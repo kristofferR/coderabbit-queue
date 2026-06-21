@@ -12,6 +12,8 @@
 # Docs: https://github.com/kristofferR/coderabbit-queue
 set -uo pipefail
 
+CRQ_VERSION="0.1.0"
+
 # ----------------------------------------------------------------------------
 # Config (env, overridable). A config file is sourced first if present.
 # ----------------------------------------------------------------------------
@@ -160,7 +162,7 @@ release() {   # $1 = nonce; only deletes if we still own it
 # ----------------------------------------------------------------------------
 empty_state() {
   jq -cn --arg scope "$CRQ_SCOPE" \
-    '{v:1,rev:0,next_seq:0,queue:[],in_flight:null,last_fired:null,warn:null,
+    '{v:1,rev:0,next_seq:0,queue:[],in_flight:null,last_fired:null,warn:null,fired:{},
       blocked:{scope:$scope,blocked_until:null,remaining:null,source:"init",checked_at:null,calib_asked_at:null}}'
 }
 
@@ -361,7 +363,8 @@ gc_json() {   # $1 = json
       # stdout (gh skips --jq on errors), so anything that isn't a known state = keep.
       if [ "$state" = "closed" ]; then
         log "gc: dropping $repo#$pr (closed)"
-        json="$(jq -c --arg r "$repo" --argjson p "$pr" '.queue|=map(select(.repo!=$r or .pr!=$p))' <<<"$json")"
+        json="$(jq -c --arg r "$repo" --argjson p "$pr" --arg k "$repo#$pr" \
+          '.queue|=map(select(.repo!=$r or .pr!=$p)) | del(.fired[$k])' <<<"$json")"
       fi
     done < <(jq -c '.queue[]?' <<<"$json")
     json="$(jq -c --arg t "$(now_iso)" '.gc_at=$t' <<<"$json")"
@@ -395,7 +398,7 @@ cmd_enqueue() {
 }
 
 cmd_pump() {
-  local nonce json n bu bu_epoch lf lf_epoch qn cfresh infp head repo pr seq cid
+  local nonce json n bu bu_epoch lf lf_epoch qn cfresh infp head repo pr seq cid hsha key lastsha
   need CRQ_REPO; need CRQ_ISSUE
 
   # Lockless fast path: avoid taking the global lock on idle ticks. Re-checked
@@ -442,20 +445,31 @@ cmd_pump() {
     # window open, nothing in flight, interval ok, queue non-empty -> fire FIFO head
     head="$(jq -c '.queue|sort_by(.seq)|.[0]' <<<"$json")"
     repo="$(jq -r .repo <<<"$head")"; pr="$(jq -r .pr <<<"$head")"; seq="$(jq -r .seq <<<"$head")"
-    if [ "${CRQ_DRY_RUN:-0}" = "1" ]; then
-      log "DRY-RUN: would fire $CRQ_REVIEW_CMD on $repo#$pr (seq $seq)"
+    hsha="$(gh api "repos/$repo/pulls/$pr" --jq '.head.sha // empty' 2>/dev/null | cut -c1-9)"
+    key="$repo#$pr"
+    lastsha="$(jq -r --arg k "$key" '.fired[$k] // empty' <<<"$json")"
+    if [ -n "$hsha" ] && [ "$hsha" = "$lastsha" ]; then
+      # DEDUP: we already requested a review for this exact commit (e.g. autoreview and an
+      # agent both queued it). Drop it without posting a second @coderabbitai review.
+      json="$(jq -c --argjson s "$seq" '.queue|=map(select(.seq!=$s))' <<<"$json")"
+      log "dedup: review already requested for $key@$hsha — not re-posting"
+    elif [ "${CRQ_DRY_RUN:-0}" = "1" ]; then
+      log "DRY-RUN: would fire $CRQ_REVIEW_CMD on $repo#$pr@${hsha:-?} (seq $seq)"
       state_write "$json"; release "$nonce"; trap - EXIT; return 0
-    fi
-    cid="$(gh api "repos/$repo/issues/$pr/comments" -f body="$CRQ_REVIEW_CMD" --jq .id 2>/dev/null)"
-    if [ -n "$cid" ]; then
-      json="$(jq -c --argjson s "$seq" --arg r "$repo" --argjson p "$pr" \
-                --arg fa "$(now_iso)" --argjson cid "$cid" --arg h "$CRQ_HOST" \
-        '.queue|=map(select(.seq!=$s))
-         | .in_flight={seq:$s,repo:$r,pr:$p,fired_at:$fa,fired_comment_id:$cid,by_host:$h}
-         | .last_fired=$fa | .warn=null' <<<"$json")"
-      log "FIRED $repo#$pr (seq $seq, comment $cid)"
     else
-      log "failed to post review command on $repo#$pr"
+      cid="$(gh api "repos/$repo/issues/$pr/comments" -f body="$CRQ_REVIEW_CMD" --jq .id 2>/dev/null)"
+      if [ -n "$cid" ]; then
+        json="$(jq -c --argjson s "$seq" --arg r "$repo" --argjson p "$pr" \
+                  --arg fa "$(now_iso)" --argjson cid "$cid" --arg h "$CRQ_HOST" \
+                  --arg k "$key" --arg hs "$hsha" \
+          '.queue|=map(select(.seq!=$s))
+           | .in_flight={seq:$s,repo:$r,pr:$p,fired_at:$fa,fired_comment_id:$cid,by_host:$h}
+           | .last_fired=$fa | .warn=null
+           | (if $hs=="" then . else .fired[$k]=$hs end)' <<<"$json")"
+        log "FIRED $repo#$pr@${hsha:-?} (seq $seq, comment $cid)"
+      else
+        log "failed to post review command on $repo#$pr"
+      fi
     fi
   fi
 
@@ -603,13 +617,14 @@ cmd_autoreview() {
     *) die "usage: crq autoreview [--once] [--no-incremental]" ;;
   esac; done
   need CRQ_REPO; need CRQ_ISSUE
-  local owner repo pr head crrev json present
+  local owner repo pr head crrev json present key firedsha
   while true; do
     json="$(state_read 2>/dev/null)" || json=""
     for owner in ${CRQ_SCOPE//,/ }; do
       while read -r repo pr; do
         [ -n "$repo" ] || continue
         [ "$repo" = "$CRQ_REPO" ] && continue   # never auto-review the gate repo (calibration PR)
+        key="$repo#$pr"
         # skip PRs already queued / in-flight (lockless pre-check avoids lock churn)
         if [ -n "$json" ]; then
           present="$(jq --arg r "$repo" --argjson p "$pr" \
@@ -617,15 +632,17 @@ cmd_autoreview() {
                (.in_flight|select(.!=null and .repo==$r and .pr==$p)) ]|length' <<<"$json" 2>/dev/null)"
           [ "${present:-0}" -gt 0 ] && continue
         fi
+        head="$(gh api "repos/$repo/pulls/$pr" --jq '.head.sha // empty' 2>/dev/null | cut -c1-9)"
+        [ -n "$head" ] || continue
+        # DEDUP: skip if we already requested a review for this exact commit (pump records it).
+        firedsha="$(jq -r --arg k "$key" '.fired[$k] // empty' <<<"${json:-{}}" 2>/dev/null)"
+        [ "$firedsha" = "$head" ] && continue
         crrev="$(gh api "repos/$repo/pulls/$pr/reviews" \
           --jq "map(select(.user.login==\"$CRQ_BOT\" and .commit_id!=null))|last|.commit_id // \"\"" 2>/dev/null | cut -c1-9)"
         if [ "$incremental" = "0" ]; then
-          # auto-review only: enqueue solely when the PR has never been reviewed
-          [ -z "$crrev" ] && cmd_enqueue "$repo" "$pr"
+          [ -z "$crrev" ] && cmd_enqueue "$repo" "$pr"          # auto-review only: never reviewed yet
         else
-          # auto-review + incremental: enqueue when HEAD differs from the last reviewed commit
-          head="$(gh api "repos/$repo/pulls/$pr" --jq '.head.sha // empty' 2>/dev/null | cut -c1-9)"
-          [ -n "$head" ] && [ "$crrev" != "$head" ] && cmd_enqueue "$repo" "$pr"
+          [ "$crrev" != "$head" ] && cmd_enqueue "$repo" "$pr"  # + incremental: HEAD not yet reviewed
         fi
       done < <(gh search prs --owner "$owner" --state open --json number,repository \
                  --jq '.[]|"\(.repository.nameWithOwner) \(.number)"' 2>/dev/null)
@@ -655,6 +672,8 @@ USAGE
   crq gc                        drop closed PRs; clear timed-out in-flight
   crq refresh                   force a fresh calibration and print status
   crq unlock  [--force]         inspect / break the global lock
+  crq version                   print the crq version
+  crq help                      show this help
 
 <repo> is owner/name; <pr> is a number. Configure via env / \$HOME/.config/crq/env
 (CRQ_REPO is required). See 'crq init' output and the README.
@@ -662,9 +681,16 @@ EOF
 }
 
 main() {
-  command -v gh >/dev/null 2>&1 || die "gh (GitHub CLI) is required"
-  command -v jq >/dev/null 2>&1 || die "jq is required"
   local cmd="${1:-}"; shift || true
+  # These need nothing — handle before the gh/jq/auth preflight.
+  case "$cmd" in
+    ""|-h|--help|help)     usage; return 0 ;;
+    -v|--version|version)  echo "crq $CRQ_VERSION"; return 0 ;;
+  esac
+  # Everything else needs gh + jq, and an authenticated gh.
+  command -v gh >/dev/null 2>&1 || die "gh (GitHub CLI) is required — install: https://cli.github.com/"
+  command -v jq >/dev/null 2>&1 || die "jq is required — install: https://jqlang.github.io/jq/"
+  gh auth token >/dev/null 2>&1 || die "gh is not logged in — run: gh auth login"
   case "$cmd" in
     init)      cmd_init "$@" ;;
     enqueue)   [ $# -eq 2 ] || die "usage: crq enqueue <repo> <pr>"; cmd_enqueue "$@" ;;
@@ -677,7 +703,6 @@ main() {
     gc)        cmd_gc ;;
     refresh)   cmd_refresh ;;
     unlock)    cmd_unlock "${1:-}" ;;
-    ""|-h|--help|help) usage ;;
     *) die "unknown command: $cmd (try 'crq help')" ;;
   esac
 }

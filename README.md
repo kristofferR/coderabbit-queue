@@ -104,6 +104,27 @@ Everything lives in one small **gate repo** (private is fine):
 curl -fsSL https://raw.githubusercontent.com/kristofferR/coderabbit-queue/main/install.sh | bash
 ```
 
+<details>
+<summary>Manual install (if you'd rather not pipe a script from the net)</summary>
+
+`crq` is a single self-contained bash script — read it first if you like, then drop it on your PATH:
+
+```bash
+# clone (or just download the one file) and review it
+git clone https://github.com/kristofferR/coderabbit-queue.git
+less coderabbit-queue/crq
+
+# install it onto your PATH (make sure ~/.local/bin is on $PATH)
+install -m 0755 coderabbit-queue/crq ~/.local/bin/crq
+
+# or without cloning — fetch just the CLI:
+#   curl -fsSL https://raw.githubusercontent.com/kristofferR/coderabbit-queue/main/crq -o ~/.local/bin/crq
+#   chmod +x ~/.local/bin/crq
+
+crq help   # verify (needs gh + jq installed)
+```
+</details>
+
 **2. Create your queue** (one private repo holds the lock + dashboard + calibration PR):
 
 ```bash
@@ -163,7 +184,68 @@ Incremental review*; `--no-incremental` = *Automatic review* only. (The gate rep
 
 The guarantee is that **all your PRs get auto-reviewed** — none are skipped. The queue isn't a cap;
 it only orders the reviews so they never exceed your rate limit. (`crq wait` is the on-demand version
-for when an agent needs *its* PR reviewed right now.)
+for when an agent needs *its* PR reviewed right now.) `autoreview` and `crq wait` never double-post:
+crq records the commit it requested a review for, so the same commit is never reviewed twice.
+
+<details>
+<summary>Run it persistently (macOS launchd / Linux systemd)</summary>
+
+So it survives reboots and always keeps your PRs reviewed, run `crq autoreview` as a service.
+
+**macOS — a LaunchAgent** at `~/Library/LaunchAgents/<label>.crq-autoreview.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.crq-autoreview</string>
+  <key>ProgramArguments</key>
+  <array><string>/Users/YOU/.local/bin/crq</string><string>autoreview</string></array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>/Users/YOU</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin:/Users/YOU/.local/bin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/Users/YOU/Library/Logs/crq-autoreview.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/Library/Logs/crq-autoreview.log</string>
+</dict>
+</plist>
+```
+
+```bash
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.example.crq-autoreview.plist
+launchctl print "gui/$(id -u)/com.example.crq-autoreview" | grep -E 'state|pid'   # check it's running
+# stop with: launchctl bootout "gui/$(id -u)/com.example.crq-autoreview"
+```
+
+The `PATH` must include where `gh`, `jq`, and `crq` live; `crq` reads its config from
+`~/.config/crq/env`. `gh`'s auth is read from your login keychain, so this works while you're
+logged in.
+
+**Linux — a systemd user service** (`~/.config/systemd/user/crq-autoreview.service`):
+
+```ini
+[Unit]
+Description=crq autoreview (CodeRabbit review queue)
+[Service]
+ExecStart=%h/.local/bin/crq autoreview
+Restart=always
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user enable --now crq-autoreview
+journalctl --user -u crq-autoreview -f
+```
+
+Or, if you don't want a long-running process, run `crq autoreview --once` from cron / a timer.
+</details>
 
 ---
 
@@ -229,6 +311,7 @@ crq cancel <repo> <pr>   # take a PR out of the line
 crq gc                   # tidy up: drop closed/merged PRs, clear a stuck in-flight entry
 crq unlock [--force]     # inspect (or break) the global lock if something wedged
 crq init                 # first-time setup of the gate repo
+crq version              # print the version
 crq help                 # this list
 ```
 
