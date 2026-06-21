@@ -23,6 +23,14 @@ This enqueues `(repo, pr)`, blocks until it's *your* turn and the account is unb
 then posts the review command exactly once. It is safe to run for many PRs across many
 machines simultaneously — `crq` guarantees no two reviews fire at the same time.
 
+## Required prerequisite
+
+**CodeRabbit auto-review must be OFF.** crq is pull-only — it controls *when* reviews happen by
+posting `@coderabbitai review`. If auto-review is enabled, CodeRabbit reviews every push on its
+own, bypassing the queue and consuming the shared rate limit, which defeats crq. Disable it
+org-wide in the CodeRabbit dashboard (Settings → Review → Automatic Review) or per-repo via
+`.coderabbit.yaml` (`reviews.auto_review.enabled: false`).
+
 ## Setup (once per account)
 
 ```bash

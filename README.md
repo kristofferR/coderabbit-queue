@@ -47,6 +47,30 @@ themselves anymore — they ask `crq`, and `crq`:
 One agent changes one line — `gh pr comment ... @coderabbitai review` becomes `crq wait <repo> <pr>` —
 and the chaos is gone.
 
+> ## ⚠️ Required: turn OFF CodeRabbit auto-review
+>
+> crq can only control *when* reviews happen if CodeRabbit isn't reviewing on its own.
+> **If auto-review is enabled, CodeRabbit reviews every push automatically — bypassing crq's
+> queue entirely and spending your shared rate limit outside it.** That defeats the whole point:
+> your agents would still stampede and rate-limit themselves, crq or not.
+>
+> So crq's model is **pull, not push** — reviews fire *only* when crq (or you) explicitly post
+> `@coderabbitai review`. Disable auto-review before relying on crq:
+>
+> - **Account / org-wide (recommended):** CodeRabbit dashboard → your organization →
+>   **Settings → Review → Automatic Review** → turn it **off** (also disable incremental/auto
+>   reviews). This is the setting that matters most.
+> - **Or per repository:** commit a `.coderabbit.yaml` with:
+>   ```yaml
+>   reviews:
+>     auto_review:
+>       enabled: false
+>   ```
+>
+> Trade-off: with auto-review off, normal (non-agent) pushes won't get reviewed automatically
+> either — you (or your loop) ask for a review when a change is ready. That's exactly the control
+> crq needs.
+
 ## How it works
 
 ```
