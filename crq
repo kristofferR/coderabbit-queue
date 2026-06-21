@@ -38,6 +38,7 @@ CRQ_WAIT_TIMEOUT="${CRQ_WAIT_TIMEOUT:-0}"   # 0 = no timeout
 CRQ_LOCK_REF="${CRQ_LOCK_REF:-crq-lock}"
 CRQ_WARNING_SCAN="${CRQ_WARNING_SCAN:-1}"   # 1 = corroborate with open-PR WARNING comments
 CRQ_GC_TTL="${CRQ_GC_TTL:-120}"             # min seconds between closed-PR queue prunes
+CRQ_AUTOREVIEW_POLL="${CRQ_AUTOREVIEW_POLL:-60}"   # `crq autoreview` poll interval (s)
 CRQ_HOST="${CRQ_HOST:-$(hostname 2>/dev/null || echo unknown)}"
 
 EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"   # universal empty-tree object
@@ -587,6 +588,54 @@ cmd_init() {
   printf 'export CRQ_SCOPE=%q\n' "$CRQ_SCOPE"
 }
 
+# Emulate CodeRabbit's native auto-review (+ incremental review), but rate-coordinated:
+# enqueue open PRs in scope that need a review, then let the FIFO pump fire them when the
+# account is unblocked. Keep CodeRabbit's own auto-review OFF so this is the only driver.
+#   default          : auto-review + incremental — review new PRs AND re-review on every push
+#                      (enqueue whenever HEAD isn't the last CRQ_BOT-reviewed commit)
+#   --no-incremental : auto-review only — review each PR once (when it has no review yet),
+#                      never re-review on later pushes
+#   --once           : single pass (e.g. from cron / a monitor); otherwise loops forever
+cmd_autoreview() {
+  local once=0 incremental=1 a
+  for a in "$@"; do case "$a" in
+    --once) once=1 ;; --no-incremental) incremental=0 ;;
+    *) die "usage: crq autoreview [--once] [--no-incremental]" ;;
+  esac; done
+  need CRQ_REPO; need CRQ_ISSUE
+  local owner repo pr head crrev json present
+  while true; do
+    json="$(state_read 2>/dev/null)" || json=""
+    for owner in ${CRQ_SCOPE//,/ }; do
+      while read -r repo pr; do
+        [ -n "$repo" ] || continue
+        [ "$repo" = "$CRQ_REPO" ] && continue   # never auto-review the gate repo (calibration PR)
+        # skip PRs already queued / in-flight (lockless pre-check avoids lock churn)
+        if [ -n "$json" ]; then
+          present="$(jq --arg r "$repo" --argjson p "$pr" \
+            '[ (.queue[]?|select(.repo==$r and .pr==$p)),
+               (.in_flight|select(.!=null and .repo==$r and .pr==$p)) ]|length' <<<"$json" 2>/dev/null)"
+          [ "${present:-0}" -gt 0 ] && continue
+        fi
+        crrev="$(gh api "repos/$repo/pulls/$pr/reviews" \
+          --jq "map(select(.user.login==\"$CRQ_BOT\" and .commit_id!=null))|last|.commit_id // \"\"" 2>/dev/null | cut -c1-9)"
+        if [ "$incremental" = "0" ]; then
+          # auto-review only: enqueue solely when the PR has never been reviewed
+          [ -z "$crrev" ] && cmd_enqueue "$repo" "$pr"
+        else
+          # auto-review + incremental: enqueue when HEAD differs from the last reviewed commit
+          head="$(gh api "repos/$repo/pulls/$pr" --jq '.head.sha // empty' 2>/dev/null | cut -c1-9)"
+          [ -n "$head" ] && [ "$crrev" != "$head" ] && cmd_enqueue "$repo" "$pr"
+        fi
+      done < <(gh search prs --owner "$owner" --state open --json number,repository \
+                 --jq '.[]|"\(.repository.nameWithOwner) \(.number)"' 2>/dev/null)
+    done
+    cmd_pump >/dev/null 2>&1 || true
+    [ "$once" = "1" ] && break
+    sleep "$CRQ_AUTOREVIEW_POLL"
+  done
+}
+
 usage() {
   cat >&2 <<EOF
 crq — CodeRabbit review queue (account-wide coordinator for parallel agents)
@@ -594,6 +643,10 @@ crq — CodeRabbit review queue (account-wide coordinator for parallel agents)
 USAGE
   crq init                      provision the gate repo (lock, dashboard issue, calibration PR)
   crq wait    <repo> <pr>       enqueue and block until OUR review is fired (use this in loops)
+  crq autoreview [--once] [--no-incremental]
+                               emulate CodeRabbit auto-review (+ incremental) review, rate-coordinated:
+                               enqueue open PRs needing review; loops unless --once.
+                               --no-incremental = review each PR once only (no re-review on push)
   crq enqueue <repo> <pr>       add to the FIFO queue (idempotent)
   crq pump                      fire <=1 queued review if the window is open (safe to call anywhere)
   crq calibrate                 refresh the account-wide rate-limit reading
@@ -617,6 +670,7 @@ main() {
     enqueue)   [ $# -eq 2 ] || die "usage: crq enqueue <repo> <pr>"; cmd_enqueue "$@" ;;
     pump)      cmd_pump ;;
     wait)      [ $# -eq 2 ] || die "usage: crq wait <repo> <pr>"; cmd_wait "$@" ;;
+    autoreview) cmd_autoreview "$@" ;;
     calibrate) cmd_refresh ;;
     status)    cmd_status ;;
     cancel)    [ $# -eq 2 ] || die "usage: crq cancel <repo> <pr>"; cmd_cancel "$@" ;;

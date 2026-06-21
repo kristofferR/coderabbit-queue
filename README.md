@@ -67,9 +67,10 @@ and the chaos is gone.
 >       enabled: false
 >   ```
 >
-> Trade-off: with auto-review off, normal (non-agent) pushes won't get reviewed automatically
-> either — you (or your loop) ask for a review when a change is ready. That's exactly the control
-> crq needs.
+> **You don't lose auto-review — crq re-creates it, coordinated.** Run `crq autoreview` (see below)
+> to emulate CodeRabbit's Automatic + Incremental review: it auto-enqueues every open PR that needs
+> a review (new PRs, and again on each push) and fires them FIFO when there's capacity. Same
+> "reviews just happen" behavior, but rate-limit-aware instead of a free-for-all.
 
 ## How it works
 
@@ -195,10 +196,33 @@ directly — `crq` owns that, account-wide.
 
 ---
 
+## Emulating auto-review + incremental review
+
+Since you turned CodeRabbit's native auto-review off (so crq controls the rate), `crq autoreview`
+gives that behavior back — coordinated. Run it as a background watcher:
+
+```bash
+crq autoreview                  # auto-review every open PR + re-review on each push (FIFO, rate-aware)
+crq autoreview --no-incremental # auto-review each PR ONCE only — no re-review on later pushes
+crq autoreview --once           # a single pass (e.g. from cron or your monitor)
+```
+
+Each pass enqueues any open PR in `CRQ_SCOPE` whose latest commit CodeRabbit hasn't reviewed yet
+(a brand-new PR → its first review; new commits → an incremental review), then fires them FIFO as
+capacity frees up. The two flags mirror CodeRabbit's own toggles: default = *Automatic + Incremental
+review*; `--no-incremental` = *Automatic review* only. (The gate repo itself is never auto-reviewed.)
+
+This is the account-wide complement to `crq wait`: `autoreview` keeps **all** your PRs reviewed
+hands-off, while `crq wait` is what an agent calls when it specifically needs *its* PR reviewed now.
+
+---
+
 ## Commands
 
 ```bash
 crq wait <repo> <pr>     # ⭐ enqueue + block until OUR review is fired (use this in loops)
+crq autoreview           # ⭐ emulate auto-review + incremental review for ALL open PRs, coordinated
+                         #    (--no-incremental = first review only; --once = single pass for cron)
 crq enqueue <repo> <pr>  # add to the queue and return immediately (idempotent)
 crq pump                 # fire the next review if the window is open (safe to call from anywhere)
 crq status               # show the dashboard: queue, in-flight, quota, next slot

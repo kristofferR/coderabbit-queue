@@ -44,6 +44,9 @@ If `crq` is not installed: `curl -fsSL https://raw.githubusercontent.com/kristof
 ## Commands you'll use
 
 - `crq wait <repo> <pr>` — the loop primitive (enqueue + block until fired).
+- `crq autoreview` — emulate native auto-review + incremental review (which are off) for ALL open
+  PRs, rate-coordinated. Run as a background watcher. `--no-incremental` = first review only;
+  `--once` = single pass. Use this to keep every PR reviewed hands-off without native auto-review.
 - `crq status` — show the queue + rate-limit state (good for a quick check).
 - `crq pump` — fire ≤1 queued review if the window is open (any agent can call it; the
   lock serializes it). `crq wait` calls this internally; you rarely call it directly.
