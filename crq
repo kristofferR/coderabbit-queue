@@ -12,7 +12,7 @@
 # Docs: https://github.com/kristofferR/coderabbit-queue
 set -uo pipefail
 
-CRQ_VERSION="0.1.0"
+CRQ_VERSION="1.0.0"
 
 # ----------------------------------------------------------------------------
 # Config (env, overridable). A config file is sourced first if present.
@@ -162,7 +162,7 @@ release() {   # $1 = nonce; only deletes if we still own it
 # ----------------------------------------------------------------------------
 empty_state() {
   jq -cn --arg scope "$CRQ_SCOPE" \
-    '{v:1,rev:0,next_seq:0,queue:[],in_flight:null,last_fired:null,warn:null,fired:{},
+    '{v:1,rev:0,next_seq:0,queue:[],in_flight:null,last_fired:null,warn:null,fired:{},history:[],
       blocked:{scope:$scope,blocked_until:null,remaining:null,source:"init",checked_at:null,calib_asked_at:null}}'
 }
 
@@ -174,29 +174,55 @@ state_read() {   # echoes compact JSON from the dashboard issue
 
 render_human() {
   jq -r '
-    def ts(x): if x==null then "—" else x end;
-    "## 🐰 crq dashboard  ·  rev \(.rev)  ·  updated \(ts(.wrote_at))",
+    def ts(x): if x==null then "—" else (x | sub("T";" ") | sub("Z";" UTC")) end;
+    def link(repo; pr): "[\(repo)#\(pr)](https://github.com/\(repo)/pull/\(pr))";
+    def mins(x): ((x | fromdateiso8601) - now) / 60 | floor;
+    (if (.blocked.blocked_until != null) and ((.blocked.blocked_until | fromdateiso8601) > now)
+       then "🔴 Blocked — next review in ~\(mins(.blocked.blocked_until))m"
+     elif (.in_flight != null) then "🟡 Reviewing \(.in_flight.repo)#\(.in_flight.pr)"
+     elif ((.queue | length) > 0) then "🟡 \(.queue|length) queued"
+     else "🟢 Idle — all caught up" end) as $status |
+    "# 🐰 crq — CodeRabbit review queue",
     "",
-    "**Scope:** \(.blocked.scope // "—")   ·   **Remaining:** \(.blocked.remaining // "?")   ·   **Source:** \(.blocked.source // "—")",
-    "**Blocked until:** \(ts(.blocked.blocked_until))   ·   **Last fired:** \(ts(.last_fired))",
-    "**In flight:** " + (if .in_flight==null then "—" else "\(.in_flight.repo)#\(.in_flight.pr) — fired \(.in_flight.fired_at) by \(.in_flight.by_host)" end),
+    "### \($status)",
+    "",
+    "|   |   |",
+    "|---|---|",
+    "| **Scope** | `\(.blocked.scope // "—")` |",
+    "| **Reviews remaining** | \(.blocked.remaining // "?")  _(via \(.blocked.source // "—"))_ |",
+    "| **Blocked until** | \(ts(.blocked.blocked_until)) |",
+    "| **Last review fired** | \(ts(.last_fired)) |",
+    "| **In flight** | \(if .in_flight==null then "—" else "\(link(.in_flight.repo; .in_flight.pr)) · fired \(ts(.in_flight.fired_at)) · `\(.in_flight.by_host)`" end) |",
     (if (.warn // null) != null then "", "> ⚠️ \(.warn)" else empty end),
     "",
-    "### Queue (FIFO)",
-    (if (.queue|length)==0 then "_empty_"
-     else ("| seq | PR | repo | host | enqueued |", "|--:|--:|---|---|---|"),
-          (.queue | sort_by(.seq)[] | "| \(.seq) | #\(.pr) | \(.repo) | \(.host) | \(.enqueued_at) |")
+    "## ⏳ Queue — \(.queue|length) waiting",
+    "",
+    (if (.queue|length)==0 then "_Nothing queued._"
+     else ("| # | PR | enqueued | host |", "|--:|---|---|---|"),
+          (.queue | sort_by(.seq) | to_entries[] |
+            "| \(.key + 1) | \(link(.value.repo; .value.pr)) | \(ts(.value.enqueued_at)) | `\(.value.host)` |")
      end),
     "",
-    "<sub>Managed by crq — do not edit by hand; state lives in the hidden block above.</sub>"
+    "## ✅ Recently reviewed — last \((.history // []) | length)",
+    "",
+    (if ((.history // []) | length)==0 then "_None yet._"
+     else ("| PR | commit | reviewed | host |", "|---|---|---|---|"),
+          ((.history // [])[] |
+            "| \(link(.repo; .pr)) | `\(.commit // "?")` | \(ts(.at)) | `\(.host)` |")
+     end),
+    "",
+    "---",
+    "<sub>🤖 Managed by [crq](https://github.com/kristofferR/coderabbit-queue) · rev \(.rev) · updated \(ts(.wrote_at)) · do not edit by hand (machine state is in the hidden block at the top).</sub>"
   ' <<<"$1"
 }
 
 render_title() {
   jq -r '
-    (.queue|length) as $q |
-    (if .in_flight==null then "idle" else "inflight=\(.in_flight.repo|split("/")|last)#\(.in_flight.pr)" end) as $f |
-    "crq: q=\($q) · \($f) · remaining=\(.blocked.remaining // "?")"
+    (if (.blocked.blocked_until!=null) and ((.blocked.blocked_until|fromdateiso8601)>now) then "🔴 blocked"
+     elif .in_flight!=null then "🟡 reviewing #\(.in_flight.pr)"
+     elif (.queue|length)>0 then "🟡 \(.queue|length) queued"
+     else "🟢 idle" end) as $s |
+    "crq · \($s) · queue \(.queue|length)"
   ' <<<"$1"
 }
 
@@ -465,7 +491,8 @@ cmd_pump() {
           '.queue|=map(select(.seq!=$s))
            | .in_flight={seq:$s,repo:$r,pr:$p,fired_at:$fa,fired_comment_id:$cid,by_host:$h}
            | .last_fired=$fa | .warn=null
-           | (if $hs=="" then . else .fired[$k]=$hs end)' <<<"$json")"
+           | (if $hs=="" then . else .fired[$k]=$hs end)
+           | .history = ([{repo:$r,pr:$p,commit:(if $hs=="" then null else $hs end),at:$fa,host:$h}] + (.history // []))[0:20]' <<<"$json")"
         log "FIRED $repo#$pr@${hsha:-?} (seq $seq, comment $cid)"
       else
         log "failed to post review command on $repo#$pr"
