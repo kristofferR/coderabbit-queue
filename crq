@@ -189,8 +189,8 @@ render_human() {
     "|   |   |",
     "|---|---|",
     "| **Scope** | `\(.blocked.scope // "—")` |",
-    "| **Reviews remaining** | \(.blocked.remaining // "?")  _(via \(.blocked.source // "—"))_ |",
-    "| **Blocked until** | \(ts(.blocked.blocked_until)) |",
+    "| **Reviews remaining** | \(if .blocked.remaining != null then (.blocked.remaining|tostring) elif (.blocked.blocked_until != null and ((.blocked.blocked_until|fromdateiso8601) > now)) then "0 — rate-limited" else "available now" end)  _(via \(.blocked.source // "—"))_ |",
+    "| **Rate limit** | \(if (.blocked.blocked_until != null and ((.blocked.blocked_until|fromdateiso8601) > now)) then "⛔ resets \(ts(.blocked.blocked_until)) (~\(mins(.blocked.blocked_until))m)" else "✅ not currently limited" end) |",
     "| **Last review fired** | \(ts(.last_fired)) |",
     "| **In flight** | \(if .in_flight==null then "—" else "\(link(.in_flight.repo; .in_flight.pr)) · fired \(ts(.in_flight.fired_at)) · `\(.in_flight.by_host)`" end) |",
     (if (.warn // null) != null then "", "> ⚠️ \(.warn)" else empty end),
@@ -267,14 +267,19 @@ parse_quota() {
 # override a fresh "available now" reply. The open-PR WARNING scan is only a
 # fallback used when no fresh calibration reply is available. Echoes updated JSON.
 calibrate_json() {
-  local json="$1" n checked src reply cutoff rtext rbase pair remaining reset at w wreset
+  local json="$1" n checked src reply cutoff rtext rbase pair remaining reset at w wreset bu bu_e
   n="$(now)"
   checked="$(jq -r '.blocked.checked_at // empty' <<<"$json")"
   src="$(jq -r '.blocked.source // empty' <<<"$json")"
-  # Trust a recent calibration reading.
-  if [ "$src" = "calibrate" ] && [ -n "$checked" ] \
-     && [ $(( n - $(iso2epoch "$checked") )) -lt "$CRQ_CALIBRATE_TTL" ]; then
-    echo "$json"; return 0
+  if [ -n "$checked" ] && [ $(( n - $(iso2epoch "$checked") )) -lt "$CRQ_CALIBRATE_TTL" ]; then
+    # Trust a recent calibration reading...
+    [ "$src" = "calibrate" ] && { echo "$json"; return 0; }
+    # ...and a recent WARNING-derived block (e.g. a fired review was just rate-limited) — don't
+    # let a stale "available now" calibration override it.
+    if [ "$src" = "warning" ]; then
+      bu="$(jq -r '.blocked.blocked_until // empty' <<<"$json")"; bu_e=0; [ -n "$bu" ] && bu_e="$(iso2epoch "$bu")"
+      [ "$bu_e" -gt "$n" ] && { echo "$json"; return 0; }
+    fi
   fi
   if [ -n "${CRQ_CAL_PR:-}" ]; then
     # Reuse a fresh prior reply (avoids spamming the calibration PR).
@@ -344,20 +349,29 @@ _warning_latest() {
 # In-flight detection: can pump fire the NEXT review?
 # Returns 0 (clear) / 1 (still in flight). Echoes a reason on stderr.
 # ----------------------------------------------------------------------------
-inflight_status() {   # $1 = json
-  local inf repo pr fired_at fired_id fe n rx newer
+inflight_status() {   # $1 = json; echoes timeout | warning:<reset_epoch> | done ; 0=cleared 1=still in flight
+  local inf repo pr fired_at fired_id fe n rx newer wl wu wb wreset
   inf="$(jq -c '.in_flight // empty' <<<"$1")"
   [ -n "$inf" ] || return 0
   repo="$(jq -r .repo <<<"$inf")"; pr="$(jq -r .pr <<<"$inf")"
   fired_at="$(jq -r .fired_at <<<"$inf")"; fired_id="$(jq -r .fired_comment_id <<<"$inf")"
   fe="$(iso2epoch "$fired_at")"; n="$(now)"
   if [ $(( n - fe )) -gt "$CRQ_INFLIGHT_TIMEOUT" ]; then echo "timeout" ; return 0; fi
+  # Our fire was rate-limited? CodeRabbit posts a fresh WARNING on this PR — surface its reset
+  # so the gate backs off IMMEDIATELY instead of trusting a stale "available now" calibration.
+  wl="$(gh api "repos/$repo/issues/$pr/comments" --paginate \
+    --jq "[.[]|select(.user.login==\"$CRQ_BOT\")|select(.body|contains(\"$CRQ_RL_MARKER\"))|select(.updated_at > \"$fired_at\")]|last|{u:.updated_at,b:.body}" 2>/dev/null)"
+  if [ -n "$wl" ] && [ "$wl" != "null" ]; then
+    wu="$(jq -r .u <<<"$wl")"; wb="$(jq -r .b <<<"$wl")"
+    wreset="$(parse_available_in "$wb" "$(iso2epoch "$wu")")"
+    echo "warning:${wreset:-0}"; return 0
+  fi
   rx="$(gh api "repos/$repo/issues/comments/$fired_id/reactions" \
         --jq "[.[]|select(.user.login==\"$CRQ_BOT\")]|length" 2>/dev/null)"
-  [ "${rx:-0}" -gt 0 ] && { echo "reaction"; return 0; }
+  [ "${rx:-0}" -gt 0 ] && { echo "done"; return 0; }
   newer="$(gh api "repos/$repo/issues/$pr/comments" --paginate \
     --jq "[.[]|select(.user.login==\"$CRQ_BOT\")|select((.id|tostring)!=\"$fired_id\")|select(.updated_at > \"$fired_at\")]|length" 2>/dev/null)"
-  [ "${newer:-0}" -gt 0 ] && { echo "bot-comment"; return 0; }
+  [ "${newer:-0}" -gt 0 ] && { echo "done"; return 0; }
   return 1
 }
 
@@ -365,17 +379,28 @@ inflight_status() {   # $1 = json
 # gc: drop closed/merged PRs from queue; clear timed-out in-flight.
 # ----------------------------------------------------------------------------
 gc_json() {   # $1 = json
-  local json="$1" entry repo pr state inf reason gat n
+  local json="$1" entry repo pr state inf reason gat n wreset
   n="$(now)"
   # in-flight: clear as soon as a completion signal appears (responsive — every call).
   inf="$(jq -c '.in_flight // empty' <<<"$json")"
   if [ -n "$inf" ]; then
     reason="$(inflight_status "$json")" && {
-      if [ "$reason" = "timeout" ]; then
-        json="$(jq -c '.warn="in_flight \(.in_flight.repo)#\(.in_flight.pr) timed out without a completion signal — check detector" | .in_flight=null' <<<"$json")"
-      else
-        json="$(jq -c '.in_flight=null | .warn=null' <<<"$json")"
-      fi
+      case "$reason" in
+        warning:*)
+          # the fired review was rate-limited -> back off NOW using the WARNING's countdown
+          wreset="${reason#warning:}"
+          if [ "${wreset:-0}" -gt "$n" ]; then
+            json="$(jq -c --arg bu "$(epoch2iso "$wreset")" --arg ca "$(now_iso)" \
+              '.in_flight=null | .warn=null | .blocked.blocked_until=$bu | .blocked.source="warning" | .blocked.remaining=0 | .blocked.checked_at=$ca' <<<"$json")"
+            log "rate-limited on fired PR — blocked until $(epoch2iso "$wreset")"
+          else
+            json="$(jq -c '.in_flight=null | .warn=null' <<<"$json")"
+          fi ;;
+        timeout)
+          json="$(jq -c '.warn="in_flight \(.in_flight.repo)#\(.in_flight.pr) timed out without a completion signal — check detector" | .in_flight=null' <<<"$json")" ;;
+        *)
+          json="$(jq -c '.in_flight=null | .warn=null' <<<"$json")" ;;
+      esac
     }
   fi
   # queue prune (drop non-open PRs): gated by CRQ_GC_TTL — the per-PR scan is costly.
