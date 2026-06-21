@@ -67,10 +67,8 @@ and the chaos is gone.
 >       enabled: false
 >   ```
 >
-> **You don't lose auto-review — crq re-creates it, coordinated.** Run `crq autoreview` (see below)
-> to emulate CodeRabbit's Automatic + Incremental review: it auto-enqueues every open PR that needs
-> a review (new PRs, and again on each push) and fires them FIFO when there's capacity. Same
-> "reviews just happen" behavior, but rate-limit-aware instead of a free-for-all.
+> To have reviews happen automatically across your PRs, use **`crq autoreview`** instead — it does
+> the same job rate-coordinated. See [Review all your PRs automatically](#review-all-your-prs-automatically).
 
 ## How it works
 
@@ -148,6 +146,29 @@ for you — exactly once, only when CodeRabbit has capacity.
 
 ---
 
+## Review all your PRs automatically
+
+`crq autoreview` keeps **every open PR in your account reviewed** — automatically and in order,
+never exceeding your CodeRabbit rate limit. This isn't tied to agent loops: it watches *all* your
+PRs. Run it as a background daemon (a server, a `tmux`/`screen` session, or `--once` from cron):
+
+```bash
+crq autoreview                  # review every open PR, and re-review on each new push
+crq autoreview --no-incremental # review each PR once only — skip re-review on later pushes
+crq autoreview --once           # one pass, then exit (for cron)
+```
+
+Each pass scans the open PRs in `CRQ_SCOPE` and enqueues any whose latest commit CodeRabbit hasn't
+reviewed yet — a brand-new PR gets its first review, a pushed-to PR gets an incremental one — then
+fires them FIFO as capacity frees up. The two flags map to CodeRabbit's own toggles: default =
+*Automatic + Incremental review*; `--no-incremental` = *Automatic review* only. The gate repo is
+never reviewed.
+
+`autoreview` and `crq wait` are the two ways to drive crq: `autoreview` covers everything hands-off;
+`crq wait` is for when a specific PR needs *its* review now (e.g. inside an agent loop, below).
+
+---
+
 ## ⭐ The recommended PR-review loop
 
 Here's the autonomous review loop this tool was built for. Run one per PR — on as many PRs and
@@ -196,32 +217,11 @@ directly — `crq` owns that, account-wide.
 
 ---
 
-## Emulating auto-review + incremental review
-
-Since you turned CodeRabbit's native auto-review off (so crq controls the rate), `crq autoreview`
-gives that behavior back — coordinated. Run it as a background watcher:
-
-```bash
-crq autoreview                  # auto-review every open PR + re-review on each push (FIFO, rate-aware)
-crq autoreview --no-incremental # auto-review each PR ONCE only — no re-review on later pushes
-crq autoreview --once           # a single pass (e.g. from cron or your monitor)
-```
-
-Each pass enqueues any open PR in `CRQ_SCOPE` whose latest commit CodeRabbit hasn't reviewed yet
-(a brand-new PR → its first review; new commits → an incremental review), then fires them FIFO as
-capacity frees up. The two flags mirror CodeRabbit's own toggles: default = *Automatic + Incremental
-review*; `--no-incremental` = *Automatic review* only. (The gate repo itself is never auto-reviewed.)
-
-This is the account-wide complement to `crq wait`: `autoreview` keeps **all** your PRs reviewed
-hands-off, while `crq wait` is what an agent calls when it specifically needs *its* PR reviewed now.
-
----
-
 ## Commands
 
 ```bash
 crq wait <repo> <pr>     # ⭐ enqueue + block until OUR review is fired (use this in loops)
-crq autoreview           # ⭐ emulate auto-review + incremental review for ALL open PRs, coordinated
+crq autoreview           # ⭐ review ALL open PRs automatically, rate-coordinated
                          #    (--no-incremental = first review only; --once = single pass for cron)
 crq enqueue <repo> <pr>  # add to the queue and return immediately (idempotent)
 crq pump                 # fire the next review if the window is open (safe to call from anywhere)
