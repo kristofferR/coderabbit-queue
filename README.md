@@ -177,7 +177,10 @@ crq autoreview --no-incremental # auto-review each PR ONCE only — no re-review
 crq autoreview --once           # a single pass (e.g. from cron or your monitor)
 ```
 
-Each pass enqueues any open PR in `CRQ_SCOPE` whose latest commit CodeRabbit hasn't reviewed yet
+By default `autoreview` covers every open PR in `CRQ_SCOPE`. To limit it to specific repos, set an
+allowlist (`CRQ_REPOS=owner/a,owner/b`) — or exclude a few with a denylist (`CRQ_EXCLUDE=owner/c`).
+
+Each pass enqueues any open PR in scope (minus deny / outside allow) whose latest commit CodeRabbit hasn't reviewed yet
 (a brand-new PR → its first review; new commits → an incremental review), then fires them FIFO until
 **every** PR is reviewed. The two flags mirror CodeRabbit's own toggles: default = *Automatic +
 Incremental review*; `--no-incremental` = *Automatic review* only. (The gate repo itself is never auto-reviewed.)
@@ -328,6 +331,8 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_ISSUE` | from `init` | dashboard issue number |
 | `CRQ_CAL_PR` | from `init` | calibration PR number |
 | `CRQ_SCOPE` | owner of `CRQ_REPO` | which owners/orgs share this quota (comma-separated) |
+| `CRQ_REPOS` | _(all in scope)_ | `autoreview` allowlist — only review these `owner/name` repos (comma-separated) |
+| `CRQ_EXCLUDE` | _(none)_ | `autoreview` denylist — never review these `owner/name` repos (comma-separated) |
 | `CRQ_CALIBRATE_TTL` | `120` | how long (s) to trust a quota reading before re-asking CodeRabbit |
 | `CRQ_MIN_INTERVAL` | `90` | minimum seconds between fired reviews |
 | `CRQ_POLL` | `15` | how often (s) `crq wait` checks its place in line |

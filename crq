@@ -24,6 +24,8 @@ CRQ_REPO="${CRQ_REPO:-}"                 # owner/name holding lock + dashboard +
 CRQ_ISSUE="${CRQ_ISSUE:-}"              # dashboard issue number
 CRQ_CAL_PR="${CRQ_CAL_PR:-}"           # calibration PR number
 CRQ_SCOPE="${CRQ_SCOPE:-${CRQ_REPO%%/*}}"   # comma-list of owners/orgs = rate-limit buckets
+CRQ_REPOS="${CRQ_REPOS:-}"; CRQ_REPOS="${CRQ_REPOS// /}"        # autoreview allowlist (owner/name,…); empty = all repos in scope
+CRQ_EXCLUDE="${CRQ_EXCLUDE:-}"; CRQ_EXCLUDE="${CRQ_EXCLUDE// /}" # autoreview denylist (owner/name,…)
 CRQ_BOT="${CRQ_BOT:-coderabbitai[bot]}"
 CRQ_REVIEW_CMD="${CRQ_REVIEW_CMD:-@coderabbitai review}"
 CRQ_RATELIMIT_CMD="${CRQ_RATELIMIT_CMD:-@coderabbitai rate limit}"
@@ -676,6 +678,9 @@ cmd_autoreview() {
       while read -r repo pr; do
         [ -n "$repo" ] || continue
         [ "$repo" = "$CRQ_REPO" ] && continue   # never auto-review the gate repo (calibration PR)
+        # repo allowlist / denylist (comma-separated owner/name; allowlist empty = all in scope)
+        if [ -n "$CRQ_REPOS" ]; then case ",$CRQ_REPOS," in *",$repo,"*) ;; *) continue ;; esac; fi
+        if [ -n "$CRQ_EXCLUDE" ]; then case ",$CRQ_EXCLUDE," in *",$repo,"*) continue ;; esac; fi
         key="$repo#$pr"
         # skip PRs already queued / in-flight (lockless pre-check avoids lock churn)
         if [ -n "$json" ]; then
