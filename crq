@@ -30,7 +30,7 @@ CRQ_CAL_REPLY_MARKER="${CRQ_CAL_REPLY_MARKER:-auto-generated reply by CodeRabbit
 CRQ_CALIBRATE_TTL="${CRQ_CALIBRATE_TTL:-120}"
 CRQ_LOCK_TTL="${CRQ_LOCK_TTL:-180}"
 CRQ_LOCK_TRIES="${CRQ_LOCK_TRIES:-40}"      # max acquire attempts before giving up
-CRQ_LOCK_BACKOFF_MAX="${CRQ_LOCK_BACKOFF_MAX:-20}"   # cap (s) on exponential backoff
+CRQ_LOCK_BACKOFF_MAX="${CRQ_LOCK_BACKOFF_MAX:-8}"    # cap (s) on exponential backoff
 CRQ_MIN_INTERVAL="${CRQ_MIN_INTERVAL:-90}"
 CRQ_INFLIGHT_TIMEOUT="${CRQ_INFLIGHT_TIMEOUT:-900}"
 CRQ_POLL="${CRQ_POLL:-15}"
@@ -96,17 +96,29 @@ parse_available_in() {
 # Ownership is proven by a nonce read back from the lock commit message, which
 # defeats steal races (a loser never deletes the winner's fresh lock).
 # ----------------------------------------------------------------------------
-_lock_commit_msg() { gh api "repos/$CRQ_REPO/git/commits/$1" --jq .message 2>/dev/null; }
-_lock_ref_sha()   { gh api "repos/$CRQ_REPO/git/refs/heads/$CRQ_LOCK_REF" --jq .object.sha 2>/dev/null; }
+_lock_commit_msg() { gh api "repos/$CRQ_REPO/git/commits/$1" --jq '.message // empty' 2>/dev/null; }
+# Returns the lock commit SHA, or nothing if the ref is absent. NOTE: `gh api` dumps
+# the error body to stdout and skips --jq on HTTP 404, so we must validate that the
+# output is actually a 40-char hex sha (else a missing ref looks "held").
+_lock_ref_sha() {
+  local out
+  out="$(gh api "repos/$CRQ_REPO/git/refs/heads/$CRQ_LOCK_REF" --jq '.object.sha // empty' 2>/dev/null)"
+  case "$out" in *[!0-9a-f]*|"") return 0 ;; esac
+  printf '%s' "$out"
+}
+
+# Read the acquire-epoch we embed in the lock commit message (our format, one fetch).
+_lock_epoch() { printf '%s' "$1" | sed -n 's/.*epoch=\([0-9][0-9]*\).*/\1/p'; }
 
 acquire() {   # echoes nonce on success
-  local nonce msg sha cur age cdate tries=0 backoff=1
-  nonce="$(uuidgen)"; msg="crq-lock host=$CRQ_HOST pid=$$ nonce=$nonce"
+  local nonce msg sha cur hmsg hepoch tries=0 backoff=1
+  nonce="$(uuidgen)"
   while [ "$tries" -lt "$CRQ_LOCK_TRIES" ]; do
     tries=$(( tries + 1 ))
     cur="$(_lock_ref_sha)"
     if [ -z "$cur" ]; then
-      # ref is free: create our lock commit (server-stamps committer.date) and claim it
+      # ref is free: create our lock commit (acquire epoch embedded for TTL) and claim it
+      msg="crq-lock host=$CRQ_HOST pid=$$ nonce=$nonce epoch=$(now)"
       sha="$(gh api -X POST "repos/$CRQ_REPO/git/commits" -f message="$msg" -f tree="$EMPTY_TREE" --jq .sha 2>/dev/null)"
       if [ -n "$sha" ] && gh api -X POST "repos/$CRQ_REPO/git/refs" \
            -f ref="refs/heads/$CRQ_LOCK_REF" -f sha="$sha" >/dev/null 2>&1; then
@@ -116,11 +128,11 @@ acquire() {   # echoes nonce on success
         fi
       fi
     else
-      # held: steal only if stale; delete AT MOST ONCE then retry (ownership proven by read-back)
-      cdate="$(gh api "repos/$CRQ_REPO/git/commits/$cur" --jq .committer.date 2>/dev/null)"
-      if [ -n "$cdate" ] && [ $(( $(now) - $(iso2epoch "$cdate") )) -gt "$CRQ_LOCK_TTL" ]; then
-        age=$(( $(now) - $(iso2epoch "$cdate") ))
-        log "stealing stale lock (age ${age}s > ${CRQ_LOCK_TTL}s)"
+      # held: steal only if demonstrably stale; delete AT MOST ONCE then retry
+      # (ownership is proven by the nonce read-back above, so a steal race is safe).
+      hmsg="$(_lock_commit_msg "$cur")"; hepoch="$(_lock_epoch "$hmsg")"
+      if [ -n "$hepoch" ] && [ $(( $(now) - hepoch )) -gt "$CRQ_LOCK_TTL" ]; then
+        log "stealing stale lock (age $(( $(now) - hepoch ))s > ${CRQ_LOCK_TTL}s)"
         gh api -X DELETE "repos/$CRQ_REPO/git/refs/heads/$CRQ_LOCK_REF" >/dev/null 2>&1
         continue
       fi
@@ -343,9 +355,11 @@ gc_json() {   # $1 = json
     while read -r entry; do
       [ -n "$entry" ] || continue
       repo="$(jq -r .repo <<<"$entry")"; pr="$(jq -r .pr <<<"$entry")"
-      state="$(gh api "repos/$repo/pulls/$pr" --jq '.state // "unknown"' 2>/dev/null)"
-      if [ "$state" != "open" ] && [ "$state" != "unknown" ]; then
-        log "gc: dropping $repo#$pr ($state)"
+      state="$(gh api "repos/$repo/pulls/$pr" --jq '.state // empty' 2>/dev/null)"
+      # Only drop on an explicit "closed". A transient API error returns a JSON body on
+      # stdout (gh skips --jq on errors), so anything that isn't a known state = keep.
+      if [ "$state" = "closed" ]; then
+        log "gc: dropping $repo#$pr (closed)"
         json="$(jq -c --arg r "$repo" --argjson p "$pr" '.queue|=map(select(.repo!=$r or .pr!=$p))' <<<"$json")"
       fi
     done < <(jq -c '.queue[]?' <<<"$json")
@@ -510,13 +524,12 @@ cmd_refresh() {
 }
 
 cmd_unlock() {
-  local cur msg age cdate
+  local cur msg hepoch age
   cur="$(_lock_ref_sha)"
   if [ -z "$cur" ]; then log "no lock held"; return 0; fi
-  msg="$(_lock_commit_msg "$cur")"
-  cdate="$(gh api "repos/$CRQ_REPO/git/commits/$cur" --jq .committer.date 2>/dev/null)"
-  age=$(( $(now) - $(iso2epoch "$cdate") ))
-  log "current holder: $msg (age ${age}s)"
+  msg="$(_lock_commit_msg "$cur")"; hepoch="$(_lock_epoch "$msg")"
+  if [ -n "$hepoch" ]; then age="$(( $(now) - hepoch ))s"; else age="?"; fi
+  log "current holder: ${msg:-<unknown>} (age $age)"
   if [ "${1:-}" = "--force" ]; then
     gh api -X DELETE "repos/$CRQ_REPO/git/refs/heads/$CRQ_LOCK_REF" >/dev/null 2>&1 && log "lock deleted"
   else

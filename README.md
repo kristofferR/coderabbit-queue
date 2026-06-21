@@ -1,159 +1,258 @@
-# crq — CodeRabbit review queue
+<h1 align="center">🐰 crq — CodeRabbit review queue</h1>
 
-**An account-wide, cross-host coordinator so many parallel coding agents don't compete for one shared CodeRabbit PR-review rate limit.**
+<p align="center"><b>Stop your AI agents from fighting over one CodeRabbit rate limit.</b></p>
 
-If you run several autonomous agents (Claude Code, etc.), each looping on its own
-pull request and periodically posting `@coderabbitai review`, they will fight over
-your **per-developer / per-organization** CodeRabbit quota. On the Pro plan at the
-lowest adaptive refill rate that quota is effectively *one review at a time, hours
-apart* — so the agents (a) keep firing review requests while globally rate-limited
-(noise), and (b) stampede the moment the window reopens.
-
-`crq` fixes this. Agents call `crq wait <repo> <pr>` instead of posting the review
-command directly. `crq` then:
-
-- knows the **true, account-wide** rate-limit state (it *asks* CodeRabbit, it doesn't
-  guess from one PR's stale countdown),
-- **queues** review requests and fires them **FIFO, one at a time**, the instant the
-  window opens — no stampede,
-- keeps a **live GitHub issue dashboard** of the queue and status,
-- works **across machines** (laptop, WSL, a server) because all shared state lives on
-  GitHub.
-
-There is no off-the-shelf tool for this; community "rate-limit" helpers are
-single-agent. `crq` is built for the multi-agent, multi-host case.
+<p align="center">
+One shared queue for your whole CodeRabbit account, so parallel agents request reviews
+<b>in an orderly line — one at a time, only when there's capacity</b> — instead of stampeding.
+</p>
 
 ---
+
+## The problem (in plain English)
+
+You've got several AI coding agents working at once — each on its own pull request, each looping:
+*fix code → push → ask CodeRabbit to review → read feedback → repeat.* To ask for a review, an
+agent posts `@coderabbitai review` on its PR.
+
+Here's the catch: **CodeRabbit's review limit is per *account/organization*, not per PR.** On the
+Pro plan, once you've been reviewing a lot, the refill rate drops — at the slowest tier it's
+effectively **one review at a time, hours apart**, shared across *all* your PRs.
+
+So your agents collide:
+
+- 🔁 **They spam while blocked.** Agent A's PR is "available in 3 hours," but Agent B has no idea —
+  it keeps posting `@coderabbitai review` on *its* PR and getting rate-limited too. Noise everywhere.
+- 🐎 **They stampede when the window opens.** The moment one review slot frees up, every agent fires
+  at once. One wins; the rest waste the slot and trip the limit again.
+- 🤷 **Nobody knows the real state.** Each agent only sees its own PR's stale countdown, but the
+  limit is account-wide — so that countdown is usually wrong.
+
+The result: wasted quota, redundant requests, and reviews landing in a random order.
+
+## What crq does
+
+`crq` puts **one queue in front of your whole account.** Agents don't post `@coderabbitai review`
+themselves anymore — they ask `crq`, and `crq`:
+
+- 🧠 **Knows the real limit** — it *asks CodeRabbit directly* (`@coderabbitai rate limit`, which
+  doesn't cost a review) instead of guessing from a stale comment.
+- 🚦 **Serializes everything** — a single GitHub-native lock means reviews fire **one at a time, in
+  FIFO order, only when the account is actually unblocked.** No stampede, no spam.
+- 📊 **Shows you the line** — a live GitHub issue is the dashboard: who's queued, what's in flight,
+  and when the next slot opens.
+- 🌍 **Works across machines** — all state lives on GitHub, so agents on your laptop, a server, and
+  a CI box all share the same queue with zero extra infrastructure.
+
+One agent changes one line — `gh pr comment ... @coderabbitai review` becomes `crq wait <repo> <pr>` —
+and the chaos is gone.
 
 ## How it works
 
-All coordination state lives in one small **gate repo** on GitHub (private is fine):
+```
+   agent A ─┐
+   agent B ─┼─►  crq wait <repo> <pr>
+   agent C ─┘          │
+                       ▼
+        ┌──────────────────────────────┐     asks "any capacity?"
+        │  global lock (a git ref)      │ ───────────────────────►  CodeRabbit
+        │  + FIFO queue (in an issue)   │ ◄───────────────────────  "available now" / "in 3h"
+        └──────────────────────────────┘
+                       │  when unblocked, fire the FIFO head — exactly one
+                       ▼
+        posts "@coderabbitai review" on the next PR in line
+```
+
+Everything lives in one small **gate repo** (private is fine):
 
 | Piece | What it is |
-|-------|------------|
-| **Lock** | An atomic git ref (`refs/heads/crq-lock`). Created via the GitHub *create-if-not-exists* ref API; the holder is proven by a nonce in the lock commit. This is a real distributed mutex — every state mutation and every review-fire happens under it, so there are no lost updates and **at most one** review is ever fired at a time across all hosts. |
-| **Dashboard issue** | Its body holds the queue/status as JSON (in a hidden HTML comment) plus a rendered table. The issue **title** shows a one-glance status. |
-| **Calibration PR** | A throwaway draft PR where `crq` posts `@coderabbitai rate limit` to read your remaining quota + refill time **without consuming a review**. Auto-review is disabled on the gate repo so this PR costs nothing. |
-
-The rate-limit reading is **calibration-first** (ask CodeRabbit, cached and throttled
-so command volume stays tiny) and corroborated by scanning your open PRs for
-CodeRabbit's "rate limited… available in X" warning comments. The max of the two is
-the account-wide `blocked_until`.
-
-FIFO order uses a monotonic integer `seq` assigned under the lock (not timestamps, so
-it is immune to clock skew between hosts).
+|-------|-----------|
+| 🔒 **Lock** | An atomic git ref. GitHub's "create ref only if it doesn't exist" gives a real cross-machine mutex, so only one agent acts at a time and the queue never corrupts. |
+| 📋 **Dashboard issue** | Its body holds the queue + status (as hidden JSON plus a human-readable table). The issue **title** is a one-glance status: `crq: q=3 · inflight=foo#11 · remaining=0`. |
+| 🐰 **Calibration PR** | A throwaway draft PR where crq asks `@coderabbitai rate limit` to read your real quota *without spending a review*. (crq disables auto-review on this repo so the PR itself costs nothing.) |
 
 ---
 
-## Install
+## Quick start
 
-Requires [`gh`](https://cli.github.com/) (authenticated) and [`jq`](https://jqlang.github.io/jq/).
+**1. Install** (needs [`gh`](https://cli.github.com/) logged in, and [`jq`](https://jqlang.github.io/jq/)):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kristofferR/coderabbit-queue/main/install.sh | bash
 ```
 
-or manually:
+**2. Create your queue** (one private repo holds the lock + dashboard + calibration PR):
 
 ```bash
-git clone https://github.com/kristofferR/coderabbit-queue.git
-install -m 0755 coderabbit-queue/crq ~/.local/bin/crq   # ensure ~/.local/bin is on PATH
+export CRQ_REPO=YOURUSER/crq-state
+crq init
 ```
 
-## Setup
-
-```bash
-export CRQ_REPO=youruser/crq-state     # the gate repo crq will create/use (private OK)
-crq init                               # creates the repo, dashboard issue, calibration PR
-```
-
-`crq init` prints the `export CRQ_*` lines to save (e.g. in `~/.config/crq/env`, which
-`crq` sources automatically). Put the same config on every host that runs agents.
+`crq init` creates the repo, opens the calibration PR and dashboard issue, and prints the
+`export CRQ_*` lines to save. Drop them into `~/.config/crq/env` — crq sources that file
+automatically, so every machine just needs the same four lines:
 
 ```bash
 mkdir -p ~/.config/crq
-crq init >> ~/.config/crq/env          # then trim it to just the export lines
+cat > ~/.config/crq/env <<'EOF'
+export CRQ_REPO=YOURUSER/crq-state
+export CRQ_ISSUE=2
+export CRQ_CAL_PR=1
+export CRQ_SCOPE=YOURUSER
+EOF
 ```
 
-## Usage
+> **One-time:** make sure CodeRabbit is installed on the gate repo (so it can answer
+> `@coderabbitai rate limit` on the calibration PR). If your CodeRabbit covers "all repositories"
+> you're already done; otherwise add `crq-state` in the CodeRabbit dashboard.
+
+**3. Use it.** In any review loop, replace this:
 
 ```bash
-crq wait <repo> <pr>     # enqueue and BLOCK until OUR review is fired — use this in agent loops
-crq enqueue <repo> <pr>  # add to the FIFO queue (idempotent)
-crq pump                 # fire <=1 queued review if the window is open (safe to call anywhere)
-crq status               # show the dashboard
-crq refresh              # force a fresh rate-limit calibration, then show status
-crq cancel <repo> <pr>   # remove from queue / clear a stuck in-flight entry
-crq gc                   # drop closed/merged PRs; clear a timed-out in-flight
-crq unlock [--force]     # inspect / break the global lock
+gh pr comment "$PR" --repo "$REPO" --body "@coderabbitai review"   # ❌ competes with other agents
 ```
 
-`<repo>` is `owner/name`, `<pr>` is the number.
-
-### Integrate into an agent review loop
-
-Replace any direct `@coderabbitai review` posting with a single `crq wait` call:
+with this:
 
 ```bash
-while review_cycle_should_continue; do
-  crq wait "$REPO" "$PR"          # blocks until OUR review is fired — FIFO, no competition
-  # crq has now posted the review command exactly once, only while unblocked.
-  wait_for_review_to_land "$REPO" "$PR"   # your logic: read CodeRabbit's review
-  apply_fixes_and_push                    # do the work, then loop to re-enqueue
-done
+crq wait "$REPO" "$PR"   # ✅ joins the queue, blocks until YOUR review is actually fired
 ```
 
-See [`examples/agent-loop.sh`](examples/agent-loop.sh) for a fuller version.
+That's the whole integration. `crq wait` gets in line, waits its turn, and posts the review command
+for you — exactly once, only when CodeRabbit has capacity.
 
 ---
+
+## ⭐ The recommended PR-review loop
+
+Here's the autonomous review loop this tool was built for. Run one per PR — on as many PRs and
+machines as you like — and they'll all share the queue without competing.
+
+```bash
+#!/usr/bin/env bash
+# review-loop.sh — autonomously address CodeRabbit feedback until a PR converges.
+#   REPO=owner/name PR=123 ./review-loop.sh
+set -uo pipefail
+REPO="${REPO:?set REPO=owner/name}"; PR="${PR:?set PR=<number>}"
+
+still_open() { [ "$(gh pr view "$PR" --repo "$REPO" --json state -q .state)" = "OPEN" ]; }
+
+while still_open; do
+  since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  # 1. Ask for a review — coordinated. Blocks until it's our turn and the account is unblocked,
+  #    then crq posts "@coderabbitai review" for us. No stampede, no spam, FIFO across all agents.
+  crq wait "$REPO" "$PR"
+
+  # 2. Wait for CodeRabbit's review to land (give it ~20 min).
+  for _ in $(seq 1 40); do
+    new=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+      --jq "[.[]|select(.user.login==\"coderabbitai[bot]\")|select(.created_at > \"$since\")]|length")
+    [ "${new:-0}" -gt 0 ] && break
+    sleep 30
+  done
+
+  # 3. Do the work: read the findings, fix the real ones, run your tests/linters, commit & push.
+  #    (Pushing a new commit is what makes the next CodeRabbit review meaningful.)
+  process_review_and_push "$REPO" "$PR"   # <- your logic here
+
+  # 4. Loop: the next round re-enters the queue and waits again.
+done
+echo "✅ $REPO#$PR converged or closed."
+```
+
+**Running fully unattended?** Add the lightweight **monitor** ([`examples/monitor.sh`](examples/monitor.sh)):
+a background watcher that wakes you when new bot feedback lands and, between rounds, keeps the PR in
+the queue with the non-blocking `crq enqueue` + `crq pump`. It never posts `@coderabbitai review`
+directly — `crq` owns that, account-wide.
+
+> 💡 **Watching the line:** run `crq status` any time to see the queue, what's in flight, and the
+> next slot. Or just open the dashboard issue in your browser.
+
+---
+
+## Commands
+
+```bash
+crq wait <repo> <pr>     # ⭐ enqueue + block until OUR review is fired (use this in loops)
+crq enqueue <repo> <pr>  # add to the queue and return immediately (idempotent)
+crq pump                 # fire the next review if the window is open (safe to call from anywhere)
+crq status               # show the dashboard: queue, in-flight, quota, next slot
+crq refresh              # re-check the account quota right now, then show status
+crq cancel <repo> <pr>   # take a PR out of the line
+crq gc                   # tidy up: drop closed/merged PRs, clear a stuck in-flight entry
+crq unlock [--force]     # inspect (or break) the global lock if something wedged
+crq init                 # first-time setup of the gate repo
+crq help                 # this list
+```
+
+`<repo>` is `owner/name`; `<pr>` is the number. **Exit codes:** `crq wait` returns `0` once your
+review is fired (or `2` if `CRQ_WAIT_TIMEOUT` is hit); other commands return `0` on success.
 
 ## Configuration
 
-All via environment (or `~/.config/crq/env`, sourced automatically):
+Set these in `~/.config/crq/env` (sourced automatically) or as environment variables:
 
-| Var | Default | Meaning |
-|-----|---------|---------|
-| `CRQ_REPO` | *(required)* | gate repo holding lock ref + dashboard issue + calibration PR |
+| Variable | Default | What it does |
+|----------|---------|--------------|
+| `CRQ_REPO` | *(required)* | the gate repo (`owner/name`) holding the lock, dashboard, calibration PR |
 | `CRQ_ISSUE` | from `init` | dashboard issue number |
 | `CRQ_CAL_PR` | from `init` | calibration PR number |
-| `CRQ_SCOPE` | owner of `CRQ_REPO` | comma-list of owners/orgs = rate-limit buckets (one gate each) |
-| `CRQ_CALIBRATE_TTL` | `120` | max age (s) of the cached calibration before re-asking |
-| `CRQ_LOCK_TTL` | `180` | seconds before a held lock is considered stale and stealable |
-| `CRQ_MIN_INTERVAL` | `90` | minimum seconds between fires |
-| `CRQ_INFLIGHT_TIMEOUT` | `900` | backstop to clear a stuck in-flight review |
-| `CRQ_POLL` | `15` | `crq wait` poll interval (+ jitter) |
-| `CRQ_WAIT_TIMEOUT` | `0` | give up `wait` after N seconds (0 = never) |
-| `CRQ_WARNING_SCAN` | `1` | also corroborate via open-PR warning comments (`0` to disable) |
-| `CRQ_BOT` | `coderabbitai[bot]` | review-bot login to watch |
-| `CRQ_REVIEW_CMD` | `@coderabbitai review` | command posted to fire a review |
-| `CRQ_RATELIMIT_CMD` | `@coderabbitai rate limit` | non-consuming quota-check command |
-| `CRQ_RL_MARKER` | `rate limited by coderabbit.ai` | substring identifying a rate-limit warning comment |
+| `CRQ_SCOPE` | owner of `CRQ_REPO` | which owners/orgs share this quota (comma-separated) |
+| `CRQ_CALIBRATE_TTL` | `120` | how long (s) to trust a quota reading before re-asking CodeRabbit |
+| `CRQ_MIN_INTERVAL` | `90` | minimum seconds between fired reviews |
+| `CRQ_POLL` | `15` | how often (s) `crq wait` checks its place in line |
+| `CRQ_WAIT_TIMEOUT` | `0` | give up `crq wait` after N seconds (`0` = never) |
+| `CRQ_LOCK_TTL` | `180` | when a crashed lock holder is considered gone and stealable |
+| `CRQ_INFLIGHT_TIMEOUT` | `900` | backstop to release a stuck in-flight review |
+| `CRQ_WARNING_SCAN` | `1` | also corroborate via open-PR "rate limited" comments (`0` to disable) |
 
-### Other review bots / multiple orgs
+**Other review bots:** crq isn't CodeRabbit-specific. Point `CRQ_BOT`, `CRQ_REVIEW_CMD`,
+`CRQ_RATELIMIT_CMD`, and `CRQ_RL_MARKER` at any bot with a similar command surface.
 
-`crq` is bot-agnostic: point `CRQ_BOT`, `CRQ_REVIEW_CMD`, `CRQ_RATELIMIT_CMD`, and
-`CRQ_RL_MARKER` at any bot with a similar command surface.
-
-CodeRabbit's quota is per **organization**, so PRs in different orgs draw from
-*separate* buckets. Run one independent gate per org (a distinct `CRQ_REPO` /
-`CRQ_SCOPE`); don't lump unrelated orgs into one queue or you'll serialize reviews
-that don't actually compete.
+**Multiple orgs:** CodeRabbit's quota is per-org, so PRs in different orgs draw from *different*
+buckets. Run a separate gate (its own `CRQ_REPO`) per org rather than mixing them — otherwise you'd
+serialize reviews that don't actually compete.
 
 ---
 
-## Notes & caveats
+## 🤖 For AI agents (LLM-friendly cheat sheet)
 
-- **`@coderabbitai rate limit` is PR-scoped and non-consuming**, but subject to a
-  commands-per-minute cap and a chat rate limit — hence the centralized, cached
-  `CRQ_CALIBRATE_TTL` throttle (only the lock holder ever asks; everyone else reads the
-  cached value).
-- The exact wording of CodeRabbit's `rate limit` reply and its review-acknowledgement
-  reaction may change; `crq`'s parser and in-flight detector are deliberately tolerant
-  and fall back to a warning-scan + timeout. Tune `parse_quota` / `inflight_status` in
-  `crq` if your account shows different wording.
-- The gate repo must have CodeRabbit **auto-review disabled** (`crq init` commits a
-  `.coderabbit.yaml` that does this) so the calibration PR never burns a real review.
+If you're an autonomous agent running a PR-review loop, here's everything you need:
+
+- **The one rule:** never post `@coderabbitai review` yourself. To request a review, run
+  `crq wait "<owner/repo>" "<pr-number>"`. It blocks until the review is actually fired, then returns `0`.
+- **Check state without acting:** `crq status` (human-readable) shows the queue, what's in flight,
+  remaining quota, and when the next slot opens.
+- **Don't busy-wait or retry on your own** — `crq wait` already handles the waiting, ordering, and
+  rate-limit backoff. Call it once per review round.
+- **Setup check:** if `crq` says `CRQ_REPO is not set`, run the Quick Start above (install + `crq init`)
+  once, then retry.
+
+A drop-in **[Claude Code skill](skills/coderabbit-queue/SKILL.md)** is included — copy
+`skills/coderabbit-queue/` into your agent's skills directory and it'll know when and how to use `crq`.
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| `crq status` shows `source: warning` and never `calibrate` | CodeRabbit isn't answering on the calibration PR — make sure it's **installed on the gate repo**. crq still works via the warning-scan fallback. |
+| A PR is stuck "in flight" forever | `crq gc` clears it after `CRQ_INFLIGHT_TIMEOUT`; or `crq cancel <repo> <pr>`. |
+| "could not acquire lock" | A crashed holder. `crq unlock` shows who holds it; `crq unlock --force` breaks it. |
+| Reviews fire slower than expected | That's the point — you're rate-limited. `crq status` shows the real countdown from CodeRabbit. |
+
+## How the lock works (for the curious)
+
+GitHub's `POST /git/refs` atomically creates a ref *only if it doesn't already exist* — a genuine
+distributed mutex. The lock ref points at a tiny commit whose message carries a random **nonce**;
+after creating the ref, crq reads it back and checks the nonce, so even under a thundering herd
+exactly one agent ever owns the lock (and on release it only deletes a lock that's still *its own*).
+A crashed holder is reclaimed after `CRQ_LOCK_TTL`. Every queue change happens under this lock, so
+the dashboard never has lost updates, and FIFO order uses a monotonic counter (not timestamps) so
+it's immune to clock differences between machines.
 
 ## License
 
-MIT © Kristoffer Risanger. See [LICENSE](LICENSE).
+MIT © Kristoffer Risanger. See [LICENSE](LICENSE). Contributions welcome.
