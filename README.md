@@ -148,24 +148,22 @@ for you — exactly once, only when CodeRabbit has capacity.
 
 ## Review all your PRs automatically
 
-`crq autoreview` keeps **every open PR in your account reviewed** — automatically and in order,
-never exceeding your CodeRabbit rate limit. This isn't tied to agent loops: it watches *all* your
-PRs. Run it as a background daemon (a server, a `tmux`/`screen` session, or `--once` from cron):
+`crq autoreview` reviews all your open PRs automatically, rate-coordinated. Run it as a background watcher:
 
 ```bash
-crq autoreview                  # review every open PR, and re-review on each new push
-crq autoreview --no-incremental # review each PR once only — skip re-review on later pushes
-crq autoreview --once           # one pass, then exit (for cron)
+crq autoreview                  # auto-review every open PR + re-review on each push (FIFO, rate-aware)
+crq autoreview --no-incremental # auto-review each PR ONCE only — no re-review on later pushes
+crq autoreview --once           # a single pass (e.g. from cron or your monitor)
 ```
 
-Each pass scans the open PRs in `CRQ_SCOPE` and enqueues any whose latest commit CodeRabbit hasn't
-reviewed yet — a brand-new PR gets its first review, a pushed-to PR gets an incremental one — then
-fires them FIFO as capacity frees up. The two flags map to CodeRabbit's own toggles: default =
-*Automatic + Incremental review*; `--no-incremental` = *Automatic review* only. The gate repo is
-never reviewed.
+Each pass enqueues any open PR in `CRQ_SCOPE` whose latest commit CodeRabbit hasn't reviewed yet
+(a brand-new PR → its first review; new commits → an incremental review), then fires them FIFO until
+**every** PR is reviewed. The two flags mirror CodeRabbit's own toggles: default = *Automatic +
+Incremental review*; `--no-incremental` = *Automatic review* only. (The gate repo itself is never auto-reviewed.)
 
-`autoreview` and `crq wait` are the two ways to drive crq: `autoreview` covers everything hands-off;
-`crq wait` is for when a specific PR needs *its* review now (e.g. inside an agent loop, below).
+The guarantee is that **all your PRs get auto-reviewed** — none are skipped. The queue isn't a cap;
+it only orders the reviews so they never exceed your rate limit. (`crq wait` is the on-demand version
+for when an agent needs *its* PR reviewed right now.)
 
 ---
 
