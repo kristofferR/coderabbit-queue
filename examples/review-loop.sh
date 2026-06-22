@@ -12,6 +12,9 @@ set -uo pipefail
 
 REPO="${REPO:?set REPO=owner/name}"
 PR="${PR:?set PR=<number>}"
+# crq reads its config from here too; source it so CRQ_REPO need not be exported in this shell.
+# shellcheck source=/dev/null
+[ -f "${CRQ_CONFIG:-$HOME/.config/crq/env}" ] && . "${CRQ_CONFIG:-$HOME/.config/crq/env}"
 : "${CRQ_REPO:?run 'crq init' once and configure ~/.config/crq/env (see the README)}"
 
 still_open() { [ "$(gh pr view "$PR" --repo "$REPO" --json state -q .state 2>/dev/null)" = "OPEN" ]; }
@@ -39,7 +42,10 @@ wait_for_review() {
 while still_open; do
   since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   crq wait "$REPO" "$PR"          # <-- coordinated, FIFO, never fires while rate-limited
-  wait_for_review "$since"
+  if ! wait_for_review "$since"; then
+    echo "[loop] no new review within the cap — not pushing a round on stale feedback"
+    continue
+  fi
   process_review_and_push
 done
 

@@ -26,6 +26,10 @@ CRQ_CAL_PR="${CRQ_CAL_PR:-}"           # calibration PR number
 CRQ_SCOPE="${CRQ_SCOPE:-${CRQ_REPO%%/*}}"   # comma-list of owners/orgs = rate-limit buckets
 CRQ_REPOS="${CRQ_REPOS:-}"; CRQ_REPOS="${CRQ_REPOS// /}"        # autoreview allowlist (owner/name,…); empty = all repos in scope
 CRQ_EXCLUDE="${CRQ_EXCLUDE:-}"; CRQ_EXCLUDE="${CRQ_EXCLUDE// /}" # autoreview denylist (owner/name,…)
+# lowercased copies for case-insensitive matching (GitHub owner/repo names fold case)
+CRQ_REPO_LC="$(printf '%s' "$CRQ_REPO" | tr 'A-Z' 'a-z')"
+CRQ_REPOS_LC="$(printf '%s' "$CRQ_REPOS" | tr 'A-Z' 'a-z')"
+CRQ_EXCLUDE_LC="$(printf '%s' "$CRQ_EXCLUDE" | tr 'A-Z' 'a-z')"
 CRQ_TZ="${CRQ_TZ:-}"                         # dashboard display timezone (IANA, e.g. Europe/Oslo); empty = UTC
 CRQ_BOT="${CRQ_BOT:-coderabbitai[bot]}"
 CRQ_REVIEW_CMD="${CRQ_REVIEW_CMD:-@coderabbitai review}"
@@ -258,7 +262,7 @@ state_write() {   # $1 = JSON; bumps rev, updates the issue (machine state) + RE
   prev_sig="$(jq -r '.readme_sig // empty' <<<"$1")"
   # signature of the user-visible content only — so the README is committed on material changes,
   # not on every internal tick (rev/checked_at/countdown).
-  new_sig="$(jq -c '[.queue,.in_flight,.blocked.blocked_until,.blocked.remaining,.history]' <<<"$1")"
+  new_sig="$(jq -c '[.queue,.in_flight,.blocked.blocked_until,.blocked.remaining,.blocked.source,.warn,.history]' <<<"$1")"
   json="$(jq -c --arg now "$(now_iso)" '.rev=((.rev//0)+1) | .wrote_at=$now' <<<"$1")"
   # Publish the README dashboard FIRST when content changed; only adopt the new signature if
   # that succeeds — otherwise keep the old one so the next material write retries the publish
@@ -396,15 +400,14 @@ _warning_latest() {
 # Returns 0 (clear) / 1 (still in flight). Echoes a reason on stderr.
 # ----------------------------------------------------------------------------
 inflight_status() {   # $1 = json; echoes timeout | warning:<reset_epoch> | done ; 0=cleared 1=still in flight
-  local inf repo pr fired_at fired_id fe n rx newer wl wu wb wreset
+  local inf repo pr fired_at fired_id fe n rx newer wl wu wb wreset revd
   inf="$(jq -c '.in_flight // empty' <<<"$1")"
   [ -n "$inf" ] || return 0
   repo="$(jq -r .repo <<<"$inf")"; pr="$(jq -r .pr <<<"$inf")"
   fired_at="$(jq -r .fired_at <<<"$inf")"; fired_id="$(jq -r .fired_comment_id <<<"$inf")"
   fe="$(iso2epoch "$fired_at")"; n="$(now)"
-  if [ $(( n - fe )) -gt "$CRQ_INFLIGHT_TIMEOUT" ]; then echo "timeout" ; return 0; fi
-  # Our fire was rate-limited? CodeRabbit posts a fresh WARNING on this PR — surface its reset
-  # so the gate backs off IMMEDIATELY instead of trusting a stale "available now" calibration.
+  # 1) Rate-limited? A fresh WARNING on this PR — surface its reset so the gate backs off NOW
+  # instead of trusting a stale "available now" calibration. (The review did NOT run.)
   wl="$(gh api "repos/$repo/issues/$pr/comments" --paginate \
     --jq "[.[]|select(.user.login==\"$CRQ_BOT\")|select(.body|contains(\"$CRQ_RL_MARKER\"))|select(.updated_at > \"$fired_at\")]|last // empty|{u:.updated_at,b:.body}" 2>/dev/null)"
   if [ -n "$wl" ] && [ "$wl" != "null" ]; then
@@ -412,12 +415,20 @@ inflight_status() {   # $1 = json; echoes timeout | warning:<reset_epoch> | done
     wreset="$(parse_available_in "$wb" "$(iso2epoch "$wu")")"
     echo "warning:${wreset:-0}"; return 0
   fi
+  # 2) Completed? A formal CRQ_BOT review submitted after we fired (autoreview's source of truth) —
+  # catches completions that leave no reaction/comment, so we don't wrongly time out + requeue.
+  revd="$(gh api "repos/$repo/pulls/$pr/reviews" --paginate \
+    --jq "[.[]|select(.user.login==\"$CRQ_BOT\")|select(.submitted_at > \"$fired_at\")]|length" 2>/dev/null)"
+  [ "${revd:-0}" -gt 0 ] && { echo "done"; return 0; }
+  # 3) Completed via a reaction on our trigger comment, or any newer bot comment.
   rx="$(gh api "repos/$repo/issues/comments/$fired_id/reactions" \
         --jq "[.[]|select(.user.login==\"$CRQ_BOT\")]|length" 2>/dev/null)"
   [ "${rx:-0}" -gt 0 ] && { echo "done"; return 0; }
   newer="$(gh api "repos/$repo/issues/$pr/comments" --paginate \
     --jq "[.[]|select(.user.login==\"$CRQ_BOT\")|select((.id|tostring)!=\"$fired_id\")|select(.updated_at > \"$fired_at\")]|length" 2>/dev/null)"
   [ "${newer:-0}" -gt 0 ] && { echo "done"; return 0; }
+  # 4) Backstop: only now, if nothing landed in time, treat as a timed-out review.
+  [ $(( n - fe )) -gt "$CRQ_INFLIGHT_TIMEOUT" ] && { echo "timeout"; return 0; }
   return 1
 }
 
@@ -754,17 +765,17 @@ cmd_autoreview() {
     *) die "usage: crq autoreview [--once] [--no-incremental]" ;;
   esac; done
   need CRQ_REPO; need CRQ_ISSUE
-  local owner repo pr head crrev json present key firedsha
+  local owner repo pr head crrev json present key firedsha rlc
   while true; do
     json="$(state_read 2>/dev/null)" || json=""
     for owner in ${CRQ_SCOPE//,/ }; do
       while read -r repo pr; do
         [ -n "$repo" ] || continue
-        # never auto-review the gate repo (calibration PR) — case-insensitive (GitHub names fold case)
-        [ "$(printf '%s' "$repo" | tr 'A-Z' 'a-z')" = "$(printf '%s' "$CRQ_REPO" | tr 'A-Z' 'a-z')" ] && continue
+        rlc="$(printf '%s' "$repo" | tr 'A-Z' 'a-z')"   # case-insensitive matching (GitHub folds case)
+        [ "$rlc" = "$CRQ_REPO_LC" ] && continue          # never auto-review the gate repo (calibration PR)
         # repo allowlist / denylist (comma-separated owner/name; allowlist empty = all in scope)
-        if [ -n "$CRQ_REPOS" ]; then case ",$CRQ_REPOS," in *",$repo,"*) ;; *) continue ;; esac; fi
-        if [ -n "$CRQ_EXCLUDE" ]; then case ",$CRQ_EXCLUDE," in *",$repo,"*) continue ;; esac; fi
+        if [ -n "$CRQ_REPOS_LC" ]; then case ",$CRQ_REPOS_LC," in *",$rlc,"*) ;; *) continue ;; esac; fi
+        if [ -n "$CRQ_EXCLUDE_LC" ]; then case ",$CRQ_EXCLUDE_LC," in *",$rlc,"*) continue ;; esac; fi
         key="$repo#$pr"
         # skip PRs already queued / in-flight (lockless pre-check avoids lock churn)
         if [ -n "$json" ]; then

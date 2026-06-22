@@ -24,7 +24,8 @@ IDLE_CAP=$(( $(date -u +%s) + 4500 ))
 bot_count() {
   c=$(gh api "repos/$REPO/pulls/$PR/comments" --paginate --jq "[.[]|select(.user.login|test(\"$BOTS\"))]|length" 2>/dev/null)
   r=$(gh api "repos/$REPO/pulls/$PR/reviews"  --paginate --jq "[.[]|select(.user.login|test(\"$BOTS\"))]|length" 2>/dev/null)
-  echo "${c:-0}:${r:-0}"
+  i=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq "[.[]|select(.user.login|test(\"$BOTS\"))]|length" 2>/dev/null)  # conversation comments too
+  echo "${c:-0}:${r:-0}:${i:-0}"
 }
 cr_last_review() {
   gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
