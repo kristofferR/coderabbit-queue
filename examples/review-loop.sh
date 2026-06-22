@@ -26,16 +26,18 @@ process_review_and_push() {
   echo "[loop] TODO: read review, fix findings, validate, commit & push for $REPO#$PR"
 }
 
-# Block until CodeRabbit posts something newer than $1 (ISO8601), ~20 min cap.
+# Block until CodeRabbit posts something newer than $1 (ISO8601), ~20 min cap. CodeRabbit can
+# complete as a conversation comment OR a formal PR review, so check both.
 wait_for_review() {
-  local since="$1" _
+  local since="$1" _ n r
   for _ in $(seq 1 40); do
-    local n
     # --slurp + a standalone jq with `add`: combine all pages before counting (plain --paginate
     # runs the filter per page; gh forbids --slurp with --jq, so pipe to jq).
     n=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp 2>/dev/null \
         | jq "add | map(select(.user.login==\"coderabbitai[bot]\" and .created_at > \"$since\")) | length" 2>/dev/null)
-    [ "${n:-0}" -gt 0 ] && return 0
+    r=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate --slurp 2>/dev/null \
+        | jq "add | map(select(.user.login==\"coderabbitai[bot]\" and .submitted_at > \"$since\")) | length" 2>/dev/null)
+    { [ "${n:-0}" -gt 0 ] || [ "${r:-0}" -gt 0 ]; } && return 0
     sleep 30
   done
   return 1   # timed out — no new review landed
@@ -43,7 +45,10 @@ wait_for_review() {
 
 while still_open; do
   since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  crq wait "$REPO" "$PR"          # <-- coordinated, FIFO, never fires while rate-limited
+  if ! crq wait "$REPO" "$PR"; then   # coordinated, FIFO, never fires while rate-limited
+    echo "[loop] crq wait did not fire a review (timeout/error) — skipping this round"
+    continue
+  fi
   if ! wait_for_review "$since"; then
     echo "[loop] no new review within the cap — not pushing a round on stale feedback"
     continue

@@ -22,9 +22,11 @@ BOTS='coderabbitai|chatgpt-codex'
 IDLE_CAP=$(( $(date -u +%s) + 4500 ))
 
 bot_count() {
-  c=$(gh api "repos/$REPO/pulls/$PR/comments" --paginate --jq "[.[]|select(.user.login|test(\"$BOTS\"))]|length" 2>/dev/null)
-  r=$(gh api "repos/$REPO/pulls/$PR/reviews"  --paginate --jq "[.[]|select(.user.login|test(\"$BOTS\"))]|length" 2>/dev/null)
-  i=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq "[.[]|select(.user.login|test(\"$BOTS\"))]|length" 2>/dev/null)  # conversation comments too
+  # --slurp + a standalone jq with `add`: combine all pages before counting. Plain --paginate --jq
+  # runs the filter per page, so a new (non-bot) page could shift the string and false-wake the loop.
+  c=$(gh api "repos/$REPO/pulls/$PR/comments" --paginate --slurp 2>/dev/null | jq "add|map(select(.user.login|test(\"$BOTS\")))|length" 2>/dev/null)
+  r=$(gh api "repos/$REPO/pulls/$PR/reviews"  --paginate --slurp 2>/dev/null | jq "add|map(select(.user.login|test(\"$BOTS\")))|length" 2>/dev/null)
+  i=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp 2>/dev/null | jq "add|map(select(.user.login|test(\"$BOTS\")))|length" 2>/dev/null)  # conversation comments too
   echo "${c:-0}:${r:-0}:${i:-0}"
 }
 cr_last_review() {
@@ -36,7 +38,8 @@ BASE=$(bot_count); echo "monitor PR#$PR repo=$REPO base=$BASE"
 while true; do
   CUR=$(bot_count)
   [ "$CUR" != "$BASE" ] && { echo "NEW_FEEDBACK $BASE -> $CUR"; exit 0; }
-  HEAD=$(git rev-parse --short=9 HEAD 2>/dev/null); CRREV=$(cr_last_review)
+  # compare the REMOTE PR head (not the local checkout, which may be ahead/behind/elsewhere)
+  HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha // empty' 2>/dev/null | cut -c1-9); CRREV=$(cr_last_review)
   if [ -n "$HEAD" ] && [ "$CRREV" != "$HEAD" ]; then    # new commit needs a review
     crq enqueue "$REPO" "$PR" >/dev/null 2>&1           # join the account-wide FIFO queue
     crq pump >/dev/null 2>&1 && echo "CRQ_PUMP $HEAD"   # fire <=1 review if globally unblocked

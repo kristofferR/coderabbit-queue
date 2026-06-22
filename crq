@@ -48,6 +48,7 @@ CRQ_LOCK_REF="${CRQ_LOCK_REF:-crq-lock}"
 CRQ_WARNING_SCAN="${CRQ_WARNING_SCAN:-1}"   # 1 = corroborate with open-PR WARNING comments
 CRQ_GC_TTL="${CRQ_GC_TTL:-120}"             # min seconds between closed-PR queue prunes
 CRQ_AUTOREVIEW_POLL="${CRQ_AUTOREVIEW_POLL:-60}"   # `crq autoreview` poll interval (s)
+CRQ_AUTOREVIEW_MAX_SCAN="${CRQ_AUTOREVIEW_MAX_SCAN:-400}"   # max PRs that incur API lookups per autoreview pass (REST secondary-limit guard)
 CRQ_HOST="${CRQ_HOST:-$(hostname 2>/dev/null || echo unknown)}"
 
 EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"   # universal empty-tree object
@@ -503,6 +504,7 @@ gc_json() {   # $1 = json
 cmd_enqueue() {
   local repo="$1" pr="$2" nonce json present
   need CRQ_REPO; need CRQ_ISSUE
+  repo="$(printf '%s' "$repo" | tr 'A-Z' 'a-z')"   # store normalized so all state lookups match (GitHub folds case)
   nonce="$(acquire)" || die "could not acquire lock"
   # shellcheck disable=SC2064
   trap "release '$nonce'" EXIT
@@ -608,15 +610,18 @@ cmd_pump() {
 cmd_wait() {
   local repo="$1" pr="$2" start json queued inflight enqueued=0
   need CRQ_REPO; need CRQ_ISSUE
+  repo="$(printf '%s' "$repo" | tr 'A-Z' 'a-z')"   # normalize so state lookups match (GitHub folds case)
   start="$(now)"
   while true; do
-    # Check completion BEFORE (re)enqueuing, so another runner firing our PR doesn't get a
-    # duplicate queue entry recreated here. Only enqueue if it isn't already in the system,
-    # and never treat "absent" as fired unless we actually enqueued it (failed write -> retry).
+    # Pump FIRST: its gc clears a COMPLETED in-flight from a previous round, so a stale same-PR
+    # in_flight isn't mistaken for this waiter's freshly-fired review (it also fires the FIFO head).
+    # Then check completion BEFORE (re)enqueuing, so another runner firing our PR doesn't get a
+    # duplicate queue entry recreated here; only treat "absent" as fired once we actually enqueued.
+    ( cmd_pump ) >/dev/null 2>&1 || true
     json="$(state_read)" || { sleep "$CRQ_POLL"; continue; }
     inflight="$(jq -r --arg r "$repo" --argjson p "$pr" '(.in_flight // {}) | select(.repo==$r and .pr==$p) | 1' <<<"$json" 2>/dev/null)"
     queued="$(jq --arg r "$repo" --argjson p "$pr" '[.queue[]?|select(.repo==$r and .pr==$p)]|length' <<<"$json")"
-    if [ "${inflight:-}" = "1" ]; then log "fired $repo#$pr"; return 0; fi   # our review was posted
+    if [ "${inflight:-}" = "1" ]; then log "fired $repo#$pr"; return 0; fi   # genuinely in flight now (gc didn't clear it)
     if [ "${queued:-0}" -gt 0 ]; then
       enqueued=1                                                              # in the queue, awaiting our turn
     elif [ "$enqueued" = "1" ]; then
@@ -625,7 +630,6 @@ cmd_wait() {
       ( cmd_enqueue "$repo" "$pr" ) || { sleep "$CRQ_POLL"; continue; }       # first enqueue; retry if the write failed
       enqueued=1
     fi
-    ( cmd_pump ) >/dev/null 2>&1 || true
     if [ "$CRQ_WAIT_TIMEOUT" -gt 0 ] && [ $(( $(now) - start )) -gt "$CRQ_WAIT_TIMEOUT" ]; then
       log "wait timeout for $repo#$pr"; return 2
     fi
@@ -641,6 +645,7 @@ cmd_status() {
 
 cmd_cancel() {
   local repo="$1" pr="$2" nonce json
+  repo="$(printf '%s' "$repo" | tr 'A-Z' 'a-z')"   # match normalized state (GitHub folds case)
   nonce="$(acquire)" || die "could not acquire lock"
   # shellcheck disable=SC2064
   trap "release '$nonce'" EXIT
@@ -789,9 +794,10 @@ cmd_autoreview() {
     *) die "usage: crq autoreview [--once] [--no-incremental]" ;;
   esac; done
   need CRQ_REPO; need CRQ_ISSUE
-  local owner repo pr head crrev json present key firedsha rlc
+  local owner repo pr head crrev json present key firedsha rlc scanned
   while true; do
     json="$(state_read 2>/dev/null)" || json=""
+    scanned=0
     for owner in ${CRQ_SCOPE//,/ }; do
       while read -r repo pr; do
         [ -n "$repo" ] || continue
@@ -800,13 +806,21 @@ cmd_autoreview() {
         # repo allowlist / denylist (comma-separated owner/name; allowlist empty = all in scope)
         if [ -n "$CRQ_REPOS_LC" ]; then case ",$CRQ_REPOS_LC," in *",$rlc,"*) ;; *) continue ;; esac; fi
         if [ -n "$CRQ_EXCLUDE_LC" ]; then case ",$CRQ_EXCLUDE_LC," in *",$rlc,"*) continue ;; esac; fi
-        key="$repo#$pr"
+        key="$rlc#$pr"   # normalized key — matches the lowercased repo cmd_enqueue/pump store
         # skip PRs already queued / in-flight (lockless pre-check avoids lock churn)
         if [ -n "$json" ]; then
-          present="$(jq --arg r "$repo" --argjson p "$pr" \
+          present="$(jq --arg r "$rlc" --argjson p "$pr" \
             '[ (.queue[]?|select(.repo==$r and .pr==$p)),
                (.in_flight|select(.!=null and .repo==$r and .pr==$p)) ]|length' <<<"$json" 2>/dev/null)"
           [ "${present:-0}" -gt 0 ] && continue
+        fi
+        # Bound REST GETs per pass (the head + reviews lookups below cost ~2 points each). In a huge
+        # scope without an allowlist this could otherwise exceed GitHub's ~900-points/min secondary
+        # limit and self-throttle; defer the rest to the next pass and tell the user to scope down.
+        scanned=$((scanned+1))
+        if [ "$scanned" -gt "$CRQ_AUTOREVIEW_MAX_SCAN" ]; then
+          log "autoreview: per-pass scan cap ($CRQ_AUTOREVIEW_MAX_SCAN) reached — deferring remaining PRs to the next pass (set CRQ_REPOS to scope down)"
+          break 2
         fi
         head="$(gh api "repos/$repo/pulls/$pr" --jq '.head.sha // empty' 2>/dev/null | cut -c1-9)"
         [ -n "$head" ] || continue
