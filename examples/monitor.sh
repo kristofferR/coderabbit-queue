@@ -27,8 +27,8 @@ bot_count() {
   echo "${c:-0}:${r:-0}"
 }
 cr_last_review() {
-  gh api "repos/$REPO/pulls/$PR/reviews" \
-    --jq 'map(select(.user.login=="coderabbitai[bot]" and .commit_id!=null))|last|.commit_id // ""' 2>/dev/null | cut -c1-9
+  gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
+    --jq '.[]|select(.user.login=="coderabbitai[bot]" and .commit_id!=null)|.commit_id' 2>/dev/null | tail -1 | cut -c1-9
 }
 
 BASE=$(bot_count); echo "monitor PR#$PR repo=$REPO base=$BASE"

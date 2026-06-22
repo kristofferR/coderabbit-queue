@@ -441,7 +441,14 @@ gc_json() {   # $1 = json
                                         | .blocked.remaining=0 | .blocked.checked_at=$ca) end)' <<<"$json")"
           log "rate-limited on fired PR — requeued for retry" ;;
         timeout)
-          json="$(jq -c '.warn="in_flight \(.in_flight.repo)#\(.in_flight.pr) timed out without a completion signal — check detector" | .in_flight=null' <<<"$json")" ;;
+          # No completion signal in time. The review may never have run, so requeue it and
+          # clear its fired-marker (else dedup/autoreview skip the commit forever).
+          json="$(jq -c --arg ca "$(now_iso)" '
+            (.in_flight.repo) as $r | (.in_flight.pr) as $p | ($r + "#" + ($p|tostring)) as $k
+            | .warn="in_flight \($r)#\($p) timed out without a completion signal — requeued (check detector)"
+            | .next_seq=((.next_seq//0)+1)
+            | .queue += [{seq:.next_seq, owner:($r|split("/")[0]), repo:$r, pr:$p, host:(.in_flight.by_host // "?"), enqueued_at:$ca}]
+            | del(.fired[$k]) | .in_flight=null' <<<"$json")" ;;
         *)
           json="$(jq -c '.in_flight=null | .warn=null' <<<"$json")" ;;
       esac
@@ -578,10 +585,12 @@ cmd_pump() {
 cmd_wait() {
   local repo="$1" pr="$2" start json queued
   need CRQ_REPO; need CRQ_ISSUE
-  cmd_enqueue "$repo" "$pr"
   start="$(now)"
   while true; do
-    cmd_pump >/dev/null 2>&1 || true
+    # Ensure it's enqueued (idempotent). If the write failed, retry — don't mistake
+    # "absent from the queue" for "fired". Subshells isolate a transient die.
+    if ! ( cmd_enqueue "$repo" "$pr" ); then sleep "$CRQ_POLL"; continue; fi
+    ( cmd_pump ) >/dev/null 2>&1 || true
     json="$(state_read)" || { sleep "$CRQ_POLL"; continue; }
     queued="$(jq --arg r "$repo" --argjson p "$pr" '[.queue[]?|select(.repo==$r and .pr==$p)]|length' <<<"$json")"
     if [ "${queued:-1}" -eq 0 ]; then
