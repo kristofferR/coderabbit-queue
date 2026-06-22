@@ -213,16 +213,16 @@ _leader_ref_sha() {
   case "$o" in *[!0-9a-f]*|"") return 0 ;; esac; printf '%s' "$o"
 }
 _leader_commit() { gh api -X POST "repos/$CRQ_REPO/git/commits" -f message="crq-leader $_LEADER_ID epoch=$(now)" -f tree="$EMPTY_TREE" --jq .sha 2>/dev/null; }
-_leader_beat() {   # refresh our heartbeat (we already hold it); always keeps leadership for this pass
-  local sha; sha="$(_leader_commit)"; [ -n "$sha" ] || return 0
-  gh api -X PATCH "repos/$CRQ_REPO/git/refs/heads/$CRQ_LEADER_REF" -f sha="$sha" -F force=true >/dev/null 2>&1; return 0
+_leader_beat() {   # refresh our heartbeat; 0 = ref timestamp advanced, 1 = write failed (caller re-contends)
+  local sha; sha="$(_leader_commit)"; [ -n "$sha" ] || return 1
+  gh api -X PATCH "repos/$CRQ_REPO/git/refs/heads/$CRQ_LEADER_REF" -f sha="$sha" -F force=true >/dev/null 2>&1   # 0/1 propagated
 }
 _leader_try() {   # 0 = we are (now) leader; 1 = a fresh foreign leader holds it -> stand by
   local cur msg cdate age sha
   cur="$(_leader_ref_sha)"
   if [ -n "$cur" ]; then
     msg="$(_lock_commit_msg "$cur")"
-    case "$msg" in *"$_LEADER_ID epoch="*) _leader_beat; return 0 ;; esac      # already ours -> heartbeat
+    case "$msg" in *"$_LEADER_ID epoch="*) _leader_beat; return $? ;; esac      # already ours -> heartbeat (fail -> re-contend)
     cdate="$(gh api "repos/$CRQ_REPO/git/commits/$cur" --jq '.committer.date // empty' 2>/dev/null)"
     age=999999; [ -n "$cdate" ] && age=$(( $(now) - $(iso2epoch "$cdate") ))
     [ "$age" -lt "$CRQ_LEADER_TTL" ] && return 1                                # foreign + fresh -> stand by
@@ -484,7 +484,10 @@ inflight_status() {   # $1 = json; echoes timeout | warning:<reset_epoch> | done
     # Only a fully-parsed warning counts — a transient gh error body must NOT trip the rate-limit path.
     if [ -n "$wu" ] && [ -n "$wb" ]; then
       wreset="$(parse_available_in "$wb" "$(iso2epoch "$wu")")"
-      echo "warning:${wreset:-0}"; return 0
+      # Require a parseable FUTURE reset before requeueing: otherwise gc would requeue with no
+      # blocked_until and pump could repost review requests in a tight loop. With no usable reset,
+      # fall through and let a reaction/comment/timeout resolve the in-flight review instead.
+      if [ -n "$wreset" ] && [ "$wreset" -gt "$n" ]; then echo "warning:${wreset}"; return 0; fi
     fi
   fi
   # 2) Completed? A formal CRQ_BOT review submitted after we fired (autoreview's source of truth) —
@@ -565,7 +568,9 @@ gc_json() {   # $1 = json
   # merges any duplicate-cased keys (from_entries keeps the last value, same head in practice).
   json="$(jq -c '
     .fired = ((.fired // {}) | to_entries | map(.key |= ascii_downcase) | from_entries)
-    | .history = ((.history // []) | map(if .repo then .repo |= ascii_downcase else . end))' <<<"$json")"
+    | .history = ((.history // []) | map(if .repo then .repo |= ascii_downcase else . end))
+    | .queue = ((.queue // []) | map(if .repo then .repo |= ascii_downcase else . end))
+    | (if (.in_flight|type) == "object" and .in_flight.repo then .in_flight.repo |= ascii_downcase else . end)' <<<"$json")"
   echo "$json"
 }
 
@@ -692,6 +697,11 @@ cmd_wait() {
   repo="$(printf '%s' "$repo" | tr 'A-Z' 'a-z')"   # normalize so state lookups match (GitHub folds case)
   start="$(now)"
   while true; do
+    # Timeout FIRST, so even a persistently-failing enqueue (which loops via `continue` below)
+    # still honours CRQ_WAIT_TIMEOUT instead of hanging the caller forever.
+    if [ "$CRQ_WAIT_TIMEOUT" -gt 0 ] && [ $(( $(now) - start )) -gt "$CRQ_WAIT_TIMEOUT" ]; then
+      log "wait timeout for $repo#$pr"; return 2
+    fi
     # Pump FIRST: its gc clears a COMPLETED in-flight from a previous round, so a stale same-PR
     # in_flight isn't mistaken for this waiter's freshly-fired review (it also fires the FIFO head).
     # Then check completion BEFORE (re)enqueuing, so another runner firing our PR doesn't get a
@@ -710,9 +720,6 @@ cmd_wait() {
       enqueued=1
       ( cmd_pump ) >/dev/null 2>&1 || true                                    # fire NOW — don't wait a full poll for a fresh enqueue
       continue                                                                # re-check immediately (next iter detects in_flight -> fired)
-    fi
-    if [ "$CRQ_WAIT_TIMEOUT" -gt 0 ] && [ $(( $(now) - start )) -gt "$CRQ_WAIT_TIMEOUT" ]; then
-      log "wait timeout for $repo#$pr"; return 2
     fi
     sleep $(( CRQ_POLL + (RANDOM % 5) ))
   done
@@ -872,15 +879,17 @@ cmd_autoreview() {
   need CRQ_REPO; need CRQ_ISSUE; need CRQ_SCOPE   # empty scope -> the owner loop would silently no-op
   # Singleton — only one autoreview daemon per host, and one leader per account (CRQ_REPO).
   if ! _host_singleton; then log "another crq autoreview is already running on $CRQ_HOST — exiting"; return 0; fi
-  # shellcheck disable=SC2064
-  trap '_host_singleton_drop; _leader_drop' EXIT INT TERM
+  # Clean up on any exit; on SIGINT/SIGTERM actually exit (bash would otherwise resume the loop,
+  # re-acquire leadership, and become an untracked daemon that's hard to stop).
+  trap '_host_singleton_drop; _leader_drop' EXIT
+  trap 'log "crq autoreview received stop signal — exiting"; exit 0' INT TERM
   while ! _leader_try; do
     [ "$once" = "1" ] && { log "another host leads crq autoreview for $CRQ_REPO — nothing to do (--once)"; return 0; }
     log "standing by — another host leads crq autoreview for $CRQ_REPO"
     sleep "$CRQ_AUTOREVIEW_POLL"
   done
   log "crq autoreview leader for $CRQ_REPO ($_LEADER_ID)"
-  local owner repo pr head crrev json present key firedsha rlc scanned idx deferred scan_cursor=0
+  local owner repo pr head crrev json present key firedsha rlc scanned idx deferred scan_cursor=0 searched
   while true; do
     # Re-assert leadership each pass (also our heartbeat). If a stale period let another host
     # steal it, step down and stand by until we can reclaim — never two leaders scanning at once.
@@ -892,8 +901,10 @@ cmd_autoreview() {
     json="$(state_read 2>/dev/null)" || json=""
     scanned=0; idx=0; deferred=0
     for owner in ${CRQ_SCOPE//,/ }; do
+      searched=0
       while read -r repo pr; do
         [ -n "$repo" ] || continue
+        searched=$((searched+1))
         rlc="$(printf '%s' "$repo" | tr 'A-Z' 'a-z')"   # case-insensitive matching (GitHub folds case)
         [ "$rlc" = "$CRQ_REPO_LC" ] && continue          # never auto-review the gate repo (calibration PR)
         # repo allowlist / denylist (comma-separated owner/name; allowlist empty = all in scope)
@@ -932,6 +943,9 @@ cmd_autoreview() {
         fi
       done < <(gh search prs --owner "$owner" --state open --archived=false --limit 1000 --json number,repository \
                  --jq '.[]|"\(.repository.nameWithOwner) \(.number)"' 2>/dev/null)
+      # gh search caps at 1000 results — if we hit it, some open PRs in this owner are unseen.
+      # Surface it (no silent truncation) rather than partition; narrowing CRQ_REPOS is the fix.
+      [ "$searched" -ge 1000 ] && log "autoreview: '$owner' returned the 1000-result search cap — some open PRs may be unseen; narrow CRQ_REPOS/CRQ_SCOPE"
     done
     # Advance the rotation cursor when we deferred PRs (resume there next pass); reset to the front
     # once a pass covers everything within budget. Keeps large scopes progressing, not starving.

@@ -18,7 +18,9 @@ set -u
 PR="${1:?usage: monitor.sh <PR> [owner/repo]}"
 REPO="${2:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)}"
 : "${REPO:?usage: monitor.sh <PR> [owner/repo] — REPO not given and not inside a GitHub repo}"
-BOTS='coderabbitai|chatgpt-codex'
+# crq coordinates CodeRabbit, so this example watches CodeRabbit. If your own loop also uses
+# another review bot, widen this regex yourself (e.g. 'coderabbitai|chatgpt-codex').
+BOTS='coderabbitai'
 IDLE_CAP=$(( $(date -u +%s) + 4500 ))
 
 bot_count() {
