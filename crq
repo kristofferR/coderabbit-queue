@@ -231,9 +231,13 @@ _leader_try() {   # 0 = we are (now) leader; 1 = a fresh foreign leader holds it
     msg="$(_lock_commit_msg "$cur")"
     case "$msg" in *"$_LEADER_ID epoch="*) _leader_beat; return $? ;; esac      # already ours -> heartbeat (fail -> re-contend)
     cdate="$(gh api "repos/$CRQ_REPO/git/commits/$cur" --jq '.committer.date // empty' 2>/dev/null)"
-    age=999999; [ -n "$cdate" ] && age=$(( $(now) - $(iso2epoch "$cdate") ))
+    [ -n "$cdate" ] || return 1                                                # can't read its timestamp (API blip) -> assume ALIVE, stand by (crq:234)
+    age=$(( $(now) - $(iso2epoch "$cdate") ))
     [ "$age" -lt "$CRQ_LEADER_TTL" ] && return 1                                # foreign + fresh -> stand by
-    gh api -X DELETE "repos/$CRQ_REPO/git/refs/heads/$CRQ_LEADER_REF" >/dev/null 2>&1   # foreign + stale -> steal
+    # foreign + stale -> steal, but only if the ref STILL points at the same stale commit we just
+    # measured; if another standby already refreshed/replaced it, don't delete its fresh leader (crq:236).
+    [ "$(_leader_ref_sha)" = "$cur" ] || return 1
+    gh api -X DELETE "repos/$CRQ_REPO/git/refs/heads/$CRQ_LEADER_REF" >/dev/null 2>&1
   fi
   sha="$(_leader_commit)"; [ -n "$sha" ] || return 1                            # claim via atomic create-if-not-exists
   gh api -X POST "repos/$CRQ_REPO/git/refs" -f ref="refs/heads/$CRQ_LEADER_REF" -f sha="$sha" >/dev/null 2>&1 || return 1
