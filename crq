@@ -695,6 +695,18 @@ _open_url() {
   else return 1; fi
 }
 
+# Best-effort: mute a PR's notifications (the "None" / bell-slash = IGNORED). The calibration PR
+# gets repeated `@coderabbitai rate limit` comments, so we don't want it pinging the user.
+# Requires the gh token's 'notifications' scope; returns non-zero (with no change) otherwise.
+_mute_pr() {   # $1 = pr number
+  local node
+  node="$(gh api "repos/$CRQ_REPO/pulls/$1" --jq '.node_id // empty' 2>/dev/null)"
+  [ -n "$node" ] || return 1
+  gh api graphql -F id="$node" \
+    -f query='mutation($id:ID!){ updateSubscription(input:{subscribableId:$id, state:IGNORED}){ subscribable{ ... on PullRequest { viewerSubscription } } } }' \
+    --jq '.data.updateSubscription.subscribable.viewerSubscription' 2>/dev/null | grep -q IGNORED
+}
+
 cmd_init() {
   need CRQ_REPO
   local owner branch base_sha pr_url issue_url repo_url
@@ -727,6 +739,11 @@ cmd_init() {
       --body "crq posts \`$CRQ_RATELIMIT_CMD\` here to read account-wide CodeRabbit quota. Auto-review is disabled for this repo." 2>/dev/null)"
     CRQ_CAL_PR="$(printf '%s' "$pr_url" | grep -oE '[0-9]+$')"
     log "calibration PR: ${pr_url:-#$CRQ_CAL_PR}"
+  fi
+  # mute the calibration PR's notifications (set to None) — it gets repeated rate-limit comments
+  if [ -n "${CRQ_CAL_PR:-}" ]; then
+    if _mute_pr "$CRQ_CAL_PR"; then log "muted calibration PR #$CRQ_CAL_PR notifications (None)"
+    else log "note: couldn't mute calibration PR #$CRQ_CAL_PR — grant the 'notifications' scope (gh auth refresh -h github.com -s notifications) then re-run 'crq init', or set its Notifications to None by hand"; fi
   fi
   # dashboard issue
   if [ -z "${CRQ_ISSUE:-}" ] || ! gh issue view "$CRQ_ISSUE" --repo "$CRQ_REPO" >/dev/null 2>&1; then

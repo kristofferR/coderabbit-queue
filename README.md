@@ -150,6 +150,11 @@ EOF
 > **One-time:** make sure CodeRabbit is installed on the gate repo (so it can answer
 > `@coderabbitai rate limit` on the calibration PR). If your CodeRabbit covers "all repositories"
 > you're already done; otherwise add `crq-state` in the CodeRabbit dashboard.
+>
+> `crq init` also mutes the calibration PR's notifications (it gets repeated `@coderabbitai rate
+> limit` comments). That needs the `notifications` token scope — grant it once with
+> `gh auth refresh -h github.com -s notifications` and re-run `crq init` (otherwise just set that
+> PR's **Notifications → None** by hand).
 
 **3. Use it.** In any review loop, replace this:
 
