@@ -540,8 +540,15 @@ cmd_pump() {
   fi
   qn="$(jq '.queue|length' <<<"$json")"
   infp="$(jq -r 'if .in_flight==null then 0 else 1 end' <<<"$json")"
-  if [ "$cfresh" = "1" ] && { [ "$n" -lt "$bu_epoch" ] || { [ "$qn" -eq 0 ] && [ "$infp" = "0" ]; }; }; then
-    return 0   # blocked (and known), or idle with nothing to do — no lock needed
+  # Idle: nothing queued and nothing in flight -> nothing to fire, so DON'T calibrate or lock.
+  # (Calibration posts `@coderabbitai rate limit`; doing it on idle ticks is what floods the
+  # calibration PR. We only need a quota reading when there's actually a review waiting to fire.)
+  if [ "$qn" -eq 0 ] && [ "$infp" = "0" ]; then
+    return 0
+  fi
+  # Blocked and the reading is still fresh -> nothing to do until it expires; skip the lock.
+  if [ "$cfresh" = "1" ] && [ "$n" -lt "$bu_epoch" ]; then
+    return 0
   fi
 
   nonce="$(acquire)" || die "could not acquire lock"
