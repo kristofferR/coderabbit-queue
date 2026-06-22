@@ -589,19 +589,26 @@ cmd_pump() {
 }
 
 cmd_wait() {
-  local repo="$1" pr="$2" start json queued
+  local repo="$1" pr="$2" start json queued inflight enqueued=0
   need CRQ_REPO; need CRQ_ISSUE
   start="$(now)"
   while true; do
-    # Ensure it's enqueued (idempotent). If the write failed, retry — don't mistake
-    # "absent from the queue" for "fired". Subshells isolate a transient die.
-    if ! ( cmd_enqueue "$repo" "$pr" ); then sleep "$CRQ_POLL"; continue; fi
-    ( cmd_pump ) >/dev/null 2>&1 || true
+    # Check completion BEFORE (re)enqueuing, so another runner firing our PR doesn't get a
+    # duplicate queue entry recreated here. Only enqueue if it isn't already in the system,
+    # and never treat "absent" as fired unless we actually enqueued it (failed write -> retry).
     json="$(state_read)" || { sleep "$CRQ_POLL"; continue; }
+    inflight="$(jq -r --arg r "$repo" --argjson p "$pr" '(.in_flight // {}) | select(.repo==$r and .pr==$p) | 1' <<<"$json" 2>/dev/null)"
     queued="$(jq --arg r "$repo" --argjson p "$pr" '[.queue[]?|select(.repo==$r and .pr==$p)]|length' <<<"$json")"
-    if [ "${queued:-1}" -eq 0 ]; then
-      log "fired $repo#$pr"; return 0
+    if [ "${inflight:-}" = "1" ]; then log "fired $repo#$pr"; return 0; fi   # our review was posted
+    if [ "${queued:-0}" -gt 0 ]; then
+      enqueued=1                                                              # in the queue, awaiting our turn
+    elif [ "$enqueued" = "1" ]; then
+      log "fired $repo#$pr"; return 0                                         # was queued, now gone -> fired & cleared
+    else
+      ( cmd_enqueue "$repo" "$pr" ) || { sleep "$CRQ_POLL"; continue; }       # first enqueue; retry if the write failed
+      enqueued=1
     fi
+    ( cmd_pump ) >/dev/null 2>&1 || true
     if [ "$CRQ_WAIT_TIMEOUT" -gt 0 ] && [ $(( $(now) - start )) -gt "$CRQ_WAIT_TIMEOUT" ]; then
       log "wait timeout for $repo#$pr"; return 2
     fi
@@ -623,7 +630,8 @@ cmd_cancel() {
   json="$(state_read)" || { release "$nonce"; trap - EXIT; die "cannot read state"; }
   json="$(jq -c --arg r "$repo" --argjson p "$pr" \
     '.queue|=map(select(.repo!=$r or .pr!=$p))
-     | (if (.in_flight!=null and .in_flight.repo==$r and .in_flight.pr==$p) then .in_flight=null else . end)' <<<"$json")"
+     | (if (.in_flight!=null and .in_flight.repo==$r and .in_flight.pr==$p) then .in_flight=null else . end)
+     | del(.fired[$r + "#" + ($p|tostring)])' <<<"$json")"
   state_write "$json" || { release "$nonce"; trap - EXIT; return 1; }
   release "$nonce"; trap - EXIT
   log "cancelled $repo#$pr"
@@ -752,7 +760,8 @@ cmd_autoreview() {
     for owner in ${CRQ_SCOPE//,/ }; do
       while read -r repo pr; do
         [ -n "$repo" ] || continue
-        [ "$repo" = "$CRQ_REPO" ] && continue   # never auto-review the gate repo (calibration PR)
+        # never auto-review the gate repo (calibration PR) — case-insensitive (GitHub names fold case)
+        [ "$(printf '%s' "$repo" | tr 'A-Z' 'a-z')" = "$(printf '%s' "$CRQ_REPO" | tr 'A-Z' 'a-z')" ] && continue
         # repo allowlist / denylist (comma-separated owner/name; allowlist empty = all in scope)
         if [ -n "$CRQ_REPOS" ]; then case ",$CRQ_REPOS," in *",$repo,"*) ;; *) continue ;; esac; fi
         if [ -n "$CRQ_EXCLUDE" ]; then case ",$CRQ_EXCLUDE," in *",$repo,"*) continue ;; esac; fi
