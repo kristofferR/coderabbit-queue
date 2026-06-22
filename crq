@@ -36,6 +36,7 @@ CRQ_REVIEW_CMD="${CRQ_REVIEW_CMD:-@coderabbitai review}"
 CRQ_RATELIMIT_CMD="${CRQ_RATELIMIT_CMD:-@coderabbitai rate limit}"
 CRQ_RL_MARKER="${CRQ_RL_MARKER:-rate limited by coderabbit.ai}"
 CRQ_CAL_REPLY_MARKER="${CRQ_CAL_REPLY_MARKER:-auto-generated reply by CodeRabbit}"
+CRQ_REVIEW_DONE_MARKER="${CRQ_REVIEW_DONE_MARKER:-summarize by coderabbit.ai}"   # walkthrough/summary marker = a review happened (incl. comment-only)
 CRQ_CALIBRATE_TTL="${CRQ_CALIBRATE_TTL:-120}"
 CRQ_LOCK_TTL="${CRQ_LOCK_TTL:-180}"
 CRQ_LOCK_TRIES="${CRQ_LOCK_TRIES:-40}"      # max acquire attempts before giving up
@@ -709,7 +710,7 @@ cmd_pump() {
 }
 
 cmd_wait() {
-  local repo="$1" pr="$2" start json queued inflight enqueued=0
+  local repo="$1" pr="$2" start json queued inflight enqueued=0 whead wfired
   need CRQ_REPO; need CRQ_ISSUE
   repo="$(printf '%s' "$repo" | tr 'A-Z' 'a-z')"   # normalize so state lookups match (GitHub folds case)
   start="$(now)"
@@ -731,7 +732,13 @@ cmd_wait() {
     if [ "${queued:-0}" -gt 0 ]; then
       enqueued=1                                                              # in the queue, awaiting our turn
     elif [ "$enqueued" = "1" ]; then
-      log "fired $repo#$pr"; return 0                                         # was queued, now gone -> fired & cleared
+      # Left the queue: either we fired it (in_flight, caught above) or pump DEDUPED it because this
+      # exact commit was already reviewed. Report accurately instead of always claiming "fired".
+      whead="$(gh api "repos/$repo/pulls/$pr" --jq '.head.sha // empty' 2>/dev/null | cut -c1-9)"
+      wfired="$(jq -r --arg k "$repo#$pr" '.fired[$k] // empty' <<<"$json" 2>/dev/null)"
+      if [ -n "$whead" ] && [ "$whead" = "$wfired" ]; then log "already reviewed $repo#$pr@$whead (deduped)"
+      else log "fired $repo#$pr"; fi
+      return 0
     else
       ( cmd_enqueue "$repo" "$pr" ) || { sleep "$CRQ_POLL"; continue; }       # first enqueue; retry if the write failed
       enqueued=1
@@ -906,7 +913,7 @@ cmd_autoreview() {
     sleep "$CRQ_AUTOREVIEW_POLL"
   done
   log "crq autoreview leader for $CRQ_REPO ($_LEADER_ID)"
-  local owner repo pr head crrev crrev_raw json present key firedsha rlc scanned idx deferred scan_cursor=0 searched
+  local owner repo pr head crrev crrev_raw reviewed json present key firedsha rlc scanned idx deferred scan_cursor=0 searched
   while true; do
     # Re-assert leadership each pass (also our heartbeat). If a stale period let another host
     # steal it, step down and stand by until we can reclaim — never two leaders scanning at once.
@@ -957,7 +964,13 @@ cmd_autoreview() {
         crrev="$(printf '%s' "$crrev_raw" | tail -1 | cut -c1-9)"
         # enqueue in a subshell so a transient cmd_enqueue die can't kill the long-running watcher
         if [ "$incremental" = "0" ]; then
-          [ -z "$crrev" ] && { ( cmd_enqueue "$repo" "$pr" ) || true; }          # auto-review only: never reviewed
+          # auto-review only: enqueue if never reviewed. crrev catches FORMAL reviews; also honor a
+          # comment-only completion (a CodeRabbit walkthrough/summary comment) so we don't re-review (crq:956).
+          if [ -z "$crrev" ]; then
+            reviewed="$(gh api "repos/$repo/issues/$pr/comments" --paginate --slurp 2>/dev/null \
+              | jq "add | map(select(.user.login==\"$CRQ_BOT\" and (.body|contains(\"$CRQ_REVIEW_DONE_MARKER\")))) | length" 2>/dev/null)"
+            [ "${reviewed:-0}" -gt 0 ] || { ( cmd_enqueue "$repo" "$pr" ) || true; }
+          fi
         else
           [ "$crrev" != "$head" ] && { ( cmd_enqueue "$repo" "$pr" ) || true; }  # + incremental: HEAD not reviewed
         fi

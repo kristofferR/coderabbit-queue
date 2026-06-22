@@ -38,9 +38,11 @@ bot_count() {
   [ -n "$c" ] && [ -n "$r" ] && [ -n "$i" ] || return 1
   echo "$c:$r:$i"
 }
-cr_last_review() {
-  gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
-    --jq '.[]|select(.user.login=="coderabbitai[bot]" and .commit_id!=null)|.commit_id' 2>/dev/null | tail -1 | cut -c1-9
+cr_last_review() {   # echoes the last CodeRabbit-reviewed commit (short); returns 1 if the lookup FAILED
+  local out
+  out="$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
+    --jq '.[]|select(.user.login=="coderabbitai[bot]" and .commit_id!=null)|.commit_id' 2>/dev/null)" || return 1
+  printf '%s' "$out" | tail -1 | cut -c1-9
 }
 
 BASE=""; while [ -z "$BASE" ]; do BASE=$(bot_count) || sleep 5; done   # establish a real baseline (retry past transient failures)
@@ -48,9 +50,11 @@ echo "monitor PR#$PR repo=$REPO base=$BASE"
 while true; do
   CUR=$(bot_count) || { sleep 60; continue; }   # transient API failure -> skip this tick, don't false-wake
   [ "$CUR" != "$BASE" ] && { echo "NEW_FEEDBACK $BASE -> $CUR"; exit 0; }
-  # compare the REMOTE PR head (not the local checkout, which may be ahead/behind/elsewhere)
-  HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha // empty' 2>/dev/null | cut -c1-9); CRREV=$(cr_last_review)
-  if [ -n "$HEAD" ] && [ "$CRREV" != "$HEAD" ]; then    # new commit needs a review
+  # compare the REMOTE PR head (not the local checkout, which may be ahead/behind/elsewhere).
+  # Skip the enqueue decision if EITHER lookup fails — don't treat an unreadable head/review as
+  # "needs a review" and enqueue redundantly (CRREV=$(...) fails -> the && chain short-circuits).
+  HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha // empty' 2>/dev/null | cut -c1-9)
+  if [ -n "$HEAD" ] && CRREV=$(cr_last_review) && [ "$CRREV" != "$HEAD" ]; then    # new commit needs a review
     crq enqueue "$REPO" "$PR" >/dev/null 2>&1           # join the account-wide FIFO queue
     crq pump >/dev/null 2>&1 && echo "CRQ_PUMP $HEAD"   # fire <=1 review if globally unblocked
   fi

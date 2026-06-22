@@ -271,15 +271,20 @@ machines as you like — and they'll all share the queue without competing.
 set -uo pipefail
 REPO="${REPO:?set REPO=owner/name}"; PR="${PR:?set PR=<number>}"
 
-still_open() { [ "$(gh pr view "$PR" --repo "$REPO" --json state -q .state)" = "OPEN" ]; }
+# Keep looping unless the PR is *explicitly* CLOSED/MERGED — a transient gh/API failure returns an
+# empty state, which must NOT be mistaken for a real closure (it would exit the loop early).
+still_open() { local s; s="$(gh pr view "$PR" --repo "$REPO" --json state -q .state 2>/dev/null)"; [ "$s" != "CLOSED" ] && [ "$s" != "MERGED" ]; }
 
 while still_open; do
-  since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
   # 1. Ask for a review — coordinated. Blocks until it's our turn and the account is unblocked,
   #    then crq posts "@coderabbitai review" for us. No stampede, no spam, FIFO across all agents.
   #    If it returns non-zero (timeout/error), it never fired — don't poll for a review we never asked for.
   crq wait "$REPO" "$PR" || continue
+
+  # Start the feedback window AFTER crq fires — otherwise a delayed response from a previous round
+  # that lands while we were blocked in `crq wait` would be newer than $since and falsely satisfy
+  # the poll below before our just-requested review actually runs.
+  since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
   # 2. Wait for CodeRabbit's review to land (give it ~20 min). It can land as a conversation comment
   #    OR a formal PR review, so check both. A rate-limit WARNING is NOT feedback — exclude it.
