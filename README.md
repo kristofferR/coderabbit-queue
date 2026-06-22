@@ -151,10 +151,11 @@ EOF
 > `@coderabbitai rate limit` on the calibration PR). If your CodeRabbit covers "all repositories"
 > you're already done; otherwise add `crq-state` in the CodeRabbit dashboard.
 >
-> `crq init` also mutes the calibration PR's notifications (it gets repeated `@coderabbitai rate
-> limit` comments). That needs the `notifications` token scope — grant it once with
-> `gh auth refresh -h github.com -s notifications` and re-run `crq init` (otherwise just set that
-> PR's **Notifications → None** by hand).
+> `crq init` also sets the gate repo to **Watch → Ignore**, so its calibration PR (where crq
+> posts `@coderabbitai rate limit`) never emails you — the repo is machine-only and you never
+> read it. This is essential: crq posts those comments _as you_, which re-subscribes you, so a
+> per-PR unsubscribe wouldn't hold; ignoring the whole repo is the durable fix. If `crq init`
+> can't set it (rare), do it by hand: the repo's **Watch ▾ → Ignore**.
 
 **3. Use it.** In any review loop, replace this:
 

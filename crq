@@ -706,17 +706,12 @@ _open_url() {
   else return 1; fi
 }
 
-# Best-effort: set a PR's notification subscription to "None" so the calibration PR's repeated
-# `@coderabbitai rate limit` comments don't ping the user. Requires the gh 'notifications' scope.
-# NOTE: GitHub maps IGNORED->UNSUBSCRIBED for PRs you authored, so the durable "ignore" (which
-# survives crq re-subscribing you via its own comments) can only be set via the UI's bell-slash.
-_mute_pr() {   # $1 = pr number
-  local node
-  node="$(gh api "repos/$CRQ_REPO/pulls/$1" --jq '.node_id // empty' 2>/dev/null)"
-  [ -n "$node" ] || return 1
-  gh api graphql -F id="$node" \
-    -f query='mutation($id:ID!){ updateSubscription(input:{subscribableId:$id, state:IGNORED}){ subscribable{ ... on PullRequest { viewerSubscription } } } }' \
-    --jq '.data.updateSubscription.subscribable.viewerSubscription' 2>/dev/null | grep -qE 'IGNORED|UNSUBSCRIBED'
+# Ignore ALL notifications from the gate repo. It's a machine-only state repo the user never
+# reads, and crq posts `@coderabbitai rate limit` on the calibration PR AS the user — which
+# re-subscribes them, so a per-PR unsubscribe does NOT hold and CodeRabbit's replies keep
+# emailing them. Repo-level "ignore" is the durable fix (needs only the 'repo' scope).
+_mute_repo() {
+  gh api --method PUT "repos/$CRQ_REPO/subscription" -F ignored=true --jq '.ignored' 2>/dev/null | grep -q true
 }
 
 cmd_init() {
@@ -752,11 +747,11 @@ cmd_init() {
     CRQ_CAL_PR="$(printf '%s' "$pr_url" | grep -oE '[0-9]+$')"
     log "calibration PR: ${pr_url:-#$CRQ_CAL_PR}"
   fi
-  # mute the calibration PR's notifications (set to None) — it gets repeated rate-limit comments
-  if [ -n "${CRQ_CAL_PR:-}" ]; then
-    if _mute_pr "$CRQ_CAL_PR"; then log "muted calibration PR #$CRQ_CAL_PR notifications (None)"
-    else log "note: couldn't mute calibration PR #$CRQ_CAL_PR — grant the 'notifications' scope (gh auth refresh -h github.com -s notifications) then re-run 'crq init', or set its Notifications to None by hand"; fi
-  fi
+  # Ignore ALL notifications from this machine-only gate repo, so the calibration PR's repeated
+  # CodeRabbit replies never email the user. (Per-PR unsubscribe doesn't hold — crq's own
+  # rate-limit comments re-subscribe the author; repo-level Ignore is the durable fix.)
+  if _mute_repo; then log "muted all notifications from gate repo $CRQ_REPO (Watch → Ignore)"
+  else log "note: couldn't ignore $CRQ_REPO notifications — set Watch → Ignore on the repo by hand to stop emails"; fi
   # dashboard issue
   if [ -z "${CRQ_ISSUE:-}" ] || ! gh issue view "$CRQ_ISSUE" --repo "$CRQ_REPO" >/dev/null 2>&1; then
     local json body
