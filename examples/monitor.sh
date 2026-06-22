@@ -32,16 +32,21 @@ bot_count() {
   c=$(gh api "repos/$REPO/pulls/$PR/comments" --paginate --slurp 2>/dev/null | BOTS="$BOTS" jq "$f" 2>/dev/null)
   r=$(gh api "repos/$REPO/pulls/$PR/reviews"  --paginate --slurp 2>/dev/null | BOTS="$BOTS" jq "$f" 2>/dev/null)
   i=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp 2>/dev/null | BOTS="$BOTS" jq "$f" 2>/dev/null)
-  echo "${c:-0}:${r:-0}:${i:-0}"
+  # A successful-but-empty response yields "0"; an EMPTY string means the gh call failed. Don't
+  # fabricate 0:0:0 from a transient failure (it would look like feedback vanished and false-wake) —
+  # signal an error so the caller skips this tick.
+  [ -n "$c" ] && [ -n "$r" ] && [ -n "$i" ] || return 1
+  echo "$c:$r:$i"
 }
 cr_last_review() {
   gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
     --jq '.[]|select(.user.login=="coderabbitai[bot]" and .commit_id!=null)|.commit_id' 2>/dev/null | tail -1 | cut -c1-9
 }
 
-BASE=$(bot_count); echo "monitor PR#$PR repo=$REPO base=$BASE"
+BASE=""; while [ -z "$BASE" ]; do BASE=$(bot_count) || sleep 5; done   # establish a real baseline (retry past transient failures)
+echo "monitor PR#$PR repo=$REPO base=$BASE"
 while true; do
-  CUR=$(bot_count)
+  CUR=$(bot_count) || { sleep 60; continue; }   # transient API failure -> skip this tick, don't false-wake
   [ "$CUR" != "$BASE" ] && { echo "NEW_FEEDBACK $BASE -> $CUR"; exit 0; }
   # compare the REMOTE PR head (not the local checkout, which may be ahead/behind/elsewhere)
   HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha // empty' 2>/dev/null | cut -c1-9); CRREV=$(cr_last_review)

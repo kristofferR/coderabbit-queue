@@ -906,7 +906,7 @@ cmd_autoreview() {
     sleep "$CRQ_AUTOREVIEW_POLL"
   done
   log "crq autoreview leader for $CRQ_REPO ($_LEADER_ID)"
-  local owner repo pr head crrev json present key firedsha rlc scanned idx deferred scan_cursor=0 searched
+  local owner repo pr head crrev crrev_raw json present key firedsha rlc scanned idx deferred scan_cursor=0 searched
   while true; do
     # Re-assert leadership each pass (also our heartbeat). If a stale period let another host
     # steal it, step down and stand by until we can reclaim — never two leaders scanning at once.
@@ -949,9 +949,12 @@ cmd_autoreview() {
         # DEDUP: skip if we already requested a review for this exact commit (pump records it).
         firedsha="$(jq -r --arg k "$key" '.fired[$k] // empty' <<<"${json:-{}}" 2>/dev/null)"
         [ "$firedsha" = "$head" ] && continue
-        # --paginate so the LATEST review is considered (not just page 1 on long-lived PRs)
-        crrev="$(gh api "repos/$repo/pulls/$pr/reviews" --paginate \
-          --jq ".[]|select(.user.login==\"$CRQ_BOT\" and .commit_id!=null)|.commit_id" 2>/dev/null | tail -1 | cut -c1-9)"
+        # --paginate so the LATEST review is considered (not just page 1 on long-lived PRs).
+        # If the reviews lookup itself FAILS (rate-limit/transient), skip this PR — don't mistake an
+        # unreadable review history for "never reviewed" and enqueue a redundant review (crq:954).
+        if ! crrev_raw="$(gh api "repos/$repo/pulls/$pr/reviews" --paginate \
+              --jq ".[]|select(.user.login==\"$CRQ_BOT\" and .commit_id!=null)|.commit_id" 2>/dev/null)"; then continue; fi
+        crrev="$(printf '%s' "$crrev_raw" | tail -1 | cut -c1-9)"
         # enqueue in a subshell so a transient cmd_enqueue die can't kill the long-running watcher
         if [ "$incremental" = "0" ]; then
           [ -z "$crrev" ] && { ( cmd_enqueue "$repo" "$pr" ) || true; }          # auto-review only: never reviewed

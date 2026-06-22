@@ -17,7 +17,9 @@ PR="${PR:?set PR=<number>}"
 [ -f "${CRQ_CONFIG:-$HOME/.config/crq/env}" ] && . "${CRQ_CONFIG:-$HOME/.config/crq/env}"
 : "${CRQ_REPO:?run 'crq init' once and configure ~/.config/crq/env (see the README)}"
 
-still_open() { [ "$(gh pr view "$PR" --repo "$REPO" --json state -q .state 2>/dev/null)" = "OPEN" ]; }
+# Keep looping unless the PR is *explicitly* CLOSED/MERGED — a transient gh/API failure returns
+# an empty state, which must NOT be mistaken for a real closure (that would exit the loop early).
+still_open() { local s; s="$(gh pr view "$PR" --repo "$REPO" --json state -q .state 2>/dev/null)"; [ "$s" != "CLOSED" ] && [ "$s" != "MERGED" ]; }
 
 # Replace this with your real logic: read CodeRabbit's findings, fix the genuine ones,
 # run the project's gates (tests/lint/typecheck), then commit & push ONE round. Pushing a
@@ -46,11 +48,14 @@ wait_for_review() {
 }
 
 while still_open; do
-  since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   if ! crq wait "$REPO" "$PR"; then   # coordinated, FIFO, never fires while rate-limited
     echo "[loop] crq wait did not fire a review (timeout/error) — skipping this round"
     continue
   fi
+  # Start the feedback window AFTER crq fires our review — otherwise a delayed/earlier CodeRabbit
+  # response that lands while we're blocked in `crq wait` would be newer than `since` and falsely
+  # satisfy wait_for_review before our just-requested review actually runs.
+  since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   if ! wait_for_review "$since"; then
     echo "[loop] no new review within the cap — not pushing a round on stale feedback"
     continue
