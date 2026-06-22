@@ -660,7 +660,8 @@ cmd_pump() {
       log "dedup: review already requested for $key@$hsha — not re-posting"
     elif [ "${CRQ_DRY_RUN:-0}" = "1" ]; then
       log "DRY-RUN: would fire $CRQ_REVIEW_CMD on $repo#$pr@${hsha:-?} (seq $seq)"
-      state_write "$json"; release "$nonce"; trap - EXIT; return 0
+      state_write "$json" || { release "$nonce"; trap - EXIT; return 1; }   # propagate write failure like the live paths
+      release "$nonce"; trap - EXIT; return 0
     else
       # Require a successful POST AND a numeric id — on errors (perms, locked PR, secondary
       # rate limit) gh exits non-zero and may print an error body to stdout.
@@ -868,7 +869,7 @@ cmd_autoreview() {
     --once) once=1 ;; --no-incremental) incremental=0 ;;
     *) die "usage: crq autoreview [--once] [--no-incremental]" ;;
   esac; done
-  need CRQ_REPO; need CRQ_ISSUE
+  need CRQ_REPO; need CRQ_ISSUE; need CRQ_SCOPE   # empty scope -> the owner loop would silently no-op
   # Singleton — only one autoreview daemon per host, and one leader per account (CRQ_REPO).
   if ! _host_singleton; then log "another crq autoreview is already running on $CRQ_HOST — exiting"; return 0; fi
   # shellcheck disable=SC2064
