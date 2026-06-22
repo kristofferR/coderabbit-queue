@@ -278,16 +278,20 @@ while still_open; do
 
   # 1. Ask for a review — coordinated. Blocks until it's our turn and the account is unblocked,
   #    then crq posts "@coderabbitai review" for us. No stampede, no spam, FIFO across all agents.
-  crq wait "$REPO" "$PR"
+  #    If it returns non-zero (timeout/error), it never fired — don't poll for a review we never asked for.
+  crq wait "$REPO" "$PR" || continue
 
-  # 2. Wait for CodeRabbit's review to land (give it ~20 min).
+  # 2. Wait for CodeRabbit's review to land (give it ~20 min). It can land as a conversation comment
+  #    OR a formal PR review, so check both. A rate-limit WARNING is NOT feedback — exclude it.
   got=""
   for _ in $(seq 1 40); do
     # --slurp + a standalone jq with `add`: combine all pages before counting (gh forbids
     # --slurp with --jq, so pipe to jq; plain --paginate --jq counts per page).
     new=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp \
-      | jq "add | map(select(.user.login==\"coderabbitai[bot]\" and .created_at > \"$since\")) | length")
-    [ "${new:-0}" -gt 0 ] && { got=1; break; }
+      | jq "add | map(select(.user.login==\"coderabbitai[bot]\" and .created_at > \"$since\" and (.body|contains(\"rate limited by coderabbit.ai\")|not))) | length")
+    rev=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate --slurp \
+      | jq "add | map(select(.user.login==\"coderabbitai[bot]\" and .submitted_at > \"$since\")) | length")
+    { [ "${new:-0}" -gt 0 ] || [ "${rev:-0}" -gt 0 ]; } && { got=1; break; }
     sleep 30
   done
   [ -n "$got" ] || continue   # nothing landed within the cap — don't push a round on stale feedback

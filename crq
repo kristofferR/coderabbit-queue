@@ -122,7 +122,7 @@ _lock_ref_sha() {
 _lock_epoch() { printf '%s' "$1" | sed -n 's/.*epoch=\([0-9][0-9]*\).*/\1/p'; }
 
 acquire() {   # echoes nonce on success
-  local nonce msg sha cur hmsg hepoch cdate tries=0 backoff=1
+  local nonce msg sha cur hepoch cdate tries=0 backoff=1
   nonce="$(uuidgen 2>/dev/null)"
   [ -n "$nonce" ] || nonce="$(LC_ALL=C tr -dc 'a-f0-9' </dev/urandom 2>/dev/null | head -c 32)"
   [ -n "$nonce" ] || nonce="crq-$$-$(date -u +%s)-${RANDOM}${RANDOM}"
@@ -144,11 +144,14 @@ acquire() {   # echoes nonce on success
     else
       # held: steal only if demonstrably stale; delete AT MOST ONCE then retry
       # (ownership is proven by the nonce read-back above, so a steal race is safe).
-      hmsg="$(_lock_commit_msg "$cur")"; hepoch="$(_lock_epoch "$hmsg")"
-      if [ -z "$hepoch" ]; then   # pre-epoch or foreign lock: fall back to the commit's server timestamp
-        cdate="$(gh api "repos/$CRQ_REPO/git/commits/$cur" --jq '.committer.date // empty' 2>/dev/null)"
-        [ -n "$cdate" ] && hepoch="$(iso2epoch "$cdate")"
-      fi
+      # Age the lock by GitHub's own commit timestamp — authoritative server time, immune to any
+      # single host's clock skew — NOT the client epoch embedded in the message (a host whose
+      # server-time sample fell back to a wrong local clock could otherwise mis-judge staleness
+      # and delete a live lock). epoch= stays in the message for debugging only.
+      hepoch=""
+      cdate="$(gh api "repos/$CRQ_REPO/git/commits/$cur" --jq '.committer.date // empty' 2>/dev/null)"
+      [ -n "$cdate" ] && hepoch="$(iso2epoch "$cdate")"
+      [ -n "$hepoch" ] || hepoch="$(_lock_epoch "$(_lock_commit_msg "$cur")")"   # fallback if the commit fetch failed
       if [ -n "$hepoch" ] && [ $(( $(now) - hepoch )) -gt "$CRQ_LOCK_TTL" ]; then
         log "stealing stale lock (age $(( $(now) - hepoch ))s > ${CRQ_LOCK_TTL}s)"
         gh api -X DELETE "repos/$CRQ_REPO/git/refs/heads/$CRQ_LOCK_REF" >/dev/null 2>&1
@@ -642,6 +645,8 @@ cmd_wait() {
     else
       ( cmd_enqueue "$repo" "$pr" ) || { sleep "$CRQ_POLL"; continue; }       # first enqueue; retry if the write failed
       enqueued=1
+      ( cmd_pump ) >/dev/null 2>&1 || true                                    # fire NOW — don't wait a full poll for a fresh enqueue
+      continue                                                                # re-check immediately (next iter detects in_flight -> fired)
     fi
     if [ "$CRQ_WAIT_TIMEOUT" -gt 0 ] && [ $(( $(now) - start )) -gt "$CRQ_WAIT_TIMEOUT" ]; then
       log "wait timeout for $repo#$pr"; return 2
@@ -802,10 +807,10 @@ cmd_autoreview() {
     *) die "usage: crq autoreview [--once] [--no-incremental]" ;;
   esac; done
   need CRQ_REPO; need CRQ_ISSUE
-  local owner repo pr head crrev json present key firedsha rlc scanned
+  local owner repo pr head crrev json present key firedsha rlc scanned idx deferred scan_cursor=0
   while true; do
     json="$(state_read 2>/dev/null)" || json=""
-    scanned=0
+    scanned=0; idx=0; deferred=0
     for owner in ${CRQ_SCOPE//,/ }; do
       while read -r repo pr; do
         [ -n "$repo" ] || continue
@@ -822,14 +827,15 @@ cmd_autoreview() {
                (.in_flight|select(.!=null and .repo==$r and .pr==$p)) ]|length' <<<"$json" 2>/dev/null)"
           [ "${present:-0}" -gt 0 ] && continue
         fi
-        # Bound REST GETs per pass (the head + reviews lookups below cost ~2 points each). In a huge
-        # scope without an allowlist this could otherwise exceed GitHub's ~900-points/min secondary
-        # limit and self-throttle; defer the rest to the next pass and tell the user to scope down.
+        # Bound REST GETs per pass (the head + reviews lookups below cost ~2 points each) so a huge
+        # scope can't exceed GitHub's ~900-pt/min secondary limit. ROTATE the budget across passes
+        # instead of always stopping at the same point: skip PRs covered earlier this rotation, scan
+        # up to the cap, defer the rest, then advance the cursor below so the next pass resumes where
+        # this one stopped (no tail starvation). Daemon rotates in-process; --once starts at the front.
+        idx=$((idx+1))
+        [ "$idx" -le "$scan_cursor" ] && continue
+        if [ "$scanned" -ge "$CRQ_AUTOREVIEW_MAX_SCAN" ]; then deferred=1; continue; fi
         scanned=$((scanned+1))
-        if [ "$scanned" -gt "$CRQ_AUTOREVIEW_MAX_SCAN" ]; then
-          log "autoreview: per-pass scan cap ($CRQ_AUTOREVIEW_MAX_SCAN) reached — deferring remaining PRs to the next pass (set CRQ_REPOS to scope down)"
-          break 2
-        fi
         head="$(gh api "repos/$repo/pulls/$pr" --jq '.head.sha // empty' 2>/dev/null | cut -c1-9)"
         [ -n "$head" ] || continue
         # DEDUP: skip if we already requested a review for this exact commit (pump records it).
@@ -847,6 +853,14 @@ cmd_autoreview() {
       done < <(gh search prs --owner "$owner" --state open --archived=false --limit 1000 --json number,repository \
                  --jq '.[]|"\(.repository.nameWithOwner) \(.number)"' 2>/dev/null)
     done
+    # Advance the rotation cursor when we deferred PRs (resume there next pass); reset to the front
+    # once a pass covers everything within budget. Keeps large scopes progressing, not starving.
+    if [ "$deferred" = "1" ]; then
+      scan_cursor=$(( scan_cursor + scanned ))
+      log "autoreview: scanned $scanned this pass (cap $CRQ_AUTOREVIEW_MAX_SCAN); rotating to offset $scan_cursor next pass"
+    else
+      scan_cursor=0
+    fi
     ( cmd_pump ) >/dev/null 2>&1 || true   # subshell: a transient pump die can't kill the watcher
     [ "$once" = "1" ] && break
     sleep "$CRQ_AUTOREVIEW_POLL"

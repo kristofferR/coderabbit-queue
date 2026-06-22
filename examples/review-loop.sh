@@ -33,8 +33,10 @@ wait_for_review() {
   for _ in $(seq 1 40); do
     # --slurp + a standalone jq with `add`: combine all pages before counting (plain --paginate
     # runs the filter per page; gh forbids --slurp with --jq, so pipe to jq).
+    # A rate-limit WARNING is a fresh coderabbitai comment but NOT real feedback — exclude it,
+    # else we'd "process" a round that never got reviewed (crq requeues it; we shouldn't push).
     n=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp 2>/dev/null \
-        | jq "add | map(select(.user.login==\"coderabbitai[bot]\" and .created_at > \"$since\")) | length" 2>/dev/null)
+        | jq "add | map(select(.user.login==\"coderabbitai[bot]\" and .created_at > \"$since\" and (.body|contains(\"rate limited by coderabbit.ai\")|not))) | length" 2>/dev/null)
     r=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate --slurp 2>/dev/null \
         | jq "add | map(select(.user.login==\"coderabbitai[bot]\" and .submitted_at > \"$since\")) | length" 2>/dev/null)
     { [ "${n:-0}" -gt 0 ] || [ "${r:-0}" -gt 0 ]; } && return 0
