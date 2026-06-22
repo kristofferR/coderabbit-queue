@@ -46,6 +46,8 @@ CRQ_POLL="${CRQ_POLL:-15}"
 CRQ_WAIT_TIMEOUT="${CRQ_WAIT_TIMEOUT:-0}"   # 0 = no timeout
 CRQ_LOCK_REF="${CRQ_LOCK_REF:-crq-lock}"
 CRQ_WARNING_SCAN="${CRQ_WARNING_SCAN:-1}"   # 1 = corroborate with open-PR WARNING comments
+CRQ_WARNING_SCAN_LIMIT="${CRQ_WARNING_SCAN_LIMIT:-40}"   # max PRs the under-lock WARNING scan probes (keep well under CRQ_LOCK_TTL)
+CRQ_FIRED_MAX="${CRQ_FIRED_MAX:-500}"       # cap on retained fired-markers (bounds dashboard JSON growth)
 CRQ_GC_TTL="${CRQ_GC_TTL:-120}"             # min seconds between closed-PR queue prunes
 CRQ_AUTOREVIEW_POLL="${CRQ_AUTOREVIEW_POLL:-60}"   # `crq autoreview` poll interval (s)
 CRQ_AUTOREVIEW_MAX_SCAN="${CRQ_AUTOREVIEW_MAX_SCAN:-400}"   # max PRs that incur API lookups per autoreview pass (REST secondary-limit guard)
@@ -213,8 +215,13 @@ _leader_ref_sha() {
   case "$o" in *[!0-9a-f]*|"") return 0 ;; esac; printf '%s' "$o"
 }
 _leader_commit() { gh api -X POST "repos/$CRQ_REPO/git/commits" -f message="crq-leader $_LEADER_ID epoch=$(now)" -f tree="$EMPTY_TREE" --jq .sha 2>/dev/null; }
-_leader_beat() {   # refresh our heartbeat; 0 = ref timestamp advanced, 1 = write failed (caller re-contends)
-  local sha; sha="$(_leader_commit)"; [ -n "$sha" ] || return 1
+_leader_beat() {   # refresh our heartbeat; 0 = still ours + advanced, 1 = lost/failed (caller re-contends)
+  local cur sha
+  # Re-confirm WE still hold the ref immediately before the force-update: a beat delayed past
+  # CRQ_LEADER_TTL must NOT clobber a host that legitimately stole the stale ref (split-brain).
+  cur="$(_leader_ref_sha)"; [ -n "$cur" ] || return 1
+  case "$(_lock_commit_msg "$cur")" in *"$_LEADER_ID epoch="*) ;; *) return 1 ;; esac
+  sha="$(_leader_commit)"; [ -n "$sha" ] || return 1
   gh api -X PATCH "repos/$CRQ_REPO/git/refs/heads/$CRQ_LEADER_REF" -f sha="$sha" -F force=true >/dev/null 2>&1   # 0/1 propagated
 }
 _leader_try() {   # 0 = we are (now) leader; 1 = a fresh foreign leader holds it -> stand by
@@ -455,7 +462,7 @@ _warning_latest() {
       ue="$(iso2epoch "$u")"; reset="$(parse_available_in "$b" "$ue")" || continue
       [ -n "$reset" ] || continue
       if [ "$ue" -gt "$best_u" ]; then best_u="$ue"; best_reset="$reset"; found=1; fi
-    done < <(gh search prs --owner "$owner" --state open --archived=false --limit 1000 --json number,repository \
+    done < <(gh search prs --owner "$owner" --state open --archived=false --limit "$CRQ_WARNING_SCAN_LIMIT" --json number,repository \
                --jq '.[]|"\(.repository.nameWithOwner) \(.number)"' 2>/dev/null)
   done
   [ "$found" = "1" ] && echo "${best_u}|${best_reset}"
@@ -484,10 +491,12 @@ inflight_status() {   # $1 = json; echoes timeout | warning:<reset_epoch> | done
     # Only a fully-parsed warning counts — a transient gh error body must NOT trip the rate-limit path.
     if [ -n "$wu" ] && [ -n "$wb" ]; then
       wreset="$(parse_available_in "$wb" "$(iso2epoch "$wu")")"
-      # Require a parseable FUTURE reset before requeueing: otherwise gc would requeue with no
-      # blocked_until and pump could repost review requests in a tight loop. With no usable reset,
-      # fall through and let a reaction/comment/timeout resolve the in-flight review instead.
-      if [ -n "$wreset" ] && [ "$wreset" -gt "$n" ]; then echo "warning:${wreset}"; return 0; fi
+      # A rate-limit warning means the review did NOT run, so ALWAYS requeue — never let it fall
+      # through to a "done" signal. Future reset -> back off until then; already-expired or
+      # unparseable -> requeue with no backoff (retry now; a still-limited retry just re-warns with
+      # a fresh future reset, so this can't spin). Bounded either way.
+      if [ -n "$wreset" ] && [ "$wreset" -gt "$n" ]; then echo "warning:${wreset}"; else echo "warning:0"; fi
+      return 0
     fi
   fi
   # 2) Completed? A formal CRQ_BOT review submitted after we fired (autoreview's source of truth) —
@@ -499,8 +508,10 @@ inflight_status() {   # $1 = json; echoes timeout | warning:<reset_epoch> | done
   rx="$(gh api "repos/$repo/issues/comments/$fired_id/reactions" \
         --jq "[.[]|select(.user.login==\"$CRQ_BOT\")]|length" 2>/dev/null)"
   [ "${rx:-0}" -gt 0 ] && { echo "done"; return 0; }
+  # Exclude rate-limit WARNING comments here — a warning is NOT a completion signal (the warning
+  # branch above handles it). Without this, an expired-reset warning would be miscounted as "done".
   newer="$(gh api "repos/$repo/issues/$pr/comments" --paginate --slurp 2>/dev/null \
-    | jq "add | map(select(.user.login==\"$CRQ_BOT\" and (.id|tostring)!=\"$fired_id\" and .updated_at > \"$fired_at\")) | length" 2>/dev/null)"
+    | jq "add | map(select(.user.login==\"$CRQ_BOT\" and (.id|tostring)!=\"$fired_id\" and .updated_at > \"$fired_at\" and (.body|contains(\"$CRQ_RL_MARKER\")|not))) | length" 2>/dev/null)"
   [ "${newer:-0}" -gt 0 ] && { echo "done"; return 0; }
   # 4) Backstop: only now, if nothing landed in time, treat as a timed-out review.
   [ $(( n - fe )) -gt "$CRQ_INFLIGHT_TIMEOUT" ] && { echo "timeout"; return 0; }
@@ -566,8 +577,10 @@ gc_json() {   # $1 = json
   # Normalize fired-marker keys (and history repo names) to lowercase. Case folding here means a
   # repo-name casing change or mixed-case caller can't orphan a marker and trigger a re-review;
   # merges any duplicate-cased keys (from_entries keeps the last value, same head in practice).
-  json="$(jq -c '
-    .fired = ((.fired // {}) | to_entries | map(.key |= ascii_downcase) | from_entries)
+  # Fold all repo names to lowercase (case-insensitive matching) and cap the fired-marker dict so
+  # markers for long-closed PRs can't grow the dashboard JSON without bound (keep the most-recent).
+  json="$(jq -c --argjson max "$CRQ_FIRED_MAX" '
+    .fired = ((.fired // {}) | to_entries | map(.key |= ascii_downcase) | from_entries | to_entries | .[-$max:] | from_entries)
     | .history = ((.history // []) | map(if .repo then .repo |= ascii_downcase else . end))
     | .queue = ((.queue // []) | map(if .repo then .repo |= ascii_downcase else . end))
     | (if (.in_flight|type) == "object" and .in_flight.repo then .in_flight.repo |= ascii_downcase else . end)' <<<"$json")"
