@@ -695,16 +695,17 @@ _open_url() {
   else return 1; fi
 }
 
-# Best-effort: mute a PR's notifications (the "None" / bell-slash = IGNORED). The calibration PR
-# gets repeated `@coderabbitai rate limit` comments, so we don't want it pinging the user.
-# Requires the gh token's 'notifications' scope; returns non-zero (with no change) otherwise.
+# Best-effort: set a PR's notification subscription to "None" so the calibration PR's repeated
+# `@coderabbitai rate limit` comments don't ping the user. Requires the gh 'notifications' scope.
+# NOTE: GitHub maps IGNORED->UNSUBSCRIBED for PRs you authored, so the durable "ignore" (which
+# survives crq re-subscribing you via its own comments) can only be set via the UI's bell-slash.
 _mute_pr() {   # $1 = pr number
   local node
   node="$(gh api "repos/$CRQ_REPO/pulls/$1" --jq '.node_id // empty' 2>/dev/null)"
   [ -n "$node" ] || return 1
   gh api graphql -F id="$node" \
     -f query='mutation($id:ID!){ updateSubscription(input:{subscribableId:$id, state:IGNORED}){ subscribable{ ... on PullRequest { viewerSubscription } } } }' \
-    --jq '.data.updateSubscription.subscribable.viewerSubscription' 2>/dev/null | grep -q IGNORED
+    --jq '.data.updateSubscription.subscribable.viewerSubscription' 2>/dev/null | grep -qE 'IGNORED|UNSUBSCRIBED'
 }
 
 cmd_init() {
