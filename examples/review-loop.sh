@@ -40,7 +40,7 @@ wait_for_review() {
     # A rate-limit WARNING is a fresh coderabbitai comment but NOT real feedback — exclude it,
     # else we'd "process" a round that never got reviewed (crq requeues it; we shouldn't push).
     n=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp 2>/dev/null \
-        | jq --arg bot "$BOT" --arg rl "$RL" --arg since "$since" 'add | map(select(.user.login==$bot and .created_at > $since and ((.body//"")|contains($rl)|not))) | length' 2>/dev/null)
+        | jq --arg bot "$BOT" --arg rl "$RL" --arg since "$since" 'add | map(select(.user.login==$bot and .created_at > $since and ((.body//"")|ascii_downcase|contains($rl|ascii_downcase)|not))) | length' 2>/dev/null)
     r=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate --slurp 2>/dev/null \
         | jq --arg bot "$BOT" --arg since "$since" 'add | map(select(.user.login==$bot and .submitted_at > $since)) | length' 2>/dev/null)
     { [ "${n:-0}" -gt 0 ] || [ "${r:-0}" -gt 0 ]; } && return 0

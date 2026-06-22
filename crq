@@ -676,7 +676,11 @@ cmd_pump() {
     hsha="$(gh api "repos/$repo/pulls/$pr" --jq '.head.sha // empty' 2>/dev/null | cut -c1-9)"
     key="$repo#$pr"
     lastsha="$(jq -r --arg k "$key" '.fired[$k] // empty' <<<"$json")"
-    if [ -n "$hsha" ] && [ "$hsha" = "$lastsha" ]; then
+    if [ -z "$hsha" ]; then
+      # Head lookup failed (transient/secondary-limit) — DON'T fire with a bogus/empty SHA; leave
+      # the PR queued so the next pump retries once the API recovers (crq:676).
+      log "skip: could not read $key head SHA (transient) — leaving it queued"
+    elif [ "$hsha" = "$lastsha" ]; then
       # DEDUP: we already requested a review for this exact commit (e.g. autoreview and an
       # agent both queued it). Drop it without posting a second @coderabbitai review.
       json="$(jq -c --argjson s "$seq" '.queue|=map(select(.seq!=$s))' <<<"$json")"
@@ -696,7 +700,7 @@ cmd_pump() {
           '.queue|=map(select(.seq!=$s))
            | .in_flight={seq:$s,repo:$r,pr:$p,fired_at:$fa,fired_comment_id:$cid,by_host:$h}
            | .last_fired=$fa | .warn=null
-           | (if $hs=="" then . else .fired[$k]=$hs end)
+           | (if $hs=="" then . else (.fired=(.fired|del(.[$k]))) | .fired[$k]=$hs end)
            | .history = ([{repo:$r,pr:$p,commit:(if $hs=="" then null else $hs end),at:$fa,host:$h}] + (.history // []))[0:20]' <<<"$json")"
         log "FIRED $repo#$pr@${hsha:-?} (seq $seq, comment $cid)"
       else
@@ -744,7 +748,12 @@ cmd_wait() {
       ( cmd_enqueue "$repo" "$pr" ) || { sleep "$CRQ_POLL"; continue; }       # first enqueue; retry if the write failed
       enqueued=1
       ( cmd_pump ) >/dev/null 2>&1 || true                                    # fire NOW — don't wait a full poll for a fresh enqueue
-      continue                                                                # re-check immediately (next iter detects in_flight -> fired)
+      # If that pump fired OUR review, report it immediately — before the next iteration's pump runs
+      # gc, which could clear a fast completion and make our just-fired review look deduped (crq:740).
+      json="$(state_read)" || { sleep "$CRQ_POLL"; continue; }
+      [ "$(jq -r --arg r "$repo" --argjson p "$pr" '(.in_flight // {}) | select(.repo==$r and .pr==$p) | 1' <<<"$json" 2>/dev/null)" = "1" ] \
+        && { log "fired $repo#$pr"; return 0; }
+      continue
     fi
     sleep $(( CRQ_POLL + (RANDOM % 5) ))
   done
@@ -763,10 +772,13 @@ cmd_cancel() {
   # shellcheck disable=SC2064
   trap "release '$nonce'" EXIT
   json="$(state_read)" || { release "$nonce"; trap - EXIT; die "cannot read state"; }
+  # Case-insensitive match — a dashboard upgraded from an older version may still hold mixed-case
+  # repo names/keys that gc hasn't normalized yet, and a manual cancel must still clear them (crq:761).
   json="$(jq -c --arg r "$repo" --argjson p "$pr" \
-    '.queue|=map(select(.repo!=$r or .pr!=$p))
-     | (if (.in_flight!=null and .in_flight.repo==$r and .in_flight.pr==$p) then .in_flight=null else . end)
-     | del(.fired[$r + "#" + ($p|tostring)])' <<<"$json")"
+    '($r + "#" + ($p|tostring)) as $k
+     | .queue |= map(select((.repo|ascii_downcase)!=$r or .pr!=$p))
+     | (if (.in_flight!=null and (.in_flight.repo|ascii_downcase)==$r and .in_flight.pr==$p) then .in_flight=null else . end)
+     | .fired |= with_entries(select((.key|ascii_downcase)!=$k))' <<<"$json")"
   state_write "$json" || { release "$nonce"; trap - EXIT; return 1; }
   release "$nonce"; trap - EXIT
   log "cancelled $repo#$pr"
@@ -976,7 +988,7 @@ cmd_autoreview() {
             # If the comments lookup FAILS, skip — don't treat unreadable comments as "not reviewed"
             # and enqueue a redundant review (the comment scan is the only guard here) (crq:972).
             if ! reviewed_raw="$(gh api "repos/$repo/issues/$pr/comments" --paginate --slurp 2>/dev/null)"; then continue; fi
-            reviewed="$(printf '%s' "$reviewed_raw" | jq "add | map(select(.user.login==\"$CRQ_BOT\" and (.body|contains(\"$CRQ_REVIEW_DONE_MARKER\")))) | length" 2>/dev/null)"
+            reviewed="$(printf '%s' "$reviewed_raw" | jq --arg bot "$CRQ_BOT" --arg m "$CRQ_REVIEW_DONE_MARKER" 'add | map(select(.user.login==$bot and ((.body//"")|contains($m)))) | length' 2>/dev/null)"
             [ "${reviewed:-0}" -gt 0 ] || { ( cmd_enqueue "$repo" "$pr" ) || true; }
           fi
         else
