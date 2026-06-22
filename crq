@@ -632,9 +632,20 @@ cmd_unlock() {
   fi
 }
 
+# Open a URL in the user's default browser (best-effort, cross-platform). CRQ_NO_OPEN disables it.
+_open_url() {
+  local url="$1"
+  [ -n "${CRQ_NO_OPEN:-}" ] && return 1
+  if   command -v open       >/dev/null 2>&1; then open "$url" >/dev/null 2>&1            # macOS
+  elif command -v wslview    >/dev/null 2>&1; then wslview "$url" >/dev/null 2>&1          # WSL (wslu)
+  elif command -v xdg-open   >/dev/null 2>&1; then ( xdg-open "$url" >/dev/null 2>&1 & )   # Linux
+  elif command -v powershell.exe >/dev/null 2>&1; then powershell.exe -NoProfile -Command "Start-Process '$url'" >/dev/null 2>&1  # WSL/Windows
+  else return 1; fi
+}
+
 cmd_init() {
   need CRQ_REPO
-  local owner branch base_sha pr_url issue_url
+  local owner branch base_sha pr_url issue_url repo_url
   owner="${CRQ_REPO%%/*}"
   if ! gh repo view "$CRQ_REPO" >/dev/null 2>&1; then
     log "creating private repo $CRQ_REPO"
@@ -674,12 +685,17 @@ cmd_init() {
       --title "crq: q=0 · idle · remaining=?" --body-file - 2>/dev/null)"
     CRQ_ISSUE="$(printf '%s' "$issue_url" | grep -oE '[0-9]+$')"
     log "dashboard issue: ${issue_url:-#$CRQ_ISSUE}"
+    state_write "$json"   # normalize the issue + publish the initial README dashboard (first time only)
   fi
   printf '\n# Add these to %s (or your shell profile):\n' "${CRQ_CONFIG:-$HOME/.config/crq/env}"
   printf 'export CRQ_REPO=%q\n'  "$CRQ_REPO"
   printf 'export CRQ_ISSUE=%q\n' "$CRQ_ISSUE"
   printf 'export CRQ_CAL_PR=%q\n' "$CRQ_CAL_PR"
   printf 'export CRQ_SCOPE=%q\n' "$CRQ_SCOPE"
+  # open the gate repo (its README is the live dashboard) in the default browser
+  repo_url="https://github.com/$CRQ_REPO"
+  if _open_url "$repo_url"; then log "opened your gate dashboard in the browser: $repo_url"
+  else log "your gate dashboard (the repo README): $repo_url"; fi
 }
 
 # Emulate CodeRabbit's native auto-review (+ incremental review), but rate-coordinated:

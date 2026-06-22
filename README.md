@@ -132,8 +132,9 @@ export CRQ_REPO=YOURUSER/crq-state
 crq init
 ```
 
-`crq init` creates the repo, opens the calibration PR and dashboard issue, and prints the
-`export CRQ_*` lines to save. Drop them into `~/.config/crq/env` — crq sources that file
+`crq init` creates the repo, opens the calibration PR and dashboard issue, publishes the dashboard
+to the repo's README, prints the `export CRQ_*` lines to save, and opens the gate repo in your
+browser (set `CRQ_NO_OPEN=1` to skip that — e.g. on a headless box). Drop them into `~/.config/crq/env` — crq sources that file
 automatically, so every machine just needs the same four lines:
 
 ```bash
@@ -334,6 +335,7 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_REPOS` | _(all in scope)_ | `autoreview` allowlist — only review these `owner/name` repos (comma-separated) |
 | `CRQ_EXCLUDE` | _(none)_ | `autoreview` denylist — never review these `owner/name` repos (comma-separated) |
 | `CRQ_TZ` | `UTC` | dashboard display timezone (IANA name, e.g. `Europe/Oslo`) |
+| `CRQ_NO_OPEN` | _(unset)_ | set to skip opening the gate repo in a browser after `crq init` |
 | `CRQ_CALIBRATE_TTL` | `120` | how long (s) to trust a quota reading before re-asking CodeRabbit |
 | `CRQ_MIN_INTERVAL` | `90` | minimum seconds between fired reviews |
 | `CRQ_POLL` | `15` | how often (s) `crq wait` checks its place in line |
