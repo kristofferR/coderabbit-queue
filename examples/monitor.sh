@@ -17,6 +17,7 @@
 set -u
 PR="${1:?usage: monitor.sh <PR> [owner/repo]}"
 REPO="${2:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)}"
+: "${REPO:?usage: monitor.sh <PR> [owner/repo] — REPO not given and not inside a GitHub repo}"
 BOTS='coderabbitai|chatgpt-codex'
 IDLE_CAP=$(( $(date -u +%s) + 4500 ))
 

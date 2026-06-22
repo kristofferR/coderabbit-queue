@@ -33,6 +33,7 @@ wait_for_review() {
     [ "${n:-0}" -gt 0 ] && return 0
     sleep 30
   done
+  return 1   # timed out — no new review landed
 }
 
 while still_open; do
