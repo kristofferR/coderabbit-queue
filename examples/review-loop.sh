@@ -31,8 +31,10 @@ wait_for_review() {
   local since="$1" _
   for _ in $(seq 1 40); do
     local n
-    n=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-        --jq "[.[]|select(.user.login==\"coderabbitai[bot]\")|select(.created_at > \"$since\")]|length" 2>/dev/null)
+    # --slurp + a standalone jq with `add`: combine all pages before counting (plain --paginate
+    # runs the filter per page; gh forbids --slurp with --jq, so pipe to jq).
+    n=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp 2>/dev/null \
+        | jq "add | map(select(.user.login==\"coderabbitai[bot]\" and .created_at > \"$since\")) | length" 2>/dev/null)
     [ "${n:-0}" -gt 0 ] && return 0
     sleep 30
   done

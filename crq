@@ -296,8 +296,8 @@ _calib_post() {
 # Latest bot rate-limit *reply* on the calibration PR with updated_at > $1 (ISO).
 # Filters to the reply marker so it ignores the PR-open summary/skip comment.
 _calib_latest_reply() {
-  gh api "repos/$CRQ_REPO/issues/$CRQ_CAL_PR/comments" --paginate \
-    --jq "[.[]|select(.user.login==\"$CRQ_BOT\")|select(.body|contains(\"$CRQ_CAL_REPLY_MARKER\"))|select(.updated_at > \"$1\")]|last // empty|{u:.updated_at,b:.body}" 2>/dev/null
+  gh api "repos/$CRQ_REPO/issues/$CRQ_CAL_PR/comments" --paginate --slurp 2>/dev/null \
+    | jq -c "add | map(select(.user.login==\"$CRQ_BOT\" and (.body|contains(\"$CRQ_CAL_REPLY_MARKER\")) and .updated_at > \"$1\")) | last // empty | {u:.updated_at,b:.body}" 2>/dev/null
 }
 
 # Parse a CodeRabbit reply/body for (remaining, reset_epoch). Tolerant; refined
@@ -382,8 +382,8 @@ _warning_latest() {
   for owner in ${CRQ_SCOPE//,/ }; do
     while read -r repo num; do
       [ -n "$repo" ] || continue
-      line="$(gh api "repos/$repo/issues/$num/comments" --paginate \
-        --jq "[.[]|select(.user.login==\"$CRQ_BOT\")|select(.body|contains(\"$CRQ_RL_MARKER\"))]|last // empty|{u:.updated_at,b:.body}" 2>/dev/null)"
+      line="$(gh api "repos/$repo/issues/$num/comments" --paginate --slurp 2>/dev/null \
+        | jq -c "add | map(select(.user.login==\"$CRQ_BOT\" and (.body|contains(\"$CRQ_RL_MARKER\")))) | last // empty | {u:.updated_at,b:.body}" 2>/dev/null)"
       [ -n "$line" ] && [ "$line" != "null" ] || continue
       u="$(jq -r .u <<<"$line")"; b="$(jq -r .b <<<"$line")"
       ue="$(iso2epoch "$u")"; reset="$(parse_available_in "$b" "$ue")" || continue
@@ -408,24 +408,30 @@ inflight_status() {   # $1 = json; echoes timeout | warning:<reset_epoch> | done
   fe="$(iso2epoch "$fired_at")"; n="$(now)"
   # 1) Rate-limited? A fresh WARNING on this PR — surface its reset so the gate backs off NOW
   # instead of trusting a stale "available now" calibration. (The review did NOT run.)
-  wl="$(gh api "repos/$repo/issues/$pr/comments" --paginate \
-    --jq "[.[]|select(.user.login==\"$CRQ_BOT\")|select(.body|contains(\"$CRQ_RL_MARKER\"))|select(.updated_at > \"$fired_at\")]|last // empty|{u:.updated_at,b:.body}" 2>/dev/null)"
+  # (--slurp then a standalone jq with `add`: combine ALL pages before filtering — plain
+  # --paginate --jq runs the filter once PER PAGE, so on long PRs counts/last arrive multi-line
+  # and the numeric/object tests misfire. gh forbids --slurp together with --jq, hence the pipe.)
+  wl="$(gh api "repos/$repo/issues/$pr/comments" --paginate --slurp 2>/dev/null \
+    | jq -c "add | map(select(.user.login==\"$CRQ_BOT\" and (.body|contains(\"$CRQ_RL_MARKER\")) and .updated_at > \"$fired_at\")) | last // empty | {u:.updated_at,b:.body}" 2>/dev/null)"
   if [ -n "$wl" ] && [ "$wl" != "null" ]; then
-    wu="$(jq -r .u <<<"$wl")"; wb="$(jq -r .b <<<"$wl")"
-    wreset="$(parse_available_in "$wb" "$(iso2epoch "$wu")")"
-    echo "warning:${wreset:-0}"; return 0
+    wu="$(jq -r '.u // empty' <<<"$wl" 2>/dev/null)"; wb="$(jq -r '.b // empty' <<<"$wl" 2>/dev/null)"
+    # Only a fully-parsed warning counts — a transient gh error body must NOT trip the rate-limit path.
+    if [ -n "$wu" ] && [ -n "$wb" ]; then
+      wreset="$(parse_available_in "$wb" "$(iso2epoch "$wu")")"
+      echo "warning:${wreset:-0}"; return 0
+    fi
   fi
   # 2) Completed? A formal CRQ_BOT review submitted after we fired (autoreview's source of truth) —
   # catches completions that leave no reaction/comment, so we don't wrongly time out + requeue.
-  revd="$(gh api "repos/$repo/pulls/$pr/reviews" --paginate \
-    --jq "[.[]|select(.user.login==\"$CRQ_BOT\")|select(.submitted_at > \"$fired_at\")]|length" 2>/dev/null)"
+  revd="$(gh api "repos/$repo/pulls/$pr/reviews" --paginate --slurp 2>/dev/null \
+    | jq "add | map(select(.user.login==\"$CRQ_BOT\" and .submitted_at > \"$fired_at\")) | length" 2>/dev/null)"
   [ "${revd:-0}" -gt 0 ] && { echo "done"; return 0; }
   # 3) Completed via a reaction on our trigger comment, or any newer bot comment.
   rx="$(gh api "repos/$repo/issues/comments/$fired_id/reactions" \
         --jq "[.[]|select(.user.login==\"$CRQ_BOT\")]|length" 2>/dev/null)"
   [ "${rx:-0}" -gt 0 ] && { echo "done"; return 0; }
-  newer="$(gh api "repos/$repo/issues/$pr/comments" --paginate \
-    --jq "[.[]|select(.user.login==\"$CRQ_BOT\")|select((.id|tostring)!=\"$fired_id\")|select(.updated_at > \"$fired_at\")]|length" 2>/dev/null)"
+  newer="$(gh api "repos/$repo/issues/$pr/comments" --paginate --slurp 2>/dev/null \
+    | jq "add | map(select(.user.login==\"$CRQ_BOT\" and (.id|tostring)!=\"$fired_id\" and .updated_at > \"$fired_at\")) | length" 2>/dev/null)"
   [ "${newer:-0}" -gt 0 ] && { echo "done"; return 0; }
   # 4) Backstop: only now, if nothing landed in time, treat as a timed-out review.
   [ $(( n - fe )) -gt "$CRQ_INFLIGHT_TIMEOUT" ] && { echo "timeout"; return 0; }

@@ -280,12 +280,16 @@ while still_open; do
   crq wait "$REPO" "$PR"
 
   # 2. Wait for CodeRabbit's review to land (give it ~20 min).
+  got=""
   for _ in $(seq 1 40); do
-    new=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-      --jq "[.[]|select(.user.login==\"coderabbitai[bot]\")|select(.created_at > \"$since\")]|length")
-    [ "${new:-0}" -gt 0 ] && break
+    # --slurp + a standalone jq with `add`: combine all pages before counting (gh forbids
+    # --slurp with --jq, so pipe to jq; plain --paginate --jq counts per page).
+    new=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp \
+      | jq "add | map(select(.user.login==\"coderabbitai[bot]\" and .created_at > \"$since\")) | length")
+    [ "${new:-0}" -gt 0 ] && { got=1; break; }
     sleep 30
   done
+  [ -n "$got" ] || continue   # nothing landed within the cap — don't push a round on stale feedback
 
   # 3. Do the work: read the findings, fix the real ones, run your tests/linters, commit & push.
   #    (Pushing a new commit is what makes the next CodeRabbit review meaningful.)
