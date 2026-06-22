@@ -49,6 +49,8 @@ CRQ_WARNING_SCAN="${CRQ_WARNING_SCAN:-1}"   # 1 = corroborate with open-PR WARNI
 CRQ_GC_TTL="${CRQ_GC_TTL:-120}"             # min seconds between closed-PR queue prunes
 CRQ_AUTOREVIEW_POLL="${CRQ_AUTOREVIEW_POLL:-60}"   # `crq autoreview` poll interval (s)
 CRQ_AUTOREVIEW_MAX_SCAN="${CRQ_AUTOREVIEW_MAX_SCAN:-400}"   # max PRs that incur API lookups per autoreview pass (REST secondary-limit guard)
+CRQ_LEADER_REF="${CRQ_LEADER_REF:-crq-leader}"      # ref electing the single account-wide autoreview daemon
+CRQ_LEADER_TTL="${CRQ_LEADER_TTL:-180}"             # s before a leader's stale heartbeat can be stolen (> AUTOREVIEW_POLL)
 CRQ_HOST="${CRQ_HOST:-$(hostname 2>/dev/null || echo unknown)}"
 
 EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"   # universal empty-tree object
@@ -174,6 +176,66 @@ release() {   # $1 = nonce; only deletes if we still own it
   if _lock_commit_msg "$cur" | grep -q "nonce=$1"; then
     gh api -X DELETE "repos/$CRQ_REPO/git/refs/heads/$CRQ_LOCK_REF" >/dev/null 2>&1
   fi
+}
+
+# ----------------------------------------------------------------------------
+# Singleton: exactly ONE autoreview daemon should drive an account (CRQ_REPO).
+#   - per host: a pidfile so a second `crq autoreview` on the same machine exits.
+#   - account-wide: a leader ref ($CRQ_LEADER_REF) in the gate repo claimed via
+#     atomic create-if-not-exists, heartbeated each pass, and stealable only when
+#     its commit timestamp goes stale (> CRQ_LEADER_TTL). Across all hosts exactly
+#     one daemon leads; the rest stand by and fail over if the leader dies.
+# (Agent `crq wait`/`enqueue`/`pump` are NOT daemons — they stay parallel, serialized
+#  only by the state lock.)
+# ----------------------------------------------------------------------------
+_LEADER_ID="host=$CRQ_HOST pid=$$"
+
+_host_singleton() {   # 0 = we hold this host's autoreview slot; 1 = another live daemon has it
+  local dir tag old
+  dir="${TMPDIR:-/tmp}"; dir="${dir%/}/crq"; mkdir -p "$dir" 2>/dev/null || dir="/tmp"
+  tag="$(printf '%s' "$CRQ_REPO" | tr -c 'A-Za-z0-9' '_')"
+  CRQ_HOST_PIDFILE="$dir/autoreview-$tag.pid"
+  if [ -f "$CRQ_HOST_PIDFILE" ]; then
+    old="$(cat "$CRQ_HOST_PIDFILE" 2>/dev/null)"
+    if [ -n "$old" ] && [ "$old" != "$$" ] && kill -0 "$old" 2>/dev/null \
+       && ps -p "$old" -o command= 2>/dev/null | grep -q 'crq'; then return 1; fi
+  fi
+  printf '%s\n' "$$" > "$CRQ_HOST_PIDFILE" 2>/dev/null || true
+  return 0
+}
+_host_singleton_drop() {
+  [ -n "${CRQ_HOST_PIDFILE:-}" ] && [ "$(cat "$CRQ_HOST_PIDFILE" 2>/dev/null)" = "$$" ] && rm -f "$CRQ_HOST_PIDFILE" 2>/dev/null
+  return 0
+}
+
+_leader_ref_sha() {
+  local o; o="$(gh api "repos/$CRQ_REPO/git/refs/heads/$CRQ_LEADER_REF" --jq '.object.sha // empty' 2>/dev/null)"
+  case "$o" in *[!0-9a-f]*|"") return 0 ;; esac; printf '%s' "$o"
+}
+_leader_commit() { gh api -X POST "repos/$CRQ_REPO/git/commits" -f message="crq-leader $_LEADER_ID epoch=$(now)" -f tree="$EMPTY_TREE" --jq .sha 2>/dev/null; }
+_leader_beat() {   # refresh our heartbeat (we already hold it); always keeps leadership for this pass
+  local sha; sha="$(_leader_commit)"; [ -n "$sha" ] || return 0
+  gh api -X PATCH "repos/$CRQ_REPO/git/refs/heads/$CRQ_LEADER_REF" -f sha="$sha" -F force=true >/dev/null 2>&1; return 0
+}
+_leader_try() {   # 0 = we are (now) leader; 1 = a fresh foreign leader holds it -> stand by
+  local cur msg cdate age sha
+  cur="$(_leader_ref_sha)"
+  if [ -n "$cur" ]; then
+    msg="$(_lock_commit_msg "$cur")"
+    case "$msg" in *"$_LEADER_ID epoch="*) _leader_beat; return 0 ;; esac      # already ours -> heartbeat
+    cdate="$(gh api "repos/$CRQ_REPO/git/commits/$cur" --jq '.committer.date // empty' 2>/dev/null)"
+    age=999999; [ -n "$cdate" ] && age=$(( $(now) - $(iso2epoch "$cdate") ))
+    [ "$age" -lt "$CRQ_LEADER_TTL" ] && return 1                                # foreign + fresh -> stand by
+    gh api -X DELETE "repos/$CRQ_REPO/git/refs/heads/$CRQ_LEADER_REF" >/dev/null 2>&1   # foreign + stale -> steal
+  fi
+  sha="$(_leader_commit)"; [ -n "$sha" ] || return 1                            # claim via atomic create-if-not-exists
+  gh api -X POST "repos/$CRQ_REPO/git/refs" -f ref="refs/heads/$CRQ_LEADER_REF" -f sha="$sha" >/dev/null 2>&1 || return 1
+  cur="$(_leader_ref_sha)"; [ "$cur" = "$sha" ]                                 # confirm we won the create
+}
+_leader_drop() {
+  local cur; cur="$(_leader_ref_sha)"; [ -n "$cur" ] || return 0
+  case "$(_lock_commit_msg "$cur")" in *"$_LEADER_ID epoch="*) gh api -X DELETE "repos/$CRQ_REPO/git/refs/heads/$CRQ_LEADER_REF" >/dev/null 2>&1 ;; esac
+  return 0
 }
 
 # ----------------------------------------------------------------------------
@@ -807,8 +869,25 @@ cmd_autoreview() {
     *) die "usage: crq autoreview [--once] [--no-incremental]" ;;
   esac; done
   need CRQ_REPO; need CRQ_ISSUE
+  # Singleton — only one autoreview daemon per host, and one leader per account (CRQ_REPO).
+  if ! _host_singleton; then log "another crq autoreview is already running on $CRQ_HOST — exiting"; return 0; fi
+  # shellcheck disable=SC2064
+  trap '_host_singleton_drop; _leader_drop' EXIT INT TERM
+  while ! _leader_try; do
+    [ "$once" = "1" ] && { log "another host leads crq autoreview for $CRQ_REPO — nothing to do (--once)"; return 0; }
+    log "standing by — another host leads crq autoreview for $CRQ_REPO"
+    sleep "$CRQ_AUTOREVIEW_POLL"
+  done
+  log "crq autoreview leader for $CRQ_REPO ($_LEADER_ID)"
   local owner repo pr head crrev json present key firedsha rlc scanned idx deferred scan_cursor=0
   while true; do
+    # Re-assert leadership each pass (also our heartbeat). If a stale period let another host
+    # steal it, step down and stand by until we can reclaim — never two leaders scanning at once.
+    if ! _leader_try; then
+      log "lost crq autoreview leadership — standing by"
+      while ! _leader_try; do [ "$once" = "1" ] && return 0; sleep "$CRQ_AUTOREVIEW_POLL"; done
+      log "reclaimed crq autoreview leadership"
+    fi
     json="$(state_read 2>/dev/null)" || json=""
     scanned=0; idx=0; deferred=0
     for owner in ${CRQ_SCOPE//,/ }; do
