@@ -736,9 +736,10 @@ cmd_wait() {
       # exact commit was already reviewed. Report accurately instead of always claiming "fired".
       whead="$(gh api "repos/$repo/pulls/$pr" --jq '.head.sha // empty' 2>/dev/null | cut -c1-9)"
       wfired="$(jq -r --arg k "$repo#$pr" '.fired[$k] // empty' <<<"$json" 2>/dev/null)"
-      if [ -n "$whead" ] && [ "$whead" = "$wfired" ]; then log "already reviewed $repo#$pr@$whead (deduped)"
-      else log "fired $repo#$pr"; fi
-      return 0
+      if [ -n "$whead" ] && [ "$whead" = "$wfired" ]; then
+        log "already reviewed $repo#$pr@$whead (deduped)"; return 3   # distinct: no NEW review fired
+      fi
+      log "fired $repo#$pr"; return 0
     else
       ( cmd_enqueue "$repo" "$pr" ) || { sleep "$CRQ_POLL"; continue; }       # first enqueue; retry if the write failed
       enqueued=1
@@ -913,7 +914,8 @@ cmd_autoreview() {
     sleep "$CRQ_AUTOREVIEW_POLL"
   done
   log "crq autoreview leader for $CRQ_REPO ($_LEADER_ID)"
-  local owner repo pr head crrev crrev_raw reviewed json present key firedsha rlc scanned idx deferred scan_cursor=0 searched
+  local repo pr head crrev crrev_raw reviewed reviewed_raw json present key firedsha rlc scanned idx deferred scan_cursor=0 searched
+  local search_targets search_flag target
   while true; do
     # Re-assert leadership each pass (also our heartbeat). If a stale period let another host
     # steal it, step down and stand by until we can reclaim — never two leaders scanning at once.
@@ -924,7 +926,11 @@ cmd_autoreview() {
     fi
     json="$(state_read 2>/dev/null)" || json=""
     scanned=0; idx=0; deferred=0
-    for owner in ${CRQ_SCOPE//,/ }; do
+    # With an allowlist, search each repo directly (--repo) so an owner with >1000 open PRs can't let
+    # the owner-wide 1000-result cap hide allowlisted PRs; otherwise scan per owner in scope (crq:978).
+    if [ -n "$CRQ_REPOS" ]; then search_targets="${CRQ_REPOS//,/ }"; search_flag="--repo"
+    else search_targets="${CRQ_SCOPE//,/ }"; search_flag="--owner"; fi
+    for target in $search_targets; do
       searched=0
       while read -r repo pr; do
         [ -n "$repo" ] || continue
@@ -967,18 +973,20 @@ cmd_autoreview() {
           # auto-review only: enqueue if never reviewed. crrev catches FORMAL reviews; also honor a
           # comment-only completion (a CodeRabbit walkthrough/summary comment) so we don't re-review (crq:956).
           if [ -z "$crrev" ]; then
-            reviewed="$(gh api "repos/$repo/issues/$pr/comments" --paginate --slurp 2>/dev/null \
-              | jq "add | map(select(.user.login==\"$CRQ_BOT\" and (.body|contains(\"$CRQ_REVIEW_DONE_MARKER\")))) | length" 2>/dev/null)"
+            # If the comments lookup FAILS, skip — don't treat unreadable comments as "not reviewed"
+            # and enqueue a redundant review (the comment scan is the only guard here) (crq:972).
+            if ! reviewed_raw="$(gh api "repos/$repo/issues/$pr/comments" --paginate --slurp 2>/dev/null)"; then continue; fi
+            reviewed="$(printf '%s' "$reviewed_raw" | jq "add | map(select(.user.login==\"$CRQ_BOT\" and (.body|contains(\"$CRQ_REVIEW_DONE_MARKER\")))) | length" 2>/dev/null)"
             [ "${reviewed:-0}" -gt 0 ] || { ( cmd_enqueue "$repo" "$pr" ) || true; }
           fi
         else
           [ "$crrev" != "$head" ] && { ( cmd_enqueue "$repo" "$pr" ) || true; }  # + incremental: HEAD not reviewed
         fi
-      done < <(gh search prs --owner "$owner" --state open --archived=false --limit 1000 --json number,repository \
+      done < <(gh search prs "$search_flag" "$target" --state open --archived=false --limit 1000 --json number,repository \
                  --jq '.[]|"\(.repository.nameWithOwner) \(.number)"' 2>/dev/null)
-      # gh search caps at 1000 results — if we hit it, some open PRs in this owner are unseen.
+      # gh search caps at 1000 results — if we hit it, some open PRs in this target are unseen.
       # Surface it (no silent truncation) rather than partition; narrowing CRQ_REPOS is the fix.
-      [ "$searched" -ge 1000 ] && log "autoreview: '$owner' returned the 1000-result search cap — some open PRs may be unseen; narrow CRQ_REPOS/CRQ_SCOPE"
+      [ "$searched" -ge 1000 ] && log "autoreview: '$target' returned the 1000-result search cap — some open PRs may be unseen; narrow CRQ_REPOS/CRQ_SCOPE"
     done
     # Advance the rotation cursor when we deferred PRs (resume there next pass); reset to the front
     # once a pass covers everything within budget. Keeps large scopes progressing, not starving.

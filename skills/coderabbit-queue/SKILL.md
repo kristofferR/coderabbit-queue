@@ -41,6 +41,10 @@ crq init                                # creates gate repo, dashboard issue, ca
 
 If `crq` is not installed: `curl -fsSL https://raw.githubusercontent.com/kristofferR/coderabbit-queue/main/install.sh | bash`
 
+> **Trust note:** `curl … | bash` runs remote code without local review — fine if you trust this
+> repo, but for autonomous agents or stricter setups, prefer downloading `install.sh` (or the single
+> `crq` script) and reading it before running, as the README's manual-install section shows.
+
 ## Commands you'll use
 
 - `crq wait <repo> <pr>` — the loop primitive (enqueue + block until fired).

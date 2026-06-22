@@ -18,9 +18,12 @@ set -u
 PR="${1:?usage: monitor.sh <PR> [owner/repo]}"
 REPO="${2:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)}"
 : "${REPO:?usage: monitor.sh <PR> [owner/repo] — REPO not given and not inside a GitHub repo}"
-# crq coordinates CodeRabbit, so this example watches CodeRabbit. If your own loop also uses
-# another review bot, widen this regex yourself (e.g. 'coderabbitai|chatgpt-codex').
-BOTS='coderabbitai'
+# Honor crq's configured review bot + rate-limit marker (defaults = CodeRabbit, which crq
+# coordinates). Override CRQ_BOT / CRQ_RL_MARKER for another bot.
+# shellcheck source=/dev/null
+[ -f "${CRQ_CONFIG:-$HOME/.config/crq/env}" ] && . "${CRQ_CONFIG:-$HOME/.config/crq/env}"
+BOT="${CRQ_BOT:-coderabbitai[bot]}"
+RL="${CRQ_RL_MARKER:-rate limited by coderabbit.ai}"
 IDLE_CAP=$(( $(date -u +%s) + 4500 ))
 
 bot_count() {
@@ -28,10 +31,10 @@ bot_count() {
   # runs the filter per page, so a new (non-bot) page could shift the string and false-wake the loop.
   # Exclude rate-limit WARNING posts from EVERY counter (case-insensitive) — they're not review
   # feedback and would otherwise wake the loop as NEW_FEEDBACK when no actual review arrived.
-  local f='add|map(select((.user.login|test(env.BOTS)) and ((.body//"")|ascii_downcase|contains("rate limited by coderabbit.ai")|not)))|length'
-  c=$(gh api "repos/$REPO/pulls/$PR/comments" --paginate --slurp 2>/dev/null | BOTS="$BOTS" jq "$f" 2>/dev/null)
-  r=$(gh api "repos/$REPO/pulls/$PR/reviews"  --paginate --slurp 2>/dev/null | BOTS="$BOTS" jq "$f" 2>/dev/null)
-  i=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp 2>/dev/null | BOTS="$BOTS" jq "$f" 2>/dev/null)
+  local f='add|map(select(.user.login==$bot and ((.body//"")|ascii_downcase|contains(($rl|ascii_downcase))|not)))|length'
+  c=$(gh api "repos/$REPO/pulls/$PR/comments" --paginate --slurp 2>/dev/null | jq --arg bot "$BOT" --arg rl "$RL" "$f" 2>/dev/null)
+  r=$(gh api "repos/$REPO/pulls/$PR/reviews"  --paginate --slurp 2>/dev/null | jq --arg bot "$BOT" --arg rl "$RL" "$f" 2>/dev/null)
+  i=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp 2>/dev/null | jq --arg bot "$BOT" --arg rl "$RL" "$f" 2>/dev/null)
   # A successful-but-empty response yields "0"; an EMPTY string means the gh call failed. Don't
   # fabricate 0:0:0 from a transient failure (it would look like feedback vanished and false-wake) —
   # signal an error so the caller skips this tick.
@@ -41,7 +44,7 @@ bot_count() {
 cr_last_review() {   # echoes the last CodeRabbit-reviewed commit (short); returns 1 if the lookup FAILED
   local out
   out="$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
-    --jq '.[]|select(.user.login=="coderabbitai[bot]" and .commit_id!=null)|.commit_id' 2>/dev/null)" || return 1
+    --jq ".[]|select(.user.login==\"$BOT\" and .commit_id!=null)|.commit_id" 2>/dev/null)" || return 1
   printf '%s' "$out" | tail -1 | cut -c1-9
 }
 

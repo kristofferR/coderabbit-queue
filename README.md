@@ -61,6 +61,7 @@ and the chaos is gone.
 >   **Settings → Review → Automatic Review** → turn it **off** (also disable incremental/auto
 >   reviews). This is the setting that matters most.
 > - **Or per repository:** commit a `.coderabbit.yaml` with:
+>
 >   ```yaml
 >   reviews:
 >     auto_review:
@@ -72,7 +73,7 @@ and the chaos is gone.
 
 ## How it works
 
-```
+```text
    agent A ─┐
    agent B ─┼─►  crq wait <repo> <pr>
    agent C ─┘          │
@@ -406,7 +407,7 @@ distributed mutex. The lock ref points at a tiny commit whose message carries a 
 after creating the ref, crq reads it back and checks the nonce, so even under a thundering herd
 exactly one agent ever owns the lock (and on release it only deletes a lock that's still *its own*).
 A crashed holder is reclaimed after `CRQ_LOCK_TTL`. Every queue change happens under this lock, so
-the dashboard never has lost updates, and FIFO order uses a monotonic counter (not timestamps) so
+the dashboard has never lost updates, and FIFO order uses a monotonic counter (not timestamps) so
 it's immune to clock differences between machines.
 
 ## License

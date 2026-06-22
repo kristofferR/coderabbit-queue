@@ -16,6 +16,8 @@ PR="${PR:?set PR=<number>}"
 # shellcheck source=/dev/null
 [ -f "${CRQ_CONFIG:-$HOME/.config/crq/env}" ] && . "${CRQ_CONFIG:-$HOME/.config/crq/env}"
 : "${CRQ_REPO:?run 'crq init' once and configure ~/.config/crq/env (see the README)}"
+BOT="${CRQ_BOT:-coderabbitai[bot]}"                        # honor crq's configured review bot…
+RL="${CRQ_RL_MARKER:-rate limited by coderabbit.ai}"      # …and rate-limit marker, instead of hardcoding
 
 # Keep looping unless the PR is *explicitly* CLOSED/MERGED — a transient gh/API failure returns
 # an empty state, which must NOT be mistaken for a real closure (that would exit the loop early).
@@ -38,9 +40,9 @@ wait_for_review() {
     # A rate-limit WARNING is a fresh coderabbitai comment but NOT real feedback — exclude it,
     # else we'd "process" a round that never got reviewed (crq requeues it; we shouldn't push).
     n=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp 2>/dev/null \
-        | jq "add | map(select(.user.login==\"coderabbitai[bot]\" and .created_at > \"$since\" and (.body|contains(\"rate limited by coderabbit.ai\")|not))) | length" 2>/dev/null)
+        | jq --arg bot "$BOT" --arg rl "$RL" --arg since "$since" 'add | map(select(.user.login==$bot and .created_at > $since and ((.body//"")|contains($rl)|not))) | length' 2>/dev/null)
     r=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate --slurp 2>/dev/null \
-        | jq "add | map(select(.user.login==\"coderabbitai[bot]\" and .submitted_at > \"$since\")) | length" 2>/dev/null)
+        | jq --arg bot "$BOT" --arg since "$since" 'add | map(select(.user.login==$bot and .submitted_at > $since)) | length' 2>/dev/null)
     { [ "${n:-0}" -gt 0 ] || [ "${r:-0}" -gt 0 ]; } && return 0
     sleep 30
   done
@@ -48,14 +50,18 @@ wait_for_review() {
 }
 
 while still_open; do
-  if ! crq wait "$REPO" "$PR"; then   # coordinated, FIFO, never fires while rate-limited
-    echo "[loop] crq wait did not fire a review (timeout/error) — skipping this round"
-    continue
-  fi
-  # Start the feedback window AFTER crq fires our review — otherwise a delayed/earlier CodeRabbit
-  # response that lands while we're blocked in `crq wait` would be newer than `since` and falsely
-  # satisfy wait_for_review before our just-requested review actually runs.
-  since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # crq wait is coordinated/FIFO and never fires while rate-limited. Exit codes:
+  #   0 = our review was fired   3 = deduped (this commit was already reviewed)   other = timeout/error
+  crq wait "$REPO" "$PR"; rc=$?
+  case "$rc" in
+    0) ;;                                                                          # fired -> wait for feedback
+    3) echo "[loop] $REPO#$PR already reviewed at this commit — nothing new"; continue ;;
+    *) echo "[loop] crq wait did not fire a review (timeout/error) — skipping round"; continue ;;
+  esac
+  # Start the feedback window AFTER crq fires (a delayed response that lands while we were blocked
+  # in `crq wait` would otherwise falsely satisfy the poll). Back up 1s so a comment created in the
+  # same second as 'now' isn't missed by the strictly-newer (`>`) comparison.
+  since="$(date -u -d '1 second ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1S +%Y-%m-%dT%H:%M:%SZ)"
   if ! wait_for_review "$since"; then
     echo "[loop] no new review within the cap — not pushing a round on stale feedback"
     continue
