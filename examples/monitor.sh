@@ -26,11 +26,12 @@ IDLE_CAP=$(( $(date -u +%s) + 4500 ))
 bot_count() {
   # --slurp + a standalone jq with `add`: combine all pages before counting. Plain --paginate --jq
   # runs the filter per page, so a new (non-bot) page could shift the string and false-wake the loop.
-  c=$(gh api "repos/$REPO/pulls/$PR/comments" --paginate --slurp 2>/dev/null | jq "add|map(select(.user.login|test(\"$BOTS\")))|length" 2>/dev/null)
-  r=$(gh api "repos/$REPO/pulls/$PR/reviews"  --paginate --slurp 2>/dev/null | jq "add|map(select(.user.login|test(\"$BOTS\")))|length" 2>/dev/null)
-  # conversation comments too, but EXCLUDE rate-limit WARNING posts — they're not review feedback
-  # and would otherwise wake the loop as NEW_FEEDBACK when no actual review arrived.
-  i=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp 2>/dev/null | jq "add|map(select((.user.login|test(\"$BOTS\")) and (.body|contains(\"rate limited by coderabbit.ai\")|not)))|length" 2>/dev/null)
+  # Exclude rate-limit WARNING posts from EVERY counter (case-insensitive) — they're not review
+  # feedback and would otherwise wake the loop as NEW_FEEDBACK when no actual review arrived.
+  local f='add|map(select((.user.login|test(env.BOTS)) and ((.body//"")|ascii_downcase|contains("rate limited by coderabbit.ai")|not)))|length'
+  c=$(gh api "repos/$REPO/pulls/$PR/comments" --paginate --slurp 2>/dev/null | BOTS="$BOTS" jq "$f" 2>/dev/null)
+  r=$(gh api "repos/$REPO/pulls/$PR/reviews"  --paginate --slurp 2>/dev/null | BOTS="$BOTS" jq "$f" 2>/dev/null)
+  i=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp 2>/dev/null | BOTS="$BOTS" jq "$f" 2>/dev/null)
   echo "${c:-0}:${r:-0}:${i:-0}"
 }
 cr_last_review() {
