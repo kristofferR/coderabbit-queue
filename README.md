@@ -91,7 +91,7 @@ Everything lives in one small **gate repo** (private is fine):
 | Piece | What it is |
 |-------|-----------|
 | 🔒 **Lock** | An atomic git ref. GitHub's "create ref only if it doesn't exist" gives a real cross-machine mutex, so only one agent acts at a time and the queue never corrupts. |
-| 📋 **Dashboard issue** | Its body holds the queue + status (as hidden JSON plus a human-readable table). The issue **title** is a one-glance status: `crq: q=3 · inflight=foo#11 · remaining=0`. |
+| 📋 **Dashboard** | Published to the gate repo's **`README.md`** — status, queue, and a "recently reviewed" history, every PR linked (committed only when something material changes, not on every tick). A tracking **issue** holds the machine-readable state (its **title** is a one-glance status: `crq · 🟡 2 queued`). |
 | 🐰 **Calibration PR** | A throwaway draft PR where crq asks `@coderabbitai rate limit` to read your real quota *without spending a review*. (crq disables auto-review on this repo so the PR itself costs nothing.) |
 
 ---
@@ -296,7 +296,7 @@ the queue with the non-blocking `crq enqueue` + `crq pump`. It never posts `@cod
 directly — `crq` owns that, account-wide.
 
 > 💡 **Watching the line:** run `crq status` any time to see the queue, what's in flight, and the
-> next slot. Or just open the dashboard issue in your browser.
+> next slot. Or just open your gate repo on GitHub — its README **is** the live dashboard.
 
 ---
 

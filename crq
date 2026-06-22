@@ -229,12 +229,37 @@ render_title() {
   ' <<<"$1"
 }
 
-state_write() {   # $1 = JSON; bumps rev, stamps wrote_at, re-renders issue
-  local json body title
-  json="$(jq -c --arg now "$(now_iso)" '.rev=((.rev//0)+1) | .wrote_at=$now' <<<"$1")"
-  body="$(printf '%s\n%s\n%s\n\n%s\n' "$STATE_BEGIN" "$(jq -c . <<<"$json")" "$STATE_END" "$(render_human "$json")")"
+# Publish the human dashboard to the gate repo's README.md (via the Contents API).
+update_readme() {   # $1 = json
+  local body b64 sha
+  body="$(render_human "$1")"
+  b64="$(printf '%s\n' "$body" | base64 | tr -d '\n')"
+  sha="$(gh api "repos/$CRQ_REPO/contents/README.md" --jq '.sha // empty' 2>/dev/null)"
+  case "$sha" in *[!0-9a-f]*|"") sha="" ;; esac   # guard: gh dumps the 404 body to stdout
+  if [ -n "$sha" ]; then
+    gh api -X PUT "repos/$CRQ_REPO/contents/README.md" \
+      -f message="crq: dashboard update" -f content="$b64" -f sha="$sha" >/dev/null 2>&1
+  else
+    gh api -X PUT "repos/$CRQ_REPO/contents/README.md" \
+      -f message="crq: dashboard" -f content="$b64" >/dev/null 2>&1
+  fi
+}
+
+state_write() {   # $1 = JSON; bumps rev, updates the issue (machine state) + README dashboard
+  local json title body prev_sig new_sig
+  prev_sig="$(jq -r '.readme_sig // empty' <<<"$1")"
+  # signature of the user-visible content only — so the README is committed on material changes,
+  # not on every internal tick (rev/checked_at/countdown).
+  new_sig="$(jq -c '[.queue,.in_flight,.blocked.blocked_until,.blocked.remaining,.history]' <<<"$1")"
+  json="$(jq -c --arg now "$(now_iso)" --arg sig "$new_sig" \
+            '.rev=((.rev//0)+1) | .wrote_at=$now | .readme_sig=$sig' <<<"$1")"
+  # issue body holds the machine state; the dashboard lives in the repo README
+  body="$(printf '%s\n%s\n%s\n\n_Machine state for crq. Live dashboard: the [README](https://github.com/%s#readme) of this repo._\n' \
+            "$STATE_BEGIN" "$(jq -c . <<<"$json")" "$STATE_END" "$CRQ_REPO")"
   title="$(render_title "$json")"
   printf '%s' "$body" | gh issue edit "$CRQ_ISSUE" --repo "$CRQ_REPO" --title "$title" --body-file - >/dev/null
+  [ "$new_sig" != "$prev_sig" ] && update_readme "$json"
+  return 0
 }
 
 # ----------------------------------------------------------------------------
