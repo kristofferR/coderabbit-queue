@@ -495,6 +495,12 @@ gc_json() {   # $1 = json
     done < <(jq -c '.queue[]?' <<<"$json")
     json="$(jq -c --arg t "$(now_iso)" '.gc_at=$t' <<<"$json")"
   fi
+  # Normalize fired-marker keys (and history repo names) to lowercase. Case folding here means a
+  # repo-name casing change or mixed-case caller can't orphan a marker and trigger a re-review;
+  # merges any duplicate-cased keys (from_entries keeps the last value, same head in practice).
+  json="$(jq -c '
+    .fired = ((.fired // {}) | to_entries | map(.key |= ascii_downcase) | from_entries)
+    | .history = ((.history // []) | map(if .repo then .repo |= ascii_downcase else . end))' <<<"$json")"
   echo "$json"
 }
 
