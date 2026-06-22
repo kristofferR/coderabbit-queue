@@ -26,6 +26,7 @@ CRQ_CAL_PR="${CRQ_CAL_PR:-}"           # calibration PR number
 CRQ_SCOPE="${CRQ_SCOPE:-${CRQ_REPO%%/*}}"   # comma-list of owners/orgs = rate-limit buckets
 CRQ_REPOS="${CRQ_REPOS:-}"; CRQ_REPOS="${CRQ_REPOS// /}"        # autoreview allowlist (owner/name,…); empty = all repos in scope
 CRQ_EXCLUDE="${CRQ_EXCLUDE:-}"; CRQ_EXCLUDE="${CRQ_EXCLUDE// /}" # autoreview denylist (owner/name,…)
+CRQ_TZ="${CRQ_TZ:-}"                         # dashboard display timezone (IANA, e.g. Europe/Oslo); empty = UTC
 CRQ_BOT="${CRQ_BOT:-coderabbitai[bot]}"
 CRQ_REVIEW_CMD="${CRQ_REVIEW_CMD:-@coderabbitai review}"
 CRQ_RATELIMIT_CMD="${CRQ_RATELIMIT_CMD:-@coderabbitai rate limit}"
@@ -175,8 +176,8 @@ state_read() {   # echoes compact JSON from the dashboard issue
 }
 
 render_human() {
-  jq -r '
-    def ts(x): if x==null then "—" else (x | sub("T";" ") | sub("Z";" UTC")) end;
+  TZ="${CRQ_TZ:-UTC}" jq -r '
+    def ts(x): if x==null then "—" else (x | fromdateiso8601 | strflocaltime("%Y-%m-%d %H:%M %Z")) end;
     def link(repo; pr): "[\(repo)#\(pr)](https://github.com/\(repo)/pull/\(pr))";
     def mins(x): ((x | fromdateiso8601) - now) / 60 | floor;
     (if (.blocked.blocked_until != null) and ((.blocked.blocked_until | fromdateiso8601) > now)

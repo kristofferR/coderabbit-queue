@@ -333,6 +333,7 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_SCOPE` | owner of `CRQ_REPO` | which owners/orgs share this quota (comma-separated) |
 | `CRQ_REPOS` | _(all in scope)_ | `autoreview` allowlist — only review these `owner/name` repos (comma-separated) |
 | `CRQ_EXCLUDE` | _(none)_ | `autoreview` denylist — never review these `owner/name` repos (comma-separated) |
+| `CRQ_TZ` | `UTC` | dashboard display timezone (IANA name, e.g. `Europe/Oslo`) |
 | `CRQ_CALIBRATE_TTL` | `120` | how long (s) to trust a quota reading before re-asking CodeRabbit |
 | `CRQ_MIN_INTERVAL` | `90` | minimum seconds between fired reviews |
 | `CRQ_POLL` | `15` | how often (s) `crq wait` checks its place in line |
