@@ -254,13 +254,20 @@ update_readme() {   # $1 = json
 }
 
 state_write() {   # $1 = JSON; bumps rev, updates the issue (machine state) + README dashboard
-  local json title body prev_sig new_sig
+  local json title body prev_sig new_sig sig
   prev_sig="$(jq -r '.readme_sig // empty' <<<"$1")"
   # signature of the user-visible content only — so the README is committed on material changes,
   # not on every internal tick (rev/checked_at/countdown).
   new_sig="$(jq -c '[.queue,.in_flight,.blocked.blocked_until,.blocked.remaining,.history]' <<<"$1")"
-  json="$(jq -c --arg now "$(now_iso)" --arg sig "$new_sig" \
-            '.rev=((.rev//0)+1) | .wrote_at=$now | .readme_sig=$sig' <<<"$1")"
+  json="$(jq -c --arg now "$(now_iso)" '.rev=((.rev//0)+1) | .wrote_at=$now' <<<"$1")"
+  # Publish the README dashboard FIRST when content changed; only adopt the new signature if
+  # that succeeds — otherwise keep the old one so the next material write retries the publish
+  # (don't let a failed README update leave the dashboard stale forever).
+  sig="$prev_sig"
+  if [ "$new_sig" != "$prev_sig" ]; then
+    if update_readme "$json"; then sig="$new_sig"; else log "WARN: README dashboard publish failed — will retry next change"; fi
+  fi
+  json="$(jq -c --arg sig "$sig" '.readme_sig=$sig' <<<"$json")"
   # issue body holds the machine state; the dashboard lives in the repo README
   body="$(printf '%s\n%s\n%s\n\n_Machine state for crq. Live dashboard: the [README](https://github.com/%s#readme) of this repo._\n' \
             "$STATE_BEGIN" "$(jq -c . <<<"$json")" "$STATE_END" "$CRQ_REPO")"
@@ -270,7 +277,6 @@ state_write() {   # $1 = JSON; bumps rev, updates the issue (machine state) + RE
     log "ERROR: failed to persist state to issue #$CRQ_ISSUE — not releasing as success"
     return 1
   fi
-  [ "$new_sig" != "$prev_sig" ] && update_readme "$json"
   return 0
 }
 
@@ -287,7 +293,7 @@ _calib_post() {
 # Filters to the reply marker so it ignores the PR-open summary/skip comment.
 _calib_latest_reply() {
   gh api "repos/$CRQ_REPO/issues/$CRQ_CAL_PR/comments" --paginate \
-    --jq "[.[]|select(.user.login==\"$CRQ_BOT\")|select(.body|contains(\"$CRQ_CAL_REPLY_MARKER\"))|select(.updated_at > \"$1\")]|last|{u:.updated_at,b:.body}" 2>/dev/null
+    --jq "[.[]|select(.user.login==\"$CRQ_BOT\")|select(.body|contains(\"$CRQ_CAL_REPLY_MARKER\"))|select(.updated_at > \"$1\")]|last // empty|{u:.updated_at,b:.body}" 2>/dev/null
 }
 
 # Parse a CodeRabbit reply/body for (remaining, reset_epoch). Tolerant; refined
@@ -373,13 +379,13 @@ _warning_latest() {
     while read -r repo num; do
       [ -n "$repo" ] || continue
       line="$(gh api "repos/$repo/issues/$num/comments" --paginate \
-        --jq "[.[]|select(.user.login==\"$CRQ_BOT\")|select(.body|contains(\"$CRQ_RL_MARKER\"))]|last|{u:.updated_at,b:.body}" 2>/dev/null)"
+        --jq "[.[]|select(.user.login==\"$CRQ_BOT\")|select(.body|contains(\"$CRQ_RL_MARKER\"))]|last // empty|{u:.updated_at,b:.body}" 2>/dev/null)"
       [ -n "$line" ] && [ "$line" != "null" ] || continue
       u="$(jq -r .u <<<"$line")"; b="$(jq -r .b <<<"$line")"
       ue="$(iso2epoch "$u")"; reset="$(parse_available_in "$b" "$ue")" || continue
       [ -n "$reset" ] || continue
       if [ "$ue" -gt "$best_u" ]; then best_u="$ue"; best_reset="$reset"; found=1; fi
-    done < <(gh search prs --owner "$owner" --state open --limit 1000 --json number,repository \
+    done < <(gh search prs --owner "$owner" --state open --archived=false --limit 1000 --json number,repository \
                --jq '.[]|"\(.repository.nameWithOwner) \(.number)"' 2>/dev/null)
   done
   [ "$found" = "1" ] && echo "${best_u}|${best_reset}"
@@ -400,7 +406,7 @@ inflight_status() {   # $1 = json; echoes timeout | warning:<reset_epoch> | done
   # Our fire was rate-limited? CodeRabbit posts a fresh WARNING on this PR — surface its reset
   # so the gate backs off IMMEDIATELY instead of trusting a stale "available now" calibration.
   wl="$(gh api "repos/$repo/issues/$pr/comments" --paginate \
-    --jq "[.[]|select(.user.login==\"$CRQ_BOT\")|select(.body|contains(\"$CRQ_RL_MARKER\"))|select(.updated_at > \"$fired_at\")]|last|{u:.updated_at,b:.body}" 2>/dev/null)"
+    --jq "[.[]|select(.user.login==\"$CRQ_BOT\")|select(.body|contains(\"$CRQ_RL_MARKER\"))|select(.updated_at > \"$fired_at\")]|last // empty|{u:.updated_at,b:.body}" 2>/dev/null)"
   if [ -n "$wl" ] && [ "$wl" != "null" ]; then
     wu="$(jq -r .u <<<"$wl")"; wb="$(jq -r .b <<<"$wl")"
     wreset="$(parse_available_in "$wb" "$(iso2epoch "$wu")")"
@@ -772,7 +778,7 @@ cmd_autoreview() {
         else
           [ "$crrev" != "$head" ] && { ( cmd_enqueue "$repo" "$pr" ) || true; }  # + incremental: HEAD not reviewed
         fi
-      done < <(gh search prs --owner "$owner" --state open --limit 1000 --json number,repository \
+      done < <(gh search prs --owner "$owner" --state open --archived=false --limit 1000 --json number,repository \
                  --jq '.[]|"\(.repository.nameWithOwner) \(.number)"' 2>/dev/null)
     done
     ( cmd_pump ) >/dev/null 2>&1 || true   # subshell: a transient pump die can't kill the watcher
