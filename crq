@@ -117,8 +117,11 @@ _lock_ref_sha() {
 _lock_epoch() { printf '%s' "$1" | sed -n 's/.*epoch=\([0-9][0-9]*\).*/\1/p'; }
 
 acquire() {   # echoes nonce on success
-  local nonce msg sha cur hmsg hepoch tries=0 backoff=1
-  nonce="$(uuidgen)"
+  local nonce msg sha cur hmsg hepoch cdate tries=0 backoff=1
+  nonce="$(uuidgen 2>/dev/null)"
+  [ -n "$nonce" ] || nonce="$(LC_ALL=C tr -dc 'a-f0-9' </dev/urandom 2>/dev/null | head -c 32)"
+  [ -n "$nonce" ] || nonce="crq-$$-$(date -u +%s)-${RANDOM}${RANDOM}"
+  [ -n "$nonce" ] || return 1   # never proceed with an empty nonce — it would match any lock
   while [ "$tries" -lt "$CRQ_LOCK_TRIES" ]; do
     tries=$(( tries + 1 ))
     cur="$(_lock_ref_sha)"
@@ -137,6 +140,10 @@ acquire() {   # echoes nonce on success
       # held: steal only if demonstrably stale; delete AT MOST ONCE then retry
       # (ownership is proven by the nonce read-back above, so a steal race is safe).
       hmsg="$(_lock_commit_msg "$cur")"; hepoch="$(_lock_epoch "$hmsg")"
+      if [ -z "$hepoch" ]; then   # pre-epoch or foreign lock: fall back to the commit's server timestamp
+        cdate="$(gh api "repos/$CRQ_REPO/git/commits/$cur" --jq '.committer.date // empty' 2>/dev/null)"
+        [ -n "$cdate" ] && hepoch="$(iso2epoch "$cdate")"
+      fi
       if [ -n "$hepoch" ] && [ $(( $(now) - hepoch )) -gt "$CRQ_LOCK_TTL" ]; then
         log "stealing stale lock (age $(( $(now) - hepoch ))s > ${CRQ_LOCK_TTL}s)"
         gh api -X DELETE "repos/$CRQ_REPO/git/refs/heads/$CRQ_LOCK_REF" >/dev/null 2>&1
@@ -153,6 +160,7 @@ acquire() {   # echoes nonce on success
 
 release() {   # $1 = nonce; only deletes if we still own it
   local cur
+  [ -n "${1:-}" ] || return 0   # never delete on an empty nonce — it would match any lock
   cur="$(_lock_ref_sha)" || return 0
   [ -n "$cur" ] || return 0
   if _lock_commit_msg "$cur" | grep -q "nonce=$1"; then
@@ -257,7 +265,11 @@ state_write() {   # $1 = JSON; bumps rev, updates the issue (machine state) + RE
   body="$(printf '%s\n%s\n%s\n\n_Machine state for crq. Live dashboard: the [README](https://github.com/%s#readme) of this repo._\n' \
             "$STATE_BEGIN" "$(jq -c . <<<"$json")" "$STATE_END" "$CRQ_REPO")"
   title="$(render_title "$json")"
-  printf '%s' "$body" | gh issue edit "$CRQ_ISSUE" --repo "$CRQ_REPO" --title "$title" --body-file - >/dev/null
+  # Persist machine state to the issue. Propagate failure so callers don't proceed on stale state.
+  if ! printf '%s' "$body" | gh issue edit "$CRQ_ISSUE" --repo "$CRQ_REPO" --title "$title" --body-file - >/dev/null 2>&1; then
+    log "ERROR: failed to persist state to issue #$CRQ_ISSUE — not releasing as success"
+    return 1
+  fi
   [ "$new_sig" != "$prev_sig" ] && update_readme "$json"
   return 0
 }
@@ -367,7 +379,7 @@ _warning_latest() {
       ue="$(iso2epoch "$u")"; reset="$(parse_available_in "$b" "$ue")" || continue
       [ -n "$reset" ] || continue
       if [ "$ue" -gt "$best_u" ]; then best_u="$ue"; best_reset="$reset"; found=1; fi
-    done < <(gh search prs --owner "$owner" --state open --json number,repository \
+    done < <(gh search prs --owner "$owner" --state open --limit 1000 --json number,repository \
                --jq '.[]|"\(.repository.nameWithOwner) \(.number)"' 2>/dev/null)
   done
   [ "$found" = "1" ] && echo "${best_u}|${best_reset}"
@@ -415,15 +427,19 @@ gc_json() {   # $1 = json
     reason="$(inflight_status "$json")" && {
       case "$reason" in
         warning:*)
-          # the fired review was rate-limited -> back off NOW using the WARNING's countdown
+          # The fired review was rate-limited — it never actually ran. Requeue the PR (so it's
+          # retried once unblocked) and clear its fired-marker, else dedup/autoreview would skip
+          # this exact commit forever. Set blocked_until from the WARNING so we back off now.
           wreset="${reason#warning:}"
-          if [ "${wreset:-0}" -gt "$n" ]; then
-            json="$(jq -c --arg bu "$(epoch2iso "$wreset")" --arg ca "$(now_iso)" \
-              '.in_flight=null | .warn=null | .blocked.blocked_until=$bu | .blocked.source="warning" | .blocked.remaining=0 | .blocked.checked_at=$ca' <<<"$json")"
-            log "rate-limited on fired PR — blocked until $(epoch2iso "$wreset")"
-          else
-            json="$(jq -c '.in_flight=null | .warn=null' <<<"$json")"
-          fi ;;
+          json="$(jq -c --arg ca "$(now_iso)" \
+                    --arg bu "$([ "${wreset:-0}" -gt "$n" ] && epoch2iso "$wreset")" '
+            (.in_flight.repo) as $r | (.in_flight.pr) as $p | ($r + "#" + ($p|tostring)) as $k
+            | .next_seq=((.next_seq//0)+1)
+            | .queue += [{seq:.next_seq, owner:($r|split("/")[0]), repo:$r, pr:$p, host:(.in_flight.by_host // "?"), enqueued_at:$ca}]
+            | del(.fired[$k]) | .in_flight=null | .warn=null
+            | (if $bu=="" then . else (.blocked.blocked_until=$bu | .blocked.source="warning"
+                                        | .blocked.remaining=0 | .blocked.checked_at=$ca) end)' <<<"$json")"
+          log "rate-limited on fired PR — requeued for retry" ;;
         timeout)
           json="$(jq -c '.warn="in_flight \(.in_flight.repo)#\(.in_flight.pr) timed out without a completion signal — check detector" | .in_flight=null' <<<"$json")" ;;
         *)
@@ -468,7 +484,7 @@ cmd_enqueue() {
     json="$(jq -c --arg r "$repo" --argjson p "$pr" --arg h "$CRQ_HOST" --arg t "$(now_iso)" --arg o "${repo%%/*}" \
       '.next_seq=((.next_seq//0)+1)
        | .queue += [{seq:.next_seq, owner:$o, repo:$r, pr:$p, host:$h, enqueued_at:$t}]' <<<"$json")"
-    state_write "$json"
+    state_write "$json" || { release "$nonce"; trap - EXIT; return 1; }
     log "enqueued $repo#$pr (seq $(jq -r '.next_seq' <<<"$json"))"
   else
     log "$repo#$pr already queued/in-flight"
@@ -536,8 +552,10 @@ cmd_pump() {
       log "DRY-RUN: would fire $CRQ_REVIEW_CMD on $repo#$pr@${hsha:-?} (seq $seq)"
       state_write "$json"; release "$nonce"; trap - EXIT; return 0
     else
-      cid="$(gh api "repos/$repo/issues/$pr/comments" -f body="$CRQ_REVIEW_CMD" --jq .id 2>/dev/null)"
-      if [ -n "$cid" ]; then
+      # Require a successful POST AND a numeric id — on errors (perms, locked PR, secondary
+      # rate limit) gh exits non-zero and may print an error body to stdout.
+      if cid="$(gh api "repos/$repo/issues/$pr/comments" -f body="$CRQ_REVIEW_CMD" --jq '.id // empty' 2>/dev/null)" \
+         && [ -n "$cid" ] && [ -z "${cid//[0-9]/}" ]; then
         json="$(jq -c --argjson s "$seq" --arg r "$repo" --argjson p "$pr" \
                   --arg fa "$(now_iso)" --argjson cid "$cid" --arg h "$CRQ_HOST" \
                   --arg k "$key" --arg hs "$hsha" \
@@ -548,12 +566,12 @@ cmd_pump() {
            | .history = ([{repo:$r,pr:$p,commit:(if $hs=="" then null else $hs end),at:$fa,host:$h}] + (.history // []))[0:20]' <<<"$json")"
         log "FIRED $repo#$pr@${hsha:-?} (seq $seq, comment $cid)"
       else
-        log "failed to post review command on $repo#$pr"
+        log "failed to post review command on $repo#$pr (no valid comment id) — leaving it queued"
       fi
     fi
   fi
 
-  state_write "$json"
+  state_write "$json" || { release "$nonce"; trap - EXIT; return 1; }
   release "$nonce"; trap - EXIT
 }
 
@@ -591,7 +609,7 @@ cmd_cancel() {
   json="$(jq -c --arg r "$repo" --argjson p "$pr" \
     '.queue|=map(select(.repo!=$r or .pr!=$p))
      | (if (.in_flight!=null and .in_flight.repo==$r and .in_flight.pr==$p) then .in_flight=null else . end)' <<<"$json")"
-  state_write "$json"
+  state_write "$json" || { release "$nonce"; trap - EXIT; return 1; }
   release "$nonce"; trap - EXIT
   log "cancelled $repo#$pr"
 }
@@ -602,7 +620,7 @@ cmd_gc() {
   # shellcheck disable=SC2064
   trap "release '$nonce'" EXIT
   json="$(state_read)" || { release "$nonce"; trap - EXIT; die "cannot read state"; }
-  json="$(gc_json "$json")"; state_write "$json"
+  json="$(gc_json "$json")"; state_write "$json" || { release "$nonce"; trap - EXIT; return 1; }
   release "$nonce"; trap - EXIT
 }
 
@@ -613,7 +631,7 @@ cmd_refresh() {
   trap "release '$nonce'" EXIT
   json="$(state_read)" || { release "$nonce"; trap - EXIT; die "cannot read state"; }
   json="$(jq -c '.blocked.checked_at=null' <<<"$json")"   # force re-calibrate
-  json="$(calibrate_json "$json")"; state_write "$json"
+  json="$(calibrate_json "$json")"; state_write "$json" || { release "$nonce"; trap - EXIT; return 1; }
   release "$nonce"; trap - EXIT
   cmd_status
 }
@@ -736,17 +754,19 @@ cmd_autoreview() {
         # DEDUP: skip if we already requested a review for this exact commit (pump records it).
         firedsha="$(jq -r --arg k "$key" '.fired[$k] // empty' <<<"${json:-{}}" 2>/dev/null)"
         [ "$firedsha" = "$head" ] && continue
-        crrev="$(gh api "repos/$repo/pulls/$pr/reviews" \
-          --jq "map(select(.user.login==\"$CRQ_BOT\" and .commit_id!=null))|last|.commit_id // \"\"" 2>/dev/null | cut -c1-9)"
+        # --paginate so the LATEST review is considered (not just page 1 on long-lived PRs)
+        crrev="$(gh api "repos/$repo/pulls/$pr/reviews" --paginate \
+          --jq ".[]|select(.user.login==\"$CRQ_BOT\" and .commit_id!=null)|.commit_id" 2>/dev/null | tail -1 | cut -c1-9)"
+        # enqueue in a subshell so a transient cmd_enqueue die can't kill the long-running watcher
         if [ "$incremental" = "0" ]; then
-          [ -z "$crrev" ] && cmd_enqueue "$repo" "$pr"          # auto-review only: never reviewed yet
+          [ -z "$crrev" ] && { ( cmd_enqueue "$repo" "$pr" ) || true; }          # auto-review only: never reviewed
         else
-          [ "$crrev" != "$head" ] && cmd_enqueue "$repo" "$pr"  # + incremental: HEAD not yet reviewed
+          [ "$crrev" != "$head" ] && { ( cmd_enqueue "$repo" "$pr" ) || true; }  # + incremental: HEAD not reviewed
         fi
-      done < <(gh search prs --owner "$owner" --state open --json number,repository \
+      done < <(gh search prs --owner "$owner" --state open --limit 1000 --json number,repository \
                  --jq '.[]|"\(.repository.nameWithOwner) \(.number)"' 2>/dev/null)
     done
-    cmd_pump >/dev/null 2>&1 || true
+    ( cmd_pump ) >/dev/null 2>&1 || true   # subshell: a transient pump die can't kill the watcher
     [ "$once" = "1" ] && break
     sleep "$CRQ_AUTOREVIEW_POLL"
   done
