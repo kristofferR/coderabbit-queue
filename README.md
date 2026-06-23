@@ -298,7 +298,7 @@ while still_open; do
     # --slurp + a standalone jq with `add`: combine all pages before counting (gh forbids
     # --slurp with --jq, so pipe to jq; plain --paginate --jq counts per page).
     new=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp \
-      | jq "add | map(select(.user.login==\"coderabbitai[bot]\" and ((.updated_at // .created_at) > \"$since\") and (.body|contains(\"rate limited by coderabbit.ai\")|not))) | length")
+      | jq "add | map(select(.user.login==\"coderabbitai[bot]\" and ((.updated_at // .created_at) > \"$since\") and ((.body // \"\")|ascii_downcase|contains(\"rate limited by coderabbit.ai\")|not))) | length")
     rev=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate --slurp \
       | jq "add | map(select(.user.login==\"coderabbitai[bot]\" and .submitted_at > \"$since\")) | length")
     { [ "${new:-0}" -gt 0 ] || [ "${rev:-0}" -gt 0 ]; } && { got=1; break; }
