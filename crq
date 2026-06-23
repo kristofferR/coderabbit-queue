@@ -942,7 +942,7 @@ cmd_autoreview() {
     sleep "$CRQ_AUTOREVIEW_POLL"
   done
   log "crq autoreview leader for $CRQ_REPO ($_LEADER_ID)"
-  local repo pr head crrev crrev_raw reviewed reviewed_raw json present key firedsha rlc scanned idx deferred scan_cursor=0 searched
+  local repo pr head crrev crrev_raw reviewed reviewed_raw prbody json present key firedsha rlc scanned idx deferred scan_cursor=0 searched
   local search_targets search_flag target
   while true; do
     # Re-assert leadership each pass (also our heartbeat). If a stale period let another host
@@ -1008,8 +1008,12 @@ cmd_autoreview() {
             if ! reviewed_raw="$(gh api "repos/$repo/issues/$pr/comments" --paginate --slurp 2>/dev/null)"; then continue; fi
             reviewed="$(printf '%s' "$reviewed_raw" | jq --arg bot "$CRQ_BOT" --arg m "$CRQ_REVIEW_DONE_MARKER" 'add | map(select(.user.login==$bot and ((.body//"")|contains($m)))) | length' 2>/dev/null)"
             # CodeRabbit's default summary is written into the PR DESCRIPTION, not an issue comment —
-            # check the body too before deciding a no-incremental PR is unreviewed (crq:1009).
-            if [ "${reviewed:-0}" -le 0 ] && gh api "repos/$repo/pulls/$pr" --jq '.body // ""' 2>/dev/null | grep -qF "$CRQ_REVIEW_DONE_MARKER"; then reviewed=1; fi
+            # check the body too before deciding a no-incremental PR is unreviewed (crq:1009). If the
+            # body lookup itself FAILS, skip rather than enqueue on an unknown (same guard as above) (crq:1012).
+            if [ "${reviewed:-0}" -le 0 ]; then
+              if ! prbody="$(gh api "repos/$repo/pulls/$pr" --jq '.body // ""' 2>/dev/null)"; then continue; fi
+              printf '%s' "$prbody" | grep -qF "$CRQ_REVIEW_DONE_MARKER" && reviewed=1
+            fi
             [ "${reviewed:-0}" -gt 0 ] || { ( cmd_enqueue "$repo" "$pr" ) || true; }
           fi
         else
