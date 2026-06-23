@@ -1068,7 +1068,9 @@ main() {
   esac
   # Everything else needs gh + jq, and an authenticated gh.
   command -v gh >/dev/null 2>&1 || die "gh (GitHub CLI) is required — install: https://cli.github.com/"
-  gh api --help 2>&1 | grep -q -- '--slurp' || die "gh too old: crq uses 'gh api --slurp' (added in gh 2.48.0) — upgrade: https://cli.github.com/"
+  # crq uses 'gh api --slurp' (added in gh 2.48.0). Warn if it looks absent — but NEVER hard-fail on
+  # this heuristic: --help output/pagers vary by env and a false negative must not brick the tool.
+  gh api --help 2>&1 | grep -q -- '--slurp' || log "warning: 'gh api --slurp' not detected — crq needs gh >= 2.48.0; upgrade if it misbehaves: https://cli.github.com/"
   command -v jq >/dev/null 2>&1 || die "jq is required — install: https://jqlang.github.io/jq/"
   gh auth token >/dev/null 2>&1 || die "gh is not logged in — run: gh auth login"
   case "$cmd" in
