@@ -344,7 +344,8 @@ crq help                 # this list
 ```
 
 `<repo>` is `owner/name`; `<pr>` is the number. **Exit codes:** `crq wait` returns `0` once your
-review is fired (or `2` if `CRQ_WAIT_TIMEOUT` is hit); other commands return `0` on success.
+review is fired, `3` if this commit was already reviewed (deduped — no new review fired, so process
+the existing feedback), or `2` if `CRQ_WAIT_TIMEOUT` is hit; other commands return `0` on success.
 
 ## Configuration
 

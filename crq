@@ -1038,7 +1038,7 @@ crq — CodeRabbit review queue (account-wide coordinator for parallel agents)
 
 USAGE
   crq init                      provision the gate repo (lock, dashboard issue, calibration PR)
-  crq wait    <repo> <pr>       enqueue and block until OUR review is fired (use this in loops)
+  crq wait    <repo> <pr>       enqueue + block until OUR review fires (exit 0=fired, 3=already reviewed, 2=timeout)
   crq autoreview [--once] [--no-incremental]
                                emulate CodeRabbit auto-review (+ incremental) review, rate-coordinated:
                                enqueue open PRs needing review; loops unless --once.
