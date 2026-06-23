@@ -469,7 +469,7 @@ _warning_latest() {
       ue="$(iso2epoch "$u")"; reset="$(parse_available_in "$b" "$ue")" || continue
       [ -n "$reset" ] || continue
       if [ "$ue" -gt "$best_u" ]; then best_u="$ue"; best_reset="$reset"; found=1; fi
-    done < <(gh search prs --owner "$owner" --state open --archived=false --limit "$CRQ_WARNING_SCAN_LIMIT" --json number,repository \
+    done < <(gh search prs --owner "$owner" --state open --archived=false --sort updated --limit "$CRQ_WARNING_SCAN_LIMIT" --json number,repository \
                --jq '.[]|"\(.repository.nameWithOwner) \(.number)"' 2>/dev/null)
   done
   [ "$found" = "1" ] && echo "${best_u}|${best_reset}"
@@ -1007,6 +1007,9 @@ cmd_autoreview() {
             # and enqueue a redundant review (the comment scan is the only guard here) (crq:972).
             if ! reviewed_raw="$(gh api "repos/$repo/issues/$pr/comments" --paginate --slurp 2>/dev/null)"; then continue; fi
             reviewed="$(printf '%s' "$reviewed_raw" | jq --arg bot "$CRQ_BOT" --arg m "$CRQ_REVIEW_DONE_MARKER" 'add | map(select(.user.login==$bot and ((.body//"")|contains($m)))) | length' 2>/dev/null)"
+            # CodeRabbit's default summary is written into the PR DESCRIPTION, not an issue comment —
+            # check the body too before deciding a no-incremental PR is unreviewed (crq:1009).
+            if [ "${reviewed:-0}" -le 0 ] && gh api "repos/$repo/pulls/$pr" --jq '.body // ""' 2>/dev/null | grep -qF "$CRQ_REVIEW_DONE_MARKER"; then reviewed=1; fi
             [ "${reviewed:-0}" -gt 0 ] || { ( cmd_enqueue "$repo" "$pr" ) || true; }
           fi
         else

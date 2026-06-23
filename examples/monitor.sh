@@ -31,7 +31,9 @@ bot_count() {
   # runs the filter per page, so a new (non-bot) page could shift the string and false-wake the loop.
   # Exclude rate-limit WARNING posts from EVERY counter (case-insensitive) — they're not review
   # feedback and would otherwise wake the loop as NEW_FEEDBACK when no actual review arrived.
-  local f='add|map(select(.user.login==$bot and ((.body//"")|ascii_downcase|contains(($rl|ascii_downcase))|not)))|length'
+  # Emit "count@latest-timestamp" so an EDITED bot comment (CodeRabbit refreshes its summary/walkthrough
+  # in place — count unchanged) still changes the signature and wakes the loop (monitor:55).
+  local f='add|map(select(.user.login==$bot and ((.body//"")|ascii_downcase|contains(($rl|ascii_downcase))|not))) | "\(length)@\((map(.updated_at // .submitted_at // "")|max) // "")"'
   c=$(gh api "repos/$REPO/pulls/$PR/comments" --paginate --slurp 2>/dev/null | jq --arg bot "$BOT" --arg rl "$RL" "$f" 2>/dev/null)
   r=$(gh api "repos/$REPO/pulls/$PR/reviews"  --paginate --slurp 2>/dev/null | jq --arg bot "$BOT" --arg rl "$RL" "$f" 2>/dev/null)
   i=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp 2>/dev/null | jq --arg bot "$BOT" --arg rl "$RL" "$f" 2>/dev/null)
