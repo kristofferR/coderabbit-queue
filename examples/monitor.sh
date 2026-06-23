@@ -57,7 +57,9 @@ while true; do
   # Skip the enqueue decision if EITHER lookup fails — don't treat an unreadable head/review as
   # "needs a review" and enqueue redundantly (CRREV=$(...) fails -> the && chain short-circuits).
   HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha // empty' 2>/dev/null | cut -c1-9)
-  if [ -n "$HEAD" ] && CRREV=$(cr_last_review) && [ "$CRREV" != "$HEAD" ]; then    # new commit needs a review
+  # Require a real short SHA (a failed lookup leaves a non-empty non-hex error body) AND a successful
+  # cr_last_review — don't enqueue on an unreadable head/review.
+  if [ -n "$HEAD" ] && [ -z "${HEAD//[0-9a-f]/}" ] && CRREV=$(cr_last_review) && [ "$CRREV" != "$HEAD" ]; then
     crq enqueue "$REPO" "$PR" >/dev/null 2>&1           # join the account-wide FIFO queue
     crq pump >/dev/null 2>&1 && echo "CRQ_PUMP $HEAD"   # fire <=1 review if globally unblocked
   fi

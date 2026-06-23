@@ -621,7 +621,7 @@ cmd_enqueue() {
 }
 
 cmd_pump() {
-  local nonce json n bu bu_epoch lf lf_epoch qn cfresh infp head repo pr seq cid hsha key lastsha
+  local nonce json n bu bu_epoch lf lf_epoch qn cfresh infp head repo pr seq cid hsha key lastsha crrev_p
   need CRQ_REPO; need CRQ_ISSUE
 
   # Lockless fast path: avoid taking the global lock on idle ticks. Re-checked
@@ -689,6 +689,14 @@ cmd_pump() {
       # agent both queued it). Drop it without posting a second @coderabbitai review.
       json="$(jq -c --argjson s "$seq" '.queue|=map(select(.seq!=$s))' <<<"$json")"
       log "dedup: review already requested for $key@$hsha — not re-posting"
+    elif crrev_p="$(gh api "repos/$repo/pulls/$pr/reviews" --paginate --slurp 2>/dev/null \
+           | jq -r --arg bot "$CRQ_BOT" --arg h "$hsha" 'add|map(select(.user.login==$bot and ((.commit_id//"")[0:9])==$h))|length' 2>/dev/null)" \
+         && [ "${crrev_p:-0}" -gt 0 ]; then
+      # The bot has already reviewed THIS exact commit even though we hold no fired-marker — e.g. a
+      # slow review landed right after a timeout-requeue cleared the marker. Record it and drop
+      # without posting a duplicate @coderabbitai review (crq:560).
+      json="$(jq -c --argjson s "$seq" --arg k "$key" --arg hs "$hsha" '.queue|=map(select(.seq!=$s)) | .fired[$k]=$hs' <<<"$json")"
+      log "dedup: $CRQ_BOT already reviewed $key@$hsha — recording, not re-posting"
     elif [ "${CRQ_DRY_RUN:-0}" = "1" ]; then
       log "DRY-RUN: would fire $CRQ_REVIEW_CMD on $repo#$pr@${hsha:-?} (seq $seq)"
       state_write "$json" || { release "$nonce"; trap - EXIT; return 1; }   # propagate write failure like the live paths

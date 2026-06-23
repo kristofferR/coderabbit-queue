@@ -277,10 +277,14 @@ REPO="${REPO:?set REPO=owner/name}"; PR="${PR:?set PR=<number>}"
 still_open() { local s; s="$(gh pr view "$PR" --repo "$REPO" --json state -q .state 2>/dev/null)"; [ "$s" != "CLOSED" ] && [ "$s" != "MERGED" ]; }
 
 while still_open; do
-  # 1. Ask for a review — coordinated. Blocks until it's our turn and the account is unblocked,
-  #    then crq posts "@coderabbitai review" for us. No stampede, no spam, FIFO across all agents.
-  #    If it returns non-zero (timeout/error), it never fired — don't poll for a review we never asked for.
-  crq wait "$REPO" "$PR" || continue
+  # 1. Ask for a review — coordinated, FIFO, never fires while rate-limited. Exit codes:
+  #    0 = our review was fired   3 = deduped (this HEAD was already reviewed)   other = timeout/error
+  crq wait "$REPO" "$PR"; rc=$?
+  case "$rc" in
+    0) ;;                                                                       # fired -> wait for feedback below
+    3) process_review_and_push "$REPO" "$PR"; sleep "${LOOP_IDLE_SLEEP:-60}"; continue ;;  # already reviewed -> process existing, back off
+    *) sleep "${LOOP_IDLE_SLEEP:-60}"; continue ;;                              # timeout/error -> back off, skip
+  esac
 
   # Start the feedback window AFTER crq fires — otherwise a delayed response from a previous round
   # that lands while we were blocked in `crq wait` would be newer than $since and falsely satisfy
