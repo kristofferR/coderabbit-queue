@@ -55,8 +55,10 @@ while still_open; do
   crq wait "$REPO" "$PR"; rc=$?
   case "$rc" in
     0) ;;                                                                          # fired -> wait for feedback
-    3) echo "[loop] $REPO#$PR already reviewed at this commit — nothing new"; continue ;;
-    *) echo "[loop] crq wait did not fire a review (timeout/error) — skipping round"; continue ;;
+    # Deduped/timeout/error: back off before retrying so a stuck state (e.g. process_review_and_push
+    # pushed nothing, so the head is unchanged and keeps deduping) doesn't become a hot loop.
+    3) echo "[loop] $REPO#$PR already reviewed at this commit — backing off"; sleep "${LOOP_IDLE_SLEEP:-60}"; continue ;;
+    *) echo "[loop] crq wait did not fire (timeout/error) — backing off"; sleep "${LOOP_IDLE_SLEEP:-60}"; continue ;;
   esac
   # Start the feedback window AFTER crq fires (a delayed response that lands while we were blocked
   # in `crq wait` would otherwise falsely satisfy the poll). Back up 1s so a comment created in the

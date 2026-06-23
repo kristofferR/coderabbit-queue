@@ -676,10 +676,12 @@ cmd_pump() {
     hsha="$(gh api "repos/$repo/pulls/$pr" --jq '.head.sha // empty' 2>/dev/null | cut -c1-9)"
     key="$repo#$pr"
     lastsha="$(jq -r --arg k "$key" '.fired[$k] // empty' <<<"$json")"
-    if [ -z "$hsha" ]; then
-      # Head lookup failed (transient/secondary-limit) — DON'T fire with a bogus/empty SHA; leave
-      # the PR queued so the next pump retries once the API recovers (crq:676).
-      log "skip: could not read $key head SHA (transient) — leaving it queued"
+    # A failed head lookup makes gh dump an error body to stdout (--jq skipped), so cut yields a
+    # non-empty NON-hex string — validate it's a real short SHA, not just non-empty (crq:676/679).
+    if [ -z "$hsha" ] || [ -n "${hsha//[0-9a-f]/}" ]; then
+      # Couldn't read a valid head SHA (transient/secondary-limit) — DON'T fire with a bogus SHA;
+      # leave the PR queued so the next pump retries once the API recovers.
+      log "skip: could not read a valid $key head SHA (transient) — leaving it queued"
     elif [ "$hsha" = "$lastsha" ]; then
       # DEDUP: we already requested a review for this exact commit (e.g. autoreview and an
       # agent both queued it). Drop it without posting a second @coderabbitai review.
@@ -778,7 +780,7 @@ cmd_cancel() {
     '($r + "#" + ($p|tostring)) as $k
      | .queue |= map(select((.repo|ascii_downcase)!=$r or .pr!=$p))
      | (if (.in_flight!=null and (.in_flight.repo|ascii_downcase)==$r and .in_flight.pr==$p) then .in_flight=null else . end)
-     | .fired |= with_entries(select((.key|ascii_downcase)!=$k))' <<<"$json")"
+     | .fired = ((.fired // {}) | with_entries(select((.key|ascii_downcase)!=$k)))' <<<"$json")"
   state_write "$json" || { release "$nonce"; trap - EXIT; return 1; }
   release "$nonce"; trap - EXIT
   log "cancelled $repo#$pr"
