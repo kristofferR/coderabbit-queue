@@ -621,7 +621,7 @@ cmd_enqueue() {
 }
 
 cmd_pump() {
-  local nonce json n bu bu_epoch lf lf_epoch qn cfresh infp head repo pr seq cid hsha key lastsha crrev_p
+  local nonce json n bu bu_epoch lf lf_epoch qn cfresh infp head repo pr seq cid hsha key lastsha crrev_p crrev_raw
   need CRQ_REPO; need CRQ_ISSUE
 
   # Lockless fast path: avoid taking the global lock on idle ticks. Re-checked
@@ -689,9 +689,13 @@ cmd_pump() {
       # agent both queued it). Drop it without posting a second @coderabbitai review.
       json="$(jq -c --argjson s "$seq" '.queue|=map(select(.seq!=$s))' <<<"$json")"
       log "dedup: review already requested for $key@$hsha — not re-posting"
-    elif crrev_p="$(gh api "repos/$repo/pulls/$pr/reviews" --paginate --slurp 2>/dev/null \
-           | jq -r --arg bot "$CRQ_BOT" --arg h "$hsha" 'add|map(select(.user.login==$bot and ((.commit_id//"")[0:9])==$h))|length' 2>/dev/null)" \
-         && [ "${crrev_p:-0}" -gt 0 ]; then
+    elif ! crrev_raw="$(gh api "repos/$repo/pulls/$pr/reviews" --paginate --slurp 2>/dev/null)"; then
+      # Reviews lookup FAILED — don't fall through to a live post (that would reopen the duplicate
+      # window on a transient error); leave queued so the next pump retries (crq:560/699).
+      log "skip: could not read reviews for $key (transient) — leaving it queued"
+    elif ! crrev_p="$(printf '%s' "$crrev_raw" | jq -r --arg bot "$CRQ_BOT" --arg h "$hsha" 'add|map(select(.user.login==$bot and ((.commit_id//"")[0:9])==$h))|length' 2>/dev/null)"; then
+      log "skip: could not parse reviews for $key — leaving it queued"
+    elif [ "${crrev_p:-0}" -gt 0 ]; then
       # The bot has already reviewed THIS exact commit even though we hold no fired-marker — e.g. a
       # slow review landed right after a timeout-requeue cleared the marker. Record it and drop
       # without posting a duplicate @coderabbitai review (crq:560).
