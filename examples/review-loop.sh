@@ -40,7 +40,7 @@ wait_for_review() {
     # A rate-limit WARNING is a fresh coderabbitai comment but NOT real feedback — exclude it,
     # else we'd "process" a round that never got reviewed (crq requeues it; we shouldn't push).
     n=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp 2>/dev/null \
-        | jq --arg bot "$BOT" --arg rl "$RL" --arg since "$since" 'add | map(select(.user.login==$bot and .created_at > $since and ((.body//"")|ascii_downcase|contains($rl|ascii_downcase)|not))) | length' 2>/dev/null)
+        | jq --arg bot "$BOT" --arg rl "$RL" --arg since "$since" 'add | map(select(.user.login==$bot and ((.updated_at // .created_at) > $since) and ((.body//"")|ascii_downcase|contains($rl|ascii_downcase)|not))) | length' 2>/dev/null)
     r=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate --slurp 2>/dev/null \
         | jq --arg bot "$BOT" --arg since "$since" 'add | map(select(.user.login==$bot and .submitted_at > $since)) | length' 2>/dev/null)
     { [ "${n:-0}" -gt 0 ] || [ "${r:-0}" -gt 0 ]; } && return 0
@@ -54,10 +54,11 @@ while still_open; do
   #   0 = our review was fired   3 = deduped (this commit was already reviewed)   other = timeout/error
   crq wait "$REPO" "$PR"; rc=$?
   case "$rc" in
-    0) ;;                                                                          # fired -> wait for feedback
-    # Deduped/timeout/error: back off before retrying so a stuck state (e.g. process_review_and_push
-    # pushed nothing, so the head is unchanged and keeps deduping) doesn't become a hot loop.
-    3) echo "[loop] $REPO#$PR already reviewed at this commit — backing off"; sleep "${LOOP_IDLE_SLEEP:-60}"; continue ;;
+    0) ;;                                                                          # fired -> wait for new feedback below
+    3) # Deduped: this HEAD was already reviewed, so the feedback ALREADY exists — process it (don't
+       # skip), then back off so an unchanged head (e.g. process pushed nothing) can't hot-loop.
+       echo "[loop] $REPO#$PR already reviewed at this commit — processing existing feedback"
+       process_review_and_push; sleep "${LOOP_IDLE_SLEEP:-60}"; continue ;;
     *) echo "[loop] crq wait did not fire (timeout/error) — backing off"; sleep "${LOOP_IDLE_SLEEP:-60}"; continue ;;
   esac
   # Start the feedback window AFTER crq fires (a delayed response that lands while we were blocked

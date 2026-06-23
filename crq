@@ -226,14 +226,16 @@ _leader_beat() {   # refresh our heartbeat; 0 = still ours + advanced, 1 = lost/
   gh api -X PATCH "repos/$CRQ_REPO/git/refs/heads/$CRQ_LEADER_REF" -f sha="$sha" -F force=true >/dev/null 2>&1   # 0/1 propagated
 }
 _leader_try() {   # 0 = we are (now) leader; 1 = a fresh foreign leader holds it -> stand by
-  local cur msg cdate age sha
+  local cur msg cdate cep age sha
   cur="$(_leader_ref_sha)"
   if [ -n "$cur" ]; then
     msg="$(_lock_commit_msg "$cur")"
     case "$msg" in *"$_LEADER_ID epoch="*) _leader_beat; return $? ;; esac      # already ours -> heartbeat (fail -> re-contend)
     cdate="$(gh api "repos/$CRQ_REPO/git/commits/$cur" --jq '.committer.date // empty' 2>/dev/null)"
     [ -n "$cdate" ] || return 1                                                # can't read its timestamp (API blip) -> assume ALIVE, stand by (crq:234)
-    age=$(( $(now) - $(iso2epoch "$cdate") ))
+    cep="$(iso2epoch "$cdate")"
+    [ -n "$cep" ] && [ -z "${cep//[0-9]/}" ] || return 1                        # unparsable timestamp (gh dumped an error body) -> assume ALIVE (crq:236)
+    age=$(( $(now) - cep ))
     [ "$age" -lt "$CRQ_LEADER_TTL" ] && return 1                                # foreign + fresh -> stand by
     # foreign + stale -> steal, but only if the ref STILL points at the same stale commit we just
     # measured; if another standby already refreshed/replaced it, don't delete its fresh leader (crq:236).
@@ -542,8 +544,8 @@ gc_json() {   # $1 = json
           json="$(jq -c --arg ca "$(now_iso)" \
                     --arg bu "$([ "${wreset:-0}" -gt "$n" ] && epoch2iso "$wreset")" '
             (.in_flight.repo) as $r | (.in_flight.pr) as $p | ($r + "#" + ($p|tostring)) as $k
-            | .next_seq=((.next_seq//0)+1)
-            | .queue += [{seq:.next_seq, owner:($r|split("/")[0]), repo:$r, pr:$p, host:(.in_flight.by_host // "?"), enqueued_at:$ca}]
+            | ((.in_flight.seq) // ((.next_seq//0)+1)) as $sq
+            | .queue += [{seq:$sq, owner:($r|split("/")[0]), repo:$r, pr:$p, host:(.in_flight.by_host // "?"), enqueued_at:$ca}]
             | del(.fired[$k]) | .in_flight=null | .warn=null
             | (if $bu=="" then . else (.blocked.blocked_until=$bu | .blocked.source="warning"
                                         | .blocked.remaining=0 | .blocked.checked_at=$ca) end)' <<<"$json")"
@@ -554,8 +556,8 @@ gc_json() {   # $1 = json
           json="$(jq -c --arg ca "$(now_iso)" '
             (.in_flight.repo) as $r | (.in_flight.pr) as $p | ($r + "#" + ($p|tostring)) as $k
             | .warn="in_flight \($r)#\($p) timed out without a completion signal — requeued (check detector)"
-            | .next_seq=((.next_seq//0)+1)
-            | .queue += [{seq:.next_seq, owner:($r|split("/")[0]), repo:$r, pr:$p, host:(.in_flight.by_host // "?"), enqueued_at:$ca}]
+            | ((.in_flight.seq) // ((.next_seq//0)+1)) as $sq
+            | .queue += [{seq:$sq, owner:($r|split("/")[0]), repo:$r, pr:$p, host:(.in_flight.by_host // "?"), enqueued_at:$ca}]
             | del(.fired[$k]) | .in_flight=null' <<<"$json")" ;;
         *)
           json="$(jq -c '.in_flight=null | .warn=null' <<<"$json")" ;;
@@ -972,7 +974,9 @@ cmd_autoreview() {
         if [ "$scanned" -ge "$CRQ_AUTOREVIEW_MAX_SCAN" ]; then deferred=1; continue; fi
         scanned=$((scanned+1))
         head="$(gh api "repos/$repo/pulls/$pr" --jq '.head.sha // empty' 2>/dev/null | cut -c1-9)"
-        [ -n "$head" ] || continue
+        # Require a real short SHA — a failed lookup leaves a non-empty NON-hex error body (gh dumps
+        # it to stdout, --jq skipped), which must not be treated as a head and drive an enqueue (crq:975).
+        [ -n "$head" ] && [ -z "${head//[0-9a-f]/}" ] || continue
         # DEDUP: skip if we already requested a review for this exact commit (pump records it).
         firedsha="$(jq -r --arg k "$key" '.fired[$k] // empty' <<<"${json:-{}}" 2>/dev/null)"
         [ "$firedsha" = "$head" ] && continue
@@ -1052,6 +1056,7 @@ main() {
   esac
   # Everything else needs gh + jq, and an authenticated gh.
   command -v gh >/dev/null 2>&1 || die "gh (GitHub CLI) is required — install: https://cli.github.com/"
+  gh api --help 2>&1 | grep -q -- '--slurp' || die "gh too old: crq uses 'gh api --slurp' (added in gh 2.48.0) — upgrade: https://cli.github.com/"
   command -v jq >/dev/null 2>&1 || die "jq is required — install: https://jqlang.github.io/jq/"
   gh auth token >/dev/null 2>&1 || die "gh is not logged in — run: gh auth login"
   case "$cmd" in
