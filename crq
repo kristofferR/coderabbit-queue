@@ -598,9 +598,10 @@ gc_json() {   # $1 = json
 # Subcommands
 # ----------------------------------------------------------------------------
 cmd_enqueue() {
-  local repo="$1" pr="$2" nonce json present
+  local repo="$1" pr="$2" nonce json present key firedsha hsha
   need CRQ_REPO; need CRQ_ISSUE
   repo="$(printf '%s' "$repo" | tr 'A-Z' 'a-z')"   # store normalized so all state lookups match (GitHub folds case)
+  key="$repo#$pr"
   nonce="$(acquire)" || die "could not acquire lock"
   # shellcheck disable=SC2064
   trap "release '$nonce'" EXIT
@@ -608,16 +609,31 @@ cmd_enqueue() {
   present="$(jq --arg r "$repo" --argjson p "$pr" \
     '[ (.queue[]?|select(.repo==$r and .pr==$p)),
        (.in_flight | select(.!=null and .repo==$r and .pr==$p)) ] | length' <<<"$json")"
-  if [ "${present:-0}" -eq 0 ]; then
-    json="$(jq -c --arg r "$repo" --argjson p "$pr" --arg h "$CRQ_HOST" --arg t "$(now_iso)" --arg o "${repo%%/*}" \
-      '.next_seq=((.next_seq//0)+1)
-       | .queue += [{seq:.next_seq, owner:$o, repo:$r, pr:$p, host:$h, enqueued_at:$t}]' <<<"$json")"
-    state_write "$json" || { release "$nonce"; trap - EXIT; return 1; }
-    log "enqueued $repo#$pr (seq $(jq -r '.next_seq' <<<"$json"))"
-  else
+  if [ "${present:-0}" -gt 0 ]; then
     log "$repo#$pr already queued/in-flight"
+    release "$nonce"; trap - EXIT; return 0
   fi
+  # DEDUP at the source: if a review was already requested for this PR's CURRENT head, don't re-enqueue
+  # — pump would only dedup it straight back out, so a looping client (e.g. a stale hand-rolled watcher
+  # whose "is HEAD reviewed?" check misfires on a comment-only CodeRabbit review) would flap the queue
+  # forever. Only fetch the head when a fired-marker exists (zero cost for fresh PRs), and only skip on
+  # a CONFIRMED match: a failed/!valid head lookup falls through and enqueues as before (transient-safe,
+  # same short-SHA validation as pump:683).
+  firedsha="$(jq -r --arg k "$key" '.fired[$k] // empty' <<<"$json")"
+  if [ -n "$firedsha" ]; then
+    hsha="$(gh api "repos/$repo/pulls/$pr" --jq '.head.sha // empty' 2>/dev/null | cut -c1-9)"
+    if [ -n "$hsha" ] && [ -z "${hsha//[0-9a-f]/}" ] && [ "$hsha" = "$firedsha" ]; then
+      log "$repo#$pr@$hsha already reviewed (fired) — not re-enqueuing"
+      release "$nonce"; trap - EXIT; return 0
+    fi
+  fi
+  json="$(jq -c --arg r "$repo" --argjson p "$pr" --arg h "$CRQ_HOST" --arg t "$(now_iso)" --arg o "${repo%%/*}" \
+    '.next_seq=((.next_seq//0)+1)
+     | .queue += [{seq:.next_seq, owner:$o, repo:$r, pr:$p, host:$h, enqueued_at:$t}]' <<<"$json")"
+  state_write "$json" || { release "$nonce"; trap - EXIT; return 1; }
+  log "enqueued $repo#$pr (seq $(jq -r '.next_seq' <<<"$json"))"
   release "$nonce"; trap - EXIT
+  return 0
 }
 
 cmd_pump() {
