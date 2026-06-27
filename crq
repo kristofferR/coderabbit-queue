@@ -322,39 +322,33 @@ render_title() {
 }
 
 # Publish the human dashboard to the gate repo's README.md (via the Contents API).
-update_readme() {   # $1 = json
-  local body b64 sha
-  body="$(render_human "$1")"
-  b64="$(printf '%s\n' "$body" | base64 | tr -d '\n')"
+# One-time static README for the state repo: a pointer to the live dashboard (the gate issue).
+# crq no longer commits a dashboard per state change — that PUT README.md on every material change and
+# inflated the state repo's commit count / your GitHub contribution graph (thousands of `crq: dashboard
+# update` commits). The live dashboard now lives in the issue BODY (updated via `gh issue edit`, an issue
+# edit, NOT a commit). This pointer is written only when the repo has no README yet, so it never adds an
+# ongoing stream of commits.
+publish_readme_pointer() {
+  local sha body b64
   sha="$(gh api "repos/$CRQ_REPO/contents/README.md" --jq '.sha // empty' 2>/dev/null)"
-  case "$sha" in *[!0-9a-f]*|"") sha="" ;; esac   # guard: gh dumps the 404 body to stdout
-  if [ -n "$sha" ]; then
-    gh api -X PUT "repos/$CRQ_REPO/contents/README.md" \
-      -f message="crq: dashboard update" -f content="$b64" -f sha="$sha" >/dev/null 2>&1
-  else
-    gh api -X PUT "repos/$CRQ_REPO/contents/README.md" \
-      -f message="crq: dashboard" -f content="$b64" >/dev/null 2>&1
-  fi
+  case "$sha" in *[!0-9a-f]*) sha="" ;; esac    # gh dumps a 404 body to stdout — treat non-hex as absent
+  [ -n "$sha" ] && return 0                      # already has a README — don't clobber, don't add a commit
+  body="$(printf '# 🐰 crq — CodeRabbit review queue\n\n**Live dashboard:** the gate issue [#%s](https://github.com/%s/issues/%s).\n\nThis repo only holds crq'"'"'s state, kept in that issue. crq updates the issue via the API on every\nchange — an issue edit, **not a commit** — so it does not grow this repo'"'"'s commit history or your\nGitHub contribution graph.\n\nManaged by [crq](https://github.com/kristofferR/coderabbit-queue).\n' \
+            "$CRQ_ISSUE" "$CRQ_REPO" "$CRQ_ISSUE")"
+  b64="$(printf '%s' "$body" | base64 | tr -d '\n')"
+  gh api -X PUT "repos/$CRQ_REPO/contents/README.md" \
+    -f message="crq: dashboard pointer" -f content="$b64" >/dev/null 2>&1
 }
 
-state_write() {   # $1 = JSON; bumps rev, updates the issue (machine state) + README dashboard
-  local json title body prev_sig new_sig sig
-  prev_sig="$(jq -r '.readme_sig // empty' <<<"$1")"
-  # signature of the user-visible content only — so the README is committed on material changes,
-  # not on every internal tick (rev/checked_at/countdown).
-  new_sig="$(jq -c '[.queue,.in_flight,.blocked.blocked_until,.blocked.remaining,.blocked.source,.warn,.history]' <<<"$1")"
-  json="$(jq -c --arg now "$(now_iso)" '.rev=((.rev//0)+1) | .wrote_at=$now' <<<"$1")"
-  # Publish the README dashboard FIRST when content changed; only adopt the new signature if
-  # that succeeds — otherwise keep the old one so the next material write retries the publish
-  # (don't let a failed README update leave the dashboard stale forever).
-  sig="$prev_sig"
-  if [ "$new_sig" != "$prev_sig" ]; then
-    if update_readme "$json"; then sig="$new_sig"; else log "WARN: README dashboard publish failed — will retry next change"; fi
-  fi
-  json="$(jq -c --arg sig "$sig" '.readme_sig=$sig' <<<"$json")"
-  # issue body holds the machine state; the dashboard lives in the repo README
-  body="$(printf '%s\n%s\n%s\n\n_Machine state for crq. Live dashboard: the [README](https://github.com/%s#readme) of this repo._\n' \
-            "$STATE_BEGIN" "$(jq -c . <<<"$json")" "$STATE_END" "$CRQ_REPO")"
+state_write() {   # $1 = JSON; bumps rev, persists machine state + the live dashboard to the gate issue
+  local json title body
+  # The issue BODY carries both the hidden machine-state block and the live human dashboard below it,
+  # written via `gh issue edit` — an issue edit, NOT a commit. (The dashboard used to be PUT to README.md
+  # on every material change, which inflated the state repo's commit count / your contribution graph; it
+  # no longer is. A one-time static pointer README is written by publish_readme_pointer at init.)
+  json="$(jq -c --arg now "$(now_iso)" '.rev=((.rev//0)+1) | .wrote_at=$now | del(.readme_sig)' <<<"$1")"
+  body="$(printf '%s\n%s\n%s\n\n%s\n' \
+            "$STATE_BEGIN" "$(jq -c . <<<"$json")" "$STATE_END" "$(render_human "$json")")"
   title="$(render_title "$json")"
   # Persist machine state to the issue. Propagate failure so callers don't proceed on stale state.
   if ! printf '%s' "$body" | gh issue edit "$CRQ_ISSUE" --repo "$CRQ_REPO" --title "$title" --body-file - >/dev/null 2>&1; then
@@ -918,8 +912,9 @@ cmd_init() {
       --title "crq: q=0 · idle · remaining=?" --body-file - 2>/dev/null)"
     CRQ_ISSUE="$(printf '%s' "$issue_url" | grep -oE '[0-9]+$')"
     log "dashboard issue: ${issue_url:-#$CRQ_ISSUE}"
-    state_write "$json"   # normalize the issue + publish the initial README dashboard (first time only)
+    state_write "$json"   # normalize the issue body (machine state + live dashboard)
   fi
+  publish_readme_pointer   # one-time static README pointing at the dashboard issue (no per-change commits)
   printf '\n# Add these to %s (or your shell profile):\n' "${CRQ_CONFIG:-$HOME/.config/crq/env}"
   printf 'export CRQ_REPO=%q\n'  "$CRQ_REPO"
   printf 'export CRQ_ISSUE=%q\n' "$CRQ_ISSUE"
