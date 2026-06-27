@@ -92,7 +92,7 @@ Everything lives in one small **gate repo** (private is fine):
 | Piece | What it is |
 |-------|-----------|
 | 🔒 **Lock** | An atomic git ref. GitHub's "create ref only if it doesn't exist" gives a real cross-machine mutex, so only one agent acts at a time and the queue never corrupts. |
-| 📋 **Dashboard** | Published to the gate repo's **`README.md`** — status, queue, and a "recently reviewed" history, every PR linked (committed only when something material changes, not on every tick). A tracking **issue** holds the machine-readable state (its **title** is a one-glance status: `crq · 🟡 2 queued`). |
+| 📋 **Dashboard** | A tracking **issue** is the dashboard: a hidden block holds the machine-readable state and the rendered status/queue/"recently reviewed" history sits right below it, every PR linked. Updated via `gh issue edit` (an issue edit, **not a commit**), so crq never inflates the gate repo's commit count or your GitHub contribution graph. The issue **title** is a one-glance status (`crq · 🟡 2 queued`); the repo's `README.md` is just a static pointer to the issue. |
 | 🐰 **Calibration PR** | A throwaway draft PR where crq asks `@coderabbitai rate limit` to read your real quota *without spending a review*. (crq disables auto-review on this repo so the PR itself costs nothing.) |
 
 ---
@@ -133,8 +133,8 @@ export CRQ_REPO=YOURUSER/crq-state
 crq init
 ```
 
-`crq init` creates the repo, opens the calibration PR and dashboard issue, publishes the dashboard
-to the repo's README, prints the `export CRQ_*` lines to save, and opens the gate repo in your
+`crq init` creates the repo, opens the calibration PR and dashboard issue, writes a one-time static
+README pointing at that issue, prints the `export CRQ_*` lines to save, and opens the gate repo in your
 browser (set `CRQ_NO_OPEN=1` to skip that — e.g. on a headless box). Drop them into `~/.config/crq/env` — crq sources that file
 automatically, so every machine just needs the same four lines:
 
@@ -321,7 +321,8 @@ the queue with the non-blocking `crq enqueue` + `crq pump`. It never posts `@cod
 directly — `crq` owns that, account-wide.
 
 > 💡 **Watching the line:** run `crq status` any time to see the queue, what's in flight, and the
-> next slot. Or just open your gate repo on GitHub — its README **is** the live dashboard.
+> next slot. Or just open the gate **issue** on GitHub — it **is** the live dashboard (the repo README
+> links to it).
 
 ---
 
