@@ -322,19 +322,40 @@ render_title() {
 }
 
 # Publish the human dashboard to the gate repo's README.md (via the Contents API).
-# One-time static README for the state repo: a pointer to the live dashboard (the gate issue).
-# crq no longer commits a dashboard per state change — that PUT README.md on every material change and
-# inflated the state repo's commit count / your GitHub contribution graph (thousands of `crq: dashboard
-# update` commits). The live dashboard now lives in the issue BODY (updated via `gh issue edit`, an issue
-# edit, NOT a commit). This pointer is written only when the repo has no README yet, so it never adds an
-# ongoing stream of commits.
+# One-time static README for the state repo: a friendly pointer to the live dashboard (the gate issue)
+# and to the crq project repo. crq no longer commits a dashboard per state change — that PUT README.md on
+# every material change and inflated the state repo's commit count / your GitHub contribution graph
+# (thousands of `crq: dashboard update` commits). The live dashboard now lives in the issue BODY (updated
+# via `gh issue edit`, an issue edit, NOT a commit). Written only when the repo has no README yet, so it
+# never adds an ongoing stream of commits.
 publish_readme_pointer() {
-  local sha body b64
+  local sha b64 body url="https://github.com/$CRQ_REPO/issues/$CRQ_ISSUE"
   sha="$(gh api "repos/$CRQ_REPO/contents/README.md" --jq '.sha // empty' 2>/dev/null)"
   case "$sha" in *[!0-9a-f]*) sha="" ;; esac    # gh dumps a 404 body to stdout — treat non-hex as absent
   [ -n "$sha" ] && return 0                      # already has a README — don't clobber, don't add a commit
-  body="$(printf '# 🐰 crq — CodeRabbit review queue\n\n**Live dashboard:** the gate issue [#%s](https://github.com/%s/issues/%s).\n\nThis repo only holds crq'"'"'s state, kept in that issue. crq updates the issue via the API on every\nchange — an issue edit, **not a commit** — so it does not grow this repo'"'"'s commit history or your\nGitHub contribution graph.\n\nManaged by [crq](https://github.com/kristofferR/coderabbit-queue).\n' \
-            "$CRQ_ISSUE" "$CRQ_REPO" "$CRQ_ISSUE")"
+  # NOTE: heredoc-style literal — lines sit at column 0 on purpose so the rendered README has no stray indent.
+  body="<div align=\"center\">
+
+# 🐰 crq · state
+
+#### Coordination backend for [**crq**](https://github.com/kristofferR/coderabbit-queue) — the account-wide CodeRabbit review queue
+
+</div>
+
+> ### [👉 Open the live dashboard →]($url)
+>
+> The gate **issue** is the dashboard: queue, in-flight review, rate-limit quota, and recently-reviewed history.
+
+---
+
+This repository isn't a project of its own — it's the state store for **[crq](https://github.com/kristofferR/coderabbit-queue)** (docs, install, and source). It holds:
+
+- 📋 **Dashboard and state** — in [issue #$CRQ_ISSUE]($url), updated through the API as an **issue edit, never a commit**, so this repo and your GitHub contribution graph stay clean.
+- 🔒 **Lock** — an atomic git ref so only one agent fires a review at a time, account-wide.
+- 🐰 **Calibration PR** — a throwaway draft PR where crq reads your CodeRabbit quota without spending a review.
+
+<sub>Managed by <a href=\"https://github.com/kristofferR/coderabbit-queue\">crq</a> · one FIFO queue for <code>@coderabbitai review</code> across all your parallel PRs.</sub>
+"
   b64="$(printf '%s' "$body" | base64 | tr -d '\n')"
   gh api -X PUT "repos/$CRQ_REPO/contents/README.md" \
     -f message="crq: dashboard pointer" -f content="$b64" >/dev/null 2>&1
