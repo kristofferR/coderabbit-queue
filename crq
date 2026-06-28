@@ -350,7 +350,7 @@ publish_readme_pointer() {
 
 This repository isn't a project of its own — it's the state store for **[crq](https://github.com/kristofferR/coderabbit-queue)** (docs, install, and source). It holds:
 
-- 📋 **Dashboard and state** — in [issue #$CRQ_ISSUE]($url), updated through the API as an **issue edit, never a commit**, so this repo and your GitHub contribution graph stay clean.
+- 📋 **Dashboard and state** — in [issue #$CRQ_ISSUE]($url).
 - 🔒 **Lock** — an atomic git ref so only one agent fires a review at a time, account-wide.
 - 🐰 **Calibration PR** — a throwaway draft PR where crq reads your CodeRabbit quota without spending a review.
 
