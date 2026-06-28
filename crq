@@ -41,6 +41,8 @@ CRQ_CALIBRATE_TTL="${CRQ_CALIBRATE_TTL:-120}"
 CRQ_LOCK_TTL="${CRQ_LOCK_TTL:-180}"
 CRQ_LOCK_TRIES="${CRQ_LOCK_TRIES:-40}"      # max acquire attempts before giving up
 CRQ_LOCK_BACKOFF_MAX="${CRQ_LOCK_BACKOFF_MAX:-8}"    # cap (s) on exponential backoff
+CRQ_LOCK_MAX_STEALS="${CRQ_LOCK_MAX_STEALS:-3}"      # max stale-lock steals per acquire before bailing (a steal that never sticks => API/perms trouble, not contention)
+CRQ_LOCK_DEADLINE="${CRQ_LOCK_DEADLINE:-120}"        # hard wall-clock cap (s) on a single acquire — bounds the worst-case hang
 CRQ_MIN_INTERVAL="${CRQ_MIN_INTERVAL:-90}"
 CRQ_INFLIGHT_TIMEOUT="${CRQ_INFLIGHT_TIMEOUT:-900}"
 CRQ_POLL="${CRQ_POLL:-15}"
@@ -127,12 +129,13 @@ _lock_ref_sha() {
 _lock_epoch() { printf '%s' "$1" | sed -n 's/.*epoch=\([0-9][0-9]*\).*/\1/p'; }
 
 acquire() {   # echoes nonce on success
-  local nonce msg sha cur hepoch cdate tries=0 backoff=1
+  local nonce msg sha cur hepoch cdate tries=0 backoff=1 steals=0 deadline
   nonce="$(uuidgen 2>/dev/null)"
   [ -n "$nonce" ] || nonce="$(LC_ALL=C tr -dc 'a-f0-9' </dev/urandom 2>/dev/null | head -c 32)"
   [ -n "$nonce" ] || nonce="crq-$$-$(date -u +%s)-${RANDOM}${RANDOM}"
   [ -n "$nonce" ] || return 1   # never proceed with an empty nonce — it would match any lock
-  while [ "$tries" -lt "$CRQ_LOCK_TRIES" ]; do
+  deadline=$(( $(date -u +%s) + CRQ_LOCK_DEADLINE ))   # wall-clock cap so acquire can never hang for minutes
+  while [ "$tries" -lt "$CRQ_LOCK_TRIES" ] && [ "$(date -u +%s)" -lt "$deadline" ]; do
     tries=$(( tries + 1 ))
     cur="$(_lock_ref_sha)"
     if [ -z "$cur" ]; then
@@ -147,8 +150,9 @@ acquire() {   # echoes nonce on success
         fi
       fi
     else
-      # held: steal only if demonstrably stale; delete AT MOST ONCE then retry
-      # (ownership is proven by the nonce read-back above, so a steal race is safe).
+      # held: steal only if demonstrably stale, at most CRQ_LOCK_MAX_STEALS times,
+      # always backing off between attempts (ownership is proven by the nonce
+      # read-back above, so a steal race is safe).
       # Age the lock by GitHub's own commit timestamp — authoritative server time, immune to any
       # single host's clock skew — NOT the client epoch embedded in the message (a host whose
       # server-time sample fell back to a wrong local clock could otherwise mis-judge staleness
@@ -158,9 +162,25 @@ acquire() {   # echoes nonce on success
       [ -n "$cdate" ] && hepoch="$(iso2epoch "$cdate")"
       [ -n "$hepoch" ] || hepoch="$(_lock_epoch "$(_lock_commit_msg "$cur")")"   # fallback if the commit fetch failed
       if [ -n "$hepoch" ] && [ $(( $(now) - hepoch )) -gt "$CRQ_LOCK_TTL" ]; then
-        log "stealing stale lock (age $(( $(now) - hepoch ))s > ${CRQ_LOCK_TTL}s)"
-        gh api -X DELETE "repos/$CRQ_REPO/git/refs/heads/$CRQ_LOCK_REF" >/dev/null 2>&1
-        continue
+        if [ "$steals" -ge "$CRQ_LOCK_MAX_STEALS" ]; then
+          # A stale lock we keep stealing but that never clears means the DELETE is
+          # failing (write-API rate limit, perms) or a peer is recreating it — NOT
+          # ordinary contention. Bail with a clear error instead of burning every
+          # try; the caller surfaces it ("could not acquire lock") in seconds.
+          log "lock $cur still stale after ${steals} steal(s) — giving up (delete may be failing or rate-limited)"
+          return 1
+        fi
+        steals=$(( steals + 1 ))
+        log "stealing stale lock (age $(( $(now) - hepoch ))s > ${CRQ_LOCK_TTL}s; steal ${steals}/${CRQ_LOCK_MAX_STEALS})"
+        # Delete only if the ref still points at the exact SHA we judged stale, so we
+        # never clobber a lock a peer refreshed between our read and our delete.
+        if [ "$(_lock_ref_sha)" = "$cur" ]; then
+          gh api -X DELETE "repos/$CRQ_REPO/git/refs/heads/$CRQ_LOCK_REF" >/dev/null 2>&1 \
+            || log "steal delete failed — backing off before retry"
+        fi
+        # Fall through to the backoff sleep — NEVER `continue` straight back into the
+        # loop. A bare retry here skips the sleep, so a lock that won't delete makes
+        # acquire spin-hammer the write API (the silent multi-minute enqueue hang).
       fi
     fi
     # exponential backoff with jitter — disperses a thundering herd so losers don't
