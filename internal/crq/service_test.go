@@ -15,6 +15,7 @@ type fakeGitHub struct {
 	reviews   map[string][]Review
 	comments  map[string][]IssueComment
 	posted    []string
+	deleted   []int64
 	commentID int64
 }
 
@@ -68,12 +69,84 @@ func (f *fakeGitHub) PostIssueComment(_ context.Context, repo string, pr int, bo
 	return comment, nil
 }
 
+func (f *fakeGitHub) ListIssueCommentsPage(_ context.Context, repo string, pr, page, perPage int) ([]IssueComment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	all := f.comments[fakeKey(repo, pr)]
+	start := (page - 1) * perPage
+	if start < 0 || start >= len(all) {
+		return nil, nil
+	}
+	end := start + perPage
+	if end > len(all) {
+		end = len(all)
+	}
+	return append([]IssueComment(nil), all[start:end]...), nil
+}
+
+func (f *fakeGitHub) DeleteIssueComment(_ context.Context, repo string, id int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for key, list := range f.comments {
+		for i, c := range list {
+			if c.ID == id {
+				f.comments[key] = append(list[:i], list[i+1:]...)
+				f.deleted = append(f.deleted, id)
+				return nil
+			}
+		}
+	}
+	return nil
+}
+
 func (f *fakeGitHub) SearchOpenPRs(context.Context, string, bool, int) ([]SearchPR, error) {
 	return nil, nil
 }
 
 func (f *fakeGitHub) GraphQL(context.Context, string, map[string]any, any) error {
 	return errors.New("graphql unavailable")
+}
+
+func TestPruneCalibrationDeletesOldNoiseKeepsRecent(t *testing.T) {
+	gh := newFakeGitHub()
+	cfg := Config{
+		GateRepo:          "o/gate",
+		CalibrationPR:     1,
+		Bot:               "coderabbitai[bot]",
+		RateLimitCommand:  "@coderabbitai rate limit",
+		CalibrationMarker: "auto-generated reply by CodeRabbit",
+		Scope:             []string{"o"},
+	}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+	now := time.Now().UTC()
+	old := now.Add(-time.Hour)
+	mkc := func(id int64, login, body string, at time.Time) IssueComment {
+		c := IssueComment{ID: id, Body: body, CreatedAt: at, UpdatedAt: at}
+		c.User.Login = login
+		return c
+	}
+	key := fakeKey("o/gate", 1)
+	gh.comments[key] = []IssueComment{
+		mkc(1, "kristofferR", "@coderabbitai rate limit", old),                                   // old probe -> delete
+		mkc(2, "coderabbitai[bot]", "0 reviews remaining. auto-generated reply by CodeRabbit", old), // old reply -> delete
+		mkc(3, "someone", "unrelated human comment", old),                                         // not calibration noise -> keep
+		mkc(4, "kristofferR", "@coderabbitai rate limit", now),                                    // recent -> keep
+	}
+
+	deleted := svc.pruneCalibration(context.Background(), now.Add(-2*time.Minute), 80)
+	if deleted != 2 {
+		t.Fatalf("expected 2 deletions, got %d", deleted)
+	}
+	remaining := map[int64]bool{}
+	for _, c := range gh.comments[key] {
+		remaining[c.ID] = true
+	}
+	if remaining[1] || remaining[2] {
+		t.Fatalf("old calibration noise was not pruned: %v", remaining)
+	}
+	if !remaining[3] || !remaining[4] {
+		t.Fatalf("non-noise or recent comment was wrongly pruned: %v", remaining)
+	}
 }
 
 func TestEnqueueIsIdempotentAndPumpFiresOnce(t *testing.T) {
