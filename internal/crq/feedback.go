@@ -2,7 +2,7 @@ package crq
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"regexp"
@@ -181,7 +181,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			report.Status = "feedback"
 			return report, 10, nil
 		}
-		if report.Converged || waitCode == 3 {
+		if report.Converged || (waitCode == 3 && report.ReviewedBy[s.cfg.Bot]) {
 			return report, 0, nil
 		}
 		if time.Now().After(deadline) {
@@ -501,7 +501,7 @@ func dedupeFindings(in []Finding) []Finding {
 			continue
 		}
 		key := finding.Bot + "|" + finding.Path + "|" + strconv.Itoa(finding.Line) + "|" + finding.Title + "|" + finding.Body + "|" + finding.ThreadID
-		sum := sha1.Sum([]byte(key))
+		sum := sha256.Sum256([]byte(key))
 		finding.ID = hex.EncodeToString(sum[:])
 		if seen[finding.ID] {
 			continue

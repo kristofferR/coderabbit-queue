@@ -576,14 +576,20 @@ func doctor(ctx context.Context) doctorReport {
 	if report.Config.Scope == nil {
 		report.Config.Scope = []string{}
 	}
-	report.Ready = report.Config.Complete && report.Tools["gh"].Found && report.GitHub.Authenticated
+	// crq authenticates via GITHUB_TOKEN/GH_TOKEN or the gh CLI, so either path
+	// counts as GitHub-ready.
+	tokenPresent := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")) != "" || strings.TrimSpace(os.Getenv("GH_TOKEN")) != ""
+	githubReady := report.GitHub.Authenticated || tokenPresent
+	report.Ready = report.Config.Complete && githubReady
 	if !report.Config.Complete {
 		report.Recommendations = append(report.Recommendations, "run crq init and save the printed exports to "+configPath())
 	}
-	if !report.Tools["gh"].Found {
-		report.Recommendations = append(report.Recommendations, "install GitHub CLI and authenticate with gh auth login")
-	} else if !report.GitHub.Authenticated {
-		report.Recommendations = append(report.Recommendations, "authenticate GitHub CLI with gh auth login")
+	if !githubReady {
+		if !report.Tools["gh"].Found {
+			report.Recommendations = append(report.Recommendations, "set GITHUB_TOKEN/GH_TOKEN or install GitHub CLI and run gh auth login")
+		} else {
+			report.Recommendations = append(report.Recommendations, "authenticate GitHub CLI with gh auth login (or set GITHUB_TOKEN/GH_TOKEN)")
+		}
 	}
 	if !report.Tools["cr"].Found && !report.Tools["coderabbit"].Found {
 		report.Recommendations = append(report.Recommendations, "optional: install CodeRabbit CLI for local pre-push review with cr review --agent")

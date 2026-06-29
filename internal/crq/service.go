@@ -153,7 +153,10 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	}
 	item := queue[0]
 	head, err := s.headShort(ctx, item.Repo, item.PR)
-	if err != nil || !isShortSHA(head) {
+	if err != nil {
+		return PumpResult{}, err
+	}
+	if !isShortSHA(head) {
 		return PumpResult{Action: "skipped", Repo: item.Repo, PR: item.PR, Reason: "could not read head"}, nil
 	}
 	key := QueueKey(item.Repo, item.PR)
@@ -180,7 +183,11 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		s.sync(ctx, updated)
 		return PumpResult{Action: "deduped", Repo: item.Repo, PR: item.PR, Head: head, Reason: "bot already reviewed head"}, nil
 	} else if err != nil {
-		return PumpResult{Action: "skipped", Repo: item.Repo, PR: item.PR, Reason: "could not read reviews"}, nil
+		return PumpResult{}, err
+	}
+
+	if s.cfg.DryRun {
+		return PumpResult{Action: "dry_run", Repo: item.Repo, PR: item.PR, Head: head}, nil
 	}
 
 	token := randomToken()
@@ -211,9 +218,6 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	s.sync(ctx, reserved)
 	if reserved.InFlight == nil || reserved.InFlight.Token != token {
 		return PumpResult{Action: "lost_race"}, nil
-	}
-	if s.cfg.DryRun {
-		return PumpResult{Action: "dry_run", Repo: item.Repo, PR: item.PR, Head: head}, nil
 	}
 	comment, err := s.gh.PostIssueComment(ctx, item.Repo, item.PR, s.cfg.ReviewCommand)
 	if err != nil {

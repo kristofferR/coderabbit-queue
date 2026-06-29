@@ -14,9 +14,6 @@ type AutoOptions struct {
 }
 
 func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
-	if !opts.Incremental {
-		// explicit false is meaningful; defaulting happens in CLI.
-	}
 	owner := fmt.Sprintf("host=%s pid=%d", s.cfg.Host, os.Getpid())
 	token := randomToken()
 	for {
@@ -91,7 +88,7 @@ func (s *Service) acquireLeader(ctx context.Context, owner, token string) (bool,
 	state, err := s.store.Update(ctx, func(st *State) error {
 		if st.Leader != nil && st.Leader.ExpiresAt.After(now) && st.Leader.Token != token {
 			held = false
-			return nil
+			return ErrNoChange
 		}
 		st.Leader = &LeaderLease{Owner: owner, Token: token, ExpiresAt: expires, UpdatedAt: now}
 		held = true
@@ -110,7 +107,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions) error {
 	targets := s.cfg.Scope
 	byRepo := false
 	if len(s.cfg.AllowRepos) > 0 {
-		targets = targets[:0]
+		targets = make([]string, 0, len(s.cfg.AllowRepos))
 		for repo := range s.cfg.AllowRepos {
 			targets = append(targets, repo)
 		}

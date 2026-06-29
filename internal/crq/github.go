@@ -695,8 +695,15 @@ func (g *GitHub) GetBlob(ctx context.Context, repo, sha string) ([]byte, error) 
 	return []byte(out.Content), nil
 }
 
-func (g *GitHub) RepoExists(ctx context.Context, repo string) bool {
-	return g.request(ctx, http.MethodGet, "/repos/"+repoPath(repo), nil, nil) == nil
+func (g *GitHub) RepoExists(ctx context.Context, repo string) (bool, error) {
+	err := g.request(ctx, http.MethodGet, "/repos/"+repoPath(repo), nil, nil)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	return false, err
 }
 
 func (g *GitHub) GetRepo(ctx context.Context, repo string) (RepoInfo, error) {

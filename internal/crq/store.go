@@ -93,7 +93,7 @@ func (s *GitStateStore) Update(ctx context.Context, mutate func(*State) error) (
 		state.Rev++
 		state.UpdatedAt = &now
 		state.Normalize(s.cfg)
-		if err := s.compareAndSwap(ctx, state, rev); err != nil {
+		if err := s.compareAndSwap(ctx, &state, rev); err != nil {
 			if errors.Is(err, ErrCASConflict) {
 				continue
 			}
@@ -104,10 +104,10 @@ func (s *GitStateStore) Update(ctx context.Context, mutate func(*State) error) (
 	return State{}, ErrCASConflict
 }
 
-func (s *GitStateStore) compareAndSwap(ctx context.Context, state State, rev Revision) error {
-	dashboard := renderDashboard(state, s.cfg)
+func (s *GitStateStore) compareAndSwap(ctx context.Context, state *State, rev Revision) error {
+	dashboard := renderDashboard(*state, s.cfg)
 	state.DashboardSHA = hashString(dashboard)
-	stateJSON, err := json.MarshalIndent(state, "", "  ")
+	stateJSON, err := json.MarshalIndent(*state, "", "  ")
 	if err != nil {
 		return err
 	}
