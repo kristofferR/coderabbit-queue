@@ -12,6 +12,7 @@ import (
 type fakeGitHub struct {
 	mu        sync.Mutex
 	pulls     map[string]Pull
+	commits   map[string]gitCommit
 	reviews   map[string][]Review
 	comments  map[string][]IssueComment
 	reactions map[int64][]Reaction
@@ -62,6 +63,7 @@ func (retryNoChangeStore) SyncDashboard(context.Context, State) error { return n
 func newFakeGitHub() *fakeGitHub {
 	return &fakeGitHub{
 		pulls:     map[string]Pull{},
+		commits:   map[string]gitCommit{},
 		reviews:   map[string][]Review{},
 		comments:  map[string][]IssueComment{},
 		reactions: map[int64][]Reaction{},
@@ -78,6 +80,12 @@ func (f *fakeGitHub) GetPull(_ context.Context, repo string, pr int) (Pull, erro
 		return Pull{}, errors.New("missing pull")
 	}
 	return pull, nil
+}
+
+func (f *fakeGitHub) GetCommit(_ context.Context, repo, sha string) (gitCommit, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.commits[sha], nil
 }
 
 func (f *fakeGitHub) ListReviews(_ context.Context, repo string, pr int) ([]Review, error) {

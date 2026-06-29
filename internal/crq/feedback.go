@@ -83,9 +83,19 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		report.Findings = append(report.Findings, parseReviewBodyFindings(review, review.User.Login)...)
 	}
 
+	suppressPromptAt := map[string]bool{}
 	if threads, err := s.reviewThreads(ctx, repo, pr); err == nil {
 		for _, thread := range threads {
 			report.Findings = append(report.Findings, threadFindings(thread, bots)...)
+			// A resolved/outdated inline thread emits no finding, but CodeRabbit's
+			// "Prompt for AI agents" block still lists the same location. Record it so
+			// the prompt duplicate is suppressed too — otherwise an addressed finding
+			// reappears as a thread-less prompt finding and the loop never converges.
+			if thread.IsResolved || thread.IsOutdated {
+				for _, key := range promptSuppressKeys(thread, bots) {
+					suppressPromptAt[key] = true
+				}
+			}
 		}
 	} else if IsRateLimited(err) {
 		// A transient GraphQL rate limit must not silently degrade to the REST
@@ -130,6 +140,23 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		// comments (or completion signals) were simply never fetched.
 		return report, err
 	}
+	// Top-level issue comments carry no commit SHA, so bound them to the current
+	// head: a bot finding posted before this head was committed belongs to an earlier
+	// round and must not trap crq loop on stale, already-addressed feedback. The
+	// head commit time is resolved lazily — only when there's an actionable candidate.
+	headCutoff := time.Time{}
+	headCutoffLoaded := false
+	headCutoffOf := func() time.Time {
+		if !headCutoffLoaded {
+			headCutoffLoaded = true
+			if pull.Head.SHA != "" {
+				if c, cerr := s.gh.GetCommit(ctx, repo, pull.Head.SHA); cerr == nil {
+					headCutoff = c.Committer.Date
+				}
+			}
+		}
+		return headCutoff
+	}
 	for _, comment := range issueComments {
 		if !inBots(bots, comment.User.Login) {
 			continue
@@ -143,6 +170,12 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		if s.isConfiguredBot(comment.User.Login) {
 			continue
 		}
+		if isNonActionableText(comment.Body) {
+			continue // notices/acks (e.g. usage-limit messages) aren't findings
+		}
+		if cutoff := headCutoffOf(); !cutoff.IsZero() && comment.CreatedAt.Before(cutoff) {
+			continue // posted before the current head was committed — a stale round
+		}
 		report.Findings = append(report.Findings, Finding{
 			Bot:       comment.User.Login,
 			Severity:  severityOf(comment.Body),
@@ -155,7 +188,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		})
 	}
 
-	report.Findings = dedupeFindings(report.Findings)
+	report.Findings = dedupeFindings(report.Findings, suppressPromptAt)
 	sort.Slice(report.Findings, func(i, j int) bool {
 		if rankSeverity(report.Findings[i].Severity) != rankSeverity(report.Findings[j].Severity) {
 			return rankSeverity(report.Findings[i].Severity) > rankSeverity(report.Findings[j].Severity)
@@ -677,7 +710,26 @@ func threadFindings(thread reviewThread, bots map[string]struct{}) []Finding {
 	return out
 }
 
-func dedupeFindings(in []Finding) []Finding {
+// promptSuppressKeys returns the bot|path|line dedupe keys for a thread's bot
+// comments, matching the keys dedupeFindings builds for prompt findings, so a
+// resolved/outdated thread can suppress its "Prompt for AI agents" duplicate.
+func promptSuppressKeys(thread reviewThread, bots map[string]struct{}) []string {
+	var keys []string
+	for _, comment := range thread.Comments.Nodes {
+		if !inBots(bots, comment.Author.Login) {
+			continue
+		}
+		path := firstNonEmpty(thread.Path, comment.Path)
+		line := firstPositive(thread.Line, comment.Line, comment.OriginalLine)
+		if path == "" || line <= 0 {
+			continue
+		}
+		keys = append(keys, normalizeBotName(comment.Author.Login)+"|"+path+"|"+strconv.Itoa(line))
+	}
+	return keys
+}
+
+func dedupeFindings(in []Finding, suppressPromptAt map[string]bool) []Finding {
 	seen := map[string]bool{}
 	structuredAtLocation := map[string]bool{}
 	for _, finding := range in {
@@ -692,8 +744,11 @@ func dedupeFindings(in []Finding) []Finding {
 		if !isActionableFinding(finding) {
 			continue
 		}
-		if finding.Source == "review_prompt" && structuredAtLocation[normalizeBotName(finding.Bot)+"|"+finding.Path+"|"+strconv.Itoa(finding.Line)] {
-			continue
+		if finding.Source == "review_prompt" {
+			key := normalizeBotName(finding.Bot) + "|" + finding.Path + "|" + strconv.Itoa(finding.Line)
+			if structuredAtLocation[key] || suppressPromptAt[key] {
+				continue
+			}
 		}
 		key := normalizeBotName(finding.Bot) + "|" + finding.Path + "|" + strconv.Itoa(finding.Line) + "|" + finding.Title + "|" + finding.Body + "|" + finding.ThreadID
 		sum := sha256.Sum256([]byte(key))
@@ -841,11 +896,20 @@ func compactReviewBody(body string) string {
 	return strings.Join(out, "\n")
 }
 
+var rootFileRE = regexp.MustCompile(`^[A-Za-z0-9._+-]+$`)
+
 func looksLikePath(summary string) bool {
-	if strings.Contains(summary, " ") {
+	summary = strings.TrimSpace(summary)
+	if summary == "" || strings.Contains(summary, " ") {
 		return false
 	}
-	return strings.Contains(summary, "/") || strings.Contains(summary, ".")
+	if strings.Contains(summary, "/") || strings.Contains(summary, ".") {
+		return true
+	}
+	// Root-level files often have neither a slash nor a dot (Dockerfile, Makefile,
+	// LICENSE). In a "<file> (N)" detail summary a single filename-safe token is a
+	// file, so accept it rather than dropping its findings.
+	return rootFileRE.MatchString(summary)
 }
 
 func isActionableFinding(finding Finding) bool {
