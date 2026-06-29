@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -309,10 +310,11 @@ func rateLimitFrom(resp *http.Response, body string) *RateLimitError {
 	return nil
 }
 
-// send performs an HTTP request with rate-limit awareness: on a GitHub rate
-// limit it backs off (honoring Retry-After / X-RateLimit-Reset, else exponential
-// backoff) and retries, up to maxRetries or until a single wait would exceed
-// maxWait. Non-rate-limit responses are returned to the caller unchanged.
+// send performs an HTTP request with rate-limit and transient-failure awareness:
+// it retries transient network errors (timeouts, refused/reset connections, DNS
+// blips) and 5xx responses with exponential backoff, and backs off GitHub rate
+// limits (honoring Retry-After / X-RateLimit-Reset). Real caller cancellation
+// (ctx done) is never retried. Non-retryable responses are returned unchanged.
 func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) (*http.Response, error) {
 	for attempt := 0; ; attempt++ {
 		var rdr io.Reader
@@ -329,7 +331,40 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 		}
 		resp, err := g.httpClient.Do(req)
 		if err != nil {
+			// Caller cancelled or its deadline passed: surface that, don't retry.
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if isRetryableNetErr(err) {
+				if wait, ok := g.retryBackoff(attempt); ok {
+					if g.log != nil {
+						g.log.Printf("github %s %s failed (%v); retrying in %s (attempt %d/%d)", method, shortURL(fullURL), err, wait.Round(time.Second), attempt+1, g.maxRetries)
+					}
+					if serr := sleepCtx(ctx, wait); serr != nil {
+						return nil, serr
+					}
+					continue
+				}
+			}
 			return nil, err
+		}
+		// Retry transient server errors (502/503/504/500).
+		if isRetryableStatus(resp.StatusCode) {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if wait, ok := g.retryBackoff(attempt); ok {
+				if g.log != nil {
+					g.log.Printf("github %s %s: HTTP %d; retrying in %s (attempt %d/%d)", method, shortURL(fullURL), resp.StatusCode, wait.Round(time.Second), attempt+1, g.maxRetries)
+				}
+				if serr := sleepCtx(ctx, wait); serr != nil {
+					return nil, serr
+				}
+				continue
+			}
+			return nil, &APIError{Method: method, URL: fullURL, Status: resp.StatusCode, Body: string(b)}
 		}
 		if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
 			return resp, nil
@@ -372,6 +407,53 @@ func (g *GitHub) backoffWait(rl *RateLimitError, attempt int) (time.Duration, bo
 		return 0, false
 	}
 	return wait, true
+}
+
+// retryBackoff is the exponential backoff for transient network / 5xx retries,
+// clamped to maxWait and bounded by maxRetries. Unlike rate-limit backoff it
+// clamps (rather than gives up) so a brief outage gets the full wait.
+func (g *GitHub) retryBackoff(attempt int) (time.Duration, bool) {
+	if attempt >= g.maxRetries {
+		return 0, false
+	}
+	wait := g.backoffBase << uint(attempt)
+	if wait > g.maxWait {
+		wait = g.maxWait
+	}
+	return wait, true
+}
+
+func isRetryableStatus(code int) bool {
+	switch code {
+	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return false
+}
+
+// isRetryableNetErr reports whether a transport error is a transient network
+// failure worth retrying (timeouts, refused/reset connections, DNS hiccups, TLS
+// handshake failures, short EOFs). Callers must rule out ctx cancellation first.
+func isRetryableNetErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, s := range []string{
+		"timeout", "deadline exceeded", "connection refused", "connection reset",
+		"no such host", "network is unreachable", "host is unreachable",
+		"tls handshake", "i/o timeout", "broken pipe", "server misbehaving",
+		"temporary failure", "unexpected eof", "connection closed", "eof",
+	} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {
