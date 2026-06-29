@@ -1,73 +1,123 @@
 ---
 name: coderabbit-queue
-description: Coordinate CodeRabbit (or any review-bot) PR-review requests across multiple parallel agents so they don't compete for one shared, account-wide rate limit. Use whenever you are about to post "@coderabbitai review" (or otherwise re-trigger a review bot) inside an autonomous PR-review loop, especially when several agents/PRs run at once. Provides the `crq` CLI (enqueue / FIFO pump / wait / live dashboard).
+description: Drive autonomous CodeRabbit/Codex PR-review loops through crq without competing for the shared account-wide CodeRabbit rate limit. Use whenever you need to trigger CodeRabbit, fetch actionable bot feedback, resolve addressed review threads, or keep PRs reviewed automatically.
 ---
 
 # coderabbit-queue (`crq`)
 
-CodeRabbit's PR-review limit is **per-developer / per-organization (account-wide)**, not
-per-PR. When multiple agents each loop on their own PR and post `@coderabbitai review`,
-they fight over one quota: firing while globally rate-limited, then stampeding when the
-window opens. `crq` serializes this — review requests are queued and fired **FIFO, one at
-a time, only when the account is unblocked**, with a live GitHub-issue dashboard.
+CodeRabbit's PR-review limit is account-wide. Multiple agents posting `@coderabbitai review`
+directly will stampede the same quota. `crq` owns that mechanical loop:
 
-## The one rule
+1. enqueue the PR in one FIFO queue,
+2. trigger CodeRabbit only when the shared account can spend a review,
+3. wait for real bot feedback on the current head,
+4. emit normalized JSON findings or report convergence,
+5. resolve the review threads the agent says it addressed.
 
-**Never post `@coderabbitai review` directly inside a review loop. Call `crq wait` instead.**
+## The Rule
 
-```bash
-crq wait "$REPO" "$PR"
-```
-
-This enqueues `(repo, pr)`, blocks until it's *your* turn and the account is unblocked,
-then posts the review command exactly once. It is safe to run for many PRs across many
-machines simultaneously — `crq` guarantees no two reviews fire at the same time.
-
-## Required prerequisite
-
-**CodeRabbit auto-review must be OFF.** crq is pull-only — it controls *when* reviews happen by
-posting `@coderabbitai review`. If auto-review is enabled, CodeRabbit reviews every push on its
-own, bypassing the queue and consuming the shared rate limit, which defeats crq. Disable it
-org-wide in the CodeRabbit dashboard (Settings → Review → Automatic Review) or per-repo via
-`.coderabbit.yaml` (`reviews.auto_review.enabled: false`).
-
-## Setup (once per account)
+Never post `@coderabbitai review` directly. Use `crq loop` for an agent round:
 
 ```bash
-export CRQ_REPO=<youruser>/crq-state    # private gate repo
-crq init                                # creates gate repo, dashboard issue, calibration PR
-# save the printed CRQ_* exports into ~/.config/crq/env (crq sources it automatically)
+crq loop "$REPO" "$PR" > crq-feedback.json
 ```
 
-If `crq` is not installed: `curl -fsSL https://raw.githubusercontent.com/kristofferR/coderabbit-queue/main/install.sh | bash`
+Before starting, check local readiness:
 
-> **Trust note:** `curl … | bash` runs remote code without local review — fine if you trust this
-> repo, but for autonomous agents or stricter setups, prefer downloading `install.sh` (or the single
-> `crq` script) and reading it before running, as the README's manual-install section shows.
+```bash
+crq doctor
+```
 
-## Commands you'll use
+`crq doctor` emits JSON covering crq config, `gh`, optional CodeRabbit CLI availability,
+and `CODERABBIT_API_KEY` presence for headless local review.
 
-- `crq wait <repo> <pr>` — the loop primitive (enqueue + block until fired).
-- `crq autoreview` — emulate native auto-review + incremental review (which are off) for ALL open
-  PRs, rate-coordinated. Run as a background watcher. `--no-incremental` = first review only;
-  `--once` = single pass. Use this to keep every PR reviewed hands-off without native auto-review.
-- `crq status` — show the queue + rate-limit state (good for a quick check).
-- `crq pump` — fire ≤1 queued review if the window is open (any agent can call it; the
-  lock serializes it). `crq wait` calls this internally; you rarely call it directly.
-- `crq cancel <repo> <pr>` — drop a PR you no longer want reviewed.
-- `crq refresh` — force a fresh account-wide rate-limit reading, then print status.
+Exit codes:
 
-## How it decides when to fire
+- `0`: converged or no actionable findings
+- `10`: actionable findings were written to JSON
+- `2`: timed out waiting for feedback
 
-- **Primary signal:** posts `@coderabbitai rate limit` (non-consuming) on a dedicated
-  calibration PR and parses remaining reviews + refill time. Cached/throttled so command
-  volume stays tiny.
-- **Corroboration:** scans your open PRs for CodeRabbit's "available in X" warning.
-- Fires the FIFO head only when `now ≥ blocked_until`, nothing is in flight, and a minimum
-  interval has passed.
+The agent reads `crq-feedback.json`, fixes genuine findings, validates, commits, pushes, then
+calls `crq loop` again.
 
-## When to use this skill
+Minimal implementation:
 
-Use it any time you are operating an autonomous PR-review / CodeRabbit feedback loop —
-particularly the multi-PR / multi-agent case. If you find yourself about to run
-`gh pr comment ... "@coderabbitai review"`, route it through `crq wait` instead.
+```bash
+set +e
+crq loop "$REPO" "$PR" > crq-feedback.json
+rc=$?
+set -e
+
+case "$rc" in
+  0) echo "converged" ;;
+  10) jq '.findings[] | {severity,path,line,title,thread_id}' crq-feedback.json ;;
+  2) echo "timed out; do not push stale-feedback fixes" ;;
+  *) exit "$rc" ;;
+esac
+```
+
+## Feedback
+
+Use this when you only need current findings and do not want to trigger a new review:
+
+```bash
+crq feedback "$REPO" "$PR"
+```
+
+The output includes inline comments, GitHub review-thread IDs, CodeRabbit collapsed/outside-diff
+review-body findings, severity, path, line, source URL, commit, and bot.
+
+`findings` is always an array. Verify each against current code and fix the bugs and flaws it
+reports. It also surfaces still-open findings from earlier commits (any unresolved, non-outdated
+review thread), so there is no need to audit past reviews by hand.
+
+## Resolving Threads
+
+After fixing a finding that has a `thread_id`, resolve that thread **on GitHub**:
+
+```bash
+crq resolve "$REPO" "$PR" --thread "$THREAD_ID"
+```
+
+crq keys off GitHub's resolution state: an addressed finding keeps reappearing in `crq feedback`
+until its thread is resolved on GitHub. Resolve only threads you actually addressed; leave the rest open.
+
+## Fleet Auto-Review
+
+To keep all open PRs in scope reviewed while CodeRabbit native auto-review is off:
+
+```bash
+crq autoreview
+crq autoreview --once
+crq autoreview --no-incremental
+```
+
+## Optional Local CodeRabbit CLI
+
+If the official CodeRabbit CLI is installed, agents can run a local pre-push review:
+
+```bash
+cr review --agent
+```
+
+Use that only to review local git changes before pushing. It does not replace `crq loop`,
+which coordinates PR review triggers and extracts GitHub PR feedback.
+
+## Maintenance Commands
+
+Do not use queue internals in agent loops. For diagnosis only:
+
+```bash
+crq doctor
+crq status
+crq debug state
+crq debug refresh
+crq debug enqueue "$REPO" "$PR"
+crq debug pump
+crq cancel "$REPO" "$PR"
+```
+
+## Required Prerequisite
+
+CodeRabbit auto-review must be off. crq is pull-only: reviews fire through crq, not from
+CodeRabbit automatically on every push.

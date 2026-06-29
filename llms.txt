@@ -1,0 +1,78 @@
+# crq Agent Guide
+
+crq is the repo's CLI for autonomous CodeRabbit/Codex pull-request review loops.
+
+Core rule: never post `@coderabbitai review` directly. Use `crq loop`.
+
+Readiness check:
+
+```bash
+crq doctor
+```
+
+`crq doctor` emits JSON for agents: crq config, `gh`, optional CodeRabbit CLI,
+and `CODERABBIT_API_KEY` presence.
+
+## Setup
+
+The user must configure `~/.config/crq/env` once:
+
+```bash
+export CRQ_REPO=OWNER/crq-state
+export CRQ_ISSUE=1
+export CRQ_CAL_PR=1
+export CRQ_SCOPE=OWNER
+export CRQ_STATE_REF=crq-state
+```
+
+CodeRabbit native auto-review must be off.
+
+## Agent Loop
+
+```bash
+crq loop OWNER/REPO PR_NUMBER > crq-feedback.json
+rc=$?
+```
+
+Exit codes:
+- `0`: done; converged or no actionable findings.
+- `10`: read `.findings[]`, fix valid issues, validate, commit, push, resolve addressed threads, then repeat.
+- `2`: timed out waiting for feedback; do not push a stale-feedback round.
+
+Resolve addressed threads on GitHub (crq keys off GitHub resolution state; a finding keeps
+reappearing until its thread is resolved there):
+
+```bash
+crq resolve OWNER/REPO PR_NUMBER --thread THREAD_ID
+```
+
+Current feedback without triggering a review:
+
+```bash
+crq feedback OWNER/REPO PR_NUMBER
+```
+
+`crq feedback`/`crq loop` also surface still-open findings from earlier commits (unresolved,
+non-outdated review threads), so no manual cross-review audit is needed.
+
+Fleet review:
+
+```bash
+crq autoreview
+```
+
+Diagnostics only:
+
+```bash
+crq doctor
+crq status
+crq debug state
+crq debug refresh
+```
+
+JSON contract: `findings` is always an array. Each finding has `bot`, `severity`,
+`path`, `line`, `title`, `body`, `source`, `url`, and sometimes `thread_id`.
+
+Optional local preflight: if CodeRabbit CLI is installed, `cr review --agent`
+can review local git changes before pushing. That does not replace `crq loop`;
+only `crq loop` queues and waits for GitHub PR review feedback.
