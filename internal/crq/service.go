@@ -317,6 +317,7 @@ func (s *Service) markReviewPosted(ctx context.Context, token string, item Queue
 	key := QueueKey(item.Repo, item.PR)
 	recorded := false
 	state, err := s.store.Update(ctx, func(st *State) error {
+		recorded = false
 		if st.InFlight == nil || st.InFlight.Token != token {
 			return ErrNoChange
 		}
