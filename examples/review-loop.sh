@@ -24,5 +24,10 @@ case "$rc" in
   2)
     echo "timed out waiting for feedback; do not push a stale-feedback round; see $OUT"
     ;;
-  *) echo "crq loop failed with exit $rc"; exit "$rc" ;;
+  *)
+    echo "crq loop failed with exit $rc"
+    ;;
 esac
+
+# Propagate crq's exit code so automation can branch on findings/timeout/convergence.
+exit "$rc"
