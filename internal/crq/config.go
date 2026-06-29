@@ -78,7 +78,7 @@ func LoadConfig() (Config, error) {
 		ExcludeRepos:        repoSet(env["CRQ_EXCLUDE"]),
 		StateRef:            stringEnv(env, "CRQ_STATE_REF", "crq-state"),
 		Bot:                 stringEnv(env, "CRQ_BOT", "coderabbitai[bot]"),
-		RequiredBots:        listEnv(env, "CRQ_REQUIRED_BOTS", "coderabbitai[bot],chatgpt-codex-connector[bot]"),
+		RequiredBots:        listEnv(env, "CRQ_REQUIRED_BOTS", "coderabbitai[bot]"),
 		ReviewCommand:       stringEnv(env, "CRQ_REVIEW_CMD", "@coderabbitai review"),
 		RateLimitCommand:    stringEnv(env, "CRQ_RATELIMIT_CMD", "@coderabbitai rate limit"),
 		RateLimitMarker:     stringEnv(env, "CRQ_RL_MARKER", "rate limited by coderabbit.ai"),

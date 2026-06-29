@@ -140,7 +140,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		// Issue comments carry no commit SHA, so a stale completion summary from an
 		// earlier commit must not be treated as a review of the current head — rely on
 		// commit-checked reviews/threads for ReviewedBy instead.
-		if comment.User.Login == s.cfg.Bot {
+		if s.isConfiguredBot(comment.User.Login) {
 			continue
 		}
 		report.Findings = append(report.Findings, Finding{
@@ -867,6 +867,8 @@ func isNonActionableText(text string) bool {
 		"version claim",
 		"both referenced files exist",
 		"good regression test",
+		"skipped: comment is from another github bot",
+		"you have reached your codex usage limits for code reviews",
 	}
 	for _, phrase := range nonActionable {
 		if strings.Contains(text, phrase) {

@@ -14,16 +14,33 @@ type fakeGitHub struct {
 	pulls     map[string]Pull
 	reviews   map[string][]Review
 	comments  map[string][]IssueComment
+	reactions map[int64][]Reaction
 	posted    []string
 	deleted   []int64
 	commentID int64
 }
 
+type failNthUpdateStore struct {
+	StateStore
+	n     int
+	err   error
+	calls int
+}
+
+func (s *failNthUpdateStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {
+	s.calls++
+	if s.calls == s.n {
+		return State{}, s.err
+	}
+	return s.StateStore.Update(ctx, mutate)
+}
+
 func newFakeGitHub() *fakeGitHub {
 	return &fakeGitHub{
-		pulls:    map[string]Pull{},
-		reviews:  map[string][]Review{},
-		comments: map[string][]IssueComment{},
+		pulls:     map[string]Pull{},
+		reviews:   map[string][]Review{},
+		comments:  map[string][]IssueComment{},
+		reactions: map[int64][]Reaction{},
 	}
 }
 
@@ -55,8 +72,10 @@ func (f *fakeGitHub) ListReviewComments(context.Context, string, int) ([]ReviewC
 	return nil, nil
 }
 
-func (f *fakeGitHub) ListCommentReactions(context.Context, string, int64) ([]Reaction, error) {
-	return nil, nil
+func (f *fakeGitHub) ListCommentReactions(_ context.Context, _ string, id int64) ([]Reaction, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]Reaction(nil), f.reactions[id]...), nil
 }
 
 func (f *fakeGitHub) PostIssueComment(_ context.Context, repo string, pr int, body string) (IssueComment, error) {
@@ -153,6 +172,24 @@ func TestPruneCalibrationDeletesOldNoiseKeepsRecent(t *testing.T) {
 	}
 }
 
+func TestAutoReviewOnceReleasesLeader(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, Host: "h", LeaderTTL: time.Minute}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if err := svc.AutoReview(ctx, AutoOptions{Once: true}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Leader != nil {
+		t.Fatalf("one-shot autoreview should release its leader lease, got %#v", st.Leader)
+	}
+}
+
 func TestEnqueueBatchAppendsOncePerPR(t *testing.T) {
 	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, Host: "h"}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
@@ -213,6 +250,75 @@ func TestRequeueInflightRateLimitUsesBlockedNotWarn(t *testing.T) {
 	if st.Warn != "in-flight timeout" {
 		t.Fatalf("non-rate-limit requeue should set Warn, got %q", st.Warn)
 	}
+}
+
+func TestLatestCalibrationReplyToleratesBotSuffix(t *testing.T) {
+	cfg := Config{Bot: "coderabbitai", GateRepo: "o/gate", CalibrationPR: 1, CalibrationMarker: "auto-generated reply by CodeRabbit"}
+	gh := newFakeGitHub()
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+	now := time.Now().UTC()
+	comment := IssueComment{Body: "0 reviews remaining. auto-generated reply by CodeRabbit", UpdatedAt: now}
+	comment.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/gate", 1)] = []IssueComment{comment}
+
+	got, ok, err := svc.latestCalibrationReply(context.Background(), now.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || got.Body != comment.Body {
+		t.Fatalf("expected suffixed bot calibration reply to match suffix-less config, ok=%v got=%#v", ok, got)
+	}
+}
+
+func TestInflightStatusToleratesBotSuffix(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := Config{Bot: "coderabbitai", RateLimitMarker: "rate limited by coderabbit.ai", InflightTimeout: time.Hour}
+	baseState := State{InFlight: &InFlight{Repo: "o/repo", PR: 1, Phase: "posted", FiredAt: &now, FiredCommentID: 99}}
+
+	t.Run("review", func(t *testing.T) {
+		gh := newFakeGitHub()
+		review := Review{SubmittedAt: now.Add(time.Second)}
+		review.User.Login = "coderabbitai[bot]"
+		gh.reviews[fakeKey("o/repo", 1)] = []Review{review}
+		svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+		status, err := svc.inflightStatus(context.Background(), baseState)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !status.Done || status.Reason != "review submitted" {
+			t.Fatalf("expected suffixed bot review to complete in-flight review, got %#v", status)
+		}
+	})
+
+	t.Run("reaction", func(t *testing.T) {
+		gh := newFakeGitHub()
+		reaction := Reaction{}
+		reaction.User.Login = "coderabbitai[bot]"
+		gh.reactions[99] = []Reaction{reaction}
+		svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+		status, err := svc.inflightStatus(context.Background(), baseState)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !status.Done || status.Reason != "bot reacted" {
+			t.Fatalf("expected suffixed bot reaction to complete in-flight review, got %#v", status)
+		}
+	})
+
+	t.Run("rate-limit-comment", func(t *testing.T) {
+		gh := newFakeGitHub()
+		comment := IssueComment{Body: "You are rate limited by coderabbit.ai. Reviews available in 3 minutes.", UpdatedAt: now.Add(time.Second)}
+		comment.User.Login = "coderabbitai[bot]"
+		gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
+		svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+		status, err := svc.inflightStatus(context.Background(), baseState)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !status.Requeue || status.Reason != warnRateLimited {
+			t.Fatalf("expected suffixed bot rate-limit comment to requeue with blocked state, got %#v", status)
+		}
+	})
 }
 
 func TestRenewLeaderRespectsLiveLease(t *testing.T) {
@@ -283,6 +389,97 @@ func TestEnqueueIsIdempotentAndPumpFiresOnce(t *testing.T) {
 	}
 	if waiting.Action != "waiting" {
 		t.Fatalf("second pump should wait on in-flight review, got %#v", waiting)
+	}
+}
+
+func TestPumpPersistsPostedReviewAfterTransientStateFailure(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:        "owner/gate",
+		StateRef:        "crq-state",
+		Host:            "testhost",
+		Bot:             "coderabbitai[bot]",
+		ReviewCommand:   "@coderabbitai review",
+		RateLimitMarker: "rate limited by coderabbit.ai",
+		MinInterval:     0,
+		InflightTimeout: time.Minute,
+		PollInterval:    time.Millisecond,
+		FiredMax:        500,
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls["owner/repo#12"] = pull
+	inner := NewMemoryStore(cfg)
+	store := &failNthUpdateStore{StateStore: inner, n: 3, err: errors.New("transient state write failure")}
+	service := NewService(cfg, gh, store, nil)
+
+	if _, err := service.Enqueue(ctx, "owner/repo", 12); err != nil {
+		t.Fatal(err)
+	}
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "fired" || pumped.Head != "abcdef123" {
+		t.Fatalf("expected fired result after retrying posted-state write, got %#v", pumped)
+	}
+	state, _, err := inner.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.InFlight == nil || state.InFlight.Phase != "posted" || state.InFlight.FiredCommentID == 0 {
+		t.Fatalf("posted review metadata was not persisted after retry: %#v", state.InFlight)
+	}
+	if state.Fired[QueueKey("owner/repo", 12)] != "abcdef123" {
+		t.Fatalf("fired marker was not persisted after retry: %#v", state.Fired)
+	}
+}
+
+func TestWaitReenqueuesAfterClearingStaleInflight(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC().Add(-time.Minute)
+	cfg := Config{
+		GateRepo:        "owner/gate",
+		StateRef:        "crq-state",
+		Host:            "testhost",
+		Bot:             "coderabbitai[bot]",
+		ReviewCommand:   "@coderabbitai review",
+		RateLimitMarker: "rate limited by coderabbit.ai",
+		MinInterval:     0,
+		InflightTimeout: time.Hour,
+		PollInterval:    time.Millisecond,
+		WaitTimeout:     time.Second,
+		FiredMax:        500,
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef9994567890"
+	gh.pulls["owner/repo#12"] = pull
+	review := Review{CommitID: "abcdef1234567890", SubmittedAt: now.Add(time.Second)}
+	review.User.Login = "coderabbitai[bot]"
+	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.InFlight = &InFlight{Repo: "owner/repo", PR: 12, Head: "abcdef123", Token: "old-token", Phase: "posted", FiredAt: &now, FiredCommentID: 7}
+		st.Fired[QueueKey("owner/repo", 12)] = "abcdef123"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(cfg, gh, store, nil)
+
+	result, code, err := service.Wait(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 || result.Action != "fired" || result.Head != "abcdef999" {
+		t.Fatalf("expected stale in-flight clear to re-enqueue and fire new head, code=%d result=%#v", code, result)
+	}
+	if len(gh.posted) != 1 {
+		t.Fatalf("expected one review command for the new head, posted=%d", len(gh.posted))
 	}
 }
 
