@@ -394,7 +394,9 @@ func (s *Service) reviewThreads(ctx context.Context, repo string, pr int) ([]rev
 
 var (
 	detailSummaryRE = regexp.MustCompile(`(?i)<summary>\s*([^<]+?)\s+\([0-9]+\)\s*</summary>`)
-	detailHeaderRE  = regexp.MustCompile("^`([0-9]+)(?:\\s*-\\s*([0-9]+))?`: *(.*)$")
+	// Line headers come backticked in "Outside diff range comments" (`12-15`:) and
+	// un-backticked in "Comments failed to post" (12-15:) — accept both.
+	detailHeaderRE = regexp.MustCompile("^`?([0-9]+)(?:\\s*-\\s*([0-9]+))?`?: *(.*)$")
 	promptBlockRE   = regexp.MustCompile("(?is)<summary>[^<]*Prompt for all review comments with AI agents[^<]*</summary>.*?```\\s*(.*?)\\s*```")
 	promptFileRE    = regexp.MustCompile("^In (?:`@([^`]+)`|@([^:]+)):$")
 	promptBulletRE  = regexp.MustCompile("^- (?:Around line|Line)\\s+([0-9]+)(?:\\s*-\\s*([0-9]+))?:\\s*(.*)$")
