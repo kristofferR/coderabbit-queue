@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -82,10 +82,9 @@ func Preflight(ctx context.Context, opts PreflightOptions) (PreflightReport, int
 	}
 	args := coderabbitArgs(opts)
 	report.Tool = binary
-	report.Command = append([]string{binary}, args...)
+	report.Command = redactSecrets(append([]string{binary}, args...))
 
-	runCtx := ctx
-	cancel := func() {}
+	runCtx, cancel := context.WithCancel(ctx)
 	if opts.Timeout > 0 {
 		runCtx, cancel = context.WithTimeout(ctx, opts.Timeout)
 	}
@@ -110,6 +109,12 @@ func Preflight(ctx context.Context, opts PreflightOptions) (PreflightReport, int
 		return report, 1, err
 	}
 	parseErr := parsePreflightStream(stdout, &report)
+	if parseErr != nil {
+		// Stop the child and drain remaining stdout so cmd.Wait can't block on a
+		// full pipe when parsing bailed early (e.g. on a malformed JSON line).
+		cancel()
+		io.Copy(io.Discard, stdout)
+	}
 	waitErr := cmd.Wait()
 	report.Stderr = trimForReport(stderr.String(), 4000)
 	report.DurationMS = time.Since(start).Milliseconds()
@@ -242,10 +247,43 @@ func preflightFinding(event map[string]any) PreflightFinding {
 		Source:              "coderabbit_cli",
 	}
 	if finding.ID == "" {
-		sum := sha1.Sum([]byte(finding.Path + "|" + strconv.Itoa(finding.Line) + "|" + finding.Title + "|" + finding.Body))
+		sum := sha256.Sum256([]byte(finding.Path + "|" + strconv.Itoa(finding.Line) + "|" + finding.Title + "|" + finding.Body))
 		finding.ID = hex.EncodeToString(sum[:])
 	}
 	return finding
+}
+
+// redactSecrets masks the values of secret-bearing flags (e.g. --api-key) so the
+// command recorded in the preflight report never leaks credentials.
+func redactSecrets(args []string) []string {
+	secret := func(flag string) bool {
+		switch flag {
+		case "--api-key", "--apikey", "--token":
+			return true
+		}
+		return false
+	}
+	out := make([]string, len(args))
+	redactNext := false
+	for i, a := range args {
+		switch {
+		case redactNext:
+			out[i] = "***"
+			redactNext = false
+		case secret(strings.ToLower(a)):
+			out[i] = a
+			redactNext = true
+		case strings.HasPrefix(a, "--") && strings.Contains(a, "="):
+			if eq := strings.IndexByte(a, '='); eq > 0 && secret(strings.ToLower(a[:eq])) {
+				out[i] = a[:eq+1] + "***"
+			} else {
+				out[i] = a
+			}
+		default:
+			out[i] = a
+		}
+	}
+	return out
 }
 
 func stringField(value map[string]any, key string) string {

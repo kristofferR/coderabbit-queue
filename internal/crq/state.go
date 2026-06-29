@@ -289,11 +289,6 @@ func issueBody(state State, cfg Config) (string, error) {
 	return fmt.Sprintf("%s\n%s\n%s\n\n%s", stateBegin, machine, stateEnd, renderDashboard(state, cfg)), nil
 }
 
-func stateHash(state State) string {
-	b, _ := json.Marshal(state)
-	return hashString(string(b))
-}
-
 func hashString(value string) string {
 	sum := sha1.Sum([]byte(value))
 	return hex.EncodeToString(sum[:])
