@@ -37,14 +37,15 @@ asset="crq_${os}_${arch}.tar.gz"
 release_url="https://github.com/${REPO}/releases/latest/download/${asset}"
 if [ -z "${CRQ_INSTALL_REF:-}" ]; then
   say "trying release asset $release_url"
-  if download "$release_url" "$tmp/crq.tgz" 2>/dev/null; then
-    tar -xzf "$tmp/crq.tgz" -C "$tmp"
+  if download "$release_url" "$tmp/crq.tgz" 2>/dev/null \
+    && tar -xzf "$tmp/crq.tgz" -C "$tmp" 2>/dev/null \
+    && [ -f "$tmp/crq" ]; then
     install -m 0755 "$tmp/crq" "$BIN_DIR/$NAME"
     say "installed to $BIN_DIR/$NAME"
     say "run 'crq help' for the agent loop contract; the repo also includes llms.txt"
     exit 0
   fi
-  say "release asset unavailable; falling back to source build"
+  say "release asset unavailable or unusable; falling back to source build"
 fi
 
 command -v go >/dev/null 2>&1 || {
@@ -56,7 +57,9 @@ src="https://github.com/${REPO}/archive/${REF}.tar.gz"
 say "downloading source $src"
 download "$src" "$tmp/src.tgz"
 tar -xzf "$tmp/src.tgz" -C "$tmp"
-src_dir="$(find "$tmp" -maxdepth 1 -type d -name 'coderabbit-queue-*' | head -1)"
+# GitHub archives extract to a single "<repo>-<ref>/" dir; match it without
+# hardcoding the repo name so CRQ_INSTALL_REPO forks also work.
+src_dir="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d | head -1)"
 [ -n "$src_dir" ] || { say "ERROR: source archive layout not recognized"; exit 1; }
 
 say "building crq"
