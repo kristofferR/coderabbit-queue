@@ -20,9 +20,11 @@ type GitHubAPI interface {
 	GetPull(context.Context, string, int) (Pull, error)
 	ListReviews(context.Context, string, int) ([]Review, error)
 	ListIssueComments(context.Context, string, int) ([]IssueComment, error)
+	ListIssueCommentsPage(context.Context, string, int, int, int) ([]IssueComment, error)
 	ListReviewComments(context.Context, string, int) ([]ReviewComment, error)
 	ListCommentReactions(context.Context, string, int64) ([]Reaction, error)
 	PostIssueComment(context.Context, string, int, string) (IssueComment, error)
+	DeleteIssueComment(context.Context, string, int64) error
 	SearchOpenPRs(context.Context, string, bool, int) ([]SearchPR, error)
 	GraphQL(context.Context, string, map[string]any, any) error
 }
@@ -368,17 +370,28 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 func (s *Service) readQuota(ctx context.Context, now time.Time) (Blocked, error) {
 	blocked := Blocked{Scope: strings.Join(s.cfg.Scope, ","), Source: "calibrate", CheckedAt: &now}
 	cutoff := now.Add(-s.cfg.CalibrationTTL)
+	keepAfter := now.Add(-2 * s.cfg.CalibrationTTL)
 	if reply, ok, err := s.latestCalibrationReply(ctx, cutoff); err != nil {
 		return blocked, err
 	} else if ok {
 		remaining, reset := parseQuota(reply.Body, reply.UpdatedAt)
 		blocked.Remaining = remaining
 		blocked.BlockedUntil = reset
+		s.pruneCalibration(ctx, keepAfter, 80)
 		return blocked, nil
 	}
 	asked, err := s.gh.PostIssueComment(ctx, s.cfg.GateRepo, s.cfg.CalibrationPR, s.cfg.RateLimitCommand)
 	if err != nil {
-		return blocked, err
+		// The calibration PR hit GitHub's 2500-comment cap; prune our old probe
+		// comments to drop back under it, then retry once.
+		if isCommentCapError(err) {
+			if pruned := s.pruneCalibration(ctx, keepAfter, 100); pruned > 0 {
+				asked, err = s.gh.PostIssueComment(ctx, s.cfg.GateRepo, s.cfg.CalibrationPR, s.cfg.RateLimitCommand)
+			}
+		}
+		if err != nil {
+			return blocked, err
+		}
 	}
 	blocked.CalibAskedAt = &asked.CreatedAt
 	for i := 0; i < 6; i++ {
@@ -396,10 +409,61 @@ func (s *Service) readQuota(ctx context.Context, now time.Time) (Blocked, error)
 			blocked.Remaining = remaining
 			blocked.BlockedUntil = reset
 			blocked.CalibAskedAt = nil
+			s.pruneCalibration(ctx, keepAfter, 80)
 			return blocked, nil
 		}
 	}
 	return blocked, nil
+}
+
+// pruneCalibration deletes crq's old calibration probe comments and CodeRabbit's
+// replies from the calibration PR so it never reaches GitHub's hard 2500-comment
+// cap (which silently wedges the whole queue). It reads only the oldest page and
+// deletes up to max comments older than keepAfter, so cost stays bounded and the
+// most recent reading is preserved.
+func (s *Service) pruneCalibration(ctx context.Context, keepAfter time.Time, max int) int {
+	if s.cfg.CalibrationPR <= 0 || max <= 0 {
+		return 0
+	}
+	comments, err := s.gh.ListIssueCommentsPage(ctx, s.cfg.GateRepo, s.cfg.CalibrationPR, 1, 100)
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("calibration prune: list failed: %v", err)
+		}
+		return 0
+	}
+	deleted := 0
+	for _, c := range comments {
+		if deleted >= max {
+			break
+		}
+		if c.CreatedAt.After(keepAfter) || c.UpdatedAt.After(keepAfter) {
+			continue
+		}
+		if !s.isCalibrationNoise(c) {
+			continue
+		}
+		if err := s.gh.DeleteIssueComment(ctx, s.cfg.GateRepo, c.ID); err != nil {
+			if s.log != nil {
+				s.log.Printf("calibration prune: delete %d failed: %v", c.ID, err)
+			}
+			break
+		}
+		deleted++
+	}
+	if deleted > 0 && s.log != nil {
+		s.log.Printf("calibration prune: removed %d old comment(s) from PR #%d", deleted, s.cfg.CalibrationPR)
+	}
+	return deleted
+}
+
+// isCalibrationNoise reports whether a comment is a spent calibration artifact:
+// one of crq's "@coderabbitai rate limit" probes or a CodeRabbit auto-reply.
+func (s *Service) isCalibrationNoise(c IssueComment) bool {
+	if strings.TrimSpace(c.Body) == strings.TrimSpace(s.cfg.RateLimitCommand) {
+		return true
+	}
+	return c.User.Login == s.cfg.Bot && strings.Contains(c.Body, s.cfg.CalibrationMarker)
 }
 
 func (s *Service) latestCalibrationReply(ctx context.Context, after time.Time) (IssueComment, bool, error) {

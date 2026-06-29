@@ -225,6 +225,17 @@ func IsRateLimited(err error) bool {
 	return errors.As(err, &rl)
 }
 
+// isCommentCapError reports whether err is GitHub's hard cap of 2500 comments per
+// issue ("Commenting is disabled on issues with more than 2500 comments").
+func isCommentCapError(err error) bool {
+	var api *APIError
+	if !errors.As(err, &api) {
+		return false
+	}
+	b := strings.ToLower(api.Body)
+	return strings.Contains(b, "commenting is disabled") || strings.Contains(b, "more than 2500 comments")
+}
+
 // rateLimitWait returns how long to wait before retrying a rate-limited error.
 // The bool is true when err is a rate limit; the duration is 0 when GitHub gave
 // no reset hint (the caller should apply its own default backoff).
@@ -488,6 +499,19 @@ func (g *GitHub) ListIssueComments(ctx context.Context, repo string, issue int) 
 	var out []IssueComment
 	err := g.requestPaged(ctx, fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100", repoPath(repo), issue), &out)
 	return out, err
+}
+
+// ListIssueCommentsPage fetches a single page (GitHub returns oldest-first), so
+// callers that only need the oldest comments (e.g. calibration pruning) don't
+// page through thousands of them.
+func (g *GitHub) ListIssueCommentsPage(ctx context.Context, repo string, issue, page, perPage int) ([]IssueComment, error) {
+	var out []IssueComment
+	err := g.request(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=%d&page=%d", repoPath(repo), issue, perPage, page), nil, &out)
+	return out, err
+}
+
+func (g *GitHub) DeleteIssueComment(ctx context.Context, repo string, commentID int64) error {
+	return g.request(ctx, http.MethodDelete, fmt.Sprintf("/repos/%s/issues/comments/%d", repoPath(repo), commentID), nil, nil)
 }
 
 func (g *GitHub) ListReviewComments(ctx context.Context, repo string, pr int) ([]ReviewComment, error) {
