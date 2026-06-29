@@ -218,7 +218,11 @@ func (g *GitHub) GraphQL(ctx context.Context, query string, variables map[string
 					return rl
 				}
 				if g.log != nil {
-					g.log.Printf("github graphql rate limit; backing off %s (attempt %d/%d)", wait.Round(time.Second), attempt+1, g.maxRetries)
+					if rl.Until.IsZero() {
+						g.log.Printf("github graphql rate limit; backing off %s (attempt %d/%d)", wait.Round(time.Second), attempt+1, g.maxRetries)
+					} else {
+						g.log.Printf("github graphql rate limit; waiting %s until reset", wait.Round(time.Second))
+					}
 				}
 				if serr := sleepCtx(ctx, wait); serr != nil {
 					return serr
@@ -481,9 +485,16 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 		if !ok {
 			return nil, rl
 		}
-		attempt++
+		known := !rl.Until.IsZero()
+		if !known {
+			attempt++ // only hint-less backoffs consume the bounded budget
+		}
 		if g.log != nil {
-			g.log.Printf("github %s rate limit on %s %s; backing off %s (attempt %d/%d)", rl.Kind, method, shortURL(fullURL), wait.Round(time.Second), attempt, g.maxRetries)
+			if known {
+				g.log.Printf("github %s rate limit on %s %s; waiting %s until reset", rl.Kind, method, shortURL(fullURL), wait.Round(time.Second))
+			} else {
+				g.log.Printf("github %s rate limit on %s %s; backing off %s (attempt %d/%d)", rl.Kind, method, shortURL(fullURL), wait.Round(time.Second), attempt, g.maxRetries)
+			}
 		}
 		if err := sleepCtx(ctx, wait); err != nil {
 			return nil, err
@@ -509,18 +520,34 @@ func networkRetryWait(base time.Duration, attempt int) time.Duration {
 // honor the reset hint when present, else exponential backoff. ok is false when
 // the retry budget is exhausted (too many attempts, or a single wait exceeding
 // maxWait), signalling the caller to surface the RateLimitError instead.
+// maxRateLimitWait caps how long crq waits out a rate limit that has a known
+// reset. GitHub REST windows reset within an hour, so this only guards against a
+// bogus far-future reset header wedging the process.
+const maxRateLimitWait = 75 * time.Minute
+
+// backoffWait returns how long to wait before retrying a rate-limited request.
+// A known reset (a GitHub primary limit, or a Retry-After) is *waited out* — the
+// limit will clear — capped by maxRateLimitWait and not counted against the
+// bounded retry budget, so the loop/daemon rides it out instead of failing. A
+// hint-less secondary limit uses bounded exponential backoff. ok is false only
+// when the budget is exhausted or a known reset is implausibly far away.
 func (g *GitHub) backoffWait(rl *RateLimitError, attempt int) (time.Duration, bool) {
-	var wait time.Duration
-	if rl.Until.IsZero() {
-		wait = g.backoffBase << uint(attempt) // 2s, 4s, 8s, ... for hint-less secondary limits
-	} else {
-		wait = time.Until(rl.Until) + time.Second // clock-skew buffer
+	if !rl.Until.IsZero() {
+		wait := time.Until(rl.Until) + time.Second // clock-skew buffer
+		if wait < 0 {
+			wait = 0
+		}
+		if wait > maxRateLimitWait {
+			return 0, false
+		}
+		return wait, true
 	}
-	if wait < 0 {
-		wait = 0
-	}
-	if attempt >= g.maxRetries || wait > g.maxWait {
+	if attempt >= g.maxRetries {
 		return 0, false
+	}
+	wait := g.backoffBase << uint(attempt) // 2s, 4s, 8s, ... for hint-less secondary limits
+	if wait > g.maxWait {
+		wait = g.maxWait
 	}
 	return wait, true
 }

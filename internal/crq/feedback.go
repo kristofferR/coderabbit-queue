@@ -168,7 +168,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 }
 
 func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport, int, error) {
-	_, waitCode, err := s.Wait(ctx, repo, pr)
+	waitCode, err := s.waitToFire(ctx, repo, pr)
 	if err != nil {
 		return FeedbackReport{}, 1, err
 	}
@@ -178,6 +178,23 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 	for {
 		report, err := s.Feedback(ctx, repo, pr)
 		if err != nil {
+			// A GitHub REST rate limit (the shared 5000/hr quota) is transient — ride
+			// it out like a network outage rather than failing the agent. Wait for the
+			// reset and push the review deadline past it: GitHub throttling isn't the
+			// bot taking long to review.
+			if wait, ok := rateLimitWait(err); ok {
+				if wait <= 0 {
+					wait = s.cfg.PollInterval
+				}
+				deadline = deadline.Add(wait)
+				if s.log != nil {
+					s.log.Printf("crq: %s#%d GitHub API rate-limited; waiting %s for the reset, then resuming", repo, pr, wait.Round(time.Second))
+				}
+				if serr := sleepCtx(ctx, wait); serr != nil {
+					return report, 1, serr
+				}
+				continue
+			}
 			return report, 1, err
 		}
 		if len(report.Findings) > 0 {
@@ -192,15 +209,17 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		if _, err := s.Pump(ctx); err != nil && s.log != nil {
 			s.log.Printf("warning: pump while waiting for feedback failed: %v", err)
 		}
-		// The feedback-wait budget is for time the bot can actually review. While the
-		// account is rate-limited the PR just stays queued — it can't be reviewed yet —
-		// so that wait must not count against the timeout. Push the deadline past the
-		// block (keeping a full budget after it lifts) instead of giving up (exit 2)
-		// before CodeRabbit could ever run.
+		// While the account is rate-limited the PR can't be reviewed yet — it just
+		// stays queued — so that wait must not count against the feedback timeout, and
+		// there's nothing to fetch until the window clears. Push the deadline past the
+		// block and poll slowly, so a long queue wait doesn't drain the shared GitHub
+		// REST quota (and re-hit its rate limit) every PollInterval.
+		poll := s.cfg.PollInterval
 		var blockedUntil *time.Time
 		if st, _, lerr := s.store.Load(ctx); lerr == nil && st.Blocked.BlockedUntil != nil && st.Blocked.BlockedUntil.After(time.Now()) {
 			blockedUntil = st.Blocked.BlockedUntil
 			deadline = extendDeadlineForBlock(deadline, blockedUntil, time.Now(), s.cfg.FeedbackWaitTimeout)
+			poll = blockedPollInterval(*blockedUntil, time.Now(), s.cfg.PollInterval)
 		}
 		if time.Now().After(deadline) {
 			report.Status = "timeout"
@@ -217,9 +236,50 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		select {
 		case <-ctx.Done():
 			return report, 1, ctx.Err()
-		case <-time.After(s.cfg.PollInterval):
+		case <-time.After(poll):
 		}
 	}
+}
+
+// waitToFire runs Wait (enqueue + coordinated fire), riding out GitHub REST rate
+// limits the same way the feedback loop does instead of failing the agent on a
+// transient throttle. Returns Wait's exit code (3 = already reviewed for head).
+func (s *Service) waitToFire(ctx context.Context, repo string, pr int) (int, error) {
+	for {
+		_, code, err := s.Wait(ctx, repo, pr)
+		if err == nil {
+			return code, nil
+		}
+		wait, ok := rateLimitWait(err)
+		if !ok {
+			return code, err
+		}
+		if wait <= 0 {
+			wait = s.cfg.PollInterval
+		}
+		if s.log != nil {
+			s.log.Printf("crq: %s#%d GitHub API rate-limited before firing; waiting %s for the reset, then retrying", repo, pr, wait.Round(time.Second))
+		}
+		if serr := sleepCtx(ctx, wait); serr != nil {
+			return code, serr
+		}
+	}
+}
+
+// blockedPollInterval slows the feedback poll while the account is rate-limited:
+// nothing can be fetched until the window clears, so wait until just past the
+// reset instead of every PollInterval — capped so the loop still re-checks
+// periodically. Keeps a long queue wait from draining the shared GitHub REST quota.
+func blockedPollInterval(blockedUntil, now time.Time, base time.Duration) time.Duration {
+	const maxWait = 5 * time.Minute
+	wait := blockedUntil.Sub(now) + time.Second
+	if wait < base {
+		return base
+	}
+	if wait > maxWait {
+		return maxWait
+	}
+	return wait
 }
 
 // extendDeadlineForBlock keeps the feedback-wait deadline from elapsing while the
