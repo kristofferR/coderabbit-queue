@@ -69,7 +69,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		return report, err
 	}
 	for _, review := range reviews {
-		if _, ok := bots[review.User.Login]; !ok {
+		if !inBots(bots, review.User.Login) {
 			continue
 		}
 		if head != "" && strings.HasPrefix(review.CommitID, head) {
@@ -91,7 +91,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 			return report, cerr
 		}
 		for _, comment := range comments {
-			if _, ok := bots[comment.User.Login]; !ok {
+			if !inBots(bots, comment.User.Login) {
 				continue
 			}
 			commit := shortOID(firstNonEmpty(comment.CommitID, comment.OriginalCommitID))
@@ -118,7 +118,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	issueComments, err := s.gh.ListIssueComments(ctx, repo, pr)
 	if err == nil {
 		for _, comment := range issueComments {
-			if _, ok := bots[comment.User.Login]; !ok {
+			if !inBots(bots, comment.User.Login) {
 				continue
 			}
 			bodyLower := strings.ToLower(comment.Body)
@@ -457,7 +457,7 @@ func threadFindings(thread reviewThread, bots map[string]struct{}) []Finding {
 	}
 	var out []Finding
 	for _, comment := range thread.Comments.Nodes {
-		if _, ok := bots[comment.Author.Login]; !ok {
+		if !inBots(bots, comment.Author.Login) {
 			continue
 		}
 		commit := shortOID(comment.Commit.OID)
@@ -487,7 +487,7 @@ func dedupeFindings(in []Finding) []Finding {
 	structuredAtLocation := map[string]bool{}
 	for _, finding := range in {
 		if finding.Source != "review_prompt" && finding.Path != "" && finding.Line > 0 {
-			structuredAtLocation[finding.Bot+"|"+finding.Path+"|"+strconv.Itoa(finding.Line)] = true
+			structuredAtLocation[normalizeBotName(finding.Bot)+"|"+finding.Path+"|"+strconv.Itoa(finding.Line)] = true
 		}
 	}
 	out := []Finding{}
@@ -497,10 +497,10 @@ func dedupeFindings(in []Finding) []Finding {
 		if !isActionableFinding(finding) {
 			continue
 		}
-		if finding.Source == "review_prompt" && structuredAtLocation[finding.Bot+"|"+finding.Path+"|"+strconv.Itoa(finding.Line)] {
+		if finding.Source == "review_prompt" && structuredAtLocation[normalizeBotName(finding.Bot)+"|"+finding.Path+"|"+strconv.Itoa(finding.Line)] {
 			continue
 		}
-		key := finding.Bot + "|" + finding.Path + "|" + strconv.Itoa(finding.Line) + "|" + finding.Title + "|" + finding.Body + "|" + finding.ThreadID
+		key := normalizeBotName(finding.Bot) + "|" + finding.Path + "|" + strconv.Itoa(finding.Line) + "|" + finding.Title + "|" + finding.Body + "|" + finding.ThreadID
 		sum := sha256.Sum256([]byte(key))
 		finding.ID = hex.EncodeToString(sum[:])
 		if seen[finding.ID] {
@@ -521,6 +521,27 @@ func botSet(bots []string) map[string]struct{} {
 		}
 	}
 	return out
+}
+
+// inBots matches a comment author against the configured bots, tolerating the
+// "[bot]" suffix: GitHub's REST API reports "coderabbitai[bot]" but GraphQL
+// (review threads) reports "coderabbitai", and the config may use either form.
+// Without this, crq missed every review-thread finding and so never surfaced a
+// thread_id to resolve.
+func inBots(bots map[string]struct{}, login string) bool {
+	if _, ok := bots[login]; ok {
+		return true
+	}
+	stripped := strings.TrimSuffix(login, "[bot]")
+	if _, ok := bots[stripped]; ok {
+		return true
+	}
+	_, ok := bots[stripped+"[bot]"]
+	return ok
+}
+
+func normalizeBotName(login string) string {
+	return strings.TrimSuffix(login, "[bot]")
 }
 
 func severityOf(text string) string {

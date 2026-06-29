@@ -17,7 +17,10 @@ go test ./...
 ./crq help feedback | grep -Fq 'findings[]'
 ./crq help preflight | grep -q 'official local CodeRabbit CLI'
 ./crq help doctor | grep -q 'JSON readiness report'
-CRQ_CONFIG=/tmp/crq-test-missing-env CRQ_REPO=owner/crq-state CRQ_ISSUE=1 ./crq doctor | jq -e '
+# doctor exits non-zero when not ready (the documented path on a bare CI host);
+# capture its JSON so pipefail doesn't fail the test before jq validates it.
+doctor_json="$(CRQ_CONFIG=/tmp/crq-test-missing-env CRQ_REPO=owner/crq-state CRQ_ISSUE=1 ./crq doctor || true)"
+printf '%s' "$doctor_json" | jq -e '
   .status == "doctor"
   and (.ready | type == "boolean")
   and (.agent_commands | index("crq preflight --type uncommitted") != null)
