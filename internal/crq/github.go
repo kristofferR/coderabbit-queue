@@ -32,10 +32,14 @@ func (e *APIError) Error() string {
 }
 
 type GitHub struct {
-	token      string
-	httpClient *http.Client
-	apiBase    string
-	graphBase  string
+	token       string
+	httpClient  *http.Client
+	apiBase     string
+	graphBase   string
+	log         Logger
+	maxRetries  int
+	maxWait     time.Duration
+	backoffBase time.Duration
 }
 
 func NewGitHub(ctx context.Context) (*GitHub, error) {
@@ -52,28 +56,38 @@ func NewGitHub(ctx context.Context) (*GitHub, error) {
 	if token == "" {
 		return nil, errors.New("GitHub token not found (set GITHUB_TOKEN/GH_TOKEN or run 'gh auth login')")
 	}
+	maxWait := 120 * time.Second
+	if v := strings.TrimSpace(os.Getenv("CRQ_GITHUB_MAX_WAIT")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			maxWait = d
+		}
+	}
+	maxRetries := 6
+	if v := strings.TrimSpace(os.Getenv("CRQ_GITHUB_RETRIES")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			maxRetries = n
+		}
+	}
 	return &GitHub{
-		token:      token,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		apiBase:    "https://api.github.com",
-		graphBase:  "https://api.github.com/graphql",
+		token:       token,
+		httpClient:  &http.Client{Timeout: 30 * time.Second},
+		apiBase:     "https://api.github.com",
+		graphBase:   "https://api.github.com/graphql",
+		maxRetries:  maxRetries,
+		maxWait:     maxWait,
+		backoffBase: 2 * time.Second,
 	}, nil
 }
 
+// SetLogger attaches a logger so rate-limit backoff/retry is visible to humans and the daemon log.
+func (g *GitHub) SetLogger(l Logger) { g.log = l }
+
 func (g *GitHub) request(ctx context.Context, method, path string, in, out any) error {
-	body, err := encodeBody(in)
+	body, err := marshalBody(in)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, method, g.apiBase+path, body)
-	if err != nil {
-		return err
-	}
-	g.decorate(req)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := g.httpClient.Do(req)
+	resp, err := g.send(ctx, method, g.apiBase+path, body)
 	if err != nil {
 		return err
 	}
@@ -100,12 +114,7 @@ func (g *GitHub) requestPaged(ctx context.Context, path string, out any) error {
 	}
 	next := g.apiBase + path
 	for next != "" {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, next, nil)
-		if err != nil {
-			return err
-		}
-		g.decorate(req)
-		resp, err := g.httpClient.Do(req)
+		resp, err := g.send(ctx, http.MethodGet, next, nil)
 		if err != nil {
 			return err
 		}
@@ -123,26 +132,20 @@ func (g *GitHub) requestPaged(ctx context.Context, path string, out any) error {
 			resp.Body.Close()
 			return err
 		}
+		link := resp.Header.Get("Link")
 		resp.Body.Close()
 		value.Elem().Set(reflect.AppendSlice(value.Elem(), reflect.ValueOf(page).Elem()))
-		next = nextPage(resp.Header.Get("Link"))
+		next = nextPage(link)
 	}
 	return nil
 }
 
 func (g *GitHub) GraphQL(ctx context.Context, query string, variables map[string]any, out any) error {
-	payload := map[string]any{"query": query, "variables": variables}
-	body, err := encodeBody(payload)
+	body, err := marshalBody(map[string]any{"query": query, "variables": variables})
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.graphBase, body)
-	if err != nil {
-		return err
-	}
-	g.decorate(req)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := g.httpClient.Do(req)
+	resp, err := g.send(ctx, http.MethodPost, g.graphBase, body)
 	if err != nil {
 		return err
 	}
@@ -154,6 +157,7 @@ func (g *GitHub) GraphQL(ctx context.Context, query string, variables map[string
 	var envelope struct {
 		Data   json.RawMessage `json:"data"`
 		Errors []struct {
+			Type    string `json:"type"`
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
@@ -161,7 +165,17 @@ func (g *GitHub) GraphQL(ctx context.Context, query string, variables map[string
 		return err
 	}
 	if len(envelope.Errors) > 0 {
-		return errors.New(envelope.Errors[0].Message)
+		msg := envelope.Errors[0].Message
+		if strings.EqualFold(envelope.Errors[0].Type, "RATE_LIMITED") || strings.Contains(strings.ToLower(msg), "rate limit") {
+			rl := &RateLimitError{Kind: "graphql", Method: http.MethodPost, URL: g.graphBase, Remaining: -1}
+			if reset := resp.Header.Get("X-RateLimit-Reset"); reset != "" {
+				if epoch, err := strconv.ParseInt(reset, 10, 64); err == nil {
+					rl.Until = time.Unix(epoch, 0)
+				}
+			}
+			return rl
+		}
+		return errors.New(msg)
 	}
 	if out == nil {
 		return nil
@@ -176,15 +190,154 @@ func (g *GitHub) decorate(req *http.Request) {
 	req.Header.Set("User-Agent", "crq/"+Version)
 }
 
-func encodeBody(in any) (io.Reader, error) {
+func marshalBody(in any) ([]byte, error) {
 	if in == nil {
 		return nil, nil
 	}
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(in); err != nil {
-		return nil, err
+	return json.Marshal(in)
+}
+
+// RateLimitError is returned when GitHub rate-limits a request and crq could not
+// wait it out within its retry budget. It carries the reset time so callers (and
+// humans) get an actionable message instead of an opaque 403.
+type RateLimitError struct {
+	Method    string
+	URL       string
+	Kind      string // "primary", "secondary", or "graphql"
+	Remaining int    // x-ratelimit-remaining when known, else -1
+	Until     time.Time
+}
+
+func (e *RateLimitError) Error() string {
+	if e.Until.IsZero() {
+		return fmt.Sprintf("github %s rate limit hit (%s %s); retry shortly", e.Kind, e.Method, shortURL(e.URL))
 	}
-	return &buf, nil
+	wait := time.Until(e.Until).Round(time.Second)
+	if wait < 0 {
+		wait = 0
+	}
+	return fmt.Sprintf("github %s rate limit hit (%s %s); resets %s (~%s)", e.Kind, e.Method, shortURL(e.URL), e.Until.UTC().Format(time.RFC3339), wait)
+}
+
+// IsRateLimited reports whether err is (or wraps) a GitHub rate-limit error.
+func IsRateLimited(err error) bool {
+	var rl *RateLimitError
+	return errors.As(err, &rl)
+}
+
+// rateLimitWait returns how long to wait before retrying a rate-limited error.
+// The bool is true when err is a rate limit; the duration is 0 when GitHub gave
+// no reset hint (the caller should apply its own default backoff).
+func rateLimitWait(err error) (time.Duration, bool) {
+	var rl *RateLimitError
+	if !errors.As(err, &rl) {
+		return 0, false
+	}
+	if rl.Until.IsZero() {
+		return 0, true
+	}
+	d := time.Until(rl.Until)
+	if d < 0 {
+		d = 0
+	}
+	return d, true
+}
+
+// rateLimitFrom classifies a 403/429 response as a GitHub primary or secondary
+// rate limit, or returns nil if it is an ordinary error (e.g. a permission 403).
+func rateLimitFrom(resp *http.Response, body string) *RateLimitError {
+	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
+		return nil
+	}
+	lower := strings.ToLower(body)
+	// Secondary limit: honor an explicit Retry-After (seconds).
+	if ra := strings.TrimSpace(resp.Header.Get("Retry-After")); ra != "" {
+		if secs, err := strconv.Atoi(ra); err == nil {
+			return &RateLimitError{Kind: "secondary", Remaining: -1, Until: time.Now().Add(time.Duration(secs) * time.Second)}
+		}
+	}
+	remaining := -1
+	if r := resp.Header.Get("X-RateLimit-Remaining"); r != "" {
+		if n, err := strconv.Atoi(r); err == nil {
+			remaining = n
+		}
+	}
+	resetUntil := func() time.Time {
+		if reset := resp.Header.Get("X-RateLimit-Reset"); reset != "" {
+			if epoch, err := strconv.ParseInt(reset, 10, 64); err == nil {
+				return time.Unix(epoch, 0)
+			}
+		}
+		return time.Time{}
+	}
+	// Primary limit: the quota is exhausted; wait until the window resets.
+	if remaining == 0 || strings.Contains(lower, "api rate limit exceeded") {
+		return &RateLimitError{Kind: "primary", Remaining: 0, Until: resetUntil()}
+	}
+	// Secondary/abuse limit without a Retry-After header: caller backs off.
+	if strings.Contains(lower, "secondary rate limit") || strings.Contains(lower, "exceeded a secondary") || strings.Contains(lower, "abuse detection") {
+		return &RateLimitError{Kind: "secondary", Remaining: remaining}
+	}
+	return nil
+}
+
+// send performs an HTTP request with rate-limit awareness: on a GitHub rate
+// limit it backs off (honoring Retry-After / X-RateLimit-Reset, else exponential
+// backoff) and retries, up to maxRetries or until a single wait would exceed
+// maxWait. Non-rate-limit responses are returned to the caller unchanged.
+func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) (*http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		var rdr io.Reader
+		if body != nil {
+			rdr = bytes.NewReader(body)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, fullURL, rdr)
+		if err != nil {
+			return nil, err
+		}
+		g.decorate(req)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := g.httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
+			return resp, nil
+		}
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		rl := rateLimitFrom(resp, string(b))
+		if rl == nil {
+			return nil, &APIError{Method: method, URL: fullURL, Status: resp.StatusCode, Body: string(b)}
+		}
+		rl.Method, rl.URL = method, fullURL
+		wait := time.Duration(0)
+		if rl.Until.IsZero() {
+			wait = g.backoffBase << uint(attempt) // 2s, 4s, 8s, ... for hint-less secondary limits
+		} else {
+			wait = time.Until(rl.Until) + time.Second // clock-skew buffer
+		}
+		if wait < 0 {
+			wait = 0
+		}
+		if attempt >= g.maxRetries || wait > g.maxWait {
+			return nil, rl
+		}
+		if g.log != nil {
+			g.log.Printf("github %s rate limit on %s %s; backing off %s (attempt %d/%d)", rl.Kind, method, shortURL(fullURL), wait.Round(time.Second), attempt+1, g.maxRetries)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+}
+
+func shortURL(u string) string {
+	return strings.TrimPrefix(u, "https://api.github.com")
 }
 
 func nextPage(link string) string {

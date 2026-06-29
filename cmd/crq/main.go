@@ -67,6 +67,7 @@ func run(ctx context.Context, args []string) int {
 		fatal(err)
 		return 1
 	}
+	gh.SetLogger(stderrLogger{})
 	store := crq.NewGitStateStore(cfg, gh)
 	service := crq.NewService(cfg, gh, store, stderrLogger{})
 
