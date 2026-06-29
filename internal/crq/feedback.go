@@ -173,6 +173,8 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		return FeedbackReport{}, 1, err
 	}
 	deadline := time.Now().Add(s.cfg.FeedbackWaitTimeout)
+	start := time.Now()
+	var lastLog time.Time
 	for {
 		report, err := s.Feedback(ctx, repo, pr)
 		if err != nil {
@@ -192,12 +194,36 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		if _, err := s.Pump(ctx); err != nil && s.log != nil {
 			s.log.Printf("warning: pump while waiting for feedback failed: %v", err)
 		}
+		if s.log != nil && time.Since(lastLog) >= 30*time.Second {
+			s.log.Printf("crq: %s#%d waiting for review feedback on %s — reviewed %s (%s / %s)", repo, pr, report.Head, reviewedSummary(report.ReviewedBy), time.Since(start).Round(time.Second), s.cfg.FeedbackWaitTimeout)
+			lastLog = time.Now()
+		}
 		select {
 		case <-ctx.Done():
 			return report, 1, ctx.Err()
 		case <-time.After(s.cfg.PollInterval):
 		}
 	}
+}
+
+func reviewedSummary(m map[string]bool) string {
+	if len(m) == 0 {
+		return "—"
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		state := "waiting"
+		if m[k] {
+			state = "done"
+		}
+		parts = append(parts, k+"="+state)
+	}
+	return strings.Join(parts, " ")
 }
 
 type ResolvedThread struct {
