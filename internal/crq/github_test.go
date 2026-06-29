@@ -1,12 +1,53 @@
 package crq
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestSendRetriesTransientThenSucceeds(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "test-token") // refreshToken resolves from env, no gh exec
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch atomic.AddInt32(&calls, 1) {
+		case 1:
+			w.WriteHeader(http.StatusServiceUnavailable) // transient 5xx -> retry
+		case 2:
+			w.WriteHeader(http.StatusUnauthorized) // 401 -> refresh token + retry
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}
+	}))
+	defer srv.Close()
+
+	g := &GitHub{
+		token:          "test-token",
+		httpClient:     srv.Client(),
+		apiBase:        srv.URL,
+		maxRetries:     5,
+		maxWait:        time.Second,
+		backoffBase:    time.Millisecond,
+		networkMaxWait: time.Second,
+	}
+	resp, err := g.send(context.Background(), http.MethodGet, srv.URL+"/x", nil)
+	if err != nil {
+		t.Fatalf("send returned error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 after retries, got %d", resp.StatusCode)
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("expected 3 attempts (503, 401, 200), got %d", got)
+	}
+}
 
 type fakeTimeoutErr struct{}
 
