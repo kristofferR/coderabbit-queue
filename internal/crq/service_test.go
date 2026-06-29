@@ -304,6 +304,40 @@ func TestBotReviewedHeadToleratesBotSuffix(t *testing.T) {
 	}
 }
 
+func TestNeedsReviewToleratesBotSuffix(t *testing.T) {
+	// CRQ_BOT configured suffix-less, but REST reviews/comments come back as coderabbitai[bot].
+	cfg := Config{Bot: "coderabbitai", GateRepo: "o/gate", Scope: []string{"o"}, ReviewDoneMarker: "summarize by coderabbit.ai"}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("o/repo", 5)] = pull
+	review := Review{CommitID: "abcdef1234567890"}
+	review.User.Login = "coderabbitai[bot]"
+	gh.reviews[fakeKey("o/repo", 5)] = []Review{review}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	need, err := svc.needsReview(context.Background(), State{}, "o/repo", 5, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if need {
+		t.Fatal("incremental autoreview should not re-enqueue a head already reviewed by a suffixed bot login")
+	}
+
+	gh.reviews[fakeKey("o/repo", 5)] = nil
+	comment := IssueComment{Body: "finished; summarize by coderabbit.ai"}
+	comment.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/repo", 5)] = []IssueComment{comment}
+	need, err = svc.needsReview(context.Background(), State{}, "o/repo", 5, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if need {
+		t.Fatal("first-review autoreview should not re-enqueue a PR with a suffixed bot completion comment")
+	}
+}
+
 func TestPumpDropsClosedPRWithoutFiring(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{

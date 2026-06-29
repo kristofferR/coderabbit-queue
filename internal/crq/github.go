@@ -818,7 +818,11 @@ func (g *GitHub) EachOpenPR(ctx context.Context, target string, byRepo bool, fn 
 	if byRepo {
 		query += "repo:" + target
 	} else {
-		query += g.searchOwnerQualifier(ctx, target) + target
+		qualifier, err := g.searchOwnerQualifier(ctx, target)
+		if err != nil {
+			return err
+		}
+		query += qualifier + target
 	}
 	page := 1
 	for {
@@ -874,9 +878,9 @@ func (g *GitHub) SearchOpenPRs(ctx context.Context, target string, byRepo bool, 
 // searchOwnerQualifier returns the issue-search owner qualifier for a non-repo
 // scope: "org:" for organizations, "user:" for user accounts. GitHub's search
 // distinguishes the two, so an org scope returns nothing under "user:". The lookup
-// is cached per login (an account's type is stable within a run) and falls back to
-// "user:" without caching if the type can't be read.
-func (g *GitHub) searchOwnerQualifier(ctx context.Context, login string) string {
+// is cached per login (an account's type is stable within a run). Lookup failures
+// are returned so callers do not silently search the wrong scope.
+func (g *GitHub) searchOwnerQualifier(ctx context.Context, login string) (string, error) {
 	g.acctTypeMu.Lock()
 	if g.acctType == nil {
 		g.acctType = map[string]string{}
@@ -884,13 +888,13 @@ func (g *GitHub) searchOwnerQualifier(ctx context.Context, login string) string 
 	cached, ok := g.acctType[login]
 	g.acctTypeMu.Unlock()
 	if ok {
-		return cached
+		return cached, nil
 	}
 	var acct struct {
 		Type string `json:"type"`
 	}
 	if err := g.request(ctx, http.MethodGet, "/users/"+login, nil, &acct); err != nil {
-		return "user:" // best-effort; don't cache a failed lookup
+		return "", err
 	}
 	qualifier := "user:"
 	if strings.EqualFold(acct.Type, "Organization") {
@@ -899,7 +903,7 @@ func (g *GitHub) searchOwnerQualifier(ctx context.Context, login string) string 
 	g.acctTypeMu.Lock()
 	g.acctType[login] = qualifier
 	g.acctTypeMu.Unlock()
-	return qualifier
+	return qualifier, nil
 }
 
 type SearchPR struct {

@@ -1,6 +1,7 @@
 package crq
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -320,5 +321,75 @@ func TestBlockedPollInterval(t *testing.T) {
 	// Block about to clear (within base) → never poll faster than the base interval.
 	if got := blockedPollInterval(now.Add(3*time.Second), now, base); got != base {
 		t.Fatalf("imminent block: want %v, got %v", base, got)
+	}
+}
+
+func TestLoopReportsClosedPRSkip(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		RequiredBots:        []string{"coderabbitai[bot]"},
+		PollInterval:        time.Millisecond,
+		FeedbackWaitTimeout: time.Millisecond,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "closed"
+	pull.Merged = true
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	report, code, err := svc.Loop(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 || report.Status != "skipped" || report.Reason != "pr closed" {
+		t.Fatalf("closed PR should be a terminal skipped report, code=%d report=%#v", code, report)
+	}
+}
+
+func TestLoopRequiresAllRequiredBotsAfterDedupe(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		RequiredBots:        []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
+		PollInterval:        time.Nanosecond,
+		FeedbackWaitTimeout: time.Nanosecond,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	review := Review{CommitID: "abcdef1234567890"}
+	review.User.Login = "coderabbitai[bot]"
+	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Fired[QueueKey("owner/repo", 12)] = "abcdef123"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	report, code, err := svc.Loop(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code == 0 {
+		t.Fatalf("deduped CodeRabbit review must not succeed before every required bot reviews: %#v", report)
+	}
+	if report.Status != "timeout" || report.ReviewedBy["chatgpt-codex-connector[bot]"] {
+		t.Fatalf("expected timeout waiting for the missing required bot, code=%d report=%#v", code, report)
 	}
 }

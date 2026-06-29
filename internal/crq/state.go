@@ -123,19 +123,42 @@ func (s *State) Normalize(cfg Config) {
 		// a plain lexicographic trim could drop that just-written marker for a repo
 		// whose name sorts early — making crq forget the head was already requested
 		// and fire a duplicate review. Only the older remainder is trimmed.
-		recent := map[string]bool{}
-		for _, h := range s.History {
-			recent[strings.ToLower(QueueKey(h.Repo, h.PR))] = true
-		}
 		type kv struct {
 			Key string
 			Val string
 		}
+		type historyMarker struct {
+			Key    string
+			Commit string
+			At     time.Time
+			Index  int
+		}
+		recent := make([]historyMarker, 0, len(s.History))
+		for i, h := range s.History {
+			key := strings.ToLower(QueueKey(h.Repo, h.PR))
+			if fired := s.Fired[key]; fired != "" && (h.Commit == "" || h.Commit == fired) {
+				recent = append(recent, historyMarker{Key: key, Commit: fired, At: h.At, Index: i})
+			}
+		}
+		sort.SliceStable(recent, func(i, j int) bool {
+			if !recent[i].At.Equal(recent[j].At) {
+				return recent[i].At.After(recent[j].At)
+			}
+			return recent[i].Index < recent[j].Index
+		})
 		protected := map[string]string{}
+		for _, marker := range recent {
+			if len(protected) >= cfg.FiredMax {
+				break
+			}
+			if _, ok := protected[marker.Key]; ok {
+				continue
+			}
+			protected[marker.Key] = marker.Commit
+		}
 		items := make([]kv, 0, len(s.Fired))
 		for k, v := range s.Fired {
-			if recent[k] {
-				protected[k] = v
+			if _, ok := protected[k]; ok {
 				continue
 			}
 			items = append(items, kv{k, v})
