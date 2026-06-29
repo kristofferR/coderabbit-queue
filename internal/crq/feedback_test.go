@@ -167,6 +167,33 @@ func TestInBotsToleratesBotSuffix(t *testing.T) {
 	}
 }
 
+func TestMarkReviewedFlipsConfiguredKeyAcrossSuffix(t *testing.T) {
+	// A GraphQL login without the [bot] suffix must flip the configured suffixed
+	// key in place, not insert a divergent key that would leave convergence (which
+	// ANDs every key) permanently false.
+	reviewedBy := map[string]bool{"coderabbitai[bot]": false, "chatgpt-codex": false}
+	markReviewed(reviewedBy, "coderabbitai")
+	if !reviewedBy["coderabbitai[bot]"] || len(reviewedBy) != 2 {
+		t.Fatalf("expected the configured key flipped without inserting a new one: %#v", reviewedBy)
+	}
+	markReviewed(reviewedBy, "chatgpt-codex") // exact match
+	if !reviewedBy["chatgpt-codex"] {
+		t.Fatalf("exact match failed: %#v", reviewedBy)
+	}
+	// Configured key without suffix, REST login with suffix — the inverse case.
+	rb := map[string]bool{"coderabbitai": false}
+	markReviewed(rb, "coderabbitai[bot]")
+	if !rb["coderabbitai"] || len(rb) != 1 {
+		t.Fatalf("a suffixed REST login should flip the suffix-less key: %#v", rb)
+	}
+	// An unknown login is a no-op: no panic, no spurious insert.
+	rb2 := map[string]bool{"coderabbitai[bot]": false}
+	markReviewed(rb2, "some-human")
+	if rb2["coderabbitai[bot]"] || len(rb2) != 1 {
+		t.Fatalf("unknown login must be a no-op: %#v", rb2)
+	}
+}
+
 func TestThreadFindingsMatchesGraphQLBotLogin(t *testing.T) {
 	bots := botSet([]string{"coderabbitai[bot]"})
 	var th reviewThread

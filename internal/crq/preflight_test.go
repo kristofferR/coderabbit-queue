@@ -1,8 +1,13 @@
 package crq
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParsePreflightStream(t *testing.T) {
@@ -35,6 +40,27 @@ func TestParsePreflightStream(t *testing.T) {
 	}
 	if report.Complete["status"] != "review_completed" {
 		t.Fatalf("complete mismatch: %#v", report.Complete)
+	}
+}
+
+func TestPreflightParseFailureReportsExitOne(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake binary is POSIX-only")
+	}
+	// A fake CodeRabbit CLI that emits a non-JSON line then exits 0. The parse
+	// failure must surface as exit code 1 — our own cancel() of the child (to
+	// unblock Wait) must not be misreported as a timeout/cancellation (exit 2).
+	dir := t.TempDir()
+	script := filepath.Join(dir, "cr")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho 'not json'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	report, code, err := Preflight(context.Background(), PreflightOptions{Binary: script, Timeout: 10 * time.Second})
+	if code != 1 || report.ExitCode != 1 {
+		t.Fatalf("expected exit code 1 for a parse failure, got code=%d report.ExitCode=%d (err=%v)", code, report.ExitCode, err)
+	}
+	if report.Status != "error" || err == nil {
+		t.Fatalf("expected an error report, got status=%q err=%v", report.Status, err)
 	}
 }
 

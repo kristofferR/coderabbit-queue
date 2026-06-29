@@ -23,18 +23,9 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 	for {
 		held, err := s.acquireLeader(ctx, owner, token)
 		if err != nil {
-			if wait, ok := rateLimitWait(err); ok {
-				wait = s.rateLimitBackoff(wait)
-				if s.log != nil {
-					s.log.Printf("autoreview: %v; sleeping %s before next pass", err, wait.Round(time.Second))
-				}
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(wait):
-				}
-				if opts.Once {
-					return nil
+			if _, ok := rateLimitWait(err); ok {
+				if cont, serr := s.sleepRateLimit(ctx, opts, "leader", err); serr != nil || !cont {
+					return serr
 				}
 				continue
 			}
@@ -57,11 +48,28 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 				s.log.Printf("autoreview: lost leadership mid-pass; standing by")
 			}
 		} else {
+			// A rate-limited pass means the following API calls will keep failing —
+			// sleep out the window instead of immediately pumping and re-scanning,
+			// which would just hammer the quota. Skip Pump entirely in that case.
+			if _, ok := rateLimitWait(passErr); ok {
+				if cont, serr := s.sleepRateLimit(ctx, opts, "pass", passErr); serr != nil || !cont {
+					return serr
+				}
+				continue
+			}
 			if passErr != nil && s.log != nil {
 				s.log.Printf("warning: autoreview pass failed: %v", passErr)
 			}
-			if _, err := s.Pump(ctx); err != nil && s.log != nil {
-				s.log.Printf("warning: autoreview pump failed: %v", err)
+			if _, err := s.Pump(ctx); err != nil {
+				if _, ok := rateLimitWait(err); ok {
+					if cont, serr := s.sleepRateLimit(ctx, opts, "pump", err); serr != nil || !cont {
+						return serr
+					}
+					continue
+				}
+				if s.log != nil {
+					s.log.Printf("warning: autoreview pump failed: %v", err)
+				}
 			}
 		}
 		if opts.Once {
@@ -90,6 +98,29 @@ func (s *Service) rateLimitBackoff(wait time.Duration) time.Duration {
 		wait = time.Hour
 	}
 	return wait
+}
+
+// sleepRateLimit waits out a GitHub rate-limit window that an autoreview
+// leader/pass/pump step hit, using the same bounded backoff as the leader path so
+// a throttle pauses the daemon instead of spinning failing API calls. cause must
+// be a rate-limit error (the caller checks rateLimitWait first). It returns
+// cont=false (nil error) when opts.Once means we should stop after the wait, and a
+// non-nil error only when the context is cancelled mid-wait.
+func (s *Service) sleepRateLimit(ctx context.Context, opts AutoOptions, stage string, cause error) (cont bool, err error) {
+	wait, _ := rateLimitWait(cause)
+	wait = s.rateLimitBackoff(wait)
+	if s.log != nil {
+		s.log.Printf("autoreview: %s rate-limited (%v); sleeping %s before next pass", stage, cause, wait.Round(time.Second))
+	}
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-time.After(wait):
+	}
+	if opts.Once {
+		return false, nil
+	}
+	return true, nil
 }
 
 func (s *Service) acquireLeader(ctx context.Context, owner, token string) (bool, error) {
@@ -135,6 +166,15 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 		}
 		byRepo = true
 	}
+	// Load the queue snapshot once per pass and reuse it across candidates: a
+	// git-backed Load is GetRef+GetCommit+GetTree+GetBlob, so reloading it per PR
+	// would burn the shared REST quota on a large scan. The heartbeat refreshes it,
+	// and enqueueBatch re-checks Contains under CAS, so a slightly stale snapshot
+	// during collection is safe.
+	state, _, err := s.store.Load(ctx)
+	if err != nil {
+		return err
+	}
 	scanned := 0
 	var candidates []SearchPR
 	lastBeat := time.Now()
@@ -142,7 +182,10 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 		if scanned >= s.cfg.AutoReviewMaxScan {
 			break
 		}
-		prs, err := s.gh.SearchOpenPRs(ctx, target, byRepo, 1000)
+		// Cap the search to the remaining scan budget so one busy target can't burn
+		// many search requests fetching slots this pass will never use.
+		remaining := s.cfg.AutoReviewMaxScan - scanned
+		prs, err := s.gh.SearchOpenPRs(ctx, target, byRepo, remaining)
 		if err != nil {
 			return err
 		}
@@ -161,16 +204,17 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			// Heartbeat: renew the lease partway through a long pass so a standby
 			// can't steal it mid-scan and cause brief double-leadership (#4).
 			if s.cfg.LeaderTTL > 0 && time.Since(lastBeat) >= s.cfg.LeaderTTL/2 {
-				_, held, err := s.renewLeader(ctx, owner, token)
+				st, held, err := s.renewLeader(ctx, owner, token)
 				if err != nil {
 					return err
 				}
 				if !held {
 					return errLostLeadership
 				}
+				state = st // reuse the freshly written snapshot for later candidates
 				lastBeat = time.Now()
 			}
-			need, err := s.needsReview(ctx, repo, pr.Number, opts.Incremental)
+			need, err := s.needsReview(ctx, state, repo, pr.Number, opts.Incremental)
 			if err != nil {
 				if s.log != nil {
 					s.log.Printf("warning: autoreview skipped %s#%d: %v", repo, pr.Number, err)
@@ -188,12 +232,10 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 
 // needsReview reports whether an open PR should be enqueued for review: not
 // already queued/fired for its current head, and (incremental) the bot hasn't
-// reviewed that head yet, or (first-review) it has never been reviewed.
-func (s *Service) needsReview(ctx context.Context, repo string, pr int, incremental bool) (bool, error) {
-	state, _, err := s.store.Load(ctx)
-	if err != nil {
-		return false, err
-	}
+// reviewed that head yet, or (first-review) it has never been reviewed. It uses
+// the caller's preloaded queue snapshot for the queued/fired checks so a pass
+// doesn't reload git-backed state once per candidate.
+func (s *Service) needsReview(ctx context.Context, state State, repo string, pr int, incremental bool) (bool, error) {
 	if state.Contains(repo, pr) {
 		return false, nil
 	}
