@@ -74,7 +74,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 			continue
 		}
 		if head != "" && strings.HasPrefix(review.CommitID, head) {
-			report.ReviewedBy[review.User.Login] = true
+			markReviewed(report.ReviewedBy, review.User.Login)
 		}
 		if head != "" && review.CommitID != "" && !strings.HasPrefix(review.CommitID, head) {
 			continue
@@ -127,7 +127,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 				continue
 			}
 			if strings.Contains(bodyLower, strings.ToLower(s.cfg.ReviewDoneMarker)) {
-				report.ReviewedBy[comment.User.Login] = true
+				markReviewed(report.ReviewedBy, comment.User.Login)
 			}
 			if comment.User.Login == s.cfg.Bot {
 				continue
@@ -488,11 +488,11 @@ var (
 	// Line headers come backticked in "Outside diff range comments" (`12-15`:) and
 	// un-backticked in "Comments failed to post" (12-15:) — accept both.
 	detailHeaderRE = regexp.MustCompile("^`?([0-9]+)(?:\\s*-\\s*([0-9]+))?`?: *(.*)$")
-	promptBlockRE   = regexp.MustCompile("(?is)<summary>[^<]*Prompt for all review comments with AI agents[^<]*</summary>.*?```\\s*(.*?)\\s*```")
-	promptFileRE    = regexp.MustCompile("^In (?:`@([^`]+)`|@([^:]+)):$")
-	promptBulletRE  = regexp.MustCompile("^- (?:Around line|Line)\\s+([0-9]+)(?:\\s*-\\s*([0-9]+))?:\\s*(.*)$")
-	boldTitleRE     = regexp.MustCompile(`(?m)^\*\*([^*\n]+)\*\*`)
-	crCommentRE     = regexp.MustCompile(`<!--\s*cr-comment:v1:([a-f0-9]+)\s*-->`)
+	promptBlockRE  = regexp.MustCompile("(?is)<summary>[^<]*Prompt for all review comments with AI agents[^<]*</summary>.*?```\\s*(.*?)\\s*```")
+	promptFileRE   = regexp.MustCompile("^In (?:`@([^`]+)`|@([^:]+)):$")
+	promptBulletRE = regexp.MustCompile("^- (?:Around line|Line)\\s+([0-9]+)(?:\\s*-\\s*([0-9]+))?:\\s*(.*)$")
+	boldTitleRE    = regexp.MustCompile(`(?m)^\*\*([^*\n]+)\*\*`)
+	crCommentRE    = regexp.MustCompile(`<!--\s*cr-comment:v1:([a-f0-9]+)\s*-->`)
 )
 
 func parseReviewBodyFindings(review Review, bot string) []Finding {
@@ -712,6 +712,21 @@ func inBots(bots map[string]struct{}, login string) bool {
 
 func normalizeBotName(login string) string {
 	return strings.TrimSuffix(login, "[bot]")
+}
+
+// markReviewed flips the configured required-bot key that login matches to true,
+// tolerating the "[bot]" suffix difference between REST ("coderabbitai[bot]") and
+// GraphQL ("coderabbitai") logins. It updates the existing key rather than
+// inserting the raw login, so convergence (which ANDs every key) can't be broken
+// by a duplicate key that never flips true.
+func markReviewed(reviewedBy map[string]bool, login string) {
+	norm := normalizeBotName(login)
+	for bot := range reviewedBy {
+		if bot == login || normalizeBotName(bot) == norm {
+			reviewedBy[bot] = true
+			return
+		}
+	}
 }
 
 func severityOf(text string) string {

@@ -85,8 +85,11 @@ crq debug state
 crq debug refresh
 ```
 
-JSON contract: `findings` is always an array. Each finding has `bot`, `severity`,
-`path`, `line`, `title`, `body`, `source`, `url`, and sometimes `thread_id`.
+JSON contract: `findings` is always an array. Each finding always has `bot`,
+`severity`, `title`, `body`, and `source`. The location fields `path`, `line`,
+`url`, and `thread_id` are optional and omitted when CodeRabbit doesn't supply
+them (e.g. review-body / outside-diff findings have no `path`/`line`, and only
+inline review threads carry a `thread_id`) — parse them defensively.
 
 Optional local preflight: if CodeRabbit CLI is installed, `cr review --agent`
 can review local git changes before pushing. That does not replace `crq loop`;

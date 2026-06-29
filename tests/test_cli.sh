@@ -17,9 +17,14 @@ go test ./...
 ./crq help feedback | grep -Fq 'findings[]'
 ./crq help preflight | grep -q 'official local CodeRabbit CLI'
 ./crq help doctor | grep -q 'JSON readiness report'
-# doctor exits non-zero when not ready (the documented path on a bare CI host);
-# capture its JSON so pipefail doesn't fail the test before jq validates it.
-doctor_json="$(CRQ_CONFIG=/tmp/crq-test-missing-env CRQ_REPO=owner/crq-state CRQ_ISSUE=1 ./crq doctor || true)"
+# doctor exits 0 when ready and 1 when not (the documented path on a bare CI
+# host). Capture both the JSON and the exit code, and assert it is exactly 0 or 1
+# — a bare "|| true" would hide a regression that changed the exit contract.
+set +e
+doctor_json="$(CRQ_CONFIG=/tmp/crq-test-missing-env CRQ_REPO=owner/crq-state CRQ_ISSUE=1 ./crq doctor)"
+doctor_rc=$?
+set -e
+[ "$doctor_rc" -eq 0 ] || [ "$doctor_rc" -eq 1 ] || { echo "crq doctor exited $doctor_rc, expected 0 or 1" >&2; exit 1; }
 printf '%s' "$doctor_json" | jq -e '
   .status == "doctor"
   and (.ready | type == "boolean")

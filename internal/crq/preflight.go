@@ -118,13 +118,23 @@ func Preflight(ctx context.Context, opts PreflightOptions) (PreflightReport, int
 	waitErr := cmd.Wait()
 	report.Stderr = trimForReport(stderr.String(), 4000)
 	report.DurationMS = time.Since(start).Milliseconds()
-	if runCtx.Err() != nil {
+	// A genuine parse failure must surface as exit 1 even though we cancel() the
+	// child to unblock Wait — our own cancellation would otherwise read back as
+	// runCtx.Err() and get misreported as a timeout (exit 2). Distinguish the
+	// three cases by their actual cause: caller cancellation (parent ctx), a real
+	// timeout (DeadlineExceeded), then a parse failure.
+	switch {
+	case ctx.Err() != nil:
+		report.Status = "error"
+		report.Error = ctx.Err().Error()
+		report.ExitCode = 2
+		return report, 2, ctx.Err()
+	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
 		report.Status = "error"
 		report.Error = runCtx.Err().Error()
 		report.ExitCode = 2
 		return report, 2, runCtx.Err()
-	}
-	if parseErr != nil {
+	case parseErr != nil:
 		report.Status = "error"
 		report.Error = parseErr.Error()
 		report.ExitCode = 1

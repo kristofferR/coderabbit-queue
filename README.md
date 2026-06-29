@@ -290,7 +290,10 @@ while :; do
 done
 ```
 
-A ready-to-use version lives in [`examples/review-loop.sh`](examples/review-loop.sh).
+[`examples/review-loop.sh`](examples/review-loop.sh) is a minimal **one-shot wrapper** around the
+same contract — it runs `crq loop` once, prints what to do for each exit code, and exits with crq's
+code. It is the building block, not the full autonomous loop above: drop it inside your own
+`while`/fix/push/resolve cycle (or let your agent drive the loop).
 
 > 💡 **Watching the line:** run `crq status` any time to see the queue, what's in flight, and the
 > next slot. Or open the gate **issue** on GitHub — it **is** the live dashboard.

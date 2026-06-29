@@ -147,19 +147,28 @@ func TestNetworkRetryWaitPlateaus(t *testing.T) {
 
 func TestBackoffWaitRidesOutKnownReset(t *testing.T) {
 	g := &GitHub{maxRetries: 6, maxWait: 120 * time.Second, backoffBase: 2 * time.Second}
-	// Known reset within the cap: wait it out (~5m), not clamped to maxWait.
-	if w, ok := g.backoffWait(&RateLimitError{Until: time.Now().Add(5 * time.Minute)}, 0); !ok || w < 4*time.Minute || w > 6*time.Minute {
-		t.Fatalf("expected ~5m ride-out, got %s ok=%v", w, ok)
+	// Fresh reset within the cap: wait it out (~5m), reported as a known reset so
+	// the caller doesn't spend its retry budget, not clamped to maxWait.
+	if w, known, ok := g.backoffWait(&RateLimitError{Until: time.Now().Add(5 * time.Minute)}, 0); !ok || !known || w < 4*time.Minute || w > 6*time.Minute {
+		t.Fatalf("expected ~5m known-reset ride-out, got %s known=%v ok=%v", w, known, ok)
 	}
 	// Implausibly far reset: give up rather than wedge.
-	if _, ok := g.backoffWait(&RateLimitError{Until: time.Now().Add(3 * time.Hour)}, 0); ok {
+	if _, _, ok := g.backoffWait(&RateLimitError{Until: time.Now().Add(3 * time.Hour)}, 0); ok {
 		t.Fatal("should not wait out a reset beyond the cap")
 	}
-	// Hint-less secondary limit: bounded exponential backoff, capped by maxRetries.
-	if w, ok := g.backoffWait(&RateLimitError{}, 0); !ok || w != 2*time.Second {
-		t.Fatalf("expected 2s exponential backoff, got %s ok=%v", w, ok)
+	// Expired reset hint (stale header / clock skew): treat as hint-less so it
+	// consumes the budget instead of hot-looping with attempt frozen at ~0 wait.
+	if w, known, ok := g.backoffWait(&RateLimitError{Until: time.Now().Add(-time.Minute)}, 0); !ok || known || w != 2*time.Second {
+		t.Fatalf("expected expired reset to fall through to 2s budget-consuming backoff, got %s known=%v ok=%v", w, known, ok)
 	}
-	if _, ok := g.backoffWait(&RateLimitError{}, 6); ok {
+	if _, _, ok := g.backoffWait(&RateLimitError{Until: time.Now().Add(-time.Minute)}, 6); ok {
+		t.Fatal("should give up after maxRetries on an expired reset hint")
+	}
+	// Hint-less secondary limit: bounded exponential backoff, capped by maxRetries.
+	if w, known, ok := g.backoffWait(&RateLimitError{}, 0); !ok || known || w != 2*time.Second {
+		t.Fatalf("expected 2s exponential backoff, got %s known=%v ok=%v", w, known, ok)
+	}
+	if _, _, ok := g.backoffWait(&RateLimitError{}, 6); ok {
 		t.Fatal("should give up after maxRetries on a hint-less limit")
 	}
 }

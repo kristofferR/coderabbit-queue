@@ -99,7 +99,7 @@ func ensureCalibrationPR(ctx context.Context, cfg Config, gh *GitHub) (int, erro
 	}
 	if err := gh.CreateRef(ctx, cfg.GateRepo, branch, commit); err != nil {
 		if updateErr := gh.UpdateRef(ctx, cfg.GateRepo, branch, commit, true); updateErr != nil {
-			return 0, fmt.Errorf("create calibration ref: %v; update fallback: %w", err, updateErr)
+			return 0, fmt.Errorf("create calibration ref: %w; update fallback: %w", err, updateErr)
 		}
 	}
 	pr, err := gh.CreatePull(ctx, cfg.GateRepo, repo.DefaultBranch, branch, "crq calibration (do not merge)", "crq posts `"+cfg.RateLimitCommand+"` here to read account-wide CodeRabbit quota. Keep this PR open.", true)
