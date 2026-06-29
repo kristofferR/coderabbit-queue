@@ -1,0 +1,675 @@
+package crq
+
+import (
+	"context"
+	"crypto/sha1"
+	"encoding/hex"
+	"encoding/json"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type Finding struct {
+	ID        string    `json:"id"`
+	Bot       string    `json:"bot"`
+	Severity  string    `json:"severity"`
+	Path      string    `json:"path,omitempty"`
+	Line      int       `json:"line,omitempty"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	ThreadID  string    `json:"thread_id,omitempty"`
+	CommentID int64     `json:"comment_id,omitempty"`
+	ReviewID  int64     `json:"review_id,omitempty"`
+	Commit    string    `json:"commit,omitempty"`
+	URL       string    `json:"url,omitempty"`
+	Source    string    `json:"source"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
+}
+
+type FeedbackReport struct {
+	Status     string          `json:"status"`
+	Repo       string          `json:"repo"`
+	PR         int             `json:"pr"`
+	Head       string          `json:"head"`
+	Converged  bool            `json:"converged"`
+	ReviewedBy map[string]bool `json:"reviewed_by"`
+	Findings   []Finding       `json:"findings"`
+	CheckedAt  time.Time       `json:"checked_at"`
+}
+
+func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackReport, error) {
+	repo = NormalizeRepo(repo)
+	pull, err := s.gh.GetPull(ctx, repo, pr)
+	if err != nil {
+		return FeedbackReport{}, err
+	}
+	head := ""
+	if len(pull.Head.SHA) >= 9 {
+		head = pull.Head.SHA[:9]
+	}
+	report := FeedbackReport{
+		Status:     "feedback",
+		Repo:       repo,
+		PR:         pr,
+		Head:       head,
+		ReviewedBy: map[string]bool{},
+		Findings:   []Finding{},
+		CheckedAt:  time.Now().UTC(),
+	}
+	bots := botSet(s.cfg.RequiredBots)
+	for bot := range bots {
+		report.ReviewedBy[bot] = false
+	}
+
+	reviews, err := s.gh.ListReviews(ctx, repo, pr)
+	if err != nil {
+		return report, err
+	}
+	for _, review := range reviews {
+		if _, ok := bots[review.User.Login]; !ok {
+			continue
+		}
+		if head != "" && strings.HasPrefix(review.CommitID, head) {
+			report.ReviewedBy[review.User.Login] = true
+		}
+		if head != "" && review.CommitID != "" && !strings.HasPrefix(review.CommitID, head) {
+			continue
+		}
+		report.Findings = append(report.Findings, parseReviewBodyFindings(review, review.User.Login)...)
+	}
+
+	if threads, err := s.reviewThreads(ctx, repo, pr); err == nil {
+		for _, thread := range threads {
+			report.Findings = append(report.Findings, threadFindings(thread, bots)...)
+		}
+	} else {
+		comments, cerr := s.gh.ListReviewComments(ctx, repo, pr)
+		if cerr != nil {
+			return report, cerr
+		}
+		for _, comment := range comments {
+			if _, ok := bots[comment.User.Login]; !ok {
+				continue
+			}
+			commit := shortOID(firstNonEmpty(comment.CommitID, comment.OriginalCommitID))
+			if head != "" && commit != "" && commit != head {
+				continue
+			}
+			report.Findings = append(report.Findings, Finding{
+				Bot:       comment.User.Login,
+				Severity:  severityOf(comment.Body),
+				Path:      comment.Path,
+				Line:      firstPositive(comment.Line, comment.OriginalLine),
+				Title:     titleOf(comment.Body),
+				Body:      strings.TrimSpace(comment.Body),
+				CommentID: comment.ID,
+				ReviewID:  comment.PullRequestReviewID,
+				Commit:    commit,
+				URL:       comment.URL,
+				Source:    "review_comment",
+				CreatedAt: comment.CreatedAt,
+			})
+		}
+	}
+
+	issueComments, err := s.gh.ListIssueComments(ctx, repo, pr)
+	if err == nil {
+		for _, comment := range issueComments {
+			if _, ok := bots[comment.User.Login]; !ok {
+				continue
+			}
+			bodyLower := strings.ToLower(comment.Body)
+			if strings.Contains(bodyLower, strings.ToLower(s.cfg.RateLimitMarker)) {
+				continue
+			}
+			if strings.Contains(bodyLower, strings.ToLower(s.cfg.ReviewDoneMarker)) {
+				report.ReviewedBy[comment.User.Login] = true
+			}
+			if comment.User.Login == s.cfg.Bot {
+				continue
+			}
+			report.Findings = append(report.Findings, Finding{
+				Bot:       comment.User.Login,
+				Severity:  severityOf(comment.Body),
+				Title:     titleOf(comment.Body),
+				Body:      strings.TrimSpace(comment.Body),
+				CommentID: comment.ID,
+				URL:       comment.URL,
+				Source:    "issue_comment",
+				CreatedAt: comment.CreatedAt,
+			})
+		}
+	}
+
+	report.Findings = dedupeFindings(report.Findings)
+	sort.Slice(report.Findings, func(i, j int) bool {
+		if rankSeverity(report.Findings[i].Severity) != rankSeverity(report.Findings[j].Severity) {
+			return rankSeverity(report.Findings[i].Severity) > rankSeverity(report.Findings[j].Severity)
+		}
+		if report.Findings[i].Path != report.Findings[j].Path {
+			return report.Findings[i].Path < report.Findings[j].Path
+		}
+		return report.Findings[i].Line < report.Findings[j].Line
+	})
+	report.Converged = len(report.Findings) == 0
+	for _, reviewed := range report.ReviewedBy {
+		report.Converged = report.Converged && reviewed
+	}
+	if report.Converged {
+		report.Status = "converged"
+	} else if len(report.Findings) == 0 {
+		report.Status = "waiting"
+	}
+	return report, nil
+}
+
+func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport, int, error) {
+	_, waitCode, err := s.Wait(ctx, repo, pr)
+	if err != nil {
+		return FeedbackReport{}, 1, err
+	}
+	deadline := time.Now().Add(s.cfg.FeedbackWaitTimeout)
+	for {
+		report, err := s.Feedback(ctx, repo, pr)
+		if err != nil {
+			return report, 1, err
+		}
+		if len(report.Findings) > 0 {
+			report.Status = "feedback"
+			return report, 10, nil
+		}
+		if report.Converged || waitCode == 3 {
+			return report, 0, nil
+		}
+		if time.Now().After(deadline) {
+			report.Status = "timeout"
+			return report, 2, nil
+		}
+		if _, err := s.Pump(ctx); err != nil && s.log != nil {
+			s.log.Printf("warning: pump while waiting for feedback failed: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return report, 1, ctx.Err()
+		case <-time.After(s.cfg.PollInterval):
+		}
+	}
+}
+
+type ResolvedThread struct {
+	ThreadID string `json:"thread_id"`
+	Resolved bool   `json:"resolved"`
+}
+
+func (s *Service) ResolveThreads(ctx context.Context, threadIDs []string) ([]ResolvedThread, error) {
+	var out []ResolvedThread
+	for _, id := range threadIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		var result struct {
+			ResolveReviewThread struct {
+				Thread struct {
+					ID         string `json:"id"`
+					IsResolved bool   `json:"isResolved"`
+				} `json:"thread"`
+			} `json:"resolveReviewThread"`
+		}
+		err := s.gh.GraphQL(ctx, `mutation($id:ID!){
+  resolveReviewThread(input:{threadId:$id}) {
+    thread { id isResolved }
+  }
+}`, map[string]any{"id": id}, &result)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, ResolvedThread{ThreadID: result.ResolveReviewThread.Thread.ID, Resolved: result.ResolveReviewThread.Thread.IsResolved})
+	}
+	return out, nil
+}
+
+type reviewThread struct {
+	ID         string `json:"id"`
+	IsResolved bool   `json:"isResolved"`
+	IsOutdated bool   `json:"isOutdated"`
+	Path       string `json:"path"`
+	Line       int    `json:"line"`
+	Comments   struct {
+		Nodes []struct {
+			DatabaseID   int64     `json:"databaseId"`
+			Body         string    `json:"body"`
+			URL          string    `json:"url"`
+			Path         string    `json:"path"`
+			Line         int       `json:"line"`
+			OriginalLine int       `json:"originalLine"`
+			CreatedAt    time.Time `json:"createdAt"`
+			Author       struct {
+				Login string `json:"login"`
+			} `json:"author"`
+			Commit struct {
+				OID string `json:"oid"`
+			} `json:"commit"`
+			OriginalCommit struct {
+				OID string `json:"oid"`
+			} `json:"originalCommit"`
+		} `json:"nodes"`
+	} `json:"comments"`
+}
+
+func (s *Service) reviewThreads(ctx context.Context, repo string, pr int) ([]reviewThread, error) {
+	owner, name, _ := strings.Cut(repo, "/")
+	var all []reviewThread
+	cursor := ""
+	for {
+		var result struct {
+			Repository struct {
+				PullRequest struct {
+					ReviewThreads struct {
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
+						Nodes []reviewThread `json:"nodes"`
+					} `json:"reviewThreads"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		}
+		variables := map[string]any{"owner": owner, "name": name, "number": pr, "cursor": nil}
+		if cursor != "" {
+			variables["cursor"] = cursor
+		}
+		query := `query($owner:String!, $name:String!, $number:Int!, $cursor:String) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$number) {
+      reviewThreads(first:100, after:$cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id isResolved isOutdated path line
+          comments(first:50) {
+            nodes {
+              databaseId body url path line originalLine createdAt
+              author { login }
+              commit { oid }
+              originalCommit { oid }
+            }
+          }
+        }
+      }
+    }
+  }
+}`
+		if err := s.gh.GraphQL(ctx, query, variables, &result); err != nil {
+			return all, err
+		}
+		page := result.Repository.PullRequest.ReviewThreads
+		all = append(all, page.Nodes...)
+		if !page.PageInfo.HasNextPage {
+			break
+		}
+		cursor = page.PageInfo.EndCursor
+	}
+	return all, nil
+}
+
+var (
+	detailSummaryRE = regexp.MustCompile(`(?i)<summary>\s*([^<]+?)\s+\([0-9]+\)\s*</summary>`)
+	detailHeaderRE  = regexp.MustCompile("^`([0-9]+)(?:\\s*-\\s*([0-9]+))?`: *(.*)$")
+	promptBlockRE   = regexp.MustCompile("(?is)<summary>[^<]*Prompt for all review comments with AI agents[^<]*</summary>.*?```\\s*(.*?)\\s*```")
+	promptFileRE    = regexp.MustCompile("^In (?:`@([^`]+)`|@([^:]+)):$")
+	promptBulletRE  = regexp.MustCompile("^- (?:Around line|Line)\\s+([0-9]+)(?:\\s*-\\s*([0-9]+))?:\\s*(.*)$")
+	boldTitleRE     = regexp.MustCompile(`(?m)^\*\*([^*\n]+)\*\*`)
+	crCommentRE     = regexp.MustCompile(`<!--\s*cr-comment:v1:([a-f0-9]+)\s*-->`)
+)
+
+func parseReviewBodyFindings(review Review, bot string) []Finding {
+	body := strings.TrimSpace(review.Body)
+	if body == "" {
+		return nil
+	}
+	clean := stripMarkdownQuote(body)
+	out := parseDetailedReviewFindings(clean, review, bot)
+	out = append(out, parsePromptReviewFindings(clean, review, bot)...)
+	return out
+}
+
+func parseDetailedReviewFindings(body string, review Review, bot string) []Finding {
+	lines := strings.Split(body, "\n")
+	var out []Finding
+	currentPath := ""
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if match := detailSummaryRE.FindStringSubmatch(line); match != nil {
+			summary := strings.TrimSpace(match[1])
+			if looksLikePath(summary) {
+				currentPath = summary
+			}
+			continue
+		}
+		match := detailHeaderRE.FindStringSubmatch(line)
+		if match == nil || currentPath == "" {
+			continue
+		}
+		startLine, _ := strconv.Atoi(match[1])
+		meta := strings.TrimSpace(match[3])
+		if isNonActionableText(meta) {
+			continue
+		}
+		start := i + 1
+		end := len(lines)
+		for j := start; j < len(lines); j++ {
+			next := strings.TrimSpace(lines[j])
+			if detailHeaderRE.MatchString(next) || detailSummaryRE.MatchString(next) {
+				end = j
+				break
+			}
+		}
+		block := strings.TrimSpace(strings.Join(lines[start:end], "\n"))
+		title := titleFromDetailedBlock(block)
+		if title == "" {
+			title = titleOf(block)
+		}
+		bodyText := compactReviewBody(block)
+		finding := Finding{
+			Bot:       bot,
+			Severity:  severityOf(meta + "\n" + block),
+			Path:      strings.TrimPrefix(currentPath, "@"),
+			Line:      startLine,
+			Title:     title,
+			Body:      bodyText,
+			ReviewID:  review.ID,
+			Commit:    shortOID(review.CommitID),
+			URL:       review.HTMLURL,
+			Source:    "review_body",
+			CreatedAt: review.SubmittedAt,
+		}
+		if isActionableFinding(finding) {
+			out = append(out, finding)
+		}
+	}
+	return out
+}
+
+func parsePromptReviewFindings(body string, review Review, bot string) []Finding {
+	var out []Finding
+	for _, blockMatch := range promptBlockRE.FindAllStringSubmatch(body, -1) {
+		block := blockMatch[1]
+		lines := strings.Split(block, "\n")
+		currentPath := ""
+		for i := 0; i < len(lines); i++ {
+			line := strings.TrimSpace(lines[i])
+			if match := promptFileRE.FindStringSubmatch(line); match != nil {
+				currentPath = firstNonEmpty(match[1], match[2])
+				currentPath = strings.TrimPrefix(currentPath, "@")
+				continue
+			}
+			match := promptBulletRE.FindStringSubmatch(line)
+			if match == nil || currentPath == "" {
+				continue
+			}
+			startLine, _ := strconv.Atoi(match[1])
+			parts := []string{strings.TrimSpace(match[3])}
+			for j := i + 1; j < len(lines); j++ {
+				next := strings.TrimSpace(lines[j])
+				if next == "" {
+					continue
+				}
+				if strings.HasPrefix(next, "---") || promptFileRE.MatchString(next) || promptBulletRE.MatchString(next) {
+					break
+				}
+				parts = append(parts, next)
+				i = j
+			}
+			bodyText := strings.TrimSpace(strings.Join(parts, " "))
+			finding := Finding{
+				Bot:       bot,
+				Severity:  severityOf(bodyText),
+				Path:      currentPath,
+				Line:      startLine,
+				Title:     titleOf(bodyText),
+				Body:      bodyText,
+				ReviewID:  review.ID,
+				Commit:    shortOID(review.CommitID),
+				URL:       review.HTMLURL,
+				Source:    "review_prompt",
+				CreatedAt: review.SubmittedAt,
+			}
+			if isActionableFinding(finding) {
+				out = append(out, finding)
+			}
+		}
+	}
+	return out
+}
+
+// threadFindings turns one GitHub review thread into findings. An unresolved,
+// non-outdated thread is still actionable no matter which commit its comments
+// were filed on: GitHub's own resolution/outdated state is the source of truth,
+// so a real finding from an earlier commit is surfaced instead of silently
+// dropped when HEAD moves. (This is why callers do not need a manual
+// cross-review audit.) Resolved or outdated threads are skipped.
+func threadFindings(thread reviewThread, bots map[string]struct{}) []Finding {
+	if thread.IsResolved || thread.IsOutdated {
+		return nil
+	}
+	var out []Finding
+	for _, comment := range thread.Comments.Nodes {
+		if _, ok := bots[comment.Author.Login]; !ok {
+			continue
+		}
+		commit := shortOID(comment.Commit.OID)
+		if commit == "" {
+			commit = shortOID(comment.OriginalCommit.OID)
+		}
+		out = append(out, Finding{
+			Bot:       comment.Author.Login,
+			Severity:  severityOf(comment.Body),
+			Path:      firstNonEmpty(thread.Path, comment.Path),
+			Line:      firstPositive(thread.Line, comment.Line, comment.OriginalLine),
+			Title:     titleOf(comment.Body),
+			Body:      strings.TrimSpace(comment.Body),
+			ThreadID:  thread.ID,
+			CommentID: comment.DatabaseID,
+			Commit:    commit,
+			URL:       comment.URL,
+			Source:    "review_thread",
+			CreatedAt: comment.CreatedAt,
+		})
+	}
+	return out
+}
+
+func dedupeFindings(in []Finding) []Finding {
+	seen := map[string]bool{}
+	structuredAtLocation := map[string]bool{}
+	for _, finding := range in {
+		if finding.Source != "review_prompt" && finding.Path != "" && finding.Line > 0 {
+			structuredAtLocation[finding.Bot+"|"+finding.Path+"|"+strconv.Itoa(finding.Line)] = true
+		}
+	}
+	out := []Finding{}
+	for _, finding := range in {
+		finding.Body = strings.TrimSpace(finding.Body)
+		finding.Title = strings.TrimSpace(finding.Title)
+		if !isActionableFinding(finding) {
+			continue
+		}
+		if finding.Source == "review_prompt" && structuredAtLocation[finding.Bot+"|"+finding.Path+"|"+strconv.Itoa(finding.Line)] {
+			continue
+		}
+		key := finding.Bot + "|" + finding.Path + "|" + strconv.Itoa(finding.Line) + "|" + finding.Title + "|" + finding.Body + "|" + finding.ThreadID
+		sum := sha1.Sum([]byte(key))
+		finding.ID = hex.EncodeToString(sum[:])
+		if seen[finding.ID] {
+			continue
+		}
+		seen[finding.ID] = true
+		out = append(out, finding)
+	}
+	return out
+}
+
+func botSet(bots []string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, bot := range bots {
+		bot = strings.TrimSpace(bot)
+		if bot != "" {
+			out[bot] = struct{}{}
+		}
+	}
+	return out
+}
+
+func severityOf(text string) string {
+	lower := strings.ToLower(text)
+	switch {
+	case strings.Contains(lower, "critical"), strings.Contains(lower, "🔴"):
+		return "critical"
+	case strings.Contains(lower, "major"), strings.Contains(lower, "high"), strings.Contains(lower, "🟠"):
+		return "major"
+	case strings.Contains(lower, "potential issue"), strings.Contains(lower, "medium"), strings.Contains(lower, "🟡"):
+		return "potential"
+	case strings.Contains(lower, "nitpick"), strings.Contains(lower, "minor"), strings.Contains(lower, "low"), strings.Contains(lower, "🔵"):
+		return "minor"
+	default:
+		return "unknown"
+	}
+}
+
+func rankSeverity(sev string) int {
+	switch sev {
+	case "critical":
+		return 5
+	case "major":
+		return 4
+	case "potential":
+		return 3
+	case "minor":
+		return 2
+	default:
+		return 1
+	}
+}
+
+func titleOf(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.Trim(line, "#*_` ")
+		if line != "" && !strings.HasPrefix(line, "<details") && !strings.HasPrefix(line, "</") {
+			if len(line) > 180 {
+				line = line[:180]
+			}
+			return line
+		}
+	}
+	return "Review finding"
+}
+
+func titleFromDetailedBlock(body string) string {
+	if match := boldTitleRE.FindStringSubmatch(body); match != nil {
+		return strings.TrimSpace(match[1])
+	}
+	return ""
+}
+
+func stripMarkdownQuote(body string) string {
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		line = strings.TrimRight(line, " \t")
+		line = strings.TrimPrefix(line, "> ")
+		line = strings.TrimPrefix(line, ">")
+		lines[i] = line
+	}
+	return strings.Join(lines, "\n")
+}
+
+func compactReviewBody(body string) string {
+	body = crCommentRE.ReplaceAllString(body, "")
+	body = strings.ReplaceAll(body, "\r\n", "\n")
+	lines := strings.Split(body, "\n")
+	var out []string
+	skipFence := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			skipFence = !skipFence
+			continue
+		}
+		if skipFence || strings.HasPrefix(trimmed, "<details") || strings.HasPrefix(trimmed, "</details") ||
+			strings.HasPrefix(trimmed, "<summary") || strings.HasPrefix(trimmed, "</summary") ||
+			strings.HasPrefix(trimmed, "<blockquote") || strings.HasPrefix(trimmed, "</blockquote") {
+			continue
+		}
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func looksLikePath(summary string) bool {
+	if strings.Contains(summary, " ") {
+		return false
+	}
+	return strings.Contains(summary, "/") || strings.Contains(summary, ".")
+}
+
+func isActionableFinding(finding Finding) bool {
+	if strings.TrimSpace(finding.Body) == "" && strings.TrimSpace(finding.Title) == "" {
+		return false
+	}
+	text := strings.ToLower(finding.Title + "\n" + finding.Body)
+	return !isNonActionableText(text)
+}
+
+func isNonActionableText(text string) bool {
+	text = strings.ToLower(text)
+	nonActionable := []string{
+		"lgtm",
+		"also applies to:",
+		"no issue here",
+		"incorrect or invalid review comment",
+		"likely an incorrect or invalid review comment",
+		"version claim",
+		"both referenced files exist",
+		"good regression test",
+	}
+	for _, phrase := range nonActionable {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func shortOID(oid string) string {
+	if len(oid) >= 9 {
+		return oid[:9]
+	}
+	return oid
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstPositive(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func (r FeedbackReport) JSON() ([]byte, error) {
+	return json.MarshalIndent(r, "", "  ")
+}
