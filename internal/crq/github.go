@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,10 +34,11 @@ func (e *APIError) Error() string {
 }
 
 type GitHub struct {
-	token       string
-	httpClient  *http.Client
-	apiBase     string
-	graphBase   string
+	token          string
+	tokenMu        sync.Mutex
+	httpClient     *http.Client
+	apiBase        string
+	graphBase      string
 	log            Logger
 	maxRetries     int
 	maxWait        time.Duration
@@ -44,17 +46,38 @@ type GitHub struct {
 	networkMaxWait time.Duration
 }
 
-func NewGitHub(ctx context.Context) (*GitHub, error) {
+// lookupToken resolves a GitHub token from the environment or the gh CLI. gh can
+// hand back a freshly-rotated OAuth token, which is why send re-runs this on a 401.
+func lookupToken(ctx context.Context) string {
 	token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
 	if token == "" {
 		token = strings.TrimSpace(os.Getenv("GH_TOKEN"))
 	}
 	if token == "" {
-		out, err := exec.CommandContext(ctx, "gh", "auth", "token").Output()
-		if err == nil {
+		if out, err := exec.CommandContext(ctx, "gh", "auth", "token").Output(); err == nil {
 			token = strings.TrimSpace(string(out))
 		}
 	}
+	return token
+}
+
+func (g *GitHub) authToken() string {
+	g.tokenMu.Lock()
+	defer g.tokenMu.Unlock()
+	return g.token
+}
+
+// refreshToken re-resolves the token (e.g. after a 401) in case gh rotated it.
+func (g *GitHub) refreshToken(ctx context.Context) {
+	if t := lookupToken(ctx); t != "" {
+		g.tokenMu.Lock()
+		g.token = t
+		g.tokenMu.Unlock()
+	}
+}
+
+func NewGitHub(ctx context.Context) (*GitHub, error) {
+	token := lookupToken(ctx)
 	if token == "" {
 		return nil, errors.New("GitHub token not found (set GITHUB_TOKEN/GH_TOKEN or run 'gh auth login')")
 	}
@@ -214,7 +237,7 @@ func (g *GitHub) GraphQL(ctx context.Context, query string, variables map[string
 func (g *GitHub) decorate(req *http.Request) {
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("Authorization", "Bearer "+g.token)
+	req.Header.Set("Authorization", "Bearer "+g.authToken())
 	req.Header.Set("User-Agent", "crq/"+Version)
 }
 
@@ -393,6 +416,28 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 				attempt++
 				if g.log != nil {
 					g.log.Printf("github %s %s: HTTP %d; retrying in %s (attempt %d/%d)", method, shortURL(fullURL), resp.StatusCode, wait.Round(time.Second), attempt, g.maxRetries)
+				}
+				if serr := sleepCtx(ctx, wait); serr != nil {
+					return nil, serr
+				}
+				continue
+			}
+			return nil, &APIError{Method: method, URL: fullURL, Status: resp.StatusCode, Body: string(b)}
+		}
+		// A 401 is often transient (a spurious GitHub error, or a gh OAuth token
+		// that just rotated). Refresh the token and retry a bounded number of times
+		// before surfacing it as a real auth failure.
+		if resp.StatusCode == http.StatusUnauthorized {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if wait, ok := g.retryBackoff(attempt); ok {
+				g.refreshToken(ctx)
+				attempt++
+				if g.log != nil {
+					g.log.Printf("github %s %s: 401 unauthorized; refreshing token and retrying in %s (attempt %d/%d)", method, shortURL(fullURL), wait.Round(time.Second), attempt, g.maxRetries)
 				}
 				if serr := sleepCtx(ctx, wait); serr != nil {
 					return nil, serr
