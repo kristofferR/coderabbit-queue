@@ -39,6 +39,24 @@ func TestIsRetryableNetErr(t *testing.T) {
 	}
 }
 
+func TestNetworkRetryWaitPlateaus(t *testing.T) {
+	base := 2 * time.Second
+	want := map[int]time.Duration{
+		0:  2 * time.Second,
+		1:  4 * time.Second,
+		2:  8 * time.Second,
+		3:  16 * time.Second,
+		4:  30 * time.Second, // 32s capped to 30s
+		5:  30 * time.Second,
+		20: 30 * time.Second, // plateau holds for a long outage
+	}
+	for attempt, exp := range want {
+		if got := networkRetryWait(base, attempt); got != exp {
+			t.Fatalf("networkRetryWait(attempt=%d) = %s, want %s", attempt, got, exp)
+		}
+	}
+}
+
 func TestIsRetryableStatus(t *testing.T) {
 	for _, c := range []int{500, 502, 503, 504} {
 		if !isRetryableStatus(c) {
