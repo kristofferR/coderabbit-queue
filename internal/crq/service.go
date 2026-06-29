@@ -389,6 +389,10 @@ func (s *Service) Status(ctx context.Context) (State, string, error) {
 	return state, renderDashboard(state, s.cfg), nil
 }
 
+// warnRateLimited is the inflight requeue reason for a rate-limited fire. It is
+// surfaced via the Blocked state, not the sticky Warn field.
+const warnRateLimited = "rate limited"
+
 func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 	state, _, err := s.store.Load(ctx)
 	if err != nil {
@@ -410,6 +414,11 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 			return ErrNoChange
 		}
 		st.Blocked = blocked
+		// Clear a stale "rate limited" warning once the window has passed, so the
+		// dashboard can't show both "not currently limited" and a rate-limit warn.
+		if st.Warn == warnRateLimited && (blocked.BlockedUntil == nil || !blocked.BlockedUntil.After(now)) {
+			st.Warn = ""
+		}
 		return nil
 	})
 	if err != nil {
@@ -568,7 +577,7 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 		}
 		if strings.Contains(strings.ToLower(comment.Body), strings.ToLower(s.cfg.RateLimitMarker)) {
 			reset := parseAvailableIn(comment.Body, comment.UpdatedAt)
-			return inflightCheck{Requeue: true, Reason: "rate limited", BlockedUntil: reset}, nil
+			return inflightCheck{Requeue: true, Reason: warnRateLimited, BlockedUntil: reset}, nil
 		}
 	}
 	reviews, err := s.gh.ListReviews(ctx, inf.Repo, inf.PR)
@@ -617,14 +626,24 @@ func (s *Service) requeueInflight(st *State, status inflightCheck) {
 	sort.Slice(st.Queue, func(i, j int) bool { return st.Queue[i].Seq < st.Queue[j].Seq })
 	delete(st.Fired, QueueKey(inf.Repo, inf.PR))
 	st.InFlight = nil
-	st.Warn = status.Reason
-	if status.BlockedUntil != nil && status.BlockedUntil.After(time.Now().UTC()) {
+	now := time.Now().UTC()
+	if status.Reason == warnRateLimited {
+		// A rate limit is shown by the Blocked state (the dashboard's Rate-limit
+		// row), not a sticky Warn — otherwise once the window passes the table says
+		// "not currently limited" while a stale "rate limited" warning lingers.
+		until := status.BlockedUntil
+		if until == nil || !until.After(now) {
+			t := now.Add(s.cfg.CalibrationTTL) // no parseable reset; re-calibrate soon
+			until = &t
+		}
 		zero := 0
-		now := time.Now().UTC()
-		st.Blocked.BlockedUntil = status.BlockedUntil
+		st.Blocked.BlockedUntil = until
 		st.Blocked.Remaining = &zero
 		st.Blocked.Source = "warning"
 		st.Blocked.CheckedAt = &now
+		st.Warn = ""
+	} else {
+		st.Warn = status.Reason
 	}
 }
 
