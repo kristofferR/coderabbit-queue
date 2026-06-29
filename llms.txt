@@ -46,6 +46,13 @@ reappearing until its thread is resolved there):
 crq resolve OWNER/REPO PR_NUMBER --thread THREAD_ID
 ```
 
+Decline a finding you are not addressing: post the reason on its thread (left unresolved; add
+`--resolve` to also close it) instead of leaving it silently open:
+
+```bash
+crq decline OWNER/REPO PR_NUMBER --thread THREAD_ID --reason "why declined"
+```
+
 Current feedback without triggering a review:
 
 ```bash

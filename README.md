@@ -268,6 +268,12 @@ Resolve addressed threads on GitHub (crq keys off GitHub's resolution state, so 
 crq resolve owner/repo 123 --thread PRRT_kwDO...
 ```
 
+For a finding you are declining, record the reason on its thread instead of leaving it silently open (left unresolved by default; add `--resolve` to also close it as "won't fix"):
+
+```bash
+crq decline owner/repo 123 --thread PRRT_kwDO... --reason "why this is declined"
+```
+
 Keep every open PR in scope reviewed:
 
 ```bash
