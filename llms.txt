@@ -42,6 +42,9 @@ crq loop OWNER/REPO PR_NUMBER > crq-feedback.json
 rc=$?
 ```
 
+`crq loop` queues the PR, triggers CodeRabbit when the account can spend a review, waits for every
+configured required bot (`CRQ_REQUIRED_BOTS`) on the current head, then emits one JSON report.
+
 Exit codes:
 - `0`: done; converged or no actionable findings.
 - `10`: read `.findings[]`, fix valid issues, validate, commit, push, resolve addressed threads, then repeat.
@@ -70,6 +73,14 @@ crq feedback OWNER/REPO PR_NUMBER
 `crq feedback`/`crq loop` also surface still-open findings from earlier commits (unresolved,
 non-outdated review threads), so no manual cross-review audit is needed.
 
+Long waits are not hangs. During queue/rate-limit waits, missing required-bot reviews, and
+network/GitHub outages, crq logs progress to stderr; stdout stays reserved for the final JSON.
+
+Agent communication rule: do not relay every stderr progress line or send repeated "still waiting"
+updates. Tell the user once when a long `crq loop` wait begins, then stay quiet until the state
+changes (fired, feedback wait, findings, convergence, timeout, rate-limit/window change, network
+outage/recovery), the user asks for status, or at least 10 minutes have passed with no update.
+
 Fleet review:
 
 ```bash
@@ -91,6 +102,6 @@ JSON contract: `findings` is always an array. Each finding always has `bot`,
 them (e.g. review-body / outside-diff findings have no `path`/`line`, and only
 inline review threads carry a `thread_id`) — parse them defensively.
 
-Optional local preflight: if CodeRabbit CLI is installed, `cr review --agent`
-can review local git changes before pushing. That does not replace `crq loop`;
-only `crq loop` queues and waits for GitHub PR review feedback.
+Optional local preflight: if CodeRabbit CLI is installed, `crq preflight --type uncommitted`
+can review local git changes before pushing and normalize the JSON stream. That does not replace
+`crq loop`; only `crq loop` queues and waits for GitHub PR review feedback.

@@ -3,20 +3,56 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$DIR"
+install_tmp="$(mktemp -d)"
+trap 'rm -rf "$install_tmp"' EXIT
 
 go test ./...
+bash -n ./install.sh
 ./crq version | grep -q '^crq '
 ./crq help | grep -q 'crq loop <repo> <pr>'
 ./crq help | grep -q 'humans and automation'
 ./crq help | grep -q 'QUEUE WORKFLOWS'
-! ./crq help | grep -q 'crq wait <repo> <pr>'
-! ./crq help | grep -q 'crq enqueue <repo> <pr>'
-! ./crq help | grep -q 'COMPATIBILITY'
+if ./crq help | grep -q 'crq wait <repo> <pr>'; then
+  echo "unexpected legacy wait command in help" >&2
+  exit 1
+fi
+if ./crq help | grep -q 'crq enqueue <repo> <pr>'; then
+  echo "unexpected legacy enqueue command in help" >&2
+  exit 1
+fi
+if ./crq help | grep -q 'COMPATIBILITY'; then
+  echo "unexpected compatibility section in help" >&2
+  exit 1
+fi
 ./crq help loop | grep -q 'Never post @coderabbitai review directly'
 ./crq loop --help | grep -q 'Review round primitive for humans and agents'
 ./crq help feedback | grep -Fq 'findings[]'
 ./crq help preflight | grep -q 'official local CodeRabbit CLI'
 ./crq help doctor | grep -q 'JSON readiness report'
+
+install_log="$(
+  CRQ_INSTALL_SOURCE_DIR="$DIR" \
+  CRQ_BIN_DIR="$install_tmp/bin" \
+  CRQ_SKILL_DIR="$install_tmp/skills/coderabbit-queue" \
+  ./install.sh
+)"
+printf '%s' "$install_log" | grep -q 'installed Codex skill'
+[ -x "$install_tmp/bin/crq" ]
+[ -f "$install_tmp/skills/coderabbit-queue/SKILL.md" ]
+grep -q 'crq preflight --type uncommitted' "$install_tmp/skills/coderabbit-queue/SKILL.md"
+
+mkdir -p "$install_tmp/shared-skills"
+ln -s "$install_tmp/shared-skills/coderabbit-queue" "$install_tmp/codex-skill-link"
+symlink_install_log="$(
+  CRQ_INSTALL_SOURCE_DIR="$DIR" \
+  CRQ_BIN_DIR="$install_tmp/bin" \
+  CRQ_SKILL_DIR="$install_tmp/codex-skill-link" \
+  ./install.sh
+)"
+printf '%s' "$symlink_install_log" | grep -q 'via'
+[ -L "$install_tmp/codex-skill-link" ]
+[ -f "$install_tmp/shared-skills/coderabbit-queue/SKILL.md" ]
+grep -q 'crq preflight --type uncommitted' "$install_tmp/shared-skills/coderabbit-queue/SKILL.md"
 # doctor exits 0 when ready and 1 when not (the documented path on a bare CI
 # host). Capture both the JSON and the exit code, and assert it is exactly 0 or 1
 # — a bare "|| true" would hide a regression that changed the exit contract.
