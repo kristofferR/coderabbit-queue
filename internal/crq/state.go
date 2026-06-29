@@ -118,17 +118,37 @@ func (s *State) Normalize(cfg Config) {
 	}
 	s.Fired = folded
 	if cfg.FiredMax > 0 && len(s.Fired) > cfg.FiredMax {
+		// Protect markers for recently-fired heads (those still in History) from
+		// eviction. Normalize runs right after a fire records st.Fired[key]=head, and
+		// a plain lexicographic trim could drop that just-written marker for a repo
+		// whose name sorts early — making crq forget the head was already requested
+		// and fire a duplicate review. Only the older remainder is trimmed.
+		recent := map[string]bool{}
+		for _, h := range s.History {
+			recent[strings.ToLower(QueueKey(h.Repo, h.PR))] = true
+		}
 		type kv struct {
 			Key string
 			Val string
 		}
+		protected := map[string]string{}
 		items := make([]kv, 0, len(s.Fired))
 		for k, v := range s.Fired {
+			if recent[k] {
+				protected[k] = v
+				continue
+			}
 			items = append(items, kv{k, v})
 		}
+		budget := cfg.FiredMax - len(protected)
+		if budget < 0 {
+			budget = 0
+		}
 		sort.Slice(items, func(i, j int) bool { return items[i].Key < items[j].Key })
-		items = items[len(items)-cfg.FiredMax:]
-		s.Fired = map[string]string{}
+		if len(items) > budget {
+			items = items[len(items)-budget:]
+		}
+		s.Fired = protected
 		for _, item := range items {
 			s.Fired[item.Key] = item.Val
 		}

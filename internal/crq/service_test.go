@@ -286,6 +286,24 @@ func TestEnqueueIsIdempotentAndPumpFiresOnce(t *testing.T) {
 	}
 }
 
+func TestBotReviewedHeadToleratesBotSuffix(t *testing.T) {
+	// CRQ_BOT configured suffix-less, but REST reviews come back as coderabbitai[bot].
+	cfg := Config{Bot: "coderabbitai", GateRepo: "o/gate", Scope: []string{"o"}}
+	gh := newFakeGitHub()
+	review := Review{CommitID: "abcdef1234567890"}
+	review.User.Login = "coderabbitai[bot]"
+	gh.reviews[fakeKey("o/repo", 5)] = []Review{review}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	ok, err := svc.botReviewedHead(context.Background(), "o/repo", 5, "abcdef123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("a suffix-less CRQ_BOT must still dedupe against a coderabbitai[bot] REST review of the head")
+	}
+}
+
 func TestPumpDropsClosedPRWithoutFiring(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{

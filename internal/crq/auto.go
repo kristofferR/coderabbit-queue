@@ -212,6 +212,12 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			}
 			need, nerr := s.needsReview(ctx, state, repo, pr.Number, opts.Incremental)
 			if nerr != nil {
+				// A rate limit must abort the pass so AutoReview's outer backoff kicks
+				// in, instead of scanning the rest of the candidates under the same
+				// throttle (and skipping them until a later poll).
+				if IsRateLimited(nerr) {
+					return false, nerr
+				}
 				if s.log != nil {
 					s.log.Printf("warning: autoreview skipped %s#%d: %v", repo, pr.Number, nerr)
 				}
