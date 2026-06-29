@@ -223,7 +223,7 @@ func renderDashboard(state State, cfg Config) string {
 	fmt.Fprintf(&b, "| **Scope** | `%s` |\n", state.Blocked.Scope)
 	fmt.Fprintf(&b, "| **Reviews remaining** | %s%s |\n", remaining, via)
 	if blocked {
-		fmt.Fprintf(&b, "| **Rate limit** | ⛔ resets %s (~%dm) |\n", fmtStamp(state.Blocked.BlockedUntil, loc), minutesUntil(*state.Blocked.BlockedUntil, now))
+		fmt.Fprintf(&b, "| **Rate limit** | ⚠️ ⛔ rate limited — resets %s (~%dm) |\n", fmtStamp(state.Blocked.BlockedUntil, loc), minutesUntil(*state.Blocked.BlockedUntil, now))
 	} else {
 		fmt.Fprintf(&b, "| **Rate limit** | ✅ not currently limited |\n")
 	}
