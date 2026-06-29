@@ -178,6 +178,39 @@ func TestEnqueueBatchAppendsOncePerPR(t *testing.T) {
 	}
 }
 
+func TestRequeueInflightRateLimitUsesBlockedNotWarn(t *testing.T) {
+	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, CalibrationTTL: 2 * time.Minute, Host: "h"}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	// Rate-limited requeue: represented via Blocked, not a sticky Warn.
+	reset := time.Now().UTC().Add(10 * time.Minute)
+	st := &State{InFlight: &InFlight{Repo: "o/a", PR: 1, Seq: 5}, Fired: map[string]string{"o/a#1": "abc"}}
+	svc.requeueInflight(st, inflightCheck{Requeue: true, Reason: warnRateLimited, BlockedUntil: &reset})
+	if st.Warn != "" {
+		t.Fatalf("rate-limit requeue must not set a sticky Warn, got %q", st.Warn)
+	}
+	if st.Blocked.BlockedUntil == nil || !st.Blocked.BlockedUntil.Equal(reset) {
+		t.Fatalf("expected Blocked.BlockedUntil=reset, got %v", st.Blocked.BlockedUntil)
+	}
+	if st.InFlight != nil {
+		t.Fatal("inflight should be cleared on requeue")
+	}
+
+	// Rate-limited with no parseable reset: still blocks (briefly), no Warn.
+	st = &State{InFlight: &InFlight{Repo: "o/a", PR: 1}, Fired: map[string]string{}}
+	svc.requeueInflight(st, inflightCheck{Requeue: true, Reason: warnRateLimited})
+	if st.Warn != "" || st.Blocked.BlockedUntil == nil {
+		t.Fatalf("no-reset rate limit should block without a Warn; warn=%q blocked=%v", st.Warn, st.Blocked.BlockedUntil)
+	}
+
+	// Non-rate-limit requeue keeps an informative Warn.
+	st = &State{InFlight: &InFlight{Repo: "o/b", PR: 2}, Fired: map[string]string{}}
+	svc.requeueInflight(st, inflightCheck{Requeue: true, Reason: "in-flight timeout"})
+	if st.Warn != "in-flight timeout" {
+		t.Fatalf("non-rate-limit requeue should set Warn, got %q", st.Warn)
+	}
+}
+
 func TestRenewLeaderRespectsLiveLease(t *testing.T) {
 	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, LeaderTTL: time.Minute}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
