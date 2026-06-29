@@ -245,12 +245,16 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 
 	token := randomToken()
 	reserved, err := s.store.Update(ctx, func(st *State) error {
+		// Another worker already holds an in-flight slot, or won the race for this
+		// queue head (or it was cancelled) since we picked it. These are benign lost
+		// races, not write conflicts — return ErrNoChange so Update reports lost_race
+		// rather than failing the loop with "state changed while writing".
 		if st.InFlight != nil {
-			return nil
+			return ErrNoChange
 		}
 		q := st.SortedQueue()
 		if len(q) == 0 || q[0].Seq != item.Seq {
-			return ErrCASConflict
+			return ErrNoChange
 		}
 		removeQueued(st, item.Seq)
 		st.InFlight = &InFlight{
@@ -288,7 +292,14 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		}
 		return PumpResult{Action: "post_failed", Repo: item.Repo, PR: item.PR, Head: head, Reason: err.Error()}, err
 	}
-	firedAt := time.Now().UTC()
+	// Baseline completion detection on the trigger comment's GitHub timestamp, not a
+	// local clock that may run ahead of GitHub's: a completion landing in the same
+	// second (or before a fast local clock) would otherwise fail the strict After
+	// check in inflightStatus and get missed, refiring a duplicate review.
+	firedAt := comment.CreatedAt.UTC()
+	if firedAt.IsZero() {
+		firedAt = time.Now().UTC()
+	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		if st.InFlight == nil || st.InFlight.Token != token {
 			return nil
@@ -349,9 +360,14 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 			return PumpResult{Action: "fired", Repo: repo, PR: pr, Head: state.InFlight.Head}, 0, nil
 		}
 		if !state.Contains(repo, pr) {
-			head, herr := s.headShort(ctx, repo, pr)
+			head, open, herr := s.pullHead(ctx, repo, pr)
 			if herr == nil && state.Fired[QueueKey(repo, pr)] == head {
 				return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: head}, 3, nil
+			}
+			if herr == nil && !open {
+				// PR was closed/merged and dropped from the queue — nothing to review.
+				// Return a terminal result so crq loop stops instead of polling forever.
+				return PumpResult{Action: "skipped", Repo: repo, PR: pr, Reason: "pr closed"}, 2, nil
 			}
 			if result.Action == "fired" && result.Repo == repo && result.PR == pr {
 				return result, 0, nil
@@ -416,15 +432,19 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 		return state, nil
 	}
 	now := time.Now().UTC()
-	if state.Blocked.CheckedAt != nil && now.Sub(*state.Blocked.CheckedAt) < s.cfg.CalibrationTTL {
+	// Honor the freshness shortcut only when the last reading was conclusive. If a
+	// probe is still pending (CalibAskedAt set, no reply yet), keep re-checking so a
+	// late "rate-limited" reply isn't ignored for the full TTL — which would let Pump
+	// fire straight into the limit.
+	if state.Blocked.CalibAskedAt == nil && state.Blocked.CheckedAt != nil && now.Sub(*state.Blocked.CheckedAt) < s.cfg.CalibrationTTL {
 		return state, nil
 	}
-	blocked, err := s.readQuota(ctx, now)
+	blocked, err := s.readQuota(ctx, now, state.Blocked.CalibAskedAt)
 	if err != nil {
 		return state, err
 	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
-		if st.Blocked.CheckedAt != nil && time.Since(*st.Blocked.CheckedAt) < s.cfg.CalibrationTTL {
+		if st.Blocked.CalibAskedAt == nil && st.Blocked.CheckedAt != nil && time.Since(*st.Blocked.CheckedAt) < s.cfg.CalibrationTTL {
 			return ErrNoChange
 		}
 		st.Blocked = blocked
@@ -442,7 +462,7 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 	return updated, nil
 }
 
-func (s *Service) readQuota(ctx context.Context, now time.Time) (Blocked, error) {
+func (s *Service) readQuota(ctx context.Context, now time.Time, pendingAsked *time.Time) (Blocked, error) {
 	blocked := Blocked{Scope: strings.Join(s.cfg.Scope, ","), Source: "calibrate", CheckedAt: &now}
 	cutoff := now.Add(-s.cfg.CalibrationTTL)
 	keepAfter := now.Add(-2 * s.cfg.CalibrationTTL)
@@ -453,6 +473,13 @@ func (s *Service) readQuota(ctx context.Context, now time.Time) (Blocked, error)
 		blocked.Remaining = remaining
 		blocked.BlockedUntil = reset
 		s.pruneCalibration(ctx, keepAfter, 80)
+		return blocked, nil
+	}
+	// A probe from a previous call is still pending and not yet stale, and the check
+	// above found no reply to it yet: keep waiting for its (possibly late) reply
+	// instead of posting another probe every cycle.
+	if pendingAsked != nil && pendingAsked.After(cutoff) {
+		blocked.CalibAskedAt = pendingAsked
 		return blocked, nil
 	}
 	asked, err := s.gh.PostIssueComment(ctx, s.cfg.GateRepo, s.cfg.CalibrationPR, s.cfg.RateLimitCommand)
@@ -605,11 +632,14 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 	}
 	if inf.FiredCommentID != 0 {
 		reactions, err := s.gh.ListCommentReactions(ctx, inf.Repo, inf.FiredCommentID)
-		if err == nil {
-			for _, reaction := range reactions {
-				if reaction.User.Login == s.cfg.Bot {
-					return inflightCheck{Done: true, Reason: "bot reacted"}, nil
-				}
+		if err != nil {
+			// Don't treat a transient/rate-limited reactions failure as "no reaction":
+			// that can misclassify an acknowledged review as timed out and refire it.
+			return inflightCheck{}, err
+		}
+		for _, reaction := range reactions {
+			if reaction.User.Login == s.cfg.Bot {
+				return inflightCheck{Done: true, Reason: "bot reacted"}, nil
 			}
 		}
 	}
@@ -694,7 +724,7 @@ func (s *Service) botReviewedHead(ctx context.Context, repo string, pr int, head
 		return false, err
 	}
 	for _, review := range reviews {
-		if review.User.Login == s.cfg.Bot && strings.HasPrefix(review.CommitID, head) {
+		if normalizeBotName(review.User.Login) == normalizeBotName(s.cfg.Bot) && strings.HasPrefix(review.CommitID, head) {
 			return true, nil
 		}
 	}
