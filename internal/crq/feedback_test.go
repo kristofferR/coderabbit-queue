@@ -202,6 +202,31 @@ func TestThreadFindingsMatchesGraphQLBotLogin(t *testing.T) {
 	}
 }
 
+func TestRateLimitDetectionCoversFairUsageFormat(t *testing.T) {
+	cfg := Config{RateLimitMarker: "rate limited by coderabbit.ai"}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	newMsg := "<!-- This is an auto-generated reply by CodeRabbit -->\n" +
+		"You're currently rate limited under our Fair Usage Limits Policy. " +
+		"Your next review will be available in 48 minutes."
+	oldMsg := "You are rate limited by coderabbit.ai. Reviews available in 3 minutes."
+
+	if !svc.isRateLimited(newMsg) {
+		t.Fatal("must detect CodeRabbit's Fair Usage rate-limit message")
+	}
+	if !svc.isRateLimited(oldMsg) {
+		t.Fatal("must still detect the legacy marker")
+	}
+	if svc.isRateLimited("LGTM — nice fix, nothing about limits here") {
+		t.Fatal("must not flag a normal review comment")
+	}
+
+	base := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
+	if reset := parseAvailableIn(newMsg, base); reset == nil || !reset.Equal(base.Add(48*time.Minute)) {
+		t.Fatalf("expected reset base+48m from the new message, got %v", reset)
+	}
+}
+
 func TestParseAvailableIn(t *testing.T) {
 	base := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
 	reset := parseAvailableIn("Review limit reached. Reviews available in 1 hour 2 minutes 3 seconds.", base)

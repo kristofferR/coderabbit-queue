@@ -123,7 +123,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 				continue
 			}
 			bodyLower := strings.ToLower(comment.Body)
-			if strings.Contains(bodyLower, strings.ToLower(s.cfg.RateLimitMarker)) {
+			if s.isRateLimited(comment.Body) {
 				continue
 			}
 			if strings.Contains(bodyLower, strings.ToLower(s.cfg.ReviewDoneMarker)) {
