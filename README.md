@@ -381,7 +381,7 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_INFLIGHT_TIMEOUT` | `15m` | backstop to release a stuck in-flight review |
 | `CRQ_LEADER_TTL` | `3m` | when a crashed `autoreview` leader is considered gone |
 | `CRQ_GITHUB_MAX_WAIT` / `CRQ_GITHUB_RETRIES` | `120s` / `6` | GitHub rate-limit / 5xx backoff budget per request |
-| `CRQ_NETWORK_MAX_WAIT` | `30m` | how long to ride out an internet/GitHub outage (retrying ~every 30s) before failing |
+| `CRQ_NETWORK_MAX_WAIT` | `0` (no cap) | cap on riding out an internet/GitHub outage (retrying ~every 30s); `0` = keep trying until connectivity returns |
 
 **Other review bots:** crq isn't CodeRabbit-specific. Point `CRQ_BOT`, `CRQ_REVIEW_CMD`,
 `CRQ_RATELIMIT_CMD`, and `CRQ_RL_MARKER` at any bot with a similar command surface.
@@ -407,6 +407,10 @@ If you're an autonomous agent running a PR-review loop, here's everything you ne
 - **Resolve / decline:** after fixing a finding, `crq resolve <repo> <pr> --thread <id>`. If you're
   declining one, record why with `crq decline <repo> <pr> --thread <id> --reason "…"` instead of
   leaving it silently open.
+- **A long wait is not a hang.** During queue/rate-limit waits, feedback waits, and network
+  outages, crq logs progress to **stderr** (queue reason, per-bot `reviewed` status, `github
+  unreachable … offline …` / `reachable again`). It keeps retrying through an internet drop until
+  connectivity returns (no timeout by default), so don't kill it — watch stderr.
 - **Setup check:** run `crq doctor`; if config is missing, do the Quick Start (install + `crq init`).
 
 A drop-in **[Claude Code skill](skills/coderabbit-queue/SKILL.md)** is included, and a compact
@@ -422,7 +426,7 @@ machine contract lives in [`llms.txt`](llms.txt).
 | A PR is stuck "in flight" forever | `crq cancel <repo> <pr>`; it also auto-clears after `CRQ_INFLIGHT_TIMEOUT`. |
 | Reviews fire slower than expected | That's the point — you're rate-limited. `crq status` shows the real countdown from CodeRabbit. |
 | `github … rate limit hit … resets …` | crq backs off and retries automatically (up to `CRQ_GITHUB_MAX_WAIT`); past that it surfaces a clear reset time instead of a raw 403. |
-| Internet drops for a while | crq rides it out — it keeps retrying (the request *is* the connectivity probe) every ~30s for up to `CRQ_NETWORK_MAX_WAIT` (default 30m), so a long outage blocks and resumes instead of failing your loop or daemon. |
+| Internet drops for a while | crq rides it out — it keeps retrying (the request *is* the connectivity probe) every ~30s with **no timeout by default**, logging `github unreachable … offline …` to stderr and `reachable again` on recovery, so a long outage blocks and resumes instead of failing your loop or daemon. Set `CRQ_NETWORK_MAX_WAIT` to cap it. |
 | Calibration PR rejects comments | crq prunes its own probe comments to stay under GitHub's 2500-comment cap and self-heals if it ever hits it. |
 
 ## How concurrency works (for the curious)

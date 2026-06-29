@@ -269,6 +269,7 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 	repo = NormalizeRepo(repo)
 	start := time.Now()
 	enqueued := false
+	var lastLog time.Time
 	for {
 		if s.cfg.WaitTimeout > 0 && time.Since(start) > s.cfg.WaitTimeout {
 			return PumpResult{Action: "timeout", Repo: repo, PR: pr}, 2, nil
@@ -302,6 +303,14 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 			if result.Action == "fired" && result.Repo == repo && result.PR == pr {
 				return result, 0, nil
 			}
+		}
+		if s.log != nil && time.Since(lastLog) >= 30*time.Second {
+			reason := result.Reason
+			if reason == "" {
+				reason = result.Action
+			}
+			s.log.Printf("crq: %s#%d waiting for a review slot — %s (%s elapsed)", repo, pr, reason, time.Since(start).Round(time.Second))
+			lastLog = time.Now()
 		}
 		select {
 		case <-ctx.Done():
