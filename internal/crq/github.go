@@ -44,6 +44,8 @@ type GitHub struct {
 	maxWait        time.Duration
 	backoffBase    time.Duration
 	networkMaxWait time.Duration
+	acctTypeMu     sync.Mutex
+	acctType       map[string]string // scope login -> "org:" | "user:" search qualifier
 }
 
 // lookupToken resolves a GitHub token from the environment or the gh CLI. gh can
@@ -806,16 +808,20 @@ func (g *GitHub) ListCommentReactions(ctx context.Context, repo string, commentI
 	return out, err
 }
 
-func (g *GitHub) SearchOpenPRs(ctx context.Context, target string, byRepo bool, limit int) ([]SearchPR, error) {
-	var out []SearchPR
+// EachOpenPR streams open PRs for a scope (most-recently-updated first), invoking
+// fn for each. It stops early when fn returns stop=true, so a caller can bound work
+// by its own post-filter scan budget without either over-fetching search pages or
+// (the failure mode of a fixed pre-filter limit) stopping before excluded/gate
+// results have been skipped — keeping every in-scope PR reachable.
+func (g *GitHub) EachOpenPR(ctx context.Context, target string, byRepo bool, fn func(SearchPR) (stop bool, err error)) error {
 	query := "type:pr state:open archived:false "
 	if byRepo {
 		query += "repo:" + target
 	} else {
-		query += "user:" + target
+		query += g.searchOwnerQualifier(ctx, target) + target
 	}
 	page := 1
-	for len(out) < limit {
+	for {
 		values := url.Values{}
 		values.Set("q", query)
 		values.Set("per_page", "100")
@@ -829,26 +835,71 @@ func (g *GitHub) SearchOpenPRs(ctx context.Context, target string, byRepo bool, 
 			} `json:"items"`
 		}
 		if err := g.request(ctx, http.MethodGet, "/search/issues?"+values.Encode(), nil, &result); err != nil {
-			return out, err
+			return err
 		}
 		if len(result.Items) == 0 {
-			break
+			return nil
 		}
 		for _, item := range result.Items {
 			repo := strings.TrimPrefix(item.RepositoryURL, "https://api.github.com/repos/")
-			if repo != "" {
-				out = append(out, SearchPR{Repo: repo, Number: item.Number})
+			if repo == "" {
+				continue
 			}
-			if len(out) >= limit {
-				break
+			stop, err := fn(SearchPR{Repo: repo, Number: item.Number})
+			if err != nil {
+				return err
+			}
+			if stop {
+				return nil
 			}
 		}
 		if len(result.Items) < 100 {
-			break
+			return nil
 		}
 		page++
 	}
-	return out, nil
+}
+
+// SearchOpenPRs collects up to limit open PRs for a scope. It is a thin wrapper
+// over EachOpenPR for callers that want a slice rather than a streaming callback.
+func (g *GitHub) SearchOpenPRs(ctx context.Context, target string, byRepo bool, limit int) ([]SearchPR, error) {
+	var out []SearchPR
+	err := g.EachOpenPR(ctx, target, byRepo, func(pr SearchPR) (bool, error) {
+		out = append(out, pr)
+		return len(out) >= limit, nil
+	})
+	return out, err
+}
+
+// searchOwnerQualifier returns the issue-search owner qualifier for a non-repo
+// scope: "org:" for organizations, "user:" for user accounts. GitHub's search
+// distinguishes the two, so an org scope returns nothing under "user:". The lookup
+// is cached per login (an account's type is stable within a run) and falls back to
+// "user:" without caching if the type can't be read.
+func (g *GitHub) searchOwnerQualifier(ctx context.Context, login string) string {
+	g.acctTypeMu.Lock()
+	if g.acctType == nil {
+		g.acctType = map[string]string{}
+	}
+	cached, ok := g.acctType[login]
+	g.acctTypeMu.Unlock()
+	if ok {
+		return cached
+	}
+	var acct struct {
+		Type string `json:"type"`
+	}
+	if err := g.request(ctx, http.MethodGet, "/users/"+login, nil, &acct); err != nil {
+		return "user:" // best-effort; don't cache a failed lookup
+	}
+	qualifier := "user:"
+	if strings.EqualFold(acct.Type, "Organization") {
+		qualifier = "org:"
+	}
+	g.acctTypeMu.Lock()
+	g.acctType[login] = qualifier
+	g.acctTypeMu.Unlock()
+	return qualifier
 }
 
 type SearchPR struct {

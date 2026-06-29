@@ -334,7 +334,7 @@ feedback. crq keys resolution off GitHub's own thread state, so a finding keeps 
   "pr": 123,
   "head": "abcdef123",
   "converged": false,
-  "reviewed_by": { "coderabbitai[bot]": true, "chatgpt-codex": false },
+  "reviewed_by": { "coderabbitai[bot]": true, "chatgpt-codex-connector[bot]": false },
   "findings": [
     {
       "id": "…",
@@ -373,7 +373,7 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_STATE_REF` | `crq-state` | git ref that stores the typed CAS state |
 | `CRQ_REPOS` | _(all in scope)_ | `autoreview` allowlist — only these `owner/name` repos (comma-separated) |
 | `CRQ_EXCLUDE` | _(none)_ | `autoreview` denylist — never these `owner/name` repos (comma-separated) |
-| `CRQ_REQUIRED_BOTS` | `coderabbitai[bot],chatgpt-codex` | bots that must review the head for convergence |
+| `CRQ_REQUIRED_BOTS` | `coderabbitai[bot],chatgpt-codex-connector[bot]` | bots that must review the head for convergence |
 | `CRQ_TZ` | `UTC` | dashboard display timezone (IANA name, e.g. `Europe/Oslo`) |
 | `CRQ_MIN_INTERVAL` | `90s` | minimum time between fired reviews |
 | `CRQ_POLL` | `15s` | how often `crq loop` checks its place in line |

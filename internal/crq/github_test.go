@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -170,6 +171,77 @@ func TestBackoffWaitRidesOutKnownReset(t *testing.T) {
 	}
 	if _, _, ok := g.backoffWait(&RateLimitError{}, 6); ok {
 		t.Fatal("should give up after maxRetries on a hint-less limit")
+	}
+}
+
+func TestSearchOwnerQualifierDistinguishesOrgAndUser(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "t")
+	var userHits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/users/acme":
+			atomic.AddInt32(&userHits, 1)
+			_, _ = w.Write([]byte(`{"type":"Organization"}`))
+		case "/users/alice":
+			_, _ = w.Write([]byte(`{"type":"User"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 2, maxWait: time.Second, backoffBase: time.Millisecond, networkMaxWait: time.Second}
+
+	if q := g.searchOwnerQualifier(context.Background(), "acme"); q != "org:" {
+		t.Fatalf("an organization scope must use org:, got %q", q)
+	}
+	if q := g.searchOwnerQualifier(context.Background(), "alice"); q != "user:" {
+		t.Fatalf("a user scope must use user:, got %q", q)
+	}
+	// Second lookup of the same login is served from cache, not a new request.
+	if q := g.searchOwnerQualifier(context.Background(), "acme"); q != "org:" {
+		t.Fatalf("cached org lookup mismatch: %q", q)
+	}
+	if got := atomic.LoadInt32(&userHits); got != 1 {
+		t.Fatalf("expected the org type to be cached after one lookup, made %d", got)
+	}
+}
+
+func TestEachOpenPRStopsAtCallerBudgetWithoutOverFetching(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "t")
+	var searchHits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/users/alice" {
+			_, _ = w.Write([]byte(`{"type":"User"}`))
+			return
+		}
+		if r.URL.Path == "/search/issues" {
+			atomic.AddInt32(&searchHits, 1)
+			// A full page, so pagination would continue if the caller didn't stop.
+			parts := make([]string, 0, 100)
+			for i := 0; i < 100; i++ {
+				parts = append(parts, `{"number":`+strconv.Itoa(i+1)+`,"repository_url":"https://api.github.com/repos/alice/repo"}`)
+			}
+			_, _ = w.Write([]byte(`{"items":[` + strings.Join(parts, ",") + `]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 2, maxWait: time.Second, backoffBase: time.Millisecond, networkMaxWait: time.Second}
+
+	seen := 0
+	err := g.EachOpenPR(context.Background(), "alice", false, func(SearchPR) (bool, error) {
+		seen++
+		return seen >= 5, nil // caller's post-filter budget
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seen != 5 {
+		t.Fatalf("EachOpenPR should stop at the caller's budget (5), saw %d", seen)
+	}
+	if got := atomic.LoadInt32(&searchHits); got != 1 {
+		t.Fatalf("should stop within the first page, made %d search requests", got)
 	}
 }
 
