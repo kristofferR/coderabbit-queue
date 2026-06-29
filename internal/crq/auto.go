@@ -256,9 +256,10 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 	if err != nil {
 		return false, err
 	}
+	bot := normalizeBotName(s.cfg.Bot)
 	lastBotReview := ""
 	for _, review := range reviews {
-		if review.User.Login == s.cfg.Bot && review.CommitID != "" {
+		if normalizeBotName(review.User.Login) == bot && review.CommitID != "" {
 			lastBotReview = shortOID(review.CommitID)
 		}
 	}
@@ -273,7 +274,7 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 		return false, err
 	}
 	for _, comment := range comments {
-		if comment.User.Login == s.cfg.Bot && strings.Contains(comment.Body, s.cfg.ReviewDoneMarker) {
+		if normalizeBotName(comment.User.Login) == bot && strings.Contains(comment.Body, s.cfg.ReviewDoneMarker) {
 			return false, nil
 		}
 	}

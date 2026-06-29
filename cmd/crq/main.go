@@ -290,7 +290,7 @@ USAGE
                                    maintenance tools; not for normal review loops
 
 EXIT CODES
-  loop: 0 converged/no actionable findings, 10 actionable feedback, 2 timeout
+  loop: 0 converged/no actionable findings/skipped, 10 actionable feedback, 2 timeout
 
 Configure with environment variables or ~/.config/crq/env. CRQ_REPO points at the gate repo.
 For a compact machine-readable contract, read llms.txt in this repository.
@@ -307,7 +307,7 @@ Review round primitive for humans and agents. crq coordinates the review trigger
 waits for real feedback on the current PR head, and emits one JSON report to stdout.
 
 Exit codes:
-  0   converged or no actionable findings
+  0   converged, no actionable findings, or skipped because there is nothing to review
   10  actionable findings returned in .findings[]
   2   timed out waiting for feedback
 
@@ -329,7 +329,7 @@ Never post @coderabbitai review directly; crq is the only trigger.
 Emit current normalized feedback JSON without triggering a new review.
 
 Important JSON fields:
-  status       feedback | waiting | converged
+  status       feedback | waiting | converged | skipped | timeout
   head         current PR head short SHA
   reviewed_by  map of required bot -> reviewed-current-head boolean
   findings[]   always an array; empty means no actionable findings found

@@ -191,18 +191,47 @@ func TestSearchOwnerQualifierDistinguishesOrgAndUser(t *testing.T) {
 	defer srv.Close()
 	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 2, maxWait: time.Second, backoffBase: time.Millisecond, networkMaxWait: time.Second}
 
-	if q := g.searchOwnerQualifier(context.Background(), "acme"); q != "org:" {
+	if q, err := g.searchOwnerQualifier(context.Background(), "acme"); err != nil || q != "org:" {
 		t.Fatalf("an organization scope must use org:, got %q", q)
 	}
-	if q := g.searchOwnerQualifier(context.Background(), "alice"); q != "user:" {
+	if q, err := g.searchOwnerQualifier(context.Background(), "alice"); err != nil || q != "user:" {
 		t.Fatalf("a user scope must use user:, got %q", q)
 	}
 	// Second lookup of the same login is served from cache, not a new request.
-	if q := g.searchOwnerQualifier(context.Background(), "acme"); q != "org:" {
+	if q, err := g.searchOwnerQualifier(context.Background(), "acme"); err != nil || q != "org:" {
 		t.Fatalf("cached org lookup mismatch: %q", q)
 	}
 	if got := atomic.LoadInt32(&userHits); got != 1 {
 		t.Fatalf("expected the org type to be cached after one lookup, made %d", got)
+	}
+}
+
+func TestEachOpenPRPropagatesOwnerQualifierFailure(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "t")
+	var searchHits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/users/acme":
+			http.Error(w, "temporary scope lookup failure", http.StatusForbidden)
+		case "/search/issues":
+			atomic.AddInt32(&searchHits, 1)
+			_, _ = w.Write([]byte(`{"items":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 2, maxWait: time.Second, backoffBase: time.Millisecond, networkMaxWait: time.Second}
+
+	err := g.EachOpenPR(context.Background(), "acme", false, func(SearchPR) (bool, error) {
+		t.Fatal("callback should not run when owner qualifier lookup fails")
+		return true, nil
+	})
+	if err == nil {
+		t.Fatal("expected owner qualifier lookup failure to propagate")
+	}
+	if got := atomic.LoadInt32(&searchHits); got != 0 {
+		t.Fatalf("must not run the open-PR search with a fallback qualifier after lookup failure, search hits=%d", got)
 	}
 }
 

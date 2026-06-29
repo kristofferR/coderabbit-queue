@@ -35,6 +35,7 @@ type FeedbackReport struct {
 	Repo       string          `json:"repo"`
 	PR         int             `json:"pr"`
 	Head       string          `json:"head"`
+	Reason     string          `json:"reason,omitempty"`
 	Converged  bool            `json:"converged"`
 	ReviewedBy map[string]bool `json:"reviewed_by"`
 	Findings   []Finding       `json:"findings"`
@@ -177,16 +178,23 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 }
 
 func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport, int, error) {
-	waitCode, err := s.waitToFire(ctx, repo, pr)
+	waitResult, waitCode, err := s.waitToFire(ctx, repo, pr)
 	if err != nil {
 		return FeedbackReport{}, 1, err
 	}
 	if waitCode == 2 {
+		status := "timeout"
+		code := 2
+		if waitResult.Action == "skipped" {
+			status = "skipped"
+			code = 0
+		}
 		// The slot wait timed out (CRQ_WAIT_TIMEOUT) without firing a review. Don't
 		// enter the feedback poll — that would burn another feedback timeout and could
 		// return stale pre-existing findings despite no new review round. Report the
-		// timeout so the caller retries later instead.
-		return FeedbackReport{Status: "timeout", Repo: NormalizeRepo(repo), PR: pr, ReviewedBy: map[string]bool{}, Findings: []Finding{}}, 2, nil
+		// timeout so the caller retries later instead. A skipped wait result is
+		// terminal, not retryable, so preserve it as a skipped report.
+		return FeedbackReport{Status: status, Repo: NormalizeRepo(repo), PR: pr, Head: waitResult.Head, Reason: waitResult.Reason, ReviewedBy: map[string]bool{}, Findings: []Finding{}}, code, nil
 	}
 	deadline := time.Now().Add(s.cfg.FeedbackWaitTimeout)
 	start := time.Now()
@@ -217,7 +225,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			report.Status = "feedback"
 			return report, 10, nil
 		}
-		if report.Converged || (waitCode == 3 && report.ReviewedBy[s.cfg.Bot]) {
+		if report.Converged {
 			return report, 0, nil
 		}
 		// Keep the queue moving (re-fire once a rate-limit window clears) and pick up
@@ -259,16 +267,17 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 
 // waitToFire runs Wait (enqueue + coordinated fire), riding out GitHub REST rate
 // limits the same way the feedback loop does instead of failing the agent on a
-// transient throttle. Returns Wait's exit code (3 = already reviewed for head).
-func (s *Service) waitToFire(ctx context.Context, repo string, pr int) (int, error) {
+// transient throttle. Returns Wait's result and exit code (3 = already reviewed
+// for head).
+func (s *Service) waitToFire(ctx context.Context, repo string, pr int) (PumpResult, int, error) {
 	for {
-		_, code, err := s.Wait(ctx, repo, pr)
+		result, code, err := s.Wait(ctx, repo, pr)
 		if err == nil {
-			return code, nil
+			return result, code, nil
 		}
 		wait, ok := rateLimitWait(err)
 		if !ok {
-			return code, err
+			return result, code, err
 		}
 		if wait <= 0 {
 			wait = s.cfg.PollInterval
@@ -277,7 +286,7 @@ func (s *Service) waitToFire(ctx context.Context, repo string, pr int) (int, err
 			s.log.Printf("crq: %s#%d GitHub API rate-limited before firing; waiting %s for the reset, then retrying", repo, pr, wait.Round(time.Second))
 		}
 		if serr := sleepCtx(ctx, wait); serr != nil {
-			return code, serr
+			return result, code, serr
 		}
 	}
 }
