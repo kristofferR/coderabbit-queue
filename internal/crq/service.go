@@ -26,6 +26,7 @@ type GitHubAPI interface {
 	PostIssueComment(context.Context, string, int, string) (IssueComment, error)
 	DeleteIssueComment(context.Context, string, int64) error
 	SearchOpenPRs(context.Context, string, bool, int) ([]SearchPR, error)
+	EachOpenPR(context.Context, string, bool, func(SearchPR) (bool, error)) error
 	GraphQL(context.Context, string, map[string]any, any) error
 }
 
@@ -191,9 +192,22 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		return PumpResult{Action: "idle"}, nil
 	}
 	item := queue[0]
-	head, err := s.headShort(ctx, item.Repo, item.PR)
+	head, open, err := s.pullHead(ctx, item.Repo, item.PR)
 	if err != nil {
 		return PumpResult{}, err
+	}
+	if !open {
+		// PR was closed or merged after queueing — drop it rather than fire a review
+		// at a dead PR that can never converge.
+		updated, uerr := s.store.Update(ctx, func(st *State) error {
+			removeQueued(st, item.Seq)
+			return nil
+		})
+		if uerr != nil {
+			return PumpResult{}, uerr
+		}
+		s.sync(ctx, updated)
+		return PumpResult{Action: "skipped", Repo: item.Repo, PR: item.PR, Reason: "pr closed"}, nil
 	}
 	if !isShortSHA(head) {
 		return PumpResult{Action: "skipped", Repo: item.Repo, PR: item.PR, Reason: "could not read head"}, nil
@@ -656,6 +670,22 @@ func (s *Service) headShort(ctx context.Context, repo string, pr int) (string, e
 		return "", fmt.Errorf("invalid head sha")
 	}
 	return pull.Head.SHA[:9], nil
+}
+
+// pullHead returns the PR's short head SHA and whether it is still open (neither
+// closed nor merged). Pump uses it so a PR that was closed or merged after it was
+// queued is dropped instead of having a review fired at a dead PR — which would
+// never converge, time out, and requeue forever, wasting the shared slot.
+func (s *Service) pullHead(ctx context.Context, repo string, pr int) (head string, open bool, err error) {
+	pull, err := s.gh.GetPull(ctx, repo, pr)
+	if err != nil {
+		return "", false, err
+	}
+	open = pull.State == "open" && !pull.Merged
+	if len(pull.Head.SHA) < 9 {
+		return "", open, fmt.Errorf("invalid head sha")
+	}
+	return pull.Head.SHA[:9], open, nil
 }
 
 func (s *Service) botReviewedHead(ctx context.Context, repo string, pr int, head string) (bool, error) {

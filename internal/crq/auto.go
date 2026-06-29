@@ -182,48 +182,48 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 		if scanned >= s.cfg.AutoReviewMaxScan {
 			break
 		}
-		// Cap the search to the remaining scan budget so one busy target can't burn
-		// many search requests fetching slots this pass will never use.
-		remaining := s.cfg.AutoReviewMaxScan - scanned
-		prs, err := s.gh.SearchOpenPRs(ctx, target, byRepo, remaining)
-		if err != nil {
-			return err
-		}
-		for _, pr := range prs {
+		// Stream results and stop once the post-filter scan budget is spent, so
+		// excluded/gate-repo results can't crowd out in-scope PRs (a fixed pre-filter
+		// limit would never reach them) while we still don't over-fetch pages.
+		err := s.gh.EachOpenPR(ctx, target, byRepo, func(pr SearchPR) (bool, error) {
 			if scanned >= s.cfg.AutoReviewMaxScan {
-				break
+				return true, nil
 			}
 			repo := NormalizeRepo(pr.Repo)
 			if repo == NormalizeRepo(s.cfg.GateRepo) || s.cfg.ExcludeRepos[repo] {
-				continue
+				return false, nil
 			}
 			if len(s.cfg.AllowRepos) > 0 && !s.cfg.AllowRepos[repo] {
-				continue
+				return false, nil
 			}
 			scanned++
 			// Heartbeat: renew the lease partway through a long pass so a standby
 			// can't steal it mid-scan and cause brief double-leadership (#4).
 			if s.cfg.LeaderTTL > 0 && time.Since(lastBeat) >= s.cfg.LeaderTTL/2 {
-				st, held, err := s.renewLeader(ctx, owner, token)
-				if err != nil {
-					return err
+				st, held, herr := s.renewLeader(ctx, owner, token)
+				if herr != nil {
+					return false, herr
 				}
 				if !held {
-					return errLostLeadership
+					return false, errLostLeadership
 				}
 				state = st // reuse the freshly written snapshot for later candidates
 				lastBeat = time.Now()
 			}
-			need, err := s.needsReview(ctx, state, repo, pr.Number, opts.Incremental)
-			if err != nil {
+			need, nerr := s.needsReview(ctx, state, repo, pr.Number, opts.Incremental)
+			if nerr != nil {
 				if s.log != nil {
-					s.log.Printf("warning: autoreview skipped %s#%d: %v", repo, pr.Number, err)
+					s.log.Printf("warning: autoreview skipped %s#%d: %v", repo, pr.Number, nerr)
 				}
-				continue
+				return false, nil
 			}
 			if need {
 				candidates = append(candidates, SearchPR{Repo: repo, Number: pr.Number})
 			}
+			return false, nil
+		})
+		if err != nil {
+			return err
 		}
 	}
 	// One batched write for the whole pass instead of N (#2).

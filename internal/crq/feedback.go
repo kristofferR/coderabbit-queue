@@ -86,6 +86,12 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		for _, thread := range threads {
 			report.Findings = append(report.Findings, threadFindings(thread, bots)...)
 		}
+	} else if IsRateLimited(err) {
+		// A transient GraphQL rate limit must not silently degrade to the REST
+		// fallback, which loses thread resolution/outdated state and the cross-commit
+		// unresolved findings this command promises. Surface it so Loop rides it out
+		// instead of reporting converged from incomplete data.
+		return report, err
 	} else {
 		comments, cerr := s.gh.ListReviewComments(ctx, repo, pr)
 		if cerr != nil {
@@ -117,32 +123,35 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	}
 
 	issueComments, err := s.gh.ListIssueComments(ctx, repo, pr)
-	if err == nil {
-		for _, comment := range issueComments {
-			if !inBots(bots, comment.User.Login) {
-				continue
-			}
-			bodyLower := strings.ToLower(comment.Body)
-			if s.isRateLimited(comment.Body) {
-				continue
-			}
-			if strings.Contains(bodyLower, strings.ToLower(s.cfg.ReviewDoneMarker)) {
-				markReviewed(report.ReviewedBy, comment.User.Login)
-			}
-			if comment.User.Login == s.cfg.Bot {
-				continue
-			}
-			report.Findings = append(report.Findings, Finding{
-				Bot:       comment.User.Login,
-				Severity:  severityOf(comment.Body),
-				Title:     titleOf(comment.Body),
-				Body:      strings.TrimSpace(comment.Body),
-				CommentID: comment.ID,
-				URL:       comment.URL,
-				Source:    "issue_comment",
-				CreatedAt: comment.CreatedAt,
-			})
+	if err != nil {
+		// Don't silently drop the issue-comment source: a rate limit or API error
+		// here would otherwise let crq report clean/converged while Codex issue
+		// comments (or completion signals) were simply never fetched.
+		return report, err
+	}
+	for _, comment := range issueComments {
+		if !inBots(bots, comment.User.Login) {
+			continue
 		}
+		if s.isRateLimited(comment.Body) {
+			continue
+		}
+		// Issue comments carry no commit SHA, so a stale completion summary from an
+		// earlier commit must not be treated as a review of the current head — rely on
+		// commit-checked reviews/threads for ReviewedBy instead.
+		if comment.User.Login == s.cfg.Bot {
+			continue
+		}
+		report.Findings = append(report.Findings, Finding{
+			Bot:       comment.User.Login,
+			Severity:  severityOf(comment.Body),
+			Title:     titleOf(comment.Body),
+			Body:      strings.TrimSpace(comment.Body),
+			CommentID: comment.ID,
+			URL:       comment.URL,
+			Source:    "issue_comment",
+			CreatedAt: comment.CreatedAt,
+		})
 	}
 
 	report.Findings = dedupeFindings(report.Findings)
@@ -171,6 +180,13 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 	waitCode, err := s.waitToFire(ctx, repo, pr)
 	if err != nil {
 		return FeedbackReport{}, 1, err
+	}
+	if waitCode == 2 {
+		// The slot wait timed out (CRQ_WAIT_TIMEOUT) without firing a review. Don't
+		// enter the feedback poll — that would burn another feedback timeout and could
+		// return stale pre-existing findings despite no new review round. Report the
+		// timeout so the caller retries later instead.
+		return FeedbackReport{Status: "timeout", Repo: NormalizeRepo(repo), PR: pr, ReviewedBy: map[string]bool{}, Findings: []Finding{}}, 2, nil
 	}
 	deadline := time.Now().Add(s.cfg.FeedbackWaitTimeout)
 	start := time.Now()

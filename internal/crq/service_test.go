@@ -103,6 +103,10 @@ func (f *fakeGitHub) SearchOpenPRs(context.Context, string, bool, int) ([]Search
 	return nil, nil
 }
 
+func (f *fakeGitHub) EachOpenPR(context.Context, string, bool, func(SearchPR) (bool, error)) error {
+	return nil
+}
+
 func (f *fakeGitHub) GraphQL(context.Context, string, map[string]any, any) error {
 	return errors.New("graphql unavailable")
 }
@@ -127,10 +131,10 @@ func TestPruneCalibrationDeletesOldNoiseKeepsRecent(t *testing.T) {
 	}
 	key := fakeKey("o/gate", 1)
 	gh.comments[key] = []IssueComment{
-		mkc(1, "kristofferR", "@coderabbitai rate limit", old),                                   // old probe -> delete
+		mkc(1, "kristofferR", "@coderabbitai rate limit", old),                                      // old probe -> delete
 		mkc(2, "coderabbitai[bot]", "0 reviews remaining. auto-generated reply by CodeRabbit", old), // old reply -> delete
-		mkc(3, "someone", "unrelated human comment", old),                                         // not calibration noise -> keep
-		mkc(4, "kristofferR", "@coderabbitai rate limit", now),                                    // recent -> keep
+		mkc(3, "someone", "unrelated human comment", old),                                           // not calibration noise -> keep
+		mkc(4, "kristofferR", "@coderabbitai rate limit", now),                                      // recent -> keep
 	}
 
 	deleted := svc.pruneCalibration(context.Background(), now.Add(-2*time.Minute), 80)
@@ -242,6 +246,7 @@ func TestEnqueueIsIdempotentAndPumpFiresOnce(t *testing.T) {
 	}
 	gh := newFakeGitHub()
 	var pull Pull
+	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls["owner/repo#12"] = pull
 	store := NewMemoryStore(cfg)
@@ -281,11 +286,57 @@ func TestEnqueueIsIdempotentAndPumpFiresOnce(t *testing.T) {
 	}
 }
 
+func TestPumpDropsClosedPRWithoutFiring(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:        "owner/gate",
+		StateRef:        "crq-state",
+		Host:            "testhost",
+		Bot:             "coderabbitai[bot]",
+		ReviewCommand:   "@coderabbitai review",
+		RateLimitMarker: "rate limited by coderabbit.ai",
+		PollInterval:    time.Millisecond,
+		InflightTimeout: time.Minute,
+		FiredMax:        500,
+	}
+	gh := newFakeGitHub()
+	// PR queued while open, then closed/merged before it reached the front.
+	var pull Pull
+	pull.State = "closed"
+	pull.Merged = true
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls["owner/repo#12"] = pull
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+
+	if _, err := service.Enqueue(ctx, "owner/repo", 12); err != nil {
+		t.Fatal(err)
+	}
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "skipped" || pumped.Reason != "pr closed" {
+		t.Fatalf("expected a closed PR to be dropped, got %#v", pumped)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("must not post a review to a closed PR, posted %d", len(gh.posted))
+	}
+	state, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Contains("owner/repo", 12) {
+		t.Fatal("closed PR should have been removed from the queue")
+	}
+}
+
 func TestEnqueueDedupesAlreadyFiredHead(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{GateRepo: "owner/gate", StateRef: "crq-state", Host: "testhost", FiredMax: 500}
 	gh := newFakeGitHub()
 	var pull Pull
+	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls["owner/repo#7"] = pull
 	store := NewMemoryStore(cfg)
