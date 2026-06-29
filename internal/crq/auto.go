@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -12,6 +13,9 @@ type AutoOptions struct {
 	Once        bool
 	Incremental bool
 }
+
+// errLostLeadership aborts a pass when a standby stole the lease mid-scan.
+var errLostLeadership = errors.New("lost autoreview leadership mid-pass")
 
 func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 	owner := fmt.Sprintf("host=%s pid=%d", s.cfg.Host, os.Getpid())
@@ -47,11 +51,18 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 				continue
 			}
 		}
-		if err := s.autoReviewPass(ctx, opts); err != nil && s.log != nil {
-			s.log.Printf("warning: autoreview pass failed: %v", err)
-		}
-		if _, err := s.Pump(ctx); err != nil && s.log != nil {
-			s.log.Printf("warning: autoreview pump failed: %v", err)
+		passErr := s.autoReviewPass(ctx, opts, owner, token)
+		if errors.Is(passErr, errLostLeadership) {
+			if s.log != nil {
+				s.log.Printf("autoreview: lost leadership mid-pass; standing by")
+			}
+		} else {
+			if passErr != nil && s.log != nil {
+				s.log.Printf("warning: autoreview pass failed: %v", passErr)
+			}
+			if _, err := s.Pump(ctx); err != nil && s.log != nil {
+				s.log.Printf("warning: autoreview pump failed: %v", err)
+			}
 		}
 		if opts.Once {
 			return nil
@@ -82,6 +93,20 @@ func (s *Service) rateLimitBackoff(wait time.Duration) time.Duration {
 }
 
 func (s *Service) acquireLeader(ctx context.Context, owner, token string) (bool, error) {
+	state, held, err := s.renewLeader(ctx, owner, token)
+	if err != nil {
+		return false, err
+	}
+	if held {
+		s.sync(ctx, state)
+	}
+	return held, nil
+}
+
+// renewLeader claims or extends the leader lease via compare-and-swap on the
+// state ref. It does not sync the dashboard, so it's cheap enough to call as an
+// in-pass heartbeat. held is false when another live lease holder owns it.
+func (s *Service) renewLeader(ctx context.Context, owner, token string) (State, bool, error) {
 	now := time.Now().UTC()
 	expires := now.Add(s.cfg.LeaderTTL)
 	held := false
@@ -95,15 +120,12 @@ func (s *Service) acquireLeader(ctx context.Context, owner, token string) (bool,
 		return nil
 	})
 	if err != nil {
-		return false, err
+		return State{}, false, err
 	}
-	if held {
-		s.sync(ctx, state)
-	}
-	return held, nil
+	return state, held, nil
 }
 
-func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions) error {
+func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, token string) error {
 	targets := s.cfg.Scope
 	byRepo := false
 	if len(s.cfg.AllowRepos) > 0 {
@@ -114,9 +136,11 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions) error {
 		byRepo = true
 	}
 	scanned := 0
+	var candidates []SearchPR
+	lastBeat := time.Now()
 	for _, target := range targets {
 		if scanned >= s.cfg.AutoReviewMaxScan {
-			return nil
+			break
 		}
 		prs, err := s.gh.SearchOpenPRs(ctx, target, byRepo, 1000)
 		if err != nil {
@@ -124,7 +148,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions) error {
 		}
 		for _, pr := range prs {
 			if scanned >= s.cfg.AutoReviewMaxScan {
-				return nil
+				break
 			}
 			repo := NormalizeRepo(pr.Repo)
 			if repo == NormalizeRepo(s.cfg.GateRepo) || s.cfg.ExcludeRepos[repo] {
@@ -134,32 +158,55 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions) error {
 				continue
 			}
 			scanned++
-			if err := s.enqueueIfNeedsReview(ctx, repo, pr.Number, opts.Incremental); err != nil && s.log != nil {
-				s.log.Printf("warning: autoreview skipped %s#%d: %v", repo, pr.Number, err)
+			// Heartbeat: renew the lease partway through a long pass so a standby
+			// can't steal it mid-scan and cause brief double-leadership (#4).
+			if s.cfg.LeaderTTL > 0 && time.Since(lastBeat) >= s.cfg.LeaderTTL/2 {
+				_, held, err := s.renewLeader(ctx, owner, token)
+				if err != nil {
+					return err
+				}
+				if !held {
+					return errLostLeadership
+				}
+				lastBeat = time.Now()
+			}
+			need, err := s.needsReview(ctx, repo, pr.Number, opts.Incremental)
+			if err != nil {
+				if s.log != nil {
+					s.log.Printf("warning: autoreview skipped %s#%d: %v", repo, pr.Number, err)
+				}
+				continue
+			}
+			if need {
+				candidates = append(candidates, SearchPR{Repo: repo, Number: pr.Number})
 			}
 		}
 	}
-	return nil
+	// One batched write for the whole pass instead of N (#2).
+	return s.enqueueBatch(ctx, candidates)
 }
 
-func (s *Service) enqueueIfNeedsReview(ctx context.Context, repo string, pr int, incremental bool) error {
+// needsReview reports whether an open PR should be enqueued for review: not
+// already queued/fired for its current head, and (incremental) the bot hasn't
+// reviewed that head yet, or (first-review) it has never been reviewed.
+func (s *Service) needsReview(ctx context.Context, repo string, pr int, incremental bool) (bool, error) {
 	state, _, err := s.store.Load(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if state.Contains(repo, pr) {
-		return nil
+		return false, nil
 	}
 	head, err := s.headShort(ctx, repo, pr)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if state.Fired[QueueKey(repo, pr)] == head {
-		return nil
+		return false, nil
 	}
 	reviews, err := s.gh.ListReviews(ctx, repo, pr)
 	if err != nil {
-		return err
+		return false, err
 	}
 	lastBotReview := ""
 	for _, review := range reviews {
@@ -168,31 +215,26 @@ func (s *Service) enqueueIfNeedsReview(ctx context.Context, repo string, pr int,
 		}
 	}
 	if incremental {
-		if lastBotReview != head {
-			_, err = s.Enqueue(ctx, repo, pr)
-			return err
-		}
-		return nil
+		return lastBotReview != head, nil
 	}
 	if lastBotReview != "" {
-		return nil
+		return false, nil
 	}
 	comments, err := s.gh.ListIssueComments(ctx, repo, pr)
 	if err != nil {
-		return err
+		return false, err
 	}
 	for _, comment := range comments {
 		if comment.User.Login == s.cfg.Bot && strings.Contains(comment.Body, s.cfg.ReviewDoneMarker) {
-			return nil
+			return false, nil
 		}
 	}
 	pull, err := s.gh.GetPull(ctx, repo, pr)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if strings.Contains(pull.Body, s.cfg.ReviewDoneMarker) {
-		return nil
+		return false, nil
 	}
-	_, err = s.Enqueue(ctx, repo, pr)
-	return err
+	return true, nil
 }

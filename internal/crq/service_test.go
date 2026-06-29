@@ -149,6 +149,50 @@ func TestPruneCalibrationDeletesOldNoiseKeepsRecent(t *testing.T) {
 	}
 }
 
+func TestEnqueueBatchAppendsOncePerPR(t *testing.T) {
+	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, Host: "h"}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	ctx := context.Background()
+	items := []SearchPR{
+		{Repo: "o/a", Number: 1},
+		{Repo: "o/b", Number: 2},
+		{Repo: "o/a", Number: 1}, // duplicate within the batch
+	}
+	if err := svc.enqueueBatch(ctx, items); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ := svc.store.Load(ctx)
+	if len(st.Queue) != 2 {
+		t.Fatalf("expected 2 queued (deduped), got %d", len(st.Queue))
+	}
+	if st.Queue[0].Seq == st.Queue[1].Seq || st.Queue[0].Seq == 0 {
+		t.Fatalf("expected distinct non-zero seqs, got %d and %d", st.Queue[0].Seq, st.Queue[1].Seq)
+	}
+	// Re-batching the same PRs is a no-op since they're already queued.
+	if err := svc.enqueueBatch(ctx, items); err != nil {
+		t.Fatal(err)
+	}
+	st2, _, _ := svc.store.Load(ctx)
+	if len(st2.Queue) != 2 {
+		t.Fatalf("expected still 2 after re-batch, got %d", len(st2.Queue))
+	}
+}
+
+func TestRenewLeaderRespectsLiveLease(t *testing.T) {
+	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, LeaderTTL: time.Minute}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	ctx := context.Background()
+	if _, held, err := svc.renewLeader(ctx, "ownerA", "tokA"); err != nil || !held {
+		t.Fatalf("A should acquire the lease: held=%v err=%v", held, err)
+	}
+	if _, held, _ := svc.renewLeader(ctx, "ownerA", "tokA"); !held {
+		t.Fatal("A should renew its own lease")
+	}
+	if _, held, _ := svc.renewLeader(ctx, "ownerB", "tokB"); held {
+		t.Fatal("B must not steal a live lease")
+	}
+}
+
 func TestEnqueueIsIdempotentAndPumpFiresOnce(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{
