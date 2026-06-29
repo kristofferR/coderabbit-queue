@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"regexp"
 	"sort"
 	"strconv"
@@ -228,6 +229,56 @@ func (s *Service) ResolveThreads(ctx context.Context, threadIDs []string) ([]Res
 			return out, err
 		}
 		out = append(out, ResolvedThread{ThreadID: result.ResolveReviewThread.Thread.ID, Resolved: result.ResolveReviewThread.Thread.IsResolved})
+	}
+	return out, nil
+}
+
+type DeclinedThread struct {
+	ThreadID string `json:"thread_id"`
+	URL      string `json:"url,omitempty"`
+	Resolved bool   `json:"resolved"`
+}
+
+// DeclineThreads posts a reason as a reply on each review thread, documenting why
+// a finding is not being addressed. By default the thread is left unresolved (an
+// on-the-record disagreement); pass resolve=true to also close it ("won't fix").
+func (s *Service) DeclineThreads(ctx context.Context, threadIDs []string, reason string, resolve bool) ([]DeclinedThread, error) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return nil, errors.New("a decline reason is required (--reason)")
+	}
+	var out []DeclinedThread
+	for _, id := range threadIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		var reply struct {
+			AddPullRequestReviewThreadReply struct {
+				Comment struct {
+					URL string `json:"url"`
+				} `json:"comment"`
+			} `json:"addPullRequestReviewThreadReply"`
+		}
+		err := s.gh.GraphQL(ctx, `mutation($threadId:ID!,$body:String!){
+  addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId, body:$body}) {
+    comment { url }
+  }
+}`, map[string]any{"threadId": id, "body": reason}, &reply)
+		if err != nil {
+			return out, err
+		}
+		dt := DeclinedThread{ThreadID: id, URL: reply.AddPullRequestReviewThreadReply.Comment.URL}
+		if resolve {
+			resolved, rerr := s.ResolveThreads(ctx, []string{id})
+			if rerr != nil {
+				return out, rerr
+			}
+			if len(resolved) > 0 {
+				dt.Resolved = resolved[0].Resolved
+			}
+		}
+		out = append(out, dt)
 	}
 	return out, nil
 }

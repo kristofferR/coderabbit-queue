@@ -82,6 +82,15 @@ crq resolve "$REPO" "$PR" --thread "$THREAD_ID"
 crq keys off GitHub's resolution state: an addressed finding keeps reappearing in `crq feedback`
 until its thread is resolved on GitHub. Resolve only threads you actually addressed; leave the rest open.
 
+For a finding you are **not** addressing, record why instead of leaving it silently open:
+
+```bash
+crq decline "$REPO" "$PR" --thread "$THREAD_ID" --reason "why this is declined"
+```
+
+This replies on the thread with your reason and leaves it unresolved (add `--resolve` to also close it
+as "won't fix"), so the next reviewer and CodeRabbit can see the decision rather than an ignored finding.
+
 ## Fleet Auto-Review
 
 To keep all open PRs in scope reviewed while CodeRabbit native auto-review is off:

@@ -150,6 +150,19 @@ func run(ctx context.Context, args []string) int {
 		}
 		printJSON(result)
 		return 0
+	case "decline":
+		threads, reason, resolve, ok := parseDeclineArgs(args[1:])
+		if !ok || len(threads) == 0 || strings.TrimSpace(reason) == "" {
+			fatal(errors.New(`usage: crq decline <repo> <pr> --thread <id> [--thread <id>...] --reason "<why>" [--resolve]`))
+			return 1
+		}
+		result, err := service.DeclineThreads(ctx, threads, reason, resolve)
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		printJSON(result)
+		return 0
 	case "autoreview", "auto":
 		fs := flag.NewFlagSet("autoreview", flag.ContinueOnError)
 		fs.SetOutput(os.Stderr)
@@ -264,6 +277,8 @@ USAGE
   crq feedback <repo> <pr>         emit normalized actionable review findings as JSON
   crq resolve <repo> <pr> --thread <id> [...]
                                    resolve addressed GitHub review threads
+  crq decline <repo> <pr> --thread <id> [...] --reason "<why>" [--resolve]
+                                   reply on a thread to record why a finding is declined
   crq autoreview [--once] [--no-incremental]
                                    keep open PRs reviewed, rate-coordinated
   crq preflight [--type all|committed|uncommitted] [--base <branch>]
@@ -332,6 +347,16 @@ Resolve only GitHub review threads that were actually addressed by the latest fi
 Leave declined, stale, incorrect, or deferred findings unresolved.
 
 Thread IDs come from .findings[].thread_id in crq loop/feedback output.
+`)
+	case "decline":
+		fmt.Print(`crq decline <repo> <pr> --thread <id> [--thread <id>...] --reason "<why>" [--resolve]
+
+Record on the PR why a finding is being declined: posts the reason as a reply on
+each review thread. Use this instead of silently leaving a finding unaddressed, so
+the next reviewer (and CodeRabbit) can see the decision.
+
+By default the thread stays unresolved (an on-the-record disagreement). Pass
+--resolve to also close it ("won't fix"). Thread IDs come from .findings[].thread_id.
 `)
 	case "autoreview", "auto":
 		fmt.Print(`crq autoreview [--once] [--no-incremental]
@@ -473,6 +498,37 @@ func parseResolveArgs(args []string) ([]string, bool) {
 		threads = append(threads, positional[2:]...)
 	}
 	return threads, true
+}
+
+func parseDeclineArgs(args []string) (threads []string, reason string, resolve, ok bool) {
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--thread":
+			if i+1 >= len(args) {
+				return nil, "", false, false
+			}
+			threads = append(threads, args[i+1])
+			i++
+		case "--reason":
+			if i+1 >= len(args) {
+				return nil, "", false, false
+			}
+			reason = args[i+1]
+			i++
+		case "--resolve":
+			resolve = true
+		default:
+			positional = append(positional, args[i])
+		}
+	}
+	if len(positional) != 0 && len(positional) < 2 {
+		return nil, "", false, false
+	}
+	if len(positional) > 2 {
+		threads = append(threads, positional[2:]...)
+	}
+	return threads, reason, resolve, true
 }
 
 func printJSON(value any) {
