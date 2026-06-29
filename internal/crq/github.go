@@ -424,6 +424,27 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 			}
 			return nil, &APIError{Method: method, URL: fullURL, Status: resp.StatusCode, Body: string(b)}
 		}
+		// GitHub's API always returns JSON; a non-2xx with an HTML body is a
+		// transient edge error (a "Bad request" / "Unicorn!" page served before the
+		// request reaches the API), not a real API error — retry rather than fail.
+		if resp.StatusCode >= 400 && isHTMLResponse(resp) {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if wait, ok := g.retryBackoff(attempt); ok {
+				attempt++
+				if g.log != nil {
+					g.log.Printf("github %s %s: HTTP %d with an HTML body (edge error); retrying in %s (attempt %d/%d)", method, shortURL(fullURL), resp.StatusCode, wait.Round(time.Second), attempt, g.maxRetries)
+				}
+				if serr := sleepCtx(ctx, wait); serr != nil {
+					return nil, serr
+				}
+				continue
+			}
+			return nil, &APIError{Method: method, URL: fullURL, Status: resp.StatusCode, Body: string(b)}
+		}
 		// A 401 is often transient (a spurious GitHub error, or a gh OAuth token
 		// that just rotated). Refresh the token and retry a bounded number of times
 		// before surfacing it as a real auth failure.
@@ -516,6 +537,10 @@ func (g *GitHub) retryBackoff(attempt int) (time.Duration, bool) {
 		wait = g.maxWait
 	}
 	return wait, true
+}
+
+func isHTMLResponse(resp *http.Response) bool {
+	return strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html")
 }
 
 func isRetryableStatus(code int) bool {

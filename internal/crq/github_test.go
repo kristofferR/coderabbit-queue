@@ -55,6 +55,53 @@ func (fakeTimeoutErr) Error() string   { return "opaque transport failure" }
 func (fakeTimeoutErr) Timeout() bool   { return true }
 func (fakeTimeoutErr) Temporary() bool { return true }
 
+func TestSendRetriesHTMLEdgeErrorButNotJSON4xx(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "test-token")
+	newGH := func(srv *httptest.Server) *GitHub {
+		return &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 4, maxWait: time.Second, backoffBase: time.Millisecond, networkMaxWait: time.Second}
+	}
+
+	// An HTML 400 (edge error) is retried, then succeeds.
+	var calls int32
+	htmlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte("<html><head><title>Bad request</title></head><body>Bad request</body></html>"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer htmlSrv.Close()
+	resp, err := newGH(htmlSrv).send(context.Background(), http.MethodPost, htmlSrv.URL+"/git/blobs", []byte(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("send returned error on retryable HTML edge error: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || atomic.LoadInt32(&calls) != 2 {
+		t.Fatalf("expected retry then 200 (2 calls), got status %d in %d calls", resp.StatusCode, calls)
+	}
+
+	// A genuine JSON 400 is NOT retried — returned to the caller immediately.
+	var jcalls int32
+	jsonSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&jcalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"message":"Problems parsing JSON"}`))
+	}))
+	defer jsonSrv.Close()
+	resp, err = newGH(jsonSrv).send(context.Background(), http.MethodPost, jsonSrv.URL+"/git/blobs", []byte(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("send should return the response, not an error, for a JSON 4xx: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest || atomic.LoadInt32(&jcalls) != 1 {
+		t.Fatalf("expected a single un-retried JSON 400, got status %d in %d calls", resp.StatusCode, jcalls)
+	}
+}
+
 func TestIsRetryableNetErr(t *testing.T) {
 	if isRetryableNetErr(nil) {
 		t.Fatal("nil is not retryable")
