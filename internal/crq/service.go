@@ -88,6 +88,45 @@ func (s *Service) Enqueue(ctx context.Context, repo string, pr int) (EnqueueResu
 	return result, nil
 }
 
+// enqueueBatch appends several PRs to the queue in a single compare-and-swap
+// write plus one dashboard sync, so a large autoreview pass doesn't produce N
+// separate state writes / issue edits (the write-storm in #2). PRs already
+// queued or in flight are skipped; the fired-head dedup still happens at pump
+// time, so a stale candidate can't cause a double review.
+func (s *Service) enqueueBatch(ctx context.Context, items []SearchPR) error {
+	if len(items) == 0 {
+		return nil
+	}
+	state, err := s.store.Update(ctx, func(st *State) error {
+		added := 0
+		for _, it := range items {
+			repo := NormalizeRepo(it.Repo)
+			if st.Contains(repo, it.Number) {
+				continue
+			}
+			st.NextSeq++
+			st.Queue = append(st.Queue, QueueItem{
+				Seq:        st.NextSeq,
+				Owner:      ownerOf(repo),
+				Repo:       repo,
+				PR:         it.Number,
+				Host:       s.cfg.Host,
+				EnqueuedAt: time.Now().UTC(),
+			})
+			added++
+		}
+		if added == 0 {
+			return ErrNoChange
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	s.sync(ctx, state)
+	return nil
+}
+
 type PumpResult struct {
 	Action string `json:"action"`
 	Repo   string `json:"repo,omitempty"`
