@@ -18,6 +18,7 @@ type Logger interface {
 
 type GitHubAPI interface {
 	GetPull(context.Context, string, int) (Pull, error)
+	GetCommit(context.Context, string, string) (gitCommit, error)
 	ListReviews(context.Context, string, int) ([]Review, error)
 	ListIssueComments(context.Context, string, int) ([]IssueComment, error)
 	ListIssueCommentsPage(context.Context, string, int, int, int) ([]IssueComment, error)
@@ -623,6 +624,11 @@ type inflightCheck struct {
 	BlockedUntil *time.Time
 }
 
+// notBefore reports whether t is at or after baseline. GitHub timestamps are
+// second-granular, so a bot completion in the same second as the trigger must
+// still count — a strict After would miss it and refire a duplicate review.
+func notBefore(t, baseline time.Time) bool { return !t.Before(baseline) }
+
 func (s *Service) inflightStatus(ctx context.Context, state State) (inflightCheck, error) {
 	inf := state.InFlight
 	if inf == nil {
@@ -639,7 +645,7 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 		return inflightCheck{}, err
 	}
 	for _, comment := range comments {
-		if !s.isConfiguredBot(comment.User.Login) || !comment.UpdatedAt.After(*inf.FiredAt) {
+		if !s.isConfiguredBot(comment.User.Login) || comment.UpdatedAt.Before(*inf.FiredAt) {
 			continue
 		}
 		if s.isRateLimited(comment.Body) {
@@ -652,7 +658,7 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 		return inflightCheck{}, err
 	}
 	for _, review := range reviews {
-		if s.isConfiguredBot(review.User.Login) && review.SubmittedAt.After(*inf.FiredAt) {
+		if s.isConfiguredBot(review.User.Login) && notBefore(review.SubmittedAt, *inf.FiredAt) {
 			return inflightCheck{Done: true, Reason: "review submitted"}, nil
 		}
 	}
@@ -670,7 +676,7 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 		}
 	}
 	for _, comment := range comments {
-		if s.isConfiguredBot(comment.User.Login) && comment.ID != inf.FiredCommentID && comment.UpdatedAt.After(*inf.FiredAt) && !s.isRateLimited(comment.Body) {
+		if s.isConfiguredBot(comment.User.Login) && comment.ID != inf.FiredCommentID && notBefore(comment.UpdatedAt, *inf.FiredAt) && !s.isRateLimited(comment.Body) {
 			return inflightCheck{Done: true, Reason: "bot comment"}, nil
 		}
 	}

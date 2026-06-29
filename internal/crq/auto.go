@@ -43,6 +43,7 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			}
 		}
 		passErr := s.autoReviewPass(ctx, opts, owner, token)
+		var passFailure error
 		if errors.Is(passErr, errLostLeadership) {
 			if s.log != nil {
 				s.log.Printf("autoreview: lost leadership mid-pass; standing by")
@@ -63,6 +64,7 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			if passErr != nil && s.log != nil {
 				s.log.Printf("warning: autoreview pass failed: %v", passErr)
 			}
+			passFailure = passErr
 			if _, err := s.Pump(ctx); err != nil {
 				if _, ok := rateLimitWait(err); ok {
 					if cont, serr := s.sleepRateLimit(ctx, opts, "pump", err); serr != nil || !cont {
@@ -76,10 +78,16 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 				if s.log != nil {
 					s.log.Printf("warning: autoreview pump failed: %v", err)
 				}
+				if passFailure == nil {
+					passFailure = err
+				}
 			}
 		}
 		if opts.Once {
-			return s.finishAutoReviewOnce(ctx, token, nil)
+			// A one-shot run must surface a real (non-rate-limit) scan/pump failure —
+			// e.g. a permission or owner-lookup error — so cron/CI doesn't see success
+			// when nothing was scanned or enqueued. The daemon keeps going (logged).
+			return s.finishAutoReviewOnce(ctx, token, passFailure)
 		}
 		select {
 		case <-ctx.Done():
@@ -209,13 +217,12 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 	if err != nil {
 		return err
 	}
-	scanned := 0
 	var candidates []SearchPR
 	lastBeat := time.Now()
 	for _, target := range targets {
-		if scanned >= s.cfg.AutoReviewMaxScan {
-			break
-		}
+		// Per-target scan budget so one large scope can't consume the whole budget
+		// and starve later scopes when CRQ_SCOPE lists multiple owners/orgs.
+		scanned := 0
 		// Stream results and stop once the post-filter scan budget is spent, so
 		// excluded/gate-repo results can't crowd out in-scope PRs (a fixed pre-filter
 		// limit would never reach them) while we still don't over-fetch pages.

@@ -2,9 +2,72 @@ package crq
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestLooksLikePathAcceptsRootFiles(t *testing.T) {
+	for _, p := range []string{"Dockerfile", "Makefile", "LICENSE", "go.mod", "src/app.go", "a/b/c"} {
+		if !looksLikePath(p) {
+			t.Fatalf("expected %q to be treated as a path", p)
+		}
+	}
+	for _, p := range []string{"", "Additional comments", "🧹 Nitpick comments", "two words"} {
+		if looksLikePath(p) {
+			t.Fatalf("expected %q NOT to be a path", p)
+		}
+	}
+}
+
+func TestDedupeSuppressesResolvedThreadPromptDuplicate(t *testing.T) {
+	findings := []Finding{
+		{Bot: "coderabbitai", Path: "internal/x.go", Line: 10, Title: "dup", Body: "do x", Source: "review_prompt"},
+	}
+	suppress := map[string]bool{"coderabbitai|internal/x.go|10": true}
+	if got := dedupeFindings(findings, suppress); len(got) != 0 {
+		t.Fatalf("expected the prompt duplicate at a resolved-thread location to be suppressed, got %#v", got)
+	}
+	if got := dedupeFindings(findings, nil); len(got) != 1 {
+		t.Fatalf("expected the prompt finding to survive when not suppressed, got %#v", got)
+	}
+}
+
+func TestFeedbackBoundsIssueCommentsToHead(t *testing.T) {
+	cfg := Config{
+		Bot:             "coderabbitai[bot]",
+		RequiredBots:    []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
+		RateLimitMarker: "rate limited by coderabbit.ai",
+	}
+	gh := newFakeGitHub()
+	headTime := time.Now().UTC()
+	sha := "abcdef1234567890"
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey("o/repo", 3)] = pull
+	gc := gitCommit{SHA: sha}
+	gc.Committer.Date = headTime
+	gh.commits[sha] = gc
+	mkc := func(id int64, body string, at time.Time) IssueComment {
+		ic := IssueComment{ID: id, Body: body, CreatedAt: at, UpdatedAt: at}
+		ic.User.Login = "chatgpt-codex-connector[bot]"
+		return ic
+	}
+	gh.comments[fakeKey("o/repo", 3)] = []IssueComment{
+		mkc(1, "Stale finding from the previous head", headTime.Add(-time.Hour)),
+		mkc(2, "Current finding for this head", headTime.Add(time.Minute)),
+	}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	rep, err := svc.Feedback(context.Background(), "o/repo", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Findings) != 1 || !strings.Contains(rep.Findings[0].Body, "Current finding") {
+		t.Fatalf("expected only the post-head issue comment as a finding, got %#v", rep.Findings)
+	}
+}
 
 func TestParseReviewBodyFindingsExtractsOutsideDiffItems(t *testing.T) {
 	review := Review{
@@ -221,7 +284,7 @@ func TestDedupeFindingsDropsNonActionableBotArtifacts(t *testing.T) {
 		{Bot: "coderabbitai", Title: "> Skipped: comment is from another GitHub bot.", Body: "> Skipped: comment is from another GitHub bot.", Source: "review_thread"},
 		{Bot: "chatgpt-codex-connector[bot]", Title: "You have reached your Codex usage limits for code reviews.", Body: "You have reached your Codex usage limits for code reviews.", Source: "issue_comment"},
 	}
-	if got := dedupeFindings(findings); len(got) != 0 {
+	if got := dedupeFindings(findings, nil); len(got) != 0 {
 		t.Fatalf("expected non-actionable bot artifacts to be dropped, got %#v", got)
 	}
 }
