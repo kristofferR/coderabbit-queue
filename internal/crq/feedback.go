@@ -187,15 +187,31 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		if report.Converged || (waitCode == 3 && report.ReviewedBy[s.cfg.Bot]) {
 			return report, 0, nil
 		}
+		// Keep the queue moving (re-fire once a rate-limit window clears) and pick up
+		// the Blocked state it leaves behind.
+		if _, err := s.Pump(ctx); err != nil && s.log != nil {
+			s.log.Printf("warning: pump while waiting for feedback failed: %v", err)
+		}
+		// The feedback-wait budget is for time the bot can actually review. While the
+		// account is rate-limited the PR just stays queued — it can't be reviewed yet —
+		// so that wait must not count against the timeout. Push the deadline past the
+		// block (keeping a full budget after it lifts) instead of giving up (exit 2)
+		// before CodeRabbit could ever run.
+		var blockedUntil *time.Time
+		if st, _, lerr := s.store.Load(ctx); lerr == nil && st.Blocked.BlockedUntil != nil && st.Blocked.BlockedUntil.After(time.Now()) {
+			blockedUntil = st.Blocked.BlockedUntil
+			deadline = extendDeadlineForBlock(deadline, blockedUntil, time.Now(), s.cfg.FeedbackWaitTimeout)
+		}
 		if time.Now().After(deadline) {
 			report.Status = "timeout"
 			return report, 2, nil
 		}
-		if _, err := s.Pump(ctx); err != nil && s.log != nil {
-			s.log.Printf("warning: pump while waiting for feedback failed: %v", err)
-		}
 		if s.log != nil && time.Since(lastLog) >= 30*time.Second {
-			s.log.Printf("crq: %s#%d waiting for review feedback on %s — reviewed %s (%s / %s)", repo, pr, report.Head, reviewedSummary(report.ReviewedBy), time.Since(start).Round(time.Second), s.cfg.FeedbackWaitTimeout)
+			if blockedUntil != nil {
+				s.log.Printf("crq: %s#%d queued — account rate-limited until %s; waiting, not counting it against the %s review wait (%s elapsed)", repo, pr, blockedUntil.UTC().Format(time.RFC3339), s.cfg.FeedbackWaitTimeout, time.Since(start).Round(time.Second))
+			} else {
+				s.log.Printf("crq: %s#%d waiting for review feedback on %s — reviewed %s (%s / %s)", repo, pr, report.Head, reviewedSummary(report.ReviewedBy), time.Since(start).Round(time.Second), s.cfg.FeedbackWaitTimeout)
+			}
 			lastLog = time.Now()
 		}
 		select {
@@ -204,6 +220,21 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		case <-time.After(s.cfg.PollInterval):
 		}
 	}
+}
+
+// extendDeadlineForBlock keeps the feedback-wait deadline from elapsing while the
+// CodeRabbit account is rate-limited. A blocked PR can't be reviewed — it just
+// stays queued until the window clears and crq re-fires — so that time shouldn't
+// burn the review-wait budget. When blocked, the deadline is pushed to a full
+// budget past the block; it is never moved earlier.
+func extendDeadlineForBlock(deadline time.Time, blockedUntil *time.Time, now time.Time, budget time.Duration) time.Time {
+	if blockedUntil == nil || !blockedUntil.After(now) {
+		return deadline
+	}
+	if extended := blockedUntil.Add(budget); extended.After(deadline) {
+		return extended
+	}
+	return deadline
 }
 
 func reviewedSummary(m map[string]bool) string {

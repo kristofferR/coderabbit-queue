@@ -249,3 +249,31 @@ func TestParseQuota(t *testing.T) {
 		t.Fatalf("reset mismatch: %#v", reset)
 	}
 }
+
+func TestExtendDeadlineForBlock(t *testing.T) {
+	now := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
+	budget := 20 * time.Minute
+	base := now.Add(budget) // original deadline: now + 20m
+
+	// Not blocked → deadline unchanged.
+	if got := extendDeadlineForBlock(base, nil, now, budget); !got.Equal(base) {
+		t.Fatalf("nil block: want %v, got %v", base, got)
+	}
+	// Block already elapsed → deadline unchanged.
+	past := now.Add(-time.Minute)
+	if got := extendDeadlineForBlock(base, &past, now, budget); !got.Equal(base) {
+		t.Fatalf("past block: want %v, got %v", base, got)
+	}
+	// Block extends past the current deadline → push to blockedUntil + budget, so a
+	// full review wait remains after the rate-limit window clears.
+	until := now.Add(60 * time.Minute)
+	if want, got := until.Add(budget), extendDeadlineForBlock(base, &until, now, budget); !got.Equal(want) {
+		t.Fatalf("future block: want %v, got %v", want, got)
+	}
+	// A nearer block must never pull an already-extended deadline earlier.
+	later := now.Add(80 * time.Minute)
+	near := now.Add(5 * time.Minute)
+	if got := extendDeadlineForBlock(later, &near, now, budget); !got.Equal(later) {
+		t.Fatalf("must not shrink: want %v, got %v", later, got)
+	}
+}
