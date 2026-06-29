@@ -35,6 +35,30 @@ func (s *failNthUpdateStore) Update(ctx context.Context, mutate func(*State) err
 	return s.StateStore.Update(ctx, mutate)
 }
 
+type retryNoChangeStore struct{}
+
+func (retryNoChangeStore) Load(context.Context) (State, Revision, error) {
+	return DefaultState(Config{}), Revision{}, nil
+}
+
+func (retryNoChangeStore) Update(_ context.Context, mutate func(*State) error) (State, error) {
+	first := DefaultState(Config{})
+	first.InFlight = &InFlight{Token: "token"}
+	if err := mutate(&first); err != nil {
+		return State{}, err
+	}
+	second := DefaultState(Config{})
+	if err := mutate(&second); err != nil {
+		if errors.Is(err, ErrNoChange) {
+			return second, nil
+		}
+		return State{}, err
+	}
+	return second, nil
+}
+
+func (retryNoChangeStore) SyncDashboard(context.Context, State) error { return nil }
+
 func newFakeGitHub() *fakeGitHub {
 	return &fakeGitHub{
 		pulls:     map[string]Pull{},
@@ -434,6 +458,14 @@ func TestPumpPersistsPostedReviewAfterTransientStateFailure(t *testing.T) {
 	}
 	if state.Fired[QueueKey("owner/repo", 12)] != "abcdef123" {
 		t.Fatalf("fired marker was not persisted after retry: %#v", state.Fired)
+	}
+}
+
+func TestMarkReviewPostedResetsRecordedAcrossRetry(t *testing.T) {
+	svc := NewService(Config{}, newFakeGitHub(), retryNoChangeStore{}, nil)
+	_, err := svc.markReviewPosted(context.Background(), "token", QueueItem{Repo: "owner/repo", PR: 12}, "abcdef123", 1, time.Now().UTC())
+	if !errors.Is(err, ErrNoChange) {
+		t.Fatalf("expected no-change after retry lost the in-flight token, got %v", err)
 	}
 }
 

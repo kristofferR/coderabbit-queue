@@ -69,6 +69,7 @@ func LoadConfig() (Config, error) {
 	}
 
 	host, _ := os.Hostname()
+	bot := stringEnv(env, "CRQ_BOT", "coderabbitai[bot]")
 	cfg := Config{
 		GateRepo:            env["CRQ_REPO"],
 		DashboardIssue:      intEnv(env, "CRQ_ISSUE", 0),
@@ -77,8 +78,8 @@ func LoadConfig() (Config, error) {
 		AllowRepos:          repoSet(env["CRQ_REPOS"]),
 		ExcludeRepos:        repoSet(env["CRQ_EXCLUDE"]),
 		StateRef:            stringEnv(env, "CRQ_STATE_REF", "crq-state"),
-		Bot:                 stringEnv(env, "CRQ_BOT", "coderabbitai[bot]"),
-		RequiredBots:        listEnv(env, "CRQ_REQUIRED_BOTS", "coderabbitai[bot]"),
+		Bot:                 bot,
+		RequiredBots:        listEnv(env, "CRQ_REQUIRED_BOTS", bot),
 		ReviewCommand:       stringEnv(env, "CRQ_REVIEW_CMD", "@coderabbitai review"),
 		RateLimitCommand:    stringEnv(env, "CRQ_RATELIMIT_CMD", "@coderabbitai rate limit"),
 		RateLimitMarker:     stringEnv(env, "CRQ_RL_MARKER", "rate limited by coderabbit.ai"),

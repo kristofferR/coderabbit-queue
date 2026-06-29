@@ -54,7 +54,7 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			if _, ok := rateLimitWait(passErr); ok {
 				if cont, serr := s.sleepRateLimit(ctx, opts, "pass", passErr); serr != nil || !cont {
 					if opts.Once {
-						return s.finishAutoReviewOnce(token, serr)
+						return s.finishAutoReviewOnce(ctx, token, serr)
 					}
 					return serr
 				}
@@ -67,7 +67,7 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 				if _, ok := rateLimitWait(err); ok {
 					if cont, serr := s.sleepRateLimit(ctx, opts, "pump", err); serr != nil || !cont {
 						if opts.Once {
-							return s.finishAutoReviewOnce(token, serr)
+							return s.finishAutoReviewOnce(ctx, token, serr)
 						}
 						return serr
 					}
@@ -79,7 +79,7 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			}
 		}
 		if opts.Once {
-			return s.finishAutoReviewOnce(token, nil)
+			return s.finishAutoReviewOnce(ctx, token, nil)
 		}
 		select {
 		case <-ctx.Done():
@@ -89,8 +89,8 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 	}
 }
 
-func (s *Service) finishAutoReviewOnce(token string, err error) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+func (s *Service) finishAutoReviewOnce(ctx context.Context, token string, err error) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	if rerr := s.releaseLeader(ctx, token); err == nil && rerr != nil {
 		return rerr
