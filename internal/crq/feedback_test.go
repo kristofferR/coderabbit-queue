@@ -42,6 +42,33 @@ func TestParseReviewBodyFindingsExtractsOutsideDiffItems(t *testing.T) {
 	}
 }
 
+func TestParseReviewBodyFindingsExtractsCommentsFailedToPost(t *testing.T) {
+	// CodeRabbit's "Comments failed to post" section uses un-backticked line
+	// headers (561-573:) unlike the backticked "Outside diff range" form.
+	review := Review{
+		ID: 7,
+		Body: "<details>\n<summary>🛑 Comments failed to post (1)</summary><blockquote>\n\n" +
+			"<details>\n<summary>src-tauri/inject/messenger.js (1)</summary><blockquote>\n\n" +
+			"561-573: _📐 Maintainability & Code Quality_ | _🟠 Major_ | _⚡ Quick win_\n\n" +
+			"**Move the hide-names toggle out of `messenger.js` or update the allowlist first.**\n\n" +
+			"This adds a new injection-layer responsibility outside the documented scope.\n\n" +
+			"</blockquote></details>\n\n</blockquote></details>",
+		CommitID:    "165f71e41",
+		SubmittedAt: time.Date(2026, 6, 29, 10, 0, 0, 0, time.UTC),
+	}
+	findings := parseReviewBodyFindings(review, "coderabbitai[bot]")
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %#v", len(findings), findings)
+	}
+	f := findings[0]
+	if f.Path != "src-tauri/inject/messenger.js" || f.Line != 561 || f.Severity != "major" {
+		t.Fatalf("finding mismatch: %#v", f)
+	}
+	if f.Title != "Move the hide-names toggle out of `messenger.js` or update the allowlist first." {
+		t.Fatalf("title mismatch: %q", f.Title)
+	}
+}
+
 func TestParseReviewBodyFindingsExtractsPromptBlock(t *testing.T) {
 	review := Review{
 		ID: 100,
