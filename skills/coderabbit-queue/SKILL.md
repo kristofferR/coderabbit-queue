@@ -1,6 +1,6 @@
 ---
 name: coderabbit-queue
-description: Drive autonomous CodeRabbit/Codex PR-review loops through crq without competing for the shared account-wide CodeRabbit rate limit. Use whenever you need to trigger CodeRabbit, fetch actionable bot feedback, resolve addressed review threads, or keep PRs reviewed automatically.
+description: Drive autonomous CodeRabbit/Codex PR-review loops through crq without competing for the shared account-wide CodeRabbit rate limit. Use whenever you need to trigger CodeRabbit, fetch actionable bot feedback, resolve addressed review threads, run local pre-push review preflight, or keep PRs reviewed automatically.
 ---
 
 # coderabbit-queue (`crq`)
@@ -10,7 +10,7 @@ directly will stampede the same quota. `crq` owns that mechanical loop:
 
 1. enqueue the PR in one FIFO queue,
 2. trigger CodeRabbit only when the shared account can spend a review,
-3. wait for real bot feedback on the current head,
+3. wait for every configured required bot (`CRQ_REQUIRED_BOTS`) on the current head,
 4. emit normalized JSON findings or report convergence,
 5. resolve the review threads the agent says it addressed.
 
@@ -57,11 +57,21 @@ set -e
 
 case "$rc" in
   0) echo "converged" ;;
-  10) jq '.findings[] | {severity,path,line,title,thread_id}' crq-feedback.json ;;
+  10) jq '.findings[] | {bot,severity,path,line,title,thread_id,source}' crq-feedback.json ;;
   2) echo "timed out; do not push stale-feedback fixes" ;;
   *) exit "$rc" ;;
 esac
 ```
+
+Long waits are expected when the queue is blocked, GitHub is rate-limited, a required bot has not
+reviewed yet, or the network is down. crq logs progress to stderr; do not kill it just because stdout
+is quiet.
+
+User-facing updates must be sparse during those waits. Do not narrate every stderr progress line or
+send repeated "still waiting" messages. Say once that `crq loop` is waiting, then update only when
+the state changes (review fired, feedback wait started, findings arrived, convergence, timeout,
+rate-limit/window change, network outage/recovery), when the user asks, or after at least 10 minutes
+without any update.
 
 ## Feedback
 
@@ -71,12 +81,17 @@ Use this when you only need current findings and do not want to trigger a new re
 crq feedback "$REPO" "$PR"
 ```
 
-The output includes inline comments, GitHub review-thread IDs, CodeRabbit collapsed/outside-diff
-review-body findings, severity, path, line, source URL, commit, and bot.
+The output includes inline comments, GitHub review-thread IDs, collapsed/outside-diff review-body
+findings, prompt-block findings, Codex issue-comment findings, severity, path, line, source URL,
+commit, and bot.
 
 `findings` is always an array. Verify each against current code and fix the bugs and flaws it
 reports. It also surfaces still-open findings from earlier commits (any unresolved, non-outdated
 review thread), so there is no need to audit past reviews by hand.
+
+Parse fields defensively. Each finding has `bot`, `severity`, `title`, `body`, and `source`; `path`,
+`line`, `url`, and `thread_id` are optional. Review-body/outside-diff findings often have no
+resolvable `thread_id`.
 
 ## Resolving Threads
 
@@ -108,16 +123,16 @@ crq autoreview --once
 crq autoreview --no-incremental
 ```
 
-## Optional Local CodeRabbit CLI
+## Optional Local Preflight
 
-If the official CodeRabbit CLI is installed, agents can run a local pre-push review:
+If the official CodeRabbit CLI is installed, agents can run a normalized local pre-push review:
 
 ```bash
-cr review --agent
+crq preflight --type uncommitted
 ```
 
-Use that only to review local git changes before pushing. It does not replace `crq loop`,
-which coordinates PR review triggers and extracts GitHub PR feedback.
+Use that only to review local git changes before pushing. It does not replace `crq loop`, which
+coordinates queued GitHub PR review triggers and extracts GitHub PR feedback.
 
 ## Maintenance Commands
 

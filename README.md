@@ -109,8 +109,10 @@ Everything lives in one small **gate repo** (private is fine):
 curl -fsSL https://raw.githubusercontent.com/kristofferR/coderabbit-queue/main/install.sh | bash
 ```
 
-The installer drops a prebuilt binary into `~/.local/bin` when a release asset exists, and otherwise
-builds from source (needs [Go](https://go.dev/dl/)).
+The installer drops a prebuilt binary into `~/.local/bin` when a release asset exists, otherwise
+builds from source (needs [Go](https://go.dev/dl/)), and installs the Codex skill into
+`${CODEX_HOME:-$HOME/.codex}/skills/coderabbit-queue`. Set `CRQ_INSTALL_SKILL=0` to skip the skill,
+or `CRQ_SKILL_DIR=/custom/path/coderabbit-queue` to install it elsewhere.
 
 <details>
 <summary>Manual install (build from source)</summary>
@@ -120,6 +122,9 @@ git clone https://github.com/kristofferR/coderabbit-queue.git
 cd coderabbit-queue
 go test ./...
 go build -trimpath -ldflags "-s -w" -o ~/.local/bin/crq ./cmd/crq   # ensure ~/.local/bin is on $PATH
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+rm -rf "${CODEX_HOME:-$HOME/.codex}/skills/coderabbit-queue"
+cp -R "skills/coderabbit-queue" "${CODEX_HOME:-$HOME/.codex}/skills/coderabbit-queue"
 crq doctor   # verify gh/auth/config readiness
 ```
 
@@ -298,6 +303,12 @@ code. It is the building block, not the full autonomous loop above: drop it insi
 > 💡 **Watching the line:** run `crq status` any time to see the queue, what's in flight, and the
 > next slot. Or open the gate **issue** on GitHub — it **is** the live dashboard.
 
+**Agent progress etiquette:** long `crq loop` waits can last many minutes. Agents should not relay
+every stderr progress line or send repeated "still waiting" messages. Tell the user once when a long
+wait begins, then update only on a real state change (review fired, feedback wait, findings,
+convergence, timeout, rate-limit/window change, network outage/recovery), on request, or after at
+least 10 minutes of silence.
+
 ---
 
 ## Commands
@@ -416,8 +427,8 @@ If you're an autonomous agent running a PR-review loop, here's everything you ne
   connectivity returns (no timeout by default), so don't kill it — watch stderr.
 - **Setup check:** run `crq doctor`; if config is missing, do the Quick Start (install + `crq init`).
 
-A drop-in **[Claude Code skill](skills/coderabbit-queue/SKILL.md)** is included, and a compact
-machine contract lives in [`llms.txt`](llms.txt).
+The installer puts the **[Codex skill](skills/coderabbit-queue/SKILL.md)** on the local skill path
+by default, and a compact machine contract lives in [`llms.txt`](llms.txt).
 
 ---
 
