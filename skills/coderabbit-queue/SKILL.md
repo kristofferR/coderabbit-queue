@@ -22,6 +22,13 @@ Never post `@coderabbitai review` directly. Use `crq loop` for an agent round:
 crq loop "$REPO" "$PR" > crq-feedback.json
 ```
 
+Don't bypass crq to read review status either: never hand-poll the GitHub API
+(`gh api .../pulls/N/reviews|comments`, looping on the head) to wait for a review
+or its outcome. That drains the shared account-wide GitHub REST quota — also spent
+by the `crq autoreview` daemon and every other agent, so it exhausts fast — and
+competes with crq's own polling. Use `crq loop` (waits and returns findings),
+`crq feedback` (current findings, no trigger), or `crq status` (queue/quota).
+
 Before starting, check local readiness:
 
 ```bash
