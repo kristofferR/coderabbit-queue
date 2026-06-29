@@ -575,7 +575,7 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 		if comment.User.Login != s.cfg.Bot || !comment.UpdatedAt.After(*inf.FiredAt) {
 			continue
 		}
-		if strings.Contains(strings.ToLower(comment.Body), strings.ToLower(s.cfg.RateLimitMarker)) {
+		if s.isRateLimited(comment.Body) {
 			reset := parseAvailableIn(comment.Body, comment.UpdatedAt)
 			return inflightCheck{Requeue: true, Reason: warnRateLimited, BlockedUntil: reset}, nil
 		}
@@ -600,7 +600,7 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 		}
 	}
 	for _, comment := range comments {
-		if comment.User.Login == s.cfg.Bot && comment.ID != inf.FiredCommentID && comment.UpdatedAt.After(*inf.FiredAt) && !strings.Contains(strings.ToLower(comment.Body), strings.ToLower(s.cfg.RateLimitMarker)) {
+		if comment.User.Login == s.cfg.Bot && comment.ID != inf.FiredCommentID && comment.UpdatedAt.After(*inf.FiredAt) && !s.isRateLimited(comment.Body) {
 			return inflightCheck{Done: true, Reason: "bot comment"}, nil
 		}
 	}
@@ -707,6 +707,21 @@ func randomToken() string {
 		return strconv.FormatInt(time.Now().UnixNano(), 16)
 	}
 	return hex.EncodeToString(buf[:])
+}
+
+// isRateLimited reports whether a CodeRabbit comment is a rate-limit notice. It
+// matches the configured CRQ_RL_MARKER plus CodeRabbit's current phrasings (the
+// "Fair Usage Limits Policy" / "currently rate limited" message), which the old
+// "rate limited by coderabbit.ai" marker alone misses — so a fired review that
+// comes back rate-limited is detected and crq backs off instead of firing on.
+func (s *Service) isRateLimited(body string) bool {
+	l := strings.ToLower(body)
+	if m := strings.ToLower(strings.TrimSpace(s.cfg.RateLimitMarker)); m != "" && strings.Contains(l, m) {
+		return true
+	}
+	return strings.Contains(l, "currently rate limited") ||
+		strings.Contains(l, "rate limited under") ||
+		strings.Contains(l, "fair usage limits policy")
 }
 
 func parseAvailableIn(text string, base time.Time) *time.Time {
