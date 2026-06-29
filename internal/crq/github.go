@@ -37,10 +37,11 @@ type GitHub struct {
 	httpClient  *http.Client
 	apiBase     string
 	graphBase   string
-	log         Logger
-	maxRetries  int
-	maxWait     time.Duration
-	backoffBase time.Duration
+	log            Logger
+	maxRetries     int
+	maxWait        time.Duration
+	backoffBase    time.Duration
+	networkMaxWait time.Duration
 }
 
 func NewGitHub(ctx context.Context) (*GitHub, error) {
@@ -69,14 +70,21 @@ func NewGitHub(ctx context.Context) (*GitHub, error) {
 			maxRetries = n
 		}
 	}
+	networkMaxWait := 30 * time.Minute
+	if v := strings.TrimSpace(os.Getenv("CRQ_NETWORK_MAX_WAIT")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			networkMaxWait = d
+		}
+	}
 	return &GitHub{
-		token:       token,
-		httpClient:  &http.Client{Timeout: 30 * time.Second},
-		apiBase:     "https://api.github.com",
-		graphBase:   "https://api.github.com/graphql",
-		maxRetries:  maxRetries,
-		maxWait:     maxWait,
-		backoffBase: 2 * time.Second,
+		token:          token,
+		httpClient:     &http.Client{Timeout: 30 * time.Second},
+		apiBase:        "https://api.github.com",
+		graphBase:      "https://api.github.com/graphql",
+		maxRetries:     maxRetries,
+		maxWait:        maxWait,
+		backoffBase:    2 * time.Second,
+		networkMaxWait: networkMaxWait,
 	}, nil
 }
 
@@ -310,13 +318,19 @@ func rateLimitFrom(resp *http.Response, body string) *RateLimitError {
 	return nil
 }
 
-// send performs an HTTP request with rate-limit and transient-failure awareness:
-// it retries transient network errors (timeouts, refused/reset connections, DNS
-// blips) and 5xx responses with exponential backoff, and backs off GitHub rate
-// limits (honoring Retry-After / X-RateLimit-Reset). Real caller cancellation
-// (ctx done) is never retried. Non-retryable responses are returned unchanged.
+// send performs an HTTP request with rate-limit and failure resilience. It rides
+// out internet outages by retrying transient transport errors (timeouts,
+// refused/reset connections, DNS hiccups, TLS failures, short EOFs) on a backoff
+// that plateaus at 30s, for up to networkMaxWait (default 30m) of *continuous*
+// downtime — so a long drop blocks until connectivity returns rather than failing
+// the agent with a confusing error. The retry attempt is itself the connectivity
+// probe. It also retries 5xx and backs off GitHub rate limits with the bounded
+// maxRetries/maxWait budget. Real caller cancellation (ctx done) is never retried.
 func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) (*http.Response, error) {
-	for attempt := 0; ; attempt++ {
+	attempt := 0    // bounded retries for 5xx + rate limits
+	netAttempt := 0 // consecutive transient-network retries
+	var offlineSince time.Time
+	for {
 		var rdr io.Reader
 		if body != nil {
 			rdr = bytes.NewReader(body)
@@ -336,19 +350,28 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 				return nil, ctx.Err()
 			}
 			if isRetryableNetErr(err) {
-				if wait, ok := g.retryBackoff(attempt); ok {
-					if g.log != nil {
-						g.log.Printf("github %s %s failed (%v); retrying in %s (attempt %d/%d)", method, shortURL(fullURL), err, wait.Round(time.Second), attempt+1, g.maxRetries)
-					}
-					if serr := sleepCtx(ctx, wait); serr != nil {
-						return nil, serr
-					}
-					continue
+				if offlineSince.IsZero() {
+					offlineSince = time.Now()
 				}
+				down := time.Since(offlineSince)
+				if down > g.networkMaxWait {
+					return nil, fmt.Errorf("github unreachable for %s (%s %s): %w", down.Round(time.Second), method, shortURL(fullURL), err)
+				}
+				wait := networkRetryWait(g.backoffBase, netAttempt)
+				netAttempt++
+				if g.log != nil {
+					g.log.Printf("github unreachable on %s %s (%v); retrying in %s (offline %s / cap %s)", method, shortURL(fullURL), err, wait.Round(time.Second), down.Round(time.Second), g.networkMaxWait)
+				}
+				if serr := sleepCtx(ctx, wait); serr != nil {
+					return nil, serr
+				}
+				continue
 			}
 			return nil, err
 		}
-		// Retry transient server errors (502/503/504/500).
+		// A response came back: connectivity is fine, reset the offline tracker.
+		netAttempt, offlineSince = 0, time.Time{}
+		// Retry transient server errors (500/502/503/504).
 		if isRetryableStatus(resp.StatusCode) {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
@@ -356,8 +379,9 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 				return nil, ctx.Err()
 			}
 			if wait, ok := g.retryBackoff(attempt); ok {
+				attempt++
 				if g.log != nil {
-					g.log.Printf("github %s %s: HTTP %d; retrying in %s (attempt %d/%d)", method, shortURL(fullURL), resp.StatusCode, wait.Round(time.Second), attempt+1, g.maxRetries)
+					g.log.Printf("github %s %s: HTTP %d; retrying in %s (attempt %d/%d)", method, shortURL(fullURL), resp.StatusCode, wait.Round(time.Second), attempt, g.maxRetries)
 				}
 				if serr := sleepCtx(ctx, wait); serr != nil {
 					return nil, serr
@@ -380,13 +404,28 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 		if !ok {
 			return nil, rl
 		}
+		attempt++
 		if g.log != nil {
-			g.log.Printf("github %s rate limit on %s %s; backing off %s (attempt %d/%d)", rl.Kind, method, shortURL(fullURL), wait.Round(time.Second), attempt+1, g.maxRetries)
+			g.log.Printf("github %s rate limit on %s %s; backing off %s (attempt %d/%d)", rl.Kind, method, shortURL(fullURL), wait.Round(time.Second), attempt, g.maxRetries)
 		}
 		if err := sleepCtx(ctx, wait); err != nil {
 			return nil, err
 		}
 	}
+}
+
+// networkRetryWait is exponential backoff that plateaus at 30s, so during a long
+// outage crq keeps probing every ~30s until connectivity returns.
+func networkRetryWait(base time.Duration, attempt int) time.Duration {
+	shift := attempt
+	if shift > 5 {
+		shift = 5
+	}
+	wait := base << uint(shift)
+	if wait > 30*time.Second {
+		wait = 30 * time.Second
+	}
+	return wait
 }
 
 // backoffWait computes how long to wait before the next rate-limited retry:
