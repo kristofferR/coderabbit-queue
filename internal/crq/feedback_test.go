@@ -127,6 +127,54 @@ func TestThreadFindingsSurfacesUnresolvedAcrossCommits(t *testing.T) {
 	}
 }
 
+func TestInBotsToleratesBotSuffix(t *testing.T) {
+	bots := botSet([]string{"coderabbitai[bot]", "chatgpt-codex"})
+	// REST reports "coderabbitai[bot]"; GraphQL review threads report "coderabbitai".
+	for _, login := range []string{"coderabbitai[bot]", "coderabbitai", "chatgpt-codex", "chatgpt-codex[bot]"} {
+		if !inBots(bots, login) {
+			t.Fatalf("expected %q to match a configured bot", login)
+		}
+	}
+	if inBots(bots, "some-human") {
+		t.Fatal("unexpected match for a non-bot login")
+	}
+}
+
+func TestThreadFindingsMatchesGraphQLBotLogin(t *testing.T) {
+	bots := botSet([]string{"coderabbitai[bot]"})
+	var th reviewThread
+	th.ID = "PRRT_z"
+	th.Path = "internal/crq/foo.go"
+	th.Line = 7
+	c := th.Comments.Nodes[:0:0]
+	_ = c
+	node := struct {
+		DatabaseID   int64     `json:"databaseId"`
+		Body         string    `json:"body"`
+		URL          string    `json:"url"`
+		Path         string    `json:"path"`
+		Line         int       `json:"line"`
+		OriginalLine int       `json:"originalLine"`
+		CreatedAt    time.Time `json:"createdAt"`
+		Author       struct {
+			Login string `json:"login"`
+		} `json:"author"`
+		Commit struct {
+			OID string `json:"oid"`
+		} `json:"commit"`
+		OriginalCommit struct {
+			OID string `json:"oid"`
+		} `json:"originalCommit"`
+	}{Body: "**Potential issue** fix this", Line: 7}
+	node.Author.Login = "coderabbitai" // GraphQL form, no [bot]
+	th.Comments.Nodes = append(th.Comments.Nodes, node)
+
+	got := threadFindings(th, bots)
+	if len(got) != 1 || got[0].ThreadID != "PRRT_z" {
+		t.Fatalf("expected the GraphQL-login thread to surface with its thread_id, got %#v", got)
+	}
+}
+
 func TestParseAvailableIn(t *testing.T) {
 	base := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
 	reset := parseAvailableIn("Review limit reached. Reviews available in 1 hour 2 minutes 3 seconds.", base)

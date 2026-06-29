@@ -145,42 +145,59 @@ func (g *GitHub) GraphQL(ctx context.Context, query string, variables map[string
 	if err != nil {
 		return err
 	}
-	resp, err := g.send(ctx, http.MethodPost, g.graphBase, body)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return &APIError{Method: http.MethodPost, URL: g.graphBase, Status: resp.StatusCode, Body: string(b)}
-	}
-	var envelope struct {
-		Data   json.RawMessage `json:"data"`
-		Errors []struct {
-			Type    string `json:"type"`
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
-		return err
-	}
-	if len(envelope.Errors) > 0 {
-		msg := envelope.Errors[0].Message
-		if strings.EqualFold(envelope.Errors[0].Type, "RATE_LIMITED") || strings.Contains(strings.ToLower(msg), "rate limit") {
-			rl := &RateLimitError{Kind: "graphql", Method: http.MethodPost, URL: g.graphBase, Remaining: -1}
-			if reset := resp.Header.Get("X-RateLimit-Reset"); reset != "" {
-				if epoch, err := strconv.ParseInt(reset, 10, 64); err == nil {
-					rl.Until = time.Unix(epoch, 0)
-				}
-			}
-			return rl
+	for attempt := 0; ; attempt++ {
+		resp, err := g.send(ctx, http.MethodPost, g.graphBase, body)
+		if err != nil {
+			return err
 		}
-		return errors.New(msg)
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			return &APIError{Method: http.MethodPost, URL: g.graphBase, Status: resp.StatusCode, Body: string(b)}
+		}
+		var envelope struct {
+			Data   json.RawMessage `json:"data"`
+			Errors []struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"errors"`
+		}
+		decodeErr := json.NewDecoder(resp.Body).Decode(&envelope)
+		reset := resp.Header.Get("X-RateLimit-Reset")
+		resp.Body.Close()
+		if decodeErr != nil {
+			return decodeErr
+		}
+		if len(envelope.Errors) > 0 {
+			msg := envelope.Errors[0].Message
+			// GraphQL reports rate limits as a 200 with a RATE_LIMITED error
+			// rather than 403/429, so retry it with the same backoff as send.
+			if strings.EqualFold(envelope.Errors[0].Type, "RATE_LIMITED") || strings.Contains(strings.ToLower(msg), "rate limit") {
+				rl := &RateLimitError{Kind: "graphql", Method: http.MethodPost, URL: g.graphBase, Remaining: -1}
+				if reset != "" {
+					if epoch, perr := strconv.ParseInt(reset, 10, 64); perr == nil {
+						rl.Until = time.Unix(epoch, 0)
+					}
+				}
+				wait, ok := g.backoffWait(rl, attempt)
+				if !ok {
+					return rl
+				}
+				if g.log != nil {
+					g.log.Printf("github graphql rate limit; backing off %s (attempt %d/%d)", wait.Round(time.Second), attempt+1, g.maxRetries)
+				}
+				if serr := sleepCtx(ctx, wait); serr != nil {
+					return serr
+				}
+				continue
+			}
+			return errors.New(msg)
+		}
+		if out == nil {
+			return nil
+		}
+		return json.Unmarshal(envelope.Data, out)
 	}
-	if out == nil {
-		return nil
-	}
-	return json.Unmarshal(envelope.Data, out)
 }
 
 func (g *GitHub) decorate(req *http.Request) {
@@ -324,26 +341,45 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 			return nil, &APIError{Method: method, URL: fullURL, Status: resp.StatusCode, Body: string(b)}
 		}
 		rl.Method, rl.URL = method, fullURL
-		wait := time.Duration(0)
-		if rl.Until.IsZero() {
-			wait = g.backoffBase << uint(attempt) // 2s, 4s, 8s, ... for hint-less secondary limits
-		} else {
-			wait = time.Until(rl.Until) + time.Second // clock-skew buffer
-		}
-		if wait < 0 {
-			wait = 0
-		}
-		if attempt >= g.maxRetries || wait > g.maxWait {
+		wait, ok := g.backoffWait(rl, attempt)
+		if !ok {
 			return nil, rl
 		}
 		if g.log != nil {
 			g.log.Printf("github %s rate limit on %s %s; backing off %s (attempt %d/%d)", rl.Kind, method, shortURL(fullURL), wait.Round(time.Second), attempt+1, g.maxRetries)
 		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(wait):
+		if err := sleepCtx(ctx, wait); err != nil {
+			return nil, err
 		}
+	}
+}
+
+// backoffWait computes how long to wait before the next rate-limited retry:
+// honor the reset hint when present, else exponential backoff. ok is false when
+// the retry budget is exhausted (too many attempts, or a single wait exceeding
+// maxWait), signalling the caller to surface the RateLimitError instead.
+func (g *GitHub) backoffWait(rl *RateLimitError, attempt int) (time.Duration, bool) {
+	var wait time.Duration
+	if rl.Until.IsZero() {
+		wait = g.backoffBase << uint(attempt) // 2s, 4s, 8s, ... for hint-less secondary limits
+	} else {
+		wait = time.Until(rl.Until) + time.Second // clock-skew buffer
+	}
+	if wait < 0 {
+		wait = 0
+	}
+	if attempt >= g.maxRetries || wait > g.maxWait {
+		return 0, false
+	}
+	return wait, true
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
 	}
 }
 
