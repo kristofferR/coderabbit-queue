@@ -145,6 +145,25 @@ func TestNetworkRetryWaitPlateaus(t *testing.T) {
 	}
 }
 
+func TestBackoffWaitRidesOutKnownReset(t *testing.T) {
+	g := &GitHub{maxRetries: 6, maxWait: 120 * time.Second, backoffBase: 2 * time.Second}
+	// Known reset within the cap: wait it out (~5m), not clamped to maxWait.
+	if w, ok := g.backoffWait(&RateLimitError{Until: time.Now().Add(5 * time.Minute)}, 0); !ok || w < 4*time.Minute || w > 6*time.Minute {
+		t.Fatalf("expected ~5m ride-out, got %s ok=%v", w, ok)
+	}
+	// Implausibly far reset: give up rather than wedge.
+	if _, ok := g.backoffWait(&RateLimitError{Until: time.Now().Add(3 * time.Hour)}, 0); ok {
+		t.Fatal("should not wait out a reset beyond the cap")
+	}
+	// Hint-less secondary limit: bounded exponential backoff, capped by maxRetries.
+	if w, ok := g.backoffWait(&RateLimitError{}, 0); !ok || w != 2*time.Second {
+		t.Fatalf("expected 2s exponential backoff, got %s ok=%v", w, ok)
+	}
+	if _, ok := g.backoffWait(&RateLimitError{}, 6); ok {
+		t.Fatal("should give up after maxRetries on a hint-less limit")
+	}
+}
+
 func TestIsRetryableStatus(t *testing.T) {
 	for _, c := range []int{500, 502, 503, 504} {
 		if !isRetryableStatus(c) {

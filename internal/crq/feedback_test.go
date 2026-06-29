@@ -277,3 +277,21 @@ func TestExtendDeadlineForBlock(t *testing.T) {
 		t.Fatalf("must not shrink: want %v, got %v", later, got)
 	}
 }
+
+func TestBlockedPollInterval(t *testing.T) {
+	now := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
+	base := 15 * time.Second
+
+	// Block far out → capped, so the loop still re-checks periodically (not 15s).
+	if got := blockedPollInterval(now.Add(30*time.Minute), now, base); got != 5*time.Minute {
+		t.Fatalf("far block: want 5m, got %v", got)
+	}
+	// Block a couple minutes out → wait until just past it.
+	if got := blockedPollInterval(now.Add(2*time.Minute), now, base); got != 2*time.Minute+time.Second {
+		t.Fatalf("near block: want 2m1s, got %v", got)
+	}
+	// Block about to clear (within base) → never poll faster than the base interval.
+	if got := blockedPollInterval(now.Add(3*time.Second), now, base); got != base {
+		t.Fatalf("imminent block: want %v, got %v", base, got)
+	}
+}
