@@ -22,6 +22,21 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 	for {
 		held, err := s.acquireLeader(ctx, owner, token)
 		if err != nil {
+			if wait, ok := rateLimitWait(err); ok {
+				wait = s.rateLimitBackoff(wait)
+				if s.log != nil {
+					s.log.Printf("autoreview: %v; sleeping %s before next pass", err, wait.Round(time.Second))
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(wait):
+				}
+				if opts.Once {
+					return nil
+				}
+				continue
+			}
 			return err
 		}
 		if !held {
@@ -50,6 +65,23 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 		case <-time.After(s.cfg.AutoReviewPoll):
 		}
 	}
+}
+
+// rateLimitBackoff bounds how long the autoreview daemon sleeps when GitHub
+// rate-limits it: at least one poll interval, plus a small buffer past the
+// reset, capped at an hour so a bogus reset header can't wedge the daemon.
+func (s *Service) rateLimitBackoff(wait time.Duration) time.Duration {
+	if wait <= 0 {
+		wait = s.cfg.AutoReviewPoll
+	}
+	wait += 5 * time.Second
+	if wait < s.cfg.AutoReviewPoll {
+		wait = s.cfg.AutoReviewPoll
+	}
+	if wait > time.Hour {
+		wait = time.Hour
+	}
+	return wait
 }
 
 func (s *Service) acquireLeader(ctx context.Context, owner, token string) (bool, error) {
