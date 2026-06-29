@@ -300,13 +300,30 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if firedAt.IsZero() {
 		firedAt = time.Now().UTC()
 	}
-	updated, err := s.store.Update(ctx, func(st *State) error {
-		if st.InFlight == nil || st.InFlight.Token != token {
-			return nil
+	updated, err := s.markReviewPosted(ctx, token, item, head, comment.ID, firedAt)
+	if err != nil {
+		retryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		updated, err = s.markReviewPosted(retryCtx, token, item, head, comment.ID, firedAt)
+		if err != nil {
+			return PumpResult{}, err
 		}
+	}
+	s.sync(ctx, updated)
+	return PumpResult{Action: "fired", Repo: item.Repo, PR: item.PR, Head: head}, nil
+}
+
+func (s *Service) markReviewPosted(ctx context.Context, token string, item QueueItem, head string, commentID int64, firedAt time.Time) (State, error) {
+	key := QueueKey(item.Repo, item.PR)
+	recorded := false
+	state, err := s.store.Update(ctx, func(st *State) error {
+		if st.InFlight == nil || st.InFlight.Token != token {
+			return ErrNoChange
+		}
+		recorded = true
 		st.InFlight.Phase = "posted"
 		st.InFlight.FiredAt = &firedAt
-		st.InFlight.FiredCommentID = comment.ID
+		st.InFlight.FiredCommentID = commentID
 		st.LastFired = &firedAt
 		st.Warn = ""
 		st.Fired[key] = head
@@ -323,10 +340,12 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		return nil
 	})
 	if err != nil {
-		return PumpResult{}, err
+		return State{}, err
 	}
-	s.sync(ctx, updated)
-	return PumpResult{Action: "fired", Repo: item.Repo, PR: item.PR, Head: head}, nil
+	if !recorded {
+		return state, ErrNoChange
+	}
+	return state, nil
 }
 
 func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, int, error) {
@@ -372,6 +391,8 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 			if result.Action == "fired" && result.Repo == repo && result.PR == pr {
 				return result, 0, nil
 			}
+			enqueued = false
+			continue
 		}
 		if s.log != nil && time.Since(lastLog) >= 30*time.Second {
 			reason := result.Reason
@@ -565,7 +586,7 @@ func (s *Service) isCalibrationNoise(c IssueComment) bool {
 	if strings.TrimSpace(c.Body) == strings.TrimSpace(s.cfg.RateLimitCommand) {
 		return true
 	}
-	return c.User.Login == s.cfg.Bot && strings.Contains(c.Body, s.cfg.CalibrationMarker)
+	return s.isConfiguredBot(c.User.Login) && strings.Contains(c.Body, s.cfg.CalibrationMarker)
 }
 
 func (s *Service) latestCalibrationReply(ctx context.Context, after time.Time) (IssueComment, bool, error) {
@@ -576,7 +597,7 @@ func (s *Service) latestCalibrationReply(ctx context.Context, after time.Time) (
 	var best IssueComment
 	ok := false
 	for _, comment := range comments {
-		if comment.User.Login != s.cfg.Bot || !comment.UpdatedAt.After(after) {
+		if !s.isConfiguredBot(comment.User.Login) || !comment.UpdatedAt.After(after) {
 			continue
 		}
 		if !strings.Contains(comment.Body, s.cfg.CalibrationMarker) {
@@ -588,6 +609,10 @@ func (s *Service) latestCalibrationReply(ctx context.Context, after time.Time) (
 		}
 	}
 	return best, ok, nil
+}
+
+func (s *Service) isConfiguredBot(login string) bool {
+	return normalizeBotName(login) == normalizeBotName(s.cfg.Bot)
 }
 
 type inflightCheck struct {
@@ -613,7 +638,7 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 		return inflightCheck{}, err
 	}
 	for _, comment := range comments {
-		if comment.User.Login != s.cfg.Bot || !comment.UpdatedAt.After(*inf.FiredAt) {
+		if !s.isConfiguredBot(comment.User.Login) || !comment.UpdatedAt.After(*inf.FiredAt) {
 			continue
 		}
 		if s.isRateLimited(comment.Body) {
@@ -626,7 +651,7 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 		return inflightCheck{}, err
 	}
 	for _, review := range reviews {
-		if review.User.Login == s.cfg.Bot && review.SubmittedAt.After(*inf.FiredAt) {
+		if s.isConfiguredBot(review.User.Login) && review.SubmittedAt.After(*inf.FiredAt) {
 			return inflightCheck{Done: true, Reason: "review submitted"}, nil
 		}
 	}
@@ -638,13 +663,13 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 			return inflightCheck{}, err
 		}
 		for _, reaction := range reactions {
-			if reaction.User.Login == s.cfg.Bot {
+			if s.isConfiguredBot(reaction.User.Login) {
 				return inflightCheck{Done: true, Reason: "bot reacted"}, nil
 			}
 		}
 	}
 	for _, comment := range comments {
-		if comment.User.Login == s.cfg.Bot && comment.ID != inf.FiredCommentID && comment.UpdatedAt.After(*inf.FiredAt) && !s.isRateLimited(comment.Body) {
+		if s.isConfiguredBot(comment.User.Login) && comment.ID != inf.FiredCommentID && comment.UpdatedAt.After(*inf.FiredAt) && !s.isRateLimited(comment.Body) {
 			return inflightCheck{Done: true, Reason: "bot comment"}, nil
 		}
 	}

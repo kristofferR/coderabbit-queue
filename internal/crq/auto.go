@@ -53,6 +53,9 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			// which would just hammer the quota. Skip Pump entirely in that case.
 			if _, ok := rateLimitWait(passErr); ok {
 				if cont, serr := s.sleepRateLimit(ctx, opts, "pass", passErr); serr != nil || !cont {
+					if opts.Once {
+						return s.finishAutoReviewOnce(token, serr)
+					}
 					return serr
 				}
 				continue
@@ -63,6 +66,9 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			if _, err := s.Pump(ctx); err != nil {
 				if _, ok := rateLimitWait(err); ok {
 					if cont, serr := s.sleepRateLimit(ctx, opts, "pump", err); serr != nil || !cont {
+						if opts.Once {
+							return s.finishAutoReviewOnce(token, serr)
+						}
 						return serr
 					}
 					continue
@@ -73,7 +79,7 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			}
 		}
 		if opts.Once {
-			return nil
+			return s.finishAutoReviewOnce(token, nil)
 		}
 		select {
 		case <-ctx.Done():
@@ -81,6 +87,15 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 		case <-time.After(s.cfg.AutoReviewPoll):
 		}
 	}
+}
+
+func (s *Service) finishAutoReviewOnce(token string, err error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if rerr := s.releaseLeader(ctx, token); err == nil && rerr != nil {
+		return rerr
+	}
+	return err
 }
 
 // rateLimitBackoff bounds how long the autoreview daemon sleeps when GitHub
@@ -132,6 +147,25 @@ func (s *Service) acquireLeader(ctx context.Context, owner, token string) (bool,
 		s.sync(ctx, state)
 	}
 	return held, nil
+}
+
+func (s *Service) releaseLeader(ctx context.Context, token string) error {
+	released := false
+	state, err := s.store.Update(ctx, func(st *State) error {
+		if st.Leader == nil || st.Leader.Token != token {
+			return ErrNoChange
+		}
+		st.Leader = nil
+		released = true
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if released {
+		s.sync(ctx, state)
+	}
+	return nil
 }
 
 // renewLeader claims or extends the leader lease via compare-and-swap on the

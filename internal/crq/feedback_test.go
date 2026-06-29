@@ -195,6 +195,37 @@ func TestMarkReviewedFlipsConfiguredKeyAcrossSuffix(t *testing.T) {
 	}
 }
 
+func TestFeedbackSkipsConfiguredBotIssueCommentsAcrossSuffix(t *testing.T) {
+	cfg := Config{Bot: "coderabbitai", RequiredBots: []string{"coderabbitai"}}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("o/repo", 1)] = pull
+	comment := IssueComment{Body: "CodeRabbit summary text", UpdatedAt: time.Now().UTC()}
+	comment.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	report, err := svc.Feedback(context.Background(), "o/repo", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Findings) != 0 {
+		t.Fatalf("configured bot summary issue comments should be skipped across suffix forms: %#v", report.Findings)
+	}
+}
+
+func TestDedupeFindingsDropsNonActionableBotArtifacts(t *testing.T) {
+	findings := []Finding{
+		{Bot: "coderabbitai", Title: "> Skipped: comment is from another GitHub bot.", Body: "> Skipped: comment is from another GitHub bot.", Source: "review_thread"},
+		{Bot: "chatgpt-codex-connector[bot]", Title: "You have reached your Codex usage limits for code reviews.", Body: "You have reached your Codex usage limits for code reviews.", Source: "issue_comment"},
+	}
+	if got := dedupeFindings(findings); len(got) != 0 {
+		t.Fatalf("expected non-actionable bot artifacts to be dropped, got %#v", got)
+	}
+}
+
 func TestThreadFindingsMatchesGraphQLBotLogin(t *testing.T) {
 	bots := botSet([]string{"coderabbitai[bot]"})
 	var th reviewThread
