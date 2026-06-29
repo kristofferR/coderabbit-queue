@@ -4,6 +4,14 @@ crq is the repo's CLI for autonomous CodeRabbit/Codex pull-request review loops.
 
 Core rule: never post `@coderabbitai review` directly. Use `crq loop`.
 
+Do not bypass crq to read review status, either. Never hand-poll the GitHub API
+(`gh api .../pulls/N/reviews|comments`, looping on the head) to wait for a review
+or its outcome: it drains the shared account-wide GitHub REST quota (also spent by
+the `crq autoreview` daemon and every other agent, so it exhausts fast) and
+competes with crq's own polling. To learn a review's result use `crq loop` (waits
+and returns findings) or `crq feedback` (current findings, no trigger); for
+queue/quota use `crq status`.
+
 Readiness check:
 
 ```bash
