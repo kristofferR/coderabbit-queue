@@ -290,6 +290,9 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 	if err != nil {
 		return false, err
 	}
+	if state.AwaitingFeedback[QueueKey(repo, pr)].Head == head {
+		return false, nil
+	}
 	if state.Fired[QueueKey(repo, pr)] == head {
 		return false, nil
 	}

@@ -177,6 +177,7 @@ func (m *MemoryStore) Load(context.Context) (State, Revision, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state := cloneState(m.state)
+	state.Normalize(m.cfg)
 	return state, Revision{CommitSHA: fmt.Sprintf("%d", m.rev)}, nil
 }
 
@@ -184,6 +185,7 @@ func (m *MemoryStore) Update(_ context.Context, mutate func(*State) error) (Stat
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	state := cloneState(m.state)
+	state.Normalize(m.cfg)
 	if err := mutate(&state); err != nil {
 		if errors.Is(err, ErrNoChange) {
 			return state, nil

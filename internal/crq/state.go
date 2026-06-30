@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -18,20 +19,21 @@ const (
 )
 
 type State struct {
-	Version      int               `json:"v"`
-	Rev          int64             `json:"rev"`
-	NextSeq      int64             `json:"next_seq"`
-	Queue        []QueueItem       `json:"queue"`
-	InFlight     *InFlight         `json:"in_flight"`
-	LastFired    *time.Time        `json:"last_fired"`
-	Warn         string            `json:"warn,omitempty"`
-	Fired        map[string]string `json:"fired"`
-	History      []HistoryItem     `json:"history"`
-	Blocked      Blocked           `json:"blocked"`
-	Leader       *LeaderLease      `json:"leader,omitempty"`
-	GCAt         *time.Time        `json:"gc_at,omitempty"`
-	UpdatedAt    *time.Time        `json:"wrote_at,omitempty"`
-	DashboardSHA string            `json:"dashboard_sha,omitempty"`
+	Version          int                     `json:"v"`
+	Rev              int64                   `json:"rev"`
+	NextSeq          int64                   `json:"next_seq"`
+	Queue            []QueueItem             `json:"queue"`
+	InFlight         *InFlight               `json:"in_flight"`
+	LastFired        *time.Time              `json:"last_fired"`
+	Warn             string                  `json:"warn,omitempty"`
+	Fired            map[string]string       `json:"fired"`
+	AwaitingFeedback map[string]FeedbackWait `json:"awaiting_feedback,omitempty"`
+	History          []HistoryItem           `json:"history"`
+	Blocked          Blocked                 `json:"blocked"`
+	Leader           *LeaderLease            `json:"leader,omitempty"`
+	GCAt             *time.Time              `json:"gc_at,omitempty"`
+	UpdatedAt        *time.Time              `json:"wrote_at,omitempty"`
+	DashboardSHA     string                  `json:"dashboard_sha,omitempty"`
 }
 
 type QueueItem struct {
@@ -54,6 +56,15 @@ type InFlight struct {
 	FiredAt        *time.Time `json:"fired_at,omitempty"`
 	FiredCommentID int64      `json:"fired_comment_id,omitempty"`
 	ByHost         string     `json:"by_host"`
+}
+
+type FeedbackWait struct {
+	Repo      string    `json:"repo"`
+	PR        int       `json:"pr"`
+	Head      string    `json:"head"`
+	StartedAt time.Time `json:"started_at"`
+	Deadline  time.Time `json:"deadline"`
+	ByHost    string    `json:"by_host,omitempty"`
 }
 
 type HistoryItem struct {
@@ -96,6 +107,9 @@ func (s *State) Normalize(cfg Config) {
 	if s.Fired == nil {
 		s.Fired = map[string]string{}
 	}
+	if s.AwaitingFeedback == nil {
+		s.AwaitingFeedback = map[string]FeedbackWait{}
+	}
 	for i := range s.Queue {
 		s.Queue[i].Repo = NormalizeRepo(s.Queue[i].Repo)
 		s.Queue[i].Owner = ownerOf(s.Queue[i].Repo)
@@ -117,6 +131,25 @@ func (s *State) Normalize(cfg Config) {
 		folded[strings.ToLower(k)] = v
 	}
 	s.Fired = folded
+	awaiting := map[string]FeedbackWait{}
+	for k, wait := range s.AwaitingFeedback {
+		repo, pr := wait.Repo, wait.PR
+		if repo == "" || pr <= 0 {
+			repo, pr = splitQueueKey(k)
+		}
+		repo = NormalizeRepo(repo)
+		if repo == "" || pr <= 0 || wait.Head == "" {
+			continue
+		}
+		wait.Repo = repo
+		wait.PR = pr
+		key := QueueKey(repo, pr)
+		awaiting[key] = wait
+		if s.Fired[key] == "" {
+			s.Fired[key] = wait.Head
+		}
+	}
+	s.AwaitingFeedback = awaiting
 	if cfg.FiredMax > 0 && len(s.Fired) > cfg.FiredMax {
 		// Protect markers for recently-fired heads (those still in History) from
 		// eviction. Normalize runs right after a fire records st.Fired[key]=head, and
@@ -147,6 +180,22 @@ func (s *State) Normalize(cfg Config) {
 			return recent[i].Index < recent[j].Index
 		})
 		protected := map[string]string{}
+		awaitingMarkers := make([]historyMarker, 0, len(s.AwaitingFeedback))
+		for _, wait := range s.AwaitingFeedback {
+			key := QueueKey(wait.Repo, wait.PR)
+			if fired := s.Fired[key]; fired != "" && fired == wait.Head {
+				awaitingMarkers = append(awaitingMarkers, historyMarker{Key: key, Commit: fired, At: wait.StartedAt})
+			}
+		}
+		sort.SliceStable(awaitingMarkers, func(i, j int) bool {
+			return awaitingMarkers[i].At.After(awaitingMarkers[j].At)
+		})
+		for _, marker := range awaitingMarkers {
+			if len(protected) >= cfg.FiredMax {
+				break
+			}
+			protected[marker.Key] = marker.Commit
+		}
 		for _, marker := range recent {
 			if len(protected) >= cfg.FiredMax {
 				break
@@ -178,6 +227,18 @@ func (s *State) Normalize(cfg Config) {
 	}
 }
 
+func splitQueueKey(key string) (string, int) {
+	repo, prText, ok := strings.Cut(strings.ToLower(key), "#")
+	if !ok {
+		return "", 0
+	}
+	pr, err := strconv.Atoi(prText)
+	if err != nil {
+		return "", 0
+	}
+	return NormalizeRepo(repo), pr
+}
+
 func NormalizeRepo(repo string) string {
 	repo = strings.TrimSpace(repo)
 	repo = strings.TrimSuffix(repo, ".git")
@@ -204,6 +265,23 @@ func (s State) Contains(repo string, pr int) bool {
 func (s State) SortedQueue() []QueueItem {
 	out := append([]QueueItem(nil), s.Queue...)
 	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+	return out
+}
+
+func (s State) SortedAwaitingFeedback() []FeedbackWait {
+	out := make([]FeedbackWait, 0, len(s.AwaitingFeedback))
+	for _, wait := range s.AwaitingFeedback {
+		out = append(out, wait)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Deadline.Equal(out[j].Deadline) {
+			return out[i].Deadline.Before(out[j].Deadline)
+		}
+		if out[i].Repo != out[j].Repo {
+			return out[i].Repo < out[j].Repo
+		}
+		return out[i].PR < out[j].PR
+	})
 	return out
 }
 
@@ -237,6 +315,7 @@ func renderDashboard(state State, cfg Config) string {
 	loc := dashboardLoc(cfg)
 	now := time.Now().UTC()
 	queue := state.SortedQueue()
+	awaiting := state.SortedAwaitingFeedback()
 	blocked := state.Blocked.BlockedUntil != nil && state.Blocked.BlockedUntil.After(now)
 
 	var b strings.Builder
@@ -247,6 +326,8 @@ func renderDashboard(state State, cfg Config) string {
 		fmt.Fprintf(&b, "### 🔴 Blocked — next review in ~%dm\n\n", minutesUntil(*state.Blocked.BlockedUntil, now))
 	case state.InFlight != nil:
 		fmt.Fprintf(&b, "### 🟡 Reviewing %s#%d\n\n", state.InFlight.Repo, state.InFlight.PR)
+	case len(awaiting) > 0:
+		fmt.Fprintf(&b, "### 🟡 Awaiting feedback for %s#%d\n\n", awaiting[0].Repo, awaiting[0].PR)
 	case len(queue) > 0:
 		fmt.Fprintf(&b, "### 🟠 %d queued\n\n", len(queue))
 	default:
@@ -277,6 +358,13 @@ func renderDashboard(state State, cfg Config) string {
 			fmtStamp(state.InFlight.FiredAt, loc), state.InFlight.ByHost)
 	} else {
 		fmt.Fprintf(&b, "| **In flight** | — |\n")
+	}
+	if len(awaiting) > 0 {
+		wait := awaiting[0]
+		fmt.Fprintf(&b, "| **Feedback wait** | [%s#%d](https://github.com/%s/pull/%d) · `%s` · deadline %s |\n",
+			wait.Repo, wait.PR, wait.Repo, wait.PR, wait.Head, fmtStamp(&wait.Deadline, loc))
+	} else {
+		fmt.Fprintf(&b, "| **Feedback wait** | — |\n")
 	}
 	if state.Warn != "" {
 		fmt.Fprintf(&b, "\n> ⚠️ %s\n", state.Warn)
@@ -317,6 +405,8 @@ func renderTitle(state State) string {
 		return fmt.Sprintf("🐰 crq — blocked · queue %d", len(state.Queue))
 	case state.InFlight != nil:
 		return fmt.Sprintf("🐰 crq — reviewing #%d · queue %d", state.InFlight.PR, len(state.Queue))
+	case len(state.AwaitingFeedback) > 0:
+		return fmt.Sprintf("🐰 crq — awaiting feedback · queue %d", len(state.Queue))
 	case len(state.Queue) > 0:
 		return fmt.Sprintf("🐰 crq — %d queued", len(state.Queue))
 	default:
