@@ -211,6 +211,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 }
 
 func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport, int, error) {
+	repo = NormalizeRepo(repo)
 	waitResult, waitCode, err := s.waitToFire(ctx, repo, pr)
 	if err != nil {
 		return FeedbackReport{}, 1, err
@@ -227,10 +228,28 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		// return stale pre-existing findings despite no new review round. Report the
 		// timeout so the caller retries later instead. A skipped wait result is
 		// terminal, not retryable, so preserve it as a skipped report.
+		if waitResult.Action == "skipped" {
+			s.clearFeedbackWait(ctx, repo, pr, "")
+		}
 		return FeedbackReport{Status: status, Repo: NormalizeRepo(repo), PR: pr, Head: waitResult.Head, Reason: waitResult.Reason, ReviewedBy: map[string]bool{}, Findings: []Finding{}}, code, nil
 	}
-	deadline := time.Now().Add(s.cfg.FeedbackWaitTimeout)
-	start := time.Now()
+	head := waitResult.Head
+	if head == "" {
+		var herr error
+		head, _, herr = s.pullHead(ctx, repo, pr)
+		if herr != nil {
+			return FeedbackReport{}, 1, herr
+		}
+	}
+	wait, err := s.ensureFeedbackWait(ctx, repo, pr, head)
+	if err != nil {
+		return FeedbackReport{}, 1, err
+	}
+	deadline := wait.Deadline
+	start := wait.StartedAt
+	if start.IsZero() {
+		start = time.Now().UTC()
+	}
 	var lastLog time.Time
 	for {
 		report, err := s.Feedback(ctx, repo, pr)
@@ -247,6 +266,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 				if s.log != nil {
 					s.log.Printf("crq: %s#%d GitHub API rate-limited; waiting %s for the reset, then resuming", repo, pr, wait.Round(time.Second))
 				}
+				s.extendFeedbackWaitDeadline(ctx, repo, pr, head, deadline)
 				if serr := sleepCtx(ctx, wait); serr != nil {
 					return report, 1, serr
 				}
@@ -256,9 +276,11 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		}
 		if len(report.Findings) > 0 {
 			report.Status = "feedback"
+			s.clearFeedbackWait(ctx, repo, pr, head)
 			return report, 10, nil
 		}
 		if report.Converged {
+			s.clearFeedbackWait(ctx, repo, pr, head)
 			return report, 0, nil
 		}
 		// Keep the queue moving (re-fire once a rate-limit window clears) and pick up
@@ -275,11 +297,16 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		var blockedUntil *time.Time
 		if st, _, lerr := s.store.Load(ctx); lerr == nil && st.Blocked.BlockedUntil != nil && st.Blocked.BlockedUntil.After(time.Now()) {
 			blockedUntil = st.Blocked.BlockedUntil
-			deadline = extendDeadlineForBlock(deadline, blockedUntil, time.Now(), s.cfg.FeedbackWaitTimeout)
+			extended := extendDeadlineForBlock(deadline, blockedUntil, time.Now(), s.cfg.FeedbackWaitTimeout)
+			if extended.After(deadline) {
+				deadline = extended
+				s.extendFeedbackWaitDeadline(ctx, repo, pr, head, deadline)
+			}
 			poll = blockedPollInterval(*blockedUntil, time.Now(), s.cfg.PollInterval)
 		}
 		if time.Now().After(deadline) {
 			report.Status = "timeout"
+			s.clearFeedbackWait(ctx, repo, pr, head)
 			return report, 2, nil
 		}
 		if s.log != nil && time.Since(lastLog) >= 30*time.Second {
@@ -295,6 +322,139 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			return report, 1, ctx.Err()
 		case <-time.After(poll):
 		}
+	}
+}
+
+func (s *Service) newFeedbackWait(repo string, pr int, head string, started time.Time) FeedbackWait {
+	started = started.UTC()
+	if started.IsZero() {
+		started = time.Now().UTC()
+	}
+	return FeedbackWait{
+		Repo:      NormalizeRepo(repo),
+		PR:        pr,
+		Head:      head,
+		StartedAt: started,
+		Deadline:  started.Add(s.cfg.FeedbackWaitTimeout),
+		ByHost:    s.cfg.Host,
+	}
+}
+
+func (s *Service) ensureFeedbackWait(ctx context.Context, repo string, pr int, head string) (FeedbackWait, error) {
+	repo = NormalizeRepo(repo)
+	key := QueueKey(repo, pr)
+	var wait FeedbackWait
+	changed := false
+	state, err := s.store.Update(ctx, func(st *State) error {
+		changed = false
+		if st.AwaitingFeedback == nil {
+			st.AwaitingFeedback = map[string]FeedbackWait{}
+		}
+		if existing := st.AwaitingFeedback[key]; existing.Head == head {
+			wait = existing
+			if wait.StartedAt.IsZero() {
+				wait.StartedAt = feedbackWaitStart(*st, repo, pr, head, time.Now().UTC())
+				changed = true
+			}
+			if wait.Deadline.IsZero() {
+				wait.Deadline = wait.StartedAt.Add(s.cfg.FeedbackWaitTimeout)
+				changed = true
+			}
+			wait.Repo = repo
+			wait.PR = pr
+			if wait.ByHost == "" {
+				wait.ByHost = s.cfg.Host
+				changed = true
+			}
+			if changed {
+				st.AwaitingFeedback[key] = wait
+				st.Fired[key] = head
+				return nil
+			}
+			return ErrNoChange
+		}
+		started := feedbackWaitStart(*st, repo, pr, head, time.Now().UTC())
+		wait = s.newFeedbackWait(repo, pr, head, started)
+		st.AwaitingFeedback[key] = wait
+		st.Fired[key] = head
+		changed = true
+		return nil
+	})
+	if err != nil {
+		return FeedbackWait{}, err
+	}
+	if changed {
+		s.sync(ctx, state)
+	}
+	return wait, nil
+}
+
+func feedbackWaitStart(st State, repo string, pr int, head string, fallback time.Time) time.Time {
+	if st.InFlight != nil && st.InFlight.Repo == repo && st.InFlight.PR == pr && st.InFlight.Head == head && st.InFlight.FiredAt != nil {
+		return st.InFlight.FiredAt.UTC()
+	}
+	for _, item := range st.History {
+		if NormalizeRepo(item.Repo) == repo && item.PR == pr && item.Commit == head {
+			return item.At.UTC()
+		}
+	}
+	return fallback.UTC()
+}
+
+func (s *Service) extendFeedbackWaitDeadline(ctx context.Context, repo string, pr int, head string, deadline time.Time) {
+	repo = NormalizeRepo(repo)
+	key := QueueKey(repo, pr)
+	changed := false
+	state, err := s.store.Update(ctx, func(st *State) error {
+		changed = false
+		wait := st.AwaitingFeedback[key]
+		if wait.Head != head {
+			return ErrNoChange
+		}
+		if !deadline.After(wait.Deadline) {
+			return ErrNoChange
+		}
+		wait.Deadline = deadline.UTC()
+		st.AwaitingFeedback[key] = wait
+		changed = true
+		return nil
+	})
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("warning: failed to persist feedback wait deadline for %s#%d: %v", repo, pr, err)
+		}
+		return
+	}
+	if changed {
+		s.sync(ctx, state)
+	}
+}
+
+func (s *Service) clearFeedbackWait(ctx context.Context, repo string, pr int, head string) {
+	repo = NormalizeRepo(repo)
+	key := QueueKey(repo, pr)
+	changed := false
+	state, err := s.store.Update(ctx, func(st *State) error {
+		changed = false
+		wait := st.AwaitingFeedback[key]
+		if wait.Head == "" {
+			return ErrNoChange
+		}
+		if head != "" && wait.Head != head {
+			return ErrNoChange
+		}
+		delete(st.AwaitingFeedback, key)
+		changed = true
+		return nil
+	})
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("warning: failed to clear feedback wait for %s#%d: %v", repo, pr, err)
+		}
+		return
+	}
+	if changed {
+		s.sync(ctx, state)
 	}
 }
 

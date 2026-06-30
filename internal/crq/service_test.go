@@ -60,6 +60,57 @@ func (retryNoChangeStore) Update(_ context.Context, mutate func(*State) error) (
 
 func (retryNoChangeStore) SyncDashboard(context.Context, State) error { return nil }
 
+type adoptionRaceStore struct {
+	cfg       Config
+	loadState State
+}
+
+func (s *adoptionRaceStore) Load(context.Context) (State, Revision, error) {
+	state := cloneState(s.loadState)
+	state.Normalize(s.cfg)
+	return state, Revision{}, nil
+}
+
+func (s *adoptionRaceStore) Update(_ context.Context, mutate func(*State) error) (State, error) {
+	state := DefaultState(s.cfg)
+	state.InFlight = &InFlight{Repo: "owner/repo", PR: 12, Head: "abcdef123", Token: "other", Phase: "posted"}
+	if err := mutate(&state); err != nil {
+		if errors.Is(err, ErrNoChange) {
+			return state, nil
+		}
+		return State{}, err
+	}
+	return state, nil
+}
+
+func (s *adoptionRaceStore) SyncDashboard(context.Context, State) error { return nil }
+
+type staleDedupeStore struct {
+	cfg         Config
+	loadState   State
+	updateState State
+}
+
+func (s *staleDedupeStore) Load(context.Context) (State, Revision, error) {
+	state := cloneState(s.loadState)
+	state.Normalize(s.cfg)
+	return state, Revision{}, nil
+}
+
+func (s *staleDedupeStore) Update(_ context.Context, mutate func(*State) error) (State, error) {
+	state := cloneState(s.updateState)
+	state.Normalize(s.cfg)
+	if err := mutate(&state); err != nil {
+		if errors.Is(err, ErrNoChange) {
+			return state, nil
+		}
+		return State{}, err
+	}
+	return state, nil
+}
+
+func (s *staleDedupeStore) SyncDashboard(context.Context, State) error { return nil }
+
 func newFakeGitHub() *fakeGitHub {
 	return &fakeGitHub{
 		pulls:     map[string]Pull{},
@@ -371,16 +422,17 @@ func TestRenewLeaderRespectsLiveLease(t *testing.T) {
 func TestEnqueueIsIdempotentAndPumpFiresOnce(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{
-		GateRepo:        "owner/gate",
-		StateRef:        "crq-state",
-		Host:            "testhost",
-		Bot:             "coderabbitai[bot]",
-		ReviewCommand:   "@coderabbitai review",
-		RateLimitMarker: "rate limited by coderabbit.ai",
-		MinInterval:     0,
-		InflightTimeout: time.Minute,
-		PollInterval:    time.Millisecond,
-		FiredMax:        500,
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		ReviewCommand:       "@coderabbitai review",
+		RateLimitMarker:     "rate limited by coderabbit.ai",
+		MinInterval:         0,
+		InflightTimeout:     time.Minute,
+		PollInterval:        time.Millisecond,
+		FeedbackWaitTimeout: time.Minute,
+		FiredMax:            500,
 	}
 	gh := newFakeGitHub()
 	var pull Pull
@@ -466,6 +518,145 @@ func TestPumpPersistsPostedReviewAfterTransientStateFailure(t *testing.T) {
 	}
 	if state.Fired[QueueKey("owner/repo", 12)] != "abcdef123" {
 		t.Fatalf("fired marker was not persisted after retry: %#v", state.Fired)
+	}
+	wait := state.AwaitingFeedback[QueueKey("owner/repo", 12)]
+	if wait.Head != "abcdef123" {
+		t.Fatalf("feedback wait marker was not persisted after firing: %#v", state.AwaitingFeedback)
+	}
+	if state.InFlight.FiredAt == nil || !wait.StartedAt.Equal(*state.InFlight.FiredAt) {
+		t.Fatalf("feedback wait should start at the fired timestamp, wait=%#v inflight=%#v", wait, state.InFlight)
+	}
+	if wait.Deadline.Sub(wait.StartedAt) != cfg.FeedbackWaitTimeout {
+		t.Fatalf("feedback wait deadline should use CRQ_FEEDBACK_WAIT_TIMEOUT, got %s", wait.Deadline.Sub(wait.StartedAt))
+	}
+}
+
+func TestPumpAdoptsExistingReviewCommandWithoutRefiring(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		ReviewCommand:       "@coderabbitai review",
+		RateLimitMarker:     "rate limited by coderabbit.ai",
+		MinInterval:         0,
+		InflightTimeout:     time.Minute,
+		PollInterval:        time.Millisecond,
+		FeedbackWaitTimeout: time.Minute,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	headTime := time.Now().UTC().Add(-time.Minute)
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	gc := gitCommit{SHA: pull.Head.SHA}
+	gc.Committer.Date = headTime
+	gh.commits[pull.Head.SHA] = gc
+	comment := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: headTime.Add(30 * time.Second), UpdatedAt: headTime.Add(30 * time.Second)}
+	comment.User.Login = "kristofferR"
+	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+
+	if _, err := service.Enqueue(ctx, "owner/repo", 12); err != nil {
+		t.Fatal(err)
+	}
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "fired" || pumped.Reason != "review command already posted" {
+		t.Fatalf("expected pump to adopt the existing review command, got %#v", pumped)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("adopting an existing review command must not post another one, posted=%d", len(gh.posted))
+	}
+	state, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.InFlight == nil || state.InFlight.FiredCommentID != comment.ID || state.InFlight.Head != "abcdef123" {
+		t.Fatalf("existing review command should be persisted as in-flight, got %#v", state.InFlight)
+	}
+	if state.Fired[QueueKey("owner/repo", 12)] != "abcdef123" {
+		t.Fatalf("existing review command should restore fired dedupe state: %#v", state.Fired)
+	}
+	if wait := state.AwaitingFeedback[QueueKey("owner/repo", 12)]; wait.Head != "abcdef123" || !wait.StartedAt.Equal(comment.CreatedAt) {
+		t.Fatalf("existing review command should create a feedback wait from the comment timestamp, got %#v", wait)
+	}
+}
+
+func TestExistingReviewCommandRequiresExpectedHead(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		ReviewCommand:       "@coderabbitai review",
+		FeedbackWaitTimeout: time.Minute,
+	}
+	gh := newFakeGitHub()
+	headTime := time.Now().UTC().Add(-time.Minute)
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef9994567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	gc := gitCommit{SHA: pull.Head.SHA}
+	gc.Committer.Date = headTime
+	gh.commits[pull.Head.SHA] = gc
+	comment := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: headTime.Add(30 * time.Second), UpdatedAt: headTime.Add(30 * time.Second)}
+	comment.User.Login = "kristofferR"
+	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	service := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	if _, ok, err := service.existingReviewCommand(ctx, "owner/repo", 12, "abcdef123"); err != nil || ok {
+		t.Fatalf("must not adopt a review command after the PR head changed, ok=%v err=%v", ok, err)
+	}
+}
+
+func TestPumpTreatsExistingReviewAdoptionRaceAsLostRace(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		ReviewCommand:       "@coderabbitai review",
+		MinInterval:         0,
+		InflightTimeout:     time.Minute,
+		PollInterval:        time.Millisecond,
+		FeedbackWaitTimeout: time.Minute,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	headTime := time.Now().UTC().Add(-time.Minute)
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	gc := gitCommit{SHA: pull.Head.SHA}
+	gc.Committer.Date = headTime
+	gh.commits[pull.Head.SHA] = gc
+	comment := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: headTime.Add(30 * time.Second), UpdatedAt: headTime.Add(30 * time.Second)}
+	comment.User.Login = "kristofferR"
+	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	state := DefaultState(cfg)
+	state.NextSeq = 1
+	state.Queue = []QueueItem{{Seq: 1, Owner: "owner", Repo: "owner/repo", PR: 12, Host: "testhost", EnqueuedAt: headTime}}
+	service := NewService(cfg, gh, &adoptionRaceStore{cfg: cfg, loadState: state}, nil)
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "lost_race" {
+		t.Fatalf("expected adoption race to be a benign lost_race, got %#v", pumped)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("adoption race must not post another review command, posted=%d", len(gh.posted))
 	}
 }
 
@@ -617,6 +808,111 @@ func TestPumpDropsClosedPRWithoutFiring(t *testing.T) {
 	}
 	if state.Contains("owner/repo", 12) {
 		t.Fatal("closed PR should have been removed from the queue")
+	}
+}
+
+func TestPumpDedupesQueuedHeadAwaitingFeedback(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		ReviewCommand:       "@coderabbitai review",
+		PollInterval:        time.Millisecond,
+		InflightTimeout:     time.Minute,
+		FeedbackWaitTimeout: time.Minute,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	store := NewMemoryStore(cfg)
+	started := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.NextSeq = 1
+		st.Queue = []QueueItem{{Seq: 1, Owner: "owner", Repo: "owner/repo", PR: 12, Host: "testhost", EnqueuedAt: started}}
+		st.AwaitingFeedback[QueueKey("owner/repo", 12)] = FeedbackWait{
+			Repo:      "owner/repo",
+			PR:        12,
+			Head:      "abcdef123",
+			StartedAt: started,
+			Deadline:  started.Add(cfg.FeedbackWaitTimeout),
+		}
+		delete(st.Fired, QueueKey("owner/repo", 12)) // tolerate older/corrupt state missing the fired marker
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(cfg, gh, store, nil)
+
+	result, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != "deduped" || result.Head != "abcdef123" {
+		t.Fatalf("expected pump to dedupe the queued awaiting head, got %#v", result)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("pump must not post another review for an awaiting head, posted=%d", len(gh.posted))
+	}
+	state, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Queue) != 0 {
+		t.Fatalf("deduped awaiting item should be removed from the queue, got %#v", state.Queue)
+	}
+	if state.Fired[QueueKey("owner/repo", 12)] != "abcdef123" {
+		t.Fatalf("pump should restore the fired marker from awaiting feedback: %#v", state.Fired)
+	}
+}
+
+func TestPumpDedupeRevalidatesCurrentWaitMarker(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		ReviewCommand:       "@coderabbitai review",
+		PollInterval:        time.Millisecond,
+		InflightTimeout:     time.Minute,
+		FeedbackWaitTimeout: time.Minute,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	started := time.Now().UTC()
+	loadState := DefaultState(cfg)
+	loadState.NextSeq = 1
+	loadState.Queue = []QueueItem{{Seq: 1, Owner: "owner", Repo: "owner/repo", PR: 12, Host: "testhost", EnqueuedAt: started}}
+	loadState.AwaitingFeedback[QueueKey("owner/repo", 12)] = FeedbackWait{
+		Repo:      "owner/repo",
+		PR:        12,
+		Head:      "abcdef123",
+		StartedAt: started,
+		Deadline:  started.Add(cfg.FeedbackWaitTimeout),
+	}
+	updateState := DefaultState(cfg)
+	updateState.NextSeq = 1
+	updateState.Queue = append([]QueueItem(nil), loadState.Queue...)
+	service := NewService(cfg, gh, &staleDedupeStore{cfg: cfg, loadState: loadState, updateState: updateState}, nil)
+
+	result, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != "lost_race" {
+		t.Fatalf("stale wait marker must not report a successful dedupe, got %#v", result)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("stale dedupe race must not post another review command, posted=%d", len(gh.posted))
 	}
 }
 

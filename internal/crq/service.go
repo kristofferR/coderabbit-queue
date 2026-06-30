@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -61,8 +62,21 @@ func (s *Service) Enqueue(ctx context.Context, repo string, pr int) (EnqueueResu
 			return ErrNoChange
 		}
 		key := QueueKey(repo, pr)
+		head := ""
+		if wait := state.AwaitingFeedback[key]; wait.Head != "" {
+			var err error
+			head, err = s.headShort(ctx, repo, pr)
+			if err == nil && head == wait.Head {
+				result.Deduped = true
+				result.Head = head
+				return ErrNoChange
+			}
+		}
 		if fired := state.Fired[key]; fired != "" {
-			head, err := s.headShort(ctx, repo, pr)
+			var err error
+			if head == "" {
+				head, err = s.headShort(ctx, repo, pr)
+			}
 			if err == nil && head == fired {
 				result.Deduped = true
 				result.Head = head
@@ -214,13 +228,31 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		return PumpResult{Action: "skipped", Repo: item.Repo, PR: item.PR, Reason: "could not read head"}, nil
 	}
 	key := QueueKey(item.Repo, item.PR)
-	if state.Fired[key] == head {
+	pending := state.AwaitingFeedback[key]
+	if state.Fired[key] == head || pending.Head == head {
+		deduped := false
 		updated, err := s.store.Update(ctx, func(st *State) error {
+			deduped = false
+			q := st.SortedQueue()
+			if len(q) == 0 || q[0].Seq != item.Seq {
+				return ErrNoChange
+			}
+			currentPending := st.AwaitingFeedback[key]
+			if st.Fired[key] != head && currentPending.Head != head {
+				return ErrNoChange
+			}
 			removeQueued(st, item.Seq)
+			if currentPending.Head == head {
+				st.Fired[key] = head
+			}
+			deduped = true
 			return nil
 		})
 		if err != nil {
 			return PumpResult{}, err
+		}
+		if !deduped {
+			return PumpResult{Action: "lost_race"}, nil
 		}
 		s.sync(ctx, updated)
 		return PumpResult{Action: "deduped", Repo: item.Repo, PR: item.PR, Head: head}, nil
@@ -238,6 +270,26 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		return PumpResult{Action: "deduped", Repo: item.Repo, PR: item.PR, Head: head, Reason: "bot already reviewed head"}, nil
 	} else if err != nil {
 		return PumpResult{}, err
+	}
+	if existing, ok, err := s.existingReviewCommand(ctx, item.Repo, item.PR, head); err != nil {
+		return PumpResult{}, err
+	} else if ok {
+		firedAt := existing.CreatedAt.UTC()
+		if firedAt.IsZero() {
+			firedAt = existing.UpdatedAt.UTC()
+		}
+		if firedAt.IsZero() {
+			firedAt = time.Now().UTC()
+		}
+		updated, err := s.recordExistingReviewPosted(ctx, item, head, existing.ID, firedAt)
+		if err != nil {
+			if errors.Is(err, ErrNoChange) {
+				return PumpResult{Action: "lost_race"}, nil
+			}
+			return PumpResult{}, err
+		}
+		s.sync(ctx, updated)
+		return PumpResult{Action: "fired", Repo: item.Repo, PR: item.PR, Head: head, Reason: "review command already posted"}, nil
 	}
 
 	if s.cfg.DryRun {
@@ -307,6 +359,9 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		defer cancel()
 		updated, err = s.markReviewPosted(retryCtx, token, item, head, comment.ID, firedAt)
 		if err != nil {
+			if errors.Is(err, ErrNoChange) {
+				return PumpResult{Action: "lost_race"}, nil
+			}
 			return PumpResult{}, err
 		}
 	}
@@ -329,12 +384,117 @@ func (s *Service) markReviewPosted(ctx context.Context, token string, item Queue
 		st.LastFired = &firedAt
 		st.Warn = ""
 		st.Fired[key] = head
+		if st.AwaitingFeedback == nil {
+			st.AwaitingFeedback = map[string]FeedbackWait{}
+		}
+		st.AwaitingFeedback[key] = s.newFeedbackWait(item.Repo, item.PR, head, firedAt)
 		st.History = append([]HistoryItem{{
 			Repo:   item.Repo,
 			PR:     item.PR,
 			Commit: head,
 			At:     firedAt,
 			Host:   s.cfg.Host,
+		}}, st.History...)
+		if len(st.History) > 20 {
+			st.History = st.History[:20]
+		}
+		return nil
+	})
+	if err != nil {
+		return State{}, err
+	}
+	if !recorded {
+		return state, ErrNoChange
+	}
+	return state, nil
+}
+
+func (s *Service) existingReviewCommand(ctx context.Context, repo string, pr int, expectedHead string) (IssueComment, bool, error) {
+	comments, err := s.gh.ListIssueComments(ctx, repo, pr)
+	if err != nil {
+		return IssueComment{}, false, err
+	}
+	cutoff := time.Time{}
+	pull, err := s.gh.GetPull(ctx, repo, pr)
+	if err != nil {
+		return IssueComment{}, false, err
+	}
+	if pull.Head.SHA != "" {
+		if shortOID(pull.Head.SHA) != expectedHead {
+			return IssueComment{}, false, nil
+		}
+		commit, err := s.gh.GetCommit(ctx, repo, pull.Head.SHA)
+		if err != nil {
+			return IssueComment{}, false, err
+		}
+		cutoff = commit.Committer.Date
+	}
+	var best IssueComment
+	var bestAt time.Time
+	ok := false
+	command := strings.TrimSpace(s.cfg.ReviewCommand)
+	if command == "" {
+		return IssueComment{}, false, nil
+	}
+	for _, comment := range comments {
+		if strings.TrimSpace(comment.Body) != command {
+			continue
+		}
+		when := comment.CreatedAt
+		if when.IsZero() {
+			when = comment.UpdatedAt
+		}
+		if !cutoff.IsZero() && when.Before(cutoff) {
+			continue
+		}
+		if !ok || when.After(bestAt) {
+			best = comment
+			bestAt = when
+			ok = true
+		}
+	}
+	return best, ok, nil
+}
+
+func (s *Service) recordExistingReviewPosted(ctx context.Context, item QueueItem, head string, commentID int64, firedAt time.Time) (State, error) {
+	key := QueueKey(item.Repo, item.PR)
+	recorded := false
+	state, err := s.store.Update(ctx, func(st *State) error {
+		recorded = false
+		if st.InFlight != nil {
+			return ErrNoChange
+		}
+		q := st.SortedQueue()
+		if len(q) == 0 || q[0].Seq != item.Seq {
+			return ErrNoChange
+		}
+		recorded = true
+		removeQueued(st, item.Seq)
+		st.InFlight = &InFlight{
+			Seq:            item.Seq,
+			Repo:           item.Repo,
+			PR:             item.PR,
+			Head:           head,
+			Token:          randomToken(),
+			Phase:          "posted",
+			ReservedAt:     firedAt,
+			FiredAt:        &firedAt,
+			FiredCommentID: commentID,
+			ByHost:         firstNonEmpty(item.Host, s.cfg.Host),
+		}
+		st.LastFired = &firedAt
+		st.Warn = ""
+		st.Fired[key] = head
+		if st.AwaitingFeedback == nil {
+			st.AwaitingFeedback = map[string]FeedbackWait{}
+		}
+		st.AwaitingFeedback[key] = s.newFeedbackWait(item.Repo, item.PR, head, firedAt)
+		st.History = append([]HistoryItem{{
+			Repo:   item.Repo,
+			PR:     item.PR,
+			Commit: head,
+			At:     firedAt,
+			Host:   firstNonEmpty(item.Host, s.cfg.Host),
 		}}, st.History...)
 		if len(st.History) > 20 {
 			st.History = st.History[:20]
@@ -425,6 +585,7 @@ func (s *Service) Cancel(ctx context.Context, repo string, pr int) error {
 			st.InFlight = nil
 		}
 		delete(st.Fired, QueueKey(repo, pr))
+		delete(st.AwaitingFeedback, QueueKey(repo, pr))
 		return nil
 	})
 	if err != nil {
@@ -701,6 +862,7 @@ func (s *Service) requeueInflight(st *State, status inflightCheck) {
 	})
 	sort.Slice(st.Queue, func(i, j int) bool { return st.Queue[i].Seq < st.Queue[j].Seq })
 	delete(st.Fired, QueueKey(inf.Repo, inf.PR))
+	delete(st.AwaitingFeedback, QueueKey(inf.Repo, inf.PR))
 	st.InFlight = nil
 	now := time.Now().UTC()
 	if status.Reason == warnRateLimited {
