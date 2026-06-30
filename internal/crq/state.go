@@ -93,10 +93,11 @@ type LeaderLease struct {
 
 func DefaultState(cfg Config) State {
 	return State{
-		Version: 1,
-		Rev:     0,
-		Fired:   map[string]string{},
-		Blocked: Blocked{Scope: strings.Join(cfg.Scope, ","), Source: "init"},
+		Version:          1,
+		Rev:              0,
+		Fired:            map[string]string{},
+		AwaitingFeedback: map[string]FeedbackWait{},
+		Blocked:          Blocked{Scope: strings.Join(cfg.Scope, ","), Source: "init"},
 	}
 }
 

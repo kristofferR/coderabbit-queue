@@ -601,4 +601,11 @@ func TestLoopUsesPersistedFeedbackDeadline(t *testing.T) {
 	if len(gh.posted) != 0 {
 		t.Fatalf("expired feedback wait still must not refire the same head, posted=%d", len(gh.posted))
 	}
+	state, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wait := state.AwaitingFeedback[QueueKey("owner/repo", 12)]; wait.Head != "" {
+		t.Fatalf("expired feedback wait should clear after timeout, got %#v", wait)
+	}
 }

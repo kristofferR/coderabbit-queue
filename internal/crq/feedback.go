@@ -276,11 +276,11 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		}
 		if len(report.Findings) > 0 {
 			report.Status = "feedback"
-			s.clearFeedbackWait(ctx, repo, pr, report.Head)
+			s.clearFeedbackWait(ctx, repo, pr, head)
 			return report, 10, nil
 		}
 		if report.Converged {
-			s.clearFeedbackWait(ctx, repo, pr, report.Head)
+			s.clearFeedbackWait(ctx, repo, pr, head)
 			return report, 0, nil
 		}
 		// Keep the queue moving (re-fire once a rate-limit window clears) and pick up
@@ -306,7 +306,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		}
 		if time.Now().After(deadline) {
 			report.Status = "timeout"
-			s.clearFeedbackWait(ctx, repo, pr, report.Head)
+			s.clearFeedbackWait(ctx, repo, pr, head)
 			return report, 2, nil
 		}
 		if s.log != nil && time.Since(lastLog) >= 30*time.Second {

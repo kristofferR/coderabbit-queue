@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -229,15 +230,29 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	key := QueueKey(item.Repo, item.PR)
 	pending := state.AwaitingFeedback[key]
 	if state.Fired[key] == head || pending.Head == head {
+		deduped := false
 		updated, err := s.store.Update(ctx, func(st *State) error {
+			deduped = false
+			q := st.SortedQueue()
+			if len(q) == 0 || q[0].Seq != item.Seq {
+				return ErrNoChange
+			}
+			currentPending := st.AwaitingFeedback[key]
+			if st.Fired[key] != head && currentPending.Head != head {
+				return ErrNoChange
+			}
 			removeQueued(st, item.Seq)
-			if pending.Head == head {
+			if currentPending.Head == head {
 				st.Fired[key] = head
 			}
+			deduped = true
 			return nil
 		})
 		if err != nil {
 			return PumpResult{}, err
+		}
+		if !deduped {
+			return PumpResult{Action: "lost_race"}, nil
 		}
 		s.sync(ctx, updated)
 		return PumpResult{Action: "deduped", Repo: item.Repo, PR: item.PR, Head: head}, nil
@@ -256,7 +271,7 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	} else if err != nil {
 		return PumpResult{}, err
 	}
-	if existing, ok, err := s.existingReviewCommand(ctx, item.Repo, item.PR); err != nil {
+	if existing, ok, err := s.existingReviewCommand(ctx, item.Repo, item.PR, head); err != nil {
 		return PumpResult{}, err
 	} else if ok {
 		firedAt := existing.CreatedAt.UTC()
@@ -268,6 +283,9 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		}
 		updated, err := s.recordExistingReviewPosted(ctx, item, head, existing.ID, firedAt)
 		if err != nil {
+			if errors.Is(err, ErrNoChange) {
+				return PumpResult{Action: "lost_race"}, nil
+			}
 			return PumpResult{}, err
 		}
 		s.sync(ctx, updated)
@@ -341,6 +359,9 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		defer cancel()
 		updated, err = s.markReviewPosted(retryCtx, token, item, head, comment.ID, firedAt)
 		if err != nil {
+			if errors.Is(err, ErrNoChange) {
+				return PumpResult{Action: "lost_race"}, nil
+			}
 			return PumpResult{}, err
 		}
 	}
@@ -388,7 +409,7 @@ func (s *Service) markReviewPosted(ctx context.Context, token string, item Queue
 	return state, nil
 }
 
-func (s *Service) existingReviewCommand(ctx context.Context, repo string, pr int) (IssueComment, bool, error) {
+func (s *Service) existingReviewCommand(ctx context.Context, repo string, pr int, expectedHead string) (IssueComment, bool, error) {
 	comments, err := s.gh.ListIssueComments(ctx, repo, pr)
 	if err != nil {
 		return IssueComment{}, false, err
@@ -399,6 +420,9 @@ func (s *Service) existingReviewCommand(ctx context.Context, repo string, pr int
 		return IssueComment{}, false, err
 	}
 	if pull.Head.SHA != "" {
+		if shortOID(pull.Head.SHA) != expectedHead {
+			return IssueComment{}, false, nil
+		}
 		commit, err := s.gh.GetCommit(ctx, repo, pull.Head.SHA)
 		if err != nil {
 			return IssueComment{}, false, err
