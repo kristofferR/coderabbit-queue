@@ -67,6 +67,29 @@ Long waits are expected when the queue is blocked, GitHub is rate-limited, a req
 reviewed yet, or the network is down. crq logs progress to stderr; do not kill it just because stdout
 is quiet.
 
+## Keeping the Loop Alive in an Agent Harness
+
+A single `crq loop` call can wait an hour or more when the queue is deep or the account is
+rate-limited. Agent harnesses commonly kill plain background shell jobs between turns, which
+silently orphans the wait. Run `crq loop` under the harness's *persistent* long-running-task
+primitive instead of a fire-and-forget background shell. In Claude Code that is the Monitor tool
+with `persistent: true`, redirecting the findings JSON to a file and emitting one final event line:
+
+```
+Monitor({
+  command: 'crq loop OWNER/REPO PR > /path/to/crq-feedback.json; echo "CRQ_EXIT:$?"',
+  description: 'crq review loop on OWNER/REPO#PR',
+  persistent: true,
+})
+```
+
+The `CRQ_EXIT:<code>` line is the completion event (map it to the exit codes above); crq's stderr
+progress stays in the task's output file for diagnosis without generating event noise.
+
+If a loop runner is killed anyway, nothing is lost: the PR stays enqueued. Re-running the same
+`crq loop` command is safe and re-attaches to the wait — enqueueing is idempotent. Do not
+substitute a hand-rolled `crq status` polling loop for the runner.
+
 User-facing updates must be sparse during those waits. Do not narrate every stderr progress line or
 send repeated "still waiting" messages. Say once that `crq loop` is waiting, then update only when
 the state changes (review fired, feedback wait started, findings arrived, convergence, timeout,
