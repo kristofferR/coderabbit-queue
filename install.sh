@@ -18,8 +18,9 @@ say() { printf 'crq-install: %s\n' "$*"; }
 # signature stale and every later run is killed with SIGKILL ("Killed: 9").
 # A rename swaps in a fresh inode, and a running daemon keeps its old one.
 install_binary() {
-  src="$1"
-  dest="$2"
+  local src="$1"
+  local dest="$2"
+  local staged
   staged="$(mktemp "$(dirname "$dest")/.$(basename "$dest").tmp.XXXXXX")"
   cp "$src" "$staged"
   chmod 0755 "$staged"
