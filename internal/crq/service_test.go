@@ -10,15 +10,16 @@ import (
 )
 
 type fakeGitHub struct {
-	mu        sync.Mutex
-	pulls     map[string]Pull
-	commits   map[string]gitCommit
-	reviews   map[string][]Review
-	comments  map[string][]IssueComment
-	reactions map[int64][]Reaction
-	posted    []string
-	deleted   []int64
-	commentID int64
+	mu             sync.Mutex
+	pulls          map[string]Pull
+	commits        map[string]gitCommit
+	reviews        map[string][]Review
+	comments       map[string][]IssueComment
+	reviewComments map[string][]ReviewComment
+	reactions      map[int64][]Reaction
+	posted         []string
+	deleted        []int64
+	commentID      int64
 }
 
 type failNthUpdateStore struct {
@@ -62,11 +63,12 @@ func (retryNoChangeStore) SyncDashboard(context.Context, State) error { return n
 
 func newFakeGitHub() *fakeGitHub {
 	return &fakeGitHub{
-		pulls:     map[string]Pull{},
-		commits:   map[string]gitCommit{},
-		reviews:   map[string][]Review{},
-		comments:  map[string][]IssueComment{},
-		reactions: map[int64][]Reaction{},
+		pulls:          map[string]Pull{},
+		commits:        map[string]gitCommit{},
+		reviews:        map[string][]Review{},
+		comments:       map[string][]IssueComment{},
+		reviewComments: map[string][]ReviewComment{},
+		reactions:      map[int64][]Reaction{},
 	}
 }
 
@@ -100,8 +102,10 @@ func (f *fakeGitHub) ListIssueComments(_ context.Context, repo string, pr int) (
 	return append([]IssueComment(nil), f.comments[fakeKey(repo, pr)]...), nil
 }
 
-func (f *fakeGitHub) ListReviewComments(context.Context, string, int) ([]ReviewComment, error) {
-	return nil, nil
+func (f *fakeGitHub) ListReviewComments(_ context.Context, repo string, pr int) ([]ReviewComment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ReviewComment(nil), f.reviewComments[fakeKey(repo, pr)]...), nil
 }
 
 func (f *fakeGitHub) ListCommentReactions(_ context.Context, _ string, id int64) ([]Reaction, error) {

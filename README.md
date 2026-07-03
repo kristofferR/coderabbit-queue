@@ -384,7 +384,8 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_STATE_REF` | `crq-state` | git ref that stores the typed CAS state |
 | `CRQ_REPOS` | _(all in scope)_ | `autoreview` allowlist — only these `owner/name` repos (comma-separated) |
 | `CRQ_EXCLUDE` | _(none)_ | `autoreview` denylist — never these `owner/name` repos (comma-separated) |
-| `CRQ_REQUIRED_BOTS` | `coderabbitai[bot],chatgpt-codex-connector[bot]` | bots that must review the head for convergence |
+| `CRQ_REQUIRED_BOTS` | `coderabbitai[bot]` | bots that must review the head for convergence (crq waits for all of them) |
+| `CRQ_FEEDBACK_BOTS` | required bots + `chatgpt-codex-connector[bot]` | bots whose findings are surfaced — a superset of required bots, so Codex reviews show up without gating convergence on repos where Codex isn't installed |
 | `CRQ_TZ` | `UTC` | dashboard display timezone (IANA name, e.g. `Europe/Oslo`) |
 | `CRQ_MIN_INTERVAL` | `90s` | minimum time between fired reviews |
 | `CRQ_POLL` | `15s` | how often `crq loop` checks its place in line |

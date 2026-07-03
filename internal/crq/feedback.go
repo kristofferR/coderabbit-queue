@@ -61,8 +61,16 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		Findings:   []Finding{},
 		CheckedAt:  time.Now().UTC(),
 	}
-	bots := botSet(s.cfg.RequiredBots)
-	for bot := range bots {
+	// Two bot sets with different jobs. requiredBots gates convergence: crq isn't
+	// "done" until every one has reviewed the head, so only these seed ReviewedBy.
+	// extractBots is the broader set whose findings we surface — a superset that
+	// includes Codex — so a bot that reviews without being required (and would hang
+	// convergence if it were) still has its findings reported instead of dropped.
+	requiredBots := botSet(s.cfg.RequiredBots)
+	// Always extract from the required bots too: a bot crq waits for whose findings
+	// it didn't surface would hang the loop forever. FeedbackBots only widens this.
+	extractBots := botSet(unionBots(s.cfg.FeedbackBots, s.cfg.RequiredBots))
+	for bot := range requiredBots {
 		report.ReviewedBy[bot] = false
 	}
 
@@ -71,10 +79,12 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		return report, err
 	}
 	for _, review := range reviews {
-		if !inBots(bots, review.User.Login) {
+		if !inBots(extractBots, review.User.Login) {
 			continue
 		}
 		if head != "" && strings.HasPrefix(review.CommitID, head) {
+			// markReviewed only flips existing ReviewedBy keys (required bots), so a
+			// non-required extract bot reviewing here is a harmless no-op.
 			markReviewed(report.ReviewedBy, review.User.Login)
 		}
 		if head != "" && review.CommitID != "" && !strings.HasPrefix(review.CommitID, head) {
@@ -86,13 +96,13 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	suppressPromptAt := map[string]bool{}
 	if threads, err := s.reviewThreads(ctx, repo, pr); err == nil {
 		for _, thread := range threads {
-			report.Findings = append(report.Findings, threadFindings(thread, bots)...)
+			report.Findings = append(report.Findings, threadFindings(thread, extractBots)...)
 			// A resolved/outdated inline thread emits no finding, but CodeRabbit's
 			// "Prompt for AI agents" block still lists the same location. Record it so
 			// the prompt duplicate is suppressed too — otherwise an addressed finding
 			// reappears as a thread-less prompt finding and the loop never converges.
 			if thread.IsResolved || thread.IsOutdated {
-				for _, key := range promptSuppressKeys(thread, bots) {
+				for _, key := range promptSuppressKeys(thread, extractBots) {
 					suppressPromptAt[key] = true
 				}
 			}
@@ -109,7 +119,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 			return report, cerr
 		}
 		for _, comment := range comments {
-			if !inBots(bots, comment.User.Login) {
+			if !inBots(extractBots, comment.User.Login) {
 				continue
 			}
 			commit := shortOID(firstNonEmpty(comment.CommitID, comment.OriginalCommitID))
@@ -158,7 +168,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		return headCutoff
 	}
 	for _, comment := range issueComments {
-		if !inBots(bots, comment.User.Login) {
+		if !inBots(extractBots, comment.User.Login) {
 			continue
 		}
 		if s.isRateLimited(comment.Body) {
