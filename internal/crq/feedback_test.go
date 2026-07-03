@@ -69,6 +69,58 @@ func TestFeedbackBoundsIssueCommentsToHead(t *testing.T) {
 	}
 }
 
+func TestFeedbackSurfacesCodexEvenWhenNotRequired(t *testing.T) {
+	// Regression: Codex (chatgpt-codex-connector) reviews a PR and posts inline
+	// findings, but it isn't in RequiredBots (which is CodeRabbit-only by default).
+	// crq must still surface Codex's findings — and must NOT falsely converge just
+	// because CodeRabbit reviewed clean — while not waiting on Codex to converge.
+	cfg := Config{
+		Bot:          "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]"},
+		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, extraFeedbackBots),
+	}
+	gh := newFakeGitHub()
+	sha := "abcdef1234567890"
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey("o/repo", 7)] = pull
+
+	// CodeRabbit reviewed this head and found nothing (empty body → no findings).
+	crReview := Review{ID: 1, Body: "", CommitID: sha, SubmittedAt: time.Now().UTC()}
+	crReview.User.Login = "coderabbitai[bot]"
+	gh.reviews[fakeKey("o/repo", 7)] = []Review{crReview}
+
+	// Codex left an inline finding on the same head (REST review-comment path, since
+	// the fake GraphQL is unavailable and Feedback falls back to it).
+	cx := ReviewComment{ID: 22, Body: "**Fix the off-by-one.** This clips the last row.", Path: "app/x.go", Line: 10, CommitID: sha}
+	cx.User.Login = "chatgpt-codex-connector[bot]"
+	gh.reviewComments[fakeKey("o/repo", 7)] = []ReviewComment{cx}
+
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+	rep, err := svc.Feedback(context.Background(), "o/repo", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Findings) != 1 || !strings.Contains(rep.Findings[0].Body, "off-by-one") {
+		t.Fatalf("expected the Codex finding to be surfaced, got %#v", rep.Findings)
+	}
+	if normalizeBotName(rep.Findings[0].Bot) != "chatgpt-codex-connector" {
+		t.Fatalf("expected the finding attributed to Codex, got %q", rep.Findings[0].Bot)
+	}
+	if rep.Converged {
+		t.Fatal("must not converge while a Codex finding is open")
+	}
+	// Convergence gate stays CodeRabbit-only: Codex must not be tracked in ReviewedBy
+	// (otherwise crq would hang on repos where Codex never reviews).
+	if _, tracked := rep.ReviewedBy["chatgpt-codex-connector[bot]"]; tracked {
+		t.Fatalf("Codex must not gate convergence, ReviewedBy=%#v", rep.ReviewedBy)
+	}
+	if reviewed, ok := rep.ReviewedBy["coderabbitai[bot]"]; !ok || !reviewed {
+		t.Fatalf("CodeRabbit should be marked reviewed, ReviewedBy=%#v", rep.ReviewedBy)
+	}
+}
+
 func TestParseReviewBodyFindingsExtractsOutsideDiffItems(t *testing.T) {
 	review := Review{
 		ID: 99,
