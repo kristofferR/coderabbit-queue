@@ -10,15 +10,16 @@ import (
 )
 
 type fakeGitHub struct {
-	mu        sync.Mutex
-	pulls     map[string]Pull
-	commits   map[string]gitCommit
-	reviews   map[string][]Review
-	comments  map[string][]IssueComment
-	reactions map[int64][]Reaction
-	posted    []string
-	deleted   []int64
-	commentID int64
+	mu         sync.Mutex
+	pulls      map[string]Pull
+	commits    map[string]gitCommit
+	commitErrs map[string]error
+	reviews    map[string][]Review
+	comments   map[string][]IssueComment
+	reactions  map[int64][]Reaction
+	posted     []string
+	deleted    []int64
+	commentID  int64
 }
 
 type failNthUpdateStore struct {
@@ -113,11 +114,12 @@ func (s *staleDedupeStore) SyncDashboard(context.Context, State) error { return 
 
 func newFakeGitHub() *fakeGitHub {
 	return &fakeGitHub{
-		pulls:     map[string]Pull{},
-		commits:   map[string]gitCommit{},
-		reviews:   map[string][]Review{},
-		comments:  map[string][]IssueComment{},
-		reactions: map[int64][]Reaction{},
+		pulls:      map[string]Pull{},
+		commits:    map[string]gitCommit{},
+		commitErrs: map[string]error{},
+		reviews:    map[string][]Review{},
+		comments:   map[string][]IssueComment{},
+		reactions:  map[int64][]Reaction{},
 	}
 }
 
@@ -136,6 +138,9 @@ func (f *fakeGitHub) GetPull(_ context.Context, repo string, pr int) (Pull, erro
 func (f *fakeGitHub) GetCommit(_ context.Context, repo, sha string) (gitCommit, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.commitErrs[sha]; err != nil {
+		return gitCommit{}, err
+	}
 	return f.commits[sha], nil
 }
 
@@ -612,8 +617,282 @@ func TestExistingReviewCommandRequiresExpectedHead(t *testing.T) {
 	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
 	service := NewService(cfg, gh, NewMemoryStore(cfg), nil)
 
-	if _, ok, err := service.existingReviewCommand(ctx, "owner/repo", 12, "abcdef123"); err != nil || ok {
+	if _, ok, err := service.existingReviewCommand(ctx, "owner/repo", 12, "abcdef123", time.Time{}); err != nil || ok {
 		t.Fatalf("must not adopt a review command after the PR head changed, ok=%v err=%v", ok, err)
+	}
+}
+
+func TestPumpDryRunDoesNotAdoptExistingCommand(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		ReviewCommand:       "@coderabbitai review",
+		MinInterval:         0,
+		InflightTimeout:     time.Minute,
+		FeedbackWaitTimeout: time.Minute,
+		FiredMax:            500,
+		DryRun:              true,
+	}
+	gh := newFakeGitHub()
+	headTime := time.Now().UTC().Add(-time.Minute)
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	gc := gitCommit{SHA: pull.Head.SHA}
+	gc.Committer.Date = headTime
+	gh.commits[pull.Head.SHA] = gc
+	comment := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: headTime.Add(30 * time.Second), UpdatedAt: headTime.Add(30 * time.Second)}
+	comment.User.Login = "kristofferR"
+	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+
+	if _, err := service.Enqueue(ctx, "owner/repo", 12); err != nil {
+		t.Fatal(err)
+	}
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "dry_run" {
+		t.Fatalf("dry-run pump must simulate, not adopt an existing command, got %#v", pumped)
+	}
+	state, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.InFlight != nil || len(state.Queue) != 1 || len(state.AwaitingFeedback) != 0 {
+		t.Fatalf("dry-run pump must not mutate queue state, got inflight=%#v queue=%#v awaiting=%#v", state.InFlight, state.Queue, state.AwaitingFeedback)
+	}
+}
+
+func TestPumpIgnoresStaleCommandAfterRequeue(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		ReviewCommand:       "@coderabbitai review",
+		MinInterval:         0,
+		InflightTimeout:     time.Minute,
+		FeedbackWaitTimeout: time.Minute,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	headTime := time.Now().UTC().Add(-time.Minute)
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	gc := gitCommit{SHA: pull.Head.SHA}
+	gc.Committer.Date = headTime
+	gh.commits[pull.Head.SHA] = gc
+	stale := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: headTime.Add(10 * time.Second), UpdatedAt: headTime.Add(10 * time.Second)}
+	stale.User.Login = "kristofferR"
+	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{stale}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+
+	if _, err := service.Enqueue(ctx, "owner/repo", 12); err != nil {
+		t.Fatal(err)
+	}
+	requeuedAt := stale.CreatedAt.Add(20 * time.Second)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Queue[0].RequeuedAt = &requeuedAt
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "fired" || pumped.Reason == "review command already posted" {
+		t.Fatalf("a command older than the requeue must not be adopted, got %#v", pumped)
+	}
+	if len(gh.posted) != 1 {
+		t.Fatalf("expected a fresh review command to be posted after requeue, posted=%v", gh.posted)
+	}
+	state, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.InFlight == nil || state.InFlight.FiredCommentID == stale.ID {
+		t.Fatalf("in-flight must track the fresh command, not the stale one, got %#v", state.InFlight)
+	}
+}
+
+func TestPumpSkipsAdoptionWhenCommitLookupFails(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		ReviewCommand:       "@coderabbitai review",
+		MinInterval:         0,
+		InflightTimeout:     time.Minute,
+		FeedbackWaitTimeout: time.Minute,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	gh.commitErrs[pull.Head.SHA] = errors.New("404 not found")
+	comment := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: time.Now().UTC().Add(-30 * time.Second), UpdatedAt: time.Now().UTC().Add(-30 * time.Second)}
+	comment.User.Login = "kristofferR"
+	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+
+	if _, err := service.Enqueue(ctx, "owner/repo", 12); err != nil {
+		t.Fatal(err)
+	}
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatalf("a failed head-commit lookup must not wedge the pump: %v", err)
+	}
+	if pumped.Action != "fired" || pumped.Reason == "review command already posted" {
+		t.Fatalf("expected pump to skip adoption and post a fresh command, got %#v", pumped)
+	}
+	if len(gh.posted) != 1 {
+		t.Fatalf("expected a fresh review command to be posted, posted=%v", gh.posted)
+	}
+}
+
+func TestPumpClearsFeedbackWaitWhenReviewSubmitted(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		ReviewCommand:       "@coderabbitai review",
+		InflightTimeout:     time.Hour,
+		FeedbackWaitTimeout: time.Hour,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	firedAt := time.Now().UTC().Add(-5 * time.Minute)
+	review := Review{SubmittedAt: firedAt.Add(time.Minute)}
+	review.User.Login = cfg.Bot
+	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.InFlight = &InFlight{Repo: "owner/repo", PR: 12, Head: "abcdef123", Token: "tok", Phase: "posted", ReservedAt: firedAt, FiredAt: &firedAt, FiredCommentID: 5}
+		st.AwaitingFeedback[QueueKey("owner/repo", 12)] = FeedbackWait{Repo: "owner/repo", PR: 12, Head: "abcdef123", StartedAt: firedAt, Deadline: firedAt.Add(cfg.FeedbackWaitTimeout)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "cleared" || pumped.Reason != doneReviewSubmitted {
+		t.Fatalf("expected the submitted review to clear the in-flight slot, got %#v", pumped)
+	}
+	state, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.AwaitingFeedback) != 0 {
+		t.Fatalf("a submitted review must clear the feedback wait, got %#v", state.AwaitingFeedback)
+	}
+}
+
+func TestPumpKeepsFeedbackWaitWhenBotOnlyReacted(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		ReviewCommand:       "@coderabbitai review",
+		InflightTimeout:     time.Hour,
+		FeedbackWaitTimeout: time.Hour,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	firedAt := time.Now().UTC().Add(-time.Minute)
+	reaction := Reaction{}
+	reaction.User.Login = cfg.Bot
+	gh.reactions[5] = []Reaction{reaction}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.InFlight = &InFlight{Repo: "owner/repo", PR: 12, Head: "abcdef123", Token: "tok", Phase: "posted", ReservedAt: firedAt, FiredAt: &firedAt, FiredCommentID: 5}
+		st.AwaitingFeedback[QueueKey("owner/repo", 12)] = FeedbackWait{Repo: "owner/repo", PR: 12, Head: "abcdef123", StartedAt: firedAt, Deadline: firedAt.Add(cfg.FeedbackWaitTimeout)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "cleared" || pumped.Reason != doneBotReacted {
+		t.Fatalf("expected the reaction to clear the in-flight slot, got %#v", pumped)
+	}
+	state, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wait := state.AwaitingFeedback[QueueKey("owner/repo", 12)]; wait.Head != "abcdef123" {
+		t.Fatalf("a bare reaction means the review is still running — the wait must survive, got %#v", state.AwaitingFeedback)
+	}
+}
+
+func TestPumpPrunesExpiredFeedbackWaits(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		ReviewCommand:       "@coderabbitai review",
+		FeedbackWaitTimeout: time.Hour,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	expired := time.Now().UTC().Add(-2 * time.Hour)
+	live := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.AwaitingFeedback[QueueKey("owner/repo", 12)] = FeedbackWait{Repo: "owner/repo", PR: 12, Head: "abcdef123", StartedAt: expired, Deadline: expired.Add(time.Hour)}
+		st.AwaitingFeedback[QueueKey("owner/repo", 13)] = FeedbackWait{Repo: "owner/repo", PR: 13, Head: "fedcba321", StartedAt: live, Deadline: live.Add(time.Hour)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "idle" {
+		t.Fatalf("expected idle pump, got %#v", pumped)
+	}
+	state, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.AwaitingFeedback[QueueKey("owner/repo", 12)]; ok {
+		t.Fatalf("expired feedback wait should have been pruned, got %#v", state.AwaitingFeedback)
+	}
+	if wait := state.AwaitingFeedback[QueueKey("owner/repo", 13)]; wait.Head != "fedcba321" {
+		t.Fatalf("live feedback wait must survive pruning, got %#v", state.AwaitingFeedback)
 	}
 }
 

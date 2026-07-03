@@ -43,6 +43,19 @@ type QueueItem struct {
 	PR         int       `json:"pr"`
 	Host       string    `json:"host"`
 	EnqueuedAt time.Time `json:"enqueued_at"`
+	// RequeuedAt is set when the item re-enters the queue after an abandoned
+	// fire (rate limit, in-flight timeout). Command comments older than it must
+	// not be adopted as an already-posted review.
+	RequeuedAt *time.Time `json:"requeued_at,omitempty"`
+}
+
+// adoptCutoff returns the earliest comment timestamp Pump may adopt as an
+// existing review command for this item; zero means no lower bound.
+func (q QueueItem) adoptCutoff() time.Time {
+	if q.RequeuedAt != nil {
+		return q.RequeuedAt.UTC()
+	}
+	return time.Time{}
 }
 
 type InFlight struct {

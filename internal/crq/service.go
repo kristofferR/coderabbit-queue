@@ -165,6 +165,19 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 				if status.Requeue {
 					s.requeueInflight(st, status)
 				} else {
+					// The review round is over. If feedback actually arrived (a
+					// submitted review or a bot comment), the wait is satisfied —
+					// clear it here, because in autoreview flows no Loop is running
+					// to call clearFeedbackWait and the entry would linger forever.
+					// A bare acknowledgement (bot reacted) means the review is still
+					// in progress, so that wait stays until feedback lands or its
+					// deadline expires.
+					if status.Reason != doneBotReacted {
+						key := QueueKey(st.InFlight.Repo, st.InFlight.PR)
+						if wait := st.AwaitingFeedback[key]; wait.Head == st.InFlight.Head {
+							delete(st.AwaitingFeedback, key)
+						}
+					}
 					st.InFlight = nil
 					st.Warn = ""
 				}
@@ -185,6 +198,9 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	state, _, err := s.store.Load(ctx)
 	if err != nil {
 		return PumpResult{}, err
+	}
+	if pruned := s.pruneExpiredWaits(ctx, state); pruned != nil {
+		state = *pruned
 	}
 	queue := state.SortedQueue()
 	if len(queue) == 0 {
@@ -271,7 +287,11 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	} else if err != nil {
 		return PumpResult{}, err
 	}
-	if existing, ok, err := s.existingReviewCommand(ctx, item.Repo, item.PR, head); err != nil {
+	if s.cfg.DryRun {
+		return PumpResult{Action: "dry_run", Repo: item.Repo, PR: item.PR, Head: head}, nil
+	}
+
+	if existing, ok, err := s.existingReviewCommand(ctx, item.Repo, item.PR, head, item.adoptCutoff()); err != nil {
 		return PumpResult{}, err
 	} else if ok {
 		firedAt := existing.CreatedAt.UTC()
@@ -290,10 +310,6 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		}
 		s.sync(ctx, updated)
 		return PumpResult{Action: "fired", Repo: item.Repo, PR: item.PR, Head: head, Reason: "review command already posted"}, nil
-	}
-
-	if s.cfg.DryRun {
-		return PumpResult{Action: "dry_run", Repo: item.Repo, PR: item.PR, Head: head}, nil
 	}
 
 	token := randomToken()
@@ -409,12 +425,18 @@ func (s *Service) markReviewPosted(ctx context.Context, token string, item Queue
 	return state, nil
 }
 
-func (s *Service) existingReviewCommand(ctx context.Context, repo string, pr int, expectedHead string) (IssueComment, bool, error) {
+// existingReviewCommand looks for a review command already posted at the PR's
+// current head so Pump can adopt it instead of posting a duplicate. notBefore
+// bounds adoption: comments created before it (e.g. the stale command left
+// behind by a requeued fire) are never adopted — re-adopting one would replay
+// the very rate-limit reply or timeout that caused the requeue, looping forever
+// without ever posting a fresh command.
+func (s *Service) existingReviewCommand(ctx context.Context, repo string, pr int, expectedHead string, notBefore time.Time) (IssueComment, bool, error) {
 	comments, err := s.gh.ListIssueComments(ctx, repo, pr)
 	if err != nil {
 		return IssueComment{}, false, err
 	}
-	cutoff := time.Time{}
+	cutoff := notBefore
 	pull, err := s.gh.GetPull(ctx, repo, pr)
 	if err != nil {
 		return IssueComment{}, false, err
@@ -425,9 +447,18 @@ func (s *Service) existingReviewCommand(ctx context.Context, repo string, pr int
 		}
 		commit, err := s.gh.GetCommit(ctx, repo, pull.Head.SHA)
 		if err != nil {
-			return IssueComment{}, false, err
+			if _, ok := rateLimitWait(err); ok {
+				return IssueComment{}, false, err
+			}
+			// No head-commit cutoff available (e.g. an unreadable or 404 head):
+			// skip adoption rather than wedging the queue on this PR — the worst
+			// case is posting a command that already exists, which is exactly the
+			// pre-adoption behavior.
+			return IssueComment{}, false, nil
 		}
-		cutoff = commit.Committer.Date
+		if commit.Committer.Date.After(cutoff) {
+			cutoff = commit.Committer.Date
+		}
 	}
 	var best IssueComment
 	var bestAt time.Time
@@ -785,6 +816,15 @@ type inflightCheck struct {
 	BlockedUntil *time.Time
 }
 
+// Done reasons from inflightStatus. Pump distinguishes them: a submitted
+// review or bot comment means feedback arrived, while a bare reaction only
+// acknowledges the command — the review is still in progress.
+const (
+	doneReviewSubmitted = "review submitted"
+	doneBotReacted      = "bot reacted"
+	doneBotComment      = "bot comment"
+)
+
 // notBefore reports whether t is at or after baseline. GitHub timestamps are
 // second-granular, so a bot completion in the same second as the trigger must
 // still count — a strict After would miss it and refire a duplicate review.
@@ -820,7 +860,7 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 	}
 	for _, review := range reviews {
 		if s.isConfiguredBot(review.User.Login) && notBefore(review.SubmittedAt, *inf.FiredAt) {
-			return inflightCheck{Done: true, Reason: "review submitted"}, nil
+			return inflightCheck{Done: true, Reason: doneReviewSubmitted}, nil
 		}
 	}
 	if inf.FiredCommentID != 0 {
@@ -832,13 +872,13 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 		}
 		for _, reaction := range reactions {
 			if s.isConfiguredBot(reaction.User.Login) {
-				return inflightCheck{Done: true, Reason: "bot reacted"}, nil
+				return inflightCheck{Done: true, Reason: doneBotReacted}, nil
 			}
 		}
 	}
 	for _, comment := range comments {
 		if s.isConfiguredBot(comment.User.Login) && comment.ID != inf.FiredCommentID && notBefore(comment.UpdatedAt, *inf.FiredAt) && !s.isRateLimited(comment.Body) {
-			return inflightCheck{Done: true, Reason: "bot comment"}, nil
+			return inflightCheck{Done: true, Reason: doneBotComment}, nil
 		}
 	}
 	if time.Since(*inf.FiredAt) > s.cfg.InflightTimeout {
@@ -847,24 +887,70 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 	return inflightCheck{}, nil
 }
 
+// pruneExpiredWaits drops AwaitingFeedback entries whose deadline has passed.
+// A wait can outlive its review round — a crashed loop, or an autoreview fire
+// whose in-flight slot was released on a bot reaction before the review was
+// submitted — and nothing else removes it. Any loop resumed after pruning
+// reconstructs its start from History and times out immediately, so no wait
+// gets a fresh clock out of this. Returns the updated state, or nil if nothing
+// was pruned.
+func (s *Service) pruneExpiredWaits(ctx context.Context, state State) *State {
+	now := time.Now().UTC()
+	stale := false
+	for _, wait := range state.AwaitingFeedback {
+		if !wait.Deadline.IsZero() && now.After(wait.Deadline) {
+			stale = true
+			break
+		}
+	}
+	if !stale {
+		return nil
+	}
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		changed := false
+		for key, wait := range st.AwaitingFeedback {
+			if !wait.Deadline.IsZero() && now.After(wait.Deadline) {
+				delete(st.AwaitingFeedback, key)
+				changed = true
+			}
+		}
+		if !changed {
+			return ErrNoChange
+		}
+		return nil
+	})
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("warning: failed to prune expired feedback waits: %v", err)
+		}
+		return nil
+	}
+	s.sync(ctx, updated)
+	return &updated
+}
+
 func (s *Service) requeueInflight(st *State, status inflightCheck) {
 	if st.InFlight == nil {
 		return
 	}
 	inf := *st.InFlight
+	now := time.Now().UTC()
 	st.Queue = append(st.Queue, QueueItem{
-		Seq:        inf.Seq,
-		Owner:      ownerOf(inf.Repo),
-		Repo:       inf.Repo,
-		PR:         inf.PR,
-		Host:       inf.ByHost,
-		EnqueuedAt: time.Now().UTC(),
+		Seq:   inf.Seq,
+		Owner: ownerOf(inf.Repo),
+		Repo:  inf.Repo,
+		PR:    inf.PR,
+		Host:  inf.ByHost,
+		// The command comment from the abandoned fire is still on the PR and
+		// still newer than the head commit; RequeuedAt keeps the next fire from
+		// adopting it (see existingReviewCommand).
+		EnqueuedAt: now,
+		RequeuedAt: &now,
 	})
 	sort.Slice(st.Queue, func(i, j int) bool { return st.Queue[i].Seq < st.Queue[j].Seq })
 	delete(st.Fired, QueueKey(inf.Repo, inf.PR))
 	delete(st.AwaitingFeedback, QueueKey(inf.Repo, inf.PR))
 	st.InFlight = nil
-	now := time.Now().UTC()
 	if status.Reason == warnRateLimited {
 		// A rate limit is shown by the Blocked state (the dashboard's Rate-limit
 		// row), not a sticky Warn — otherwise once the window passes the table says
