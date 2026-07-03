@@ -77,7 +77,7 @@ func TestFeedbackSurfacesCodexEvenWhenNotRequired(t *testing.T) {
 	cfg := Config{
 		Bot:          "coderabbitai[bot]",
 		RequiredBots: []string{"coderabbitai[bot]"},
-		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, knownReviewBots),
+		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, extraFeedbackBots),
 	}
 	gh := newFakeGitHub()
 	sha := "abcdef1234567890"

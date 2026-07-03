@@ -45,6 +45,34 @@ func TestLoadConfigFeedbackBotsIncludeCodexByDefault(t *testing.T) {
 	}
 }
 
+func TestLoadConfigFeedbackBotsExcludesCodeRabbitForCustomReviewer(t *testing.T) {
+	// A crq configured for a different reviewer must not surface CodeRabbit
+	// findings — crq neither fires nor waits for CodeRabbit in that setup.
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_BOT", "custom-review-bot")
+	t.Setenv("CRQ_REQUIRED_BOTS", "")
+	t.Setenv("CRQ_FEEDBACK_BOTS", "")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range cfg.FeedbackBots {
+		if b == "coderabbitai[bot]" {
+			t.Fatalf("custom-reviewer feedback bots must not include CodeRabbit, got %#v", cfg.FeedbackBots)
+		}
+	}
+	has := false
+	for _, b := range cfg.FeedbackBots {
+		if b == "custom-review-bot" {
+			has = true
+		}
+	}
+	if !has {
+		t.Fatalf("feedback bots should include the configured reviewer, got %#v", cfg.FeedbackBots)
+	}
+}
+
 func TestLoadConfigFeedbackBotsOverride(t *testing.T) {
 	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
 	t.Setenv("CRQ_FEEDBACK_BOTS", "only-this[bot]")
