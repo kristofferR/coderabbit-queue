@@ -77,11 +77,15 @@ with `persistent: true`, redirecting the findings JSON to a file and emitting on
 
 ```
 Monitor({
-  command: 'crq loop OWNER/REPO PR > /path/to/crq-feedback.json; echo "CRQ_EXIT:$?"',
+  command: 'set +e; crq loop OWNER/REPO PR > /path/to/crq-feedback.json; echo "CRQ_EXIT:$?"',
   description: 'crq review loop on OWNER/REPO#PR',
   persistent: true,
 })
 ```
+
+The `set +e` matters: `crq loop` reports actionable outcomes as non-zero exits (10 = findings,
+2 = timeout), and a shell with errexit inherited would exit before the `echo` — the completion
+event would never arrive even though `crq-feedback.json` was written.
 
 The `CRQ_EXIT:<code>` line is the completion event (map it to the exit codes above); crq's stderr
 progress stays in the task's output file for diagnosis without generating event noise.
