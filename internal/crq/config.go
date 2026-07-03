@@ -22,6 +22,7 @@ type Config struct {
 	StateRef            string
 	Bot                 string
 	RequiredBots        []string
+	FeedbackBots        []string
 	ReviewCommand       string
 	RateLimitCommand    string
 	RateLimitMarker     string
@@ -70,6 +71,7 @@ func LoadConfig() (Config, error) {
 
 	host, _ := os.Hostname()
 	bot := stringEnv(env, "CRQ_BOT", "coderabbitai[bot]")
+	requiredBots := listEnv(env, "CRQ_REQUIRED_BOTS", bot)
 	cfg := Config{
 		GateRepo:            env["CRQ_REPO"],
 		DashboardIssue:      intEnv(env, "CRQ_ISSUE", 0),
@@ -79,7 +81,8 @@ func LoadConfig() (Config, error) {
 		ExcludeRepos:        repoSet(env["CRQ_EXCLUDE"]),
 		StateRef:            stringEnv(env, "CRQ_STATE_REF", "crq-state"),
 		Bot:                 bot,
-		RequiredBots:        listEnv(env, "CRQ_REQUIRED_BOTS", bot),
+		RequiredBots:        requiredBots,
+		FeedbackBots:        listEnv(env, "CRQ_FEEDBACK_BOTS", strings.Join(unionBots(requiredBots, knownReviewBots), ",")),
 		ReviewCommand:       stringEnv(env, "CRQ_REVIEW_CMD", "@coderabbitai review"),
 		RateLimitCommand:    stringEnv(env, "CRQ_RATELIMIT_CMD", "@coderabbitai rate limit"),
 		RateLimitMarker:     stringEnv(env, "CRQ_RL_MARKER", "rate limited by coderabbit.ai"),
@@ -198,6 +201,37 @@ func listEnv(env map[string]string, key, fallback string) []string {
 	for _, item := range strings.Split(value, ",") {
 		item = strings.TrimSpace(item)
 		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// knownReviewBots are review bots whose PR findings crq always extracts, even
+// when they aren't in RequiredBots. RequiredBots gates convergence (crq waits
+// for every one to review before declaring done); extraction must be broader so
+// a bot that reviews without being "required" — Codex being the motivating case —
+// still has its findings surfaced instead of silently dropped, without making
+// crq hang waiting for it on repos where it isn't installed.
+var knownReviewBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
+
+// unionBots concatenates bot lists, dropping blanks and case-insensitively
+// de-duplicating on the normalized login (so "coderabbitai" and
+// "coderabbitai[bot]" collapse to one), preserving first-seen order.
+func unionBots(lists ...[]string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, list := range lists {
+		for _, item := range list {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			key := normalizeBotName(item)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
 			out = append(out, item)
 		}
 	}
