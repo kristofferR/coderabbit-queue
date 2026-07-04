@@ -13,21 +13,25 @@ import (
 const Version = "2.0.0-dev"
 
 type Config struct {
-	GateRepo            string
-	DashboardIssue      int
-	CalibrationPR       int
-	Scope               []string
-	AllowRepos          map[string]bool
-	ExcludeRepos        map[string]bool
-	StateRef            string
-	Bot                 string
-	RequiredBots        []string
-	FeedbackBots        []string
-	ReviewCommand       string
-	RateLimitCommand    string
-	RateLimitMarker     string
-	CalibrationMarker   string
-	ReviewDoneMarker    string
+	GateRepo          string
+	DashboardIssue    int
+	CalibrationPR     int
+	Scope             []string
+	AllowRepos        map[string]bool
+	ExcludeRepos      map[string]bool
+	StateRef          string
+	Bot               string
+	RequiredBots      []string
+	FeedbackBots      []string
+	ReviewCommand     string
+	RateLimitCommand  string
+	RateLimitMarker   string
+	CalibrationMarker string
+	ReviewDoneMarker  string
+	// CompletionMarker identifies the bot's reply to a processed review command
+	// (CodeRabbit: "Review finished."). Feedback uses it to count a command
+	// round that produced no review object toward convergence.
+	CompletionMarker    string
 	Host                string
 	Timezone            string
 	MinInterval         time.Duration
@@ -88,6 +92,7 @@ func LoadConfig() (Config, error) {
 		RateLimitMarker:     stringEnv(env, "CRQ_RL_MARKER", "rate limited by coderabbit.ai"),
 		CalibrationMarker:   stringEnv(env, "CRQ_CAL_REPLY_MARKER", "auto-generated reply by CodeRabbit"),
 		ReviewDoneMarker:    stringEnv(env, "CRQ_REVIEW_DONE_MARKER", "summarize by coderabbit.ai"),
+		CompletionMarker:    stringEnv(env, "CRQ_COMPLETION_MARKER", "Review finished"),
 		Host:                stringEnv(env, "CRQ_HOST", host),
 		Timezone:            env["CRQ_TZ"],
 		MinInterval:         durationEnv(env, "CRQ_MIN_INTERVAL", 90*time.Second),

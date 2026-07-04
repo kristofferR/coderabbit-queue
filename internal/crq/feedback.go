@@ -218,7 +218,11 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 			}
 			if !firedAt.IsZero() {
 				for _, comment := range issueComments {
-					if !s.isConfiguredBot(comment.User.Login) || s.isRateLimited(comment.Body) {
+					// Only the completion marker counts: the bot also posts
+					// acknowledgement/skip/progress replies after a command, and
+					// treating those as a finished review would converge a round
+					// that is still running.
+					if !s.isConfiguredBot(comment.User.Login) || s.isRateLimited(comment.Body) || !s.isCompletionReply(comment.Body) {
 						continue
 					}
 					created := comment.CreatedAt
@@ -998,6 +1002,17 @@ func inBots(bots map[string]struct{}, login string) bool {
 
 func normalizeBotName(login string) string {
 	return strings.TrimSuffix(login, "[bot]")
+}
+
+// isCompletionReply reports whether body is the bot's reply to a processed
+// review command (CodeRabbit: "Review finished."). An empty marker disables
+// the completion-reply convergence fallback entirely.
+func (s *Service) isCompletionReply(body string) bool {
+	marker := strings.TrimSpace(s.cfg.CompletionMarker)
+	if marker == "" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(body), strings.ToLower(marker))
 }
 
 // needsConfiguredBotReview reports whether login gates convergence (has a

@@ -75,9 +75,10 @@ func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 	// ReviewedBy when crq state proves the command was fired for this head —
 	// otherwise the loop times out on a complete round.
 	cfg := Config{
-		Bot:             "coderabbitai[bot]",
-		RequiredBots:    []string{"coderabbitai[bot]"},
-		RateLimitMarker: "rate limited by coderabbit.ai",
+		Bot:              "coderabbitai[bot]",
+		RequiredBots:     []string{"coderabbitai[bot]"},
+		RateLimitMarker:  "rate limited by coderabbit.ai",
+		CompletionMarker: "Review finished",
 	}
 	sha := "abcdef1234567890"
 	head := sha[:9]
@@ -140,6 +141,16 @@ func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 	}
 	if rep.ReviewedBy["coderabbitai[bot]"] || rep.Converged {
 		t.Fatalf("a rate-limit reply must not satisfy the configured bot, got %#v", rep)
+	}
+
+	// An acknowledgement/progress reply without the completion marker is not a
+	// completion either — the review is still running.
+	rep, err = setup(firedAt.Add(5*time.Second), "<!-- This is an auto-generated reply by CodeRabbit -->\n✅ Action performed\n\nFull review triggered.", true).Feedback(context.Background(), "o/repo", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.ReviewedBy["coderabbitai[bot]"] || rep.Converged {
+		t.Fatalf("an ack reply without the completion marker must not satisfy the configured bot, got %#v", rep)
 	}
 }
 
