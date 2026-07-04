@@ -920,23 +920,32 @@ func (s *Service) requiredFeedbackComplete(inf *InFlight, reviews []Review) bool
 	return botsReviewedHead(reviews, required, inf.Head, *inf.FiredAt)
 }
 
-// botsReviewedHead reports whether every bot in the set has a review submitted
-// at/after since whose commit matches head — the same head check Feedback uses
-// before flipping ReviewedBy, so a delayed review for some other push never
-// counts toward the fired round.
+// botsReviewedHead reports whether every bot in the set has reviewed head —
+// the same check Feedback uses before flipping ReviewedBy: a review whose
+// commit matches the fired head counts regardless of when it was submitted,
+// because a required bot may have reviewed the commit before this round was
+// even triggered. Only when there is no head to match does the submission
+// time (at/after since) gate the round, so a review for some other push never
+// counts toward it.
 func botsReviewedHead(reviews []Review, bots map[string]struct{}, head string, since time.Time) bool {
 	for bot := range bots {
 		norm := normalizeBotName(bot)
 		responded := false
 		for _, review := range reviews {
-			if normalizeBotName(review.User.Login) != norm || !notBefore(review.SubmittedAt, since) {
+			if normalizeBotName(review.User.Login) != norm {
 				continue
 			}
-			if head != "" && !strings.HasPrefix(review.CommitID, head) {
+			if head != "" {
+				if strings.HasPrefix(review.CommitID, head) {
+					responded = true
+					break
+				}
 				continue
 			}
-			responded = true
-			break
+			if notBefore(review.SubmittedAt, since) {
+				responded = true
+				break
+			}
 		}
 		if !responded {
 			return false

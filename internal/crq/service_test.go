@@ -1048,6 +1048,25 @@ func TestPumpKeepsFeedbackWaitUntilAllRequiredBotsReview(t *testing.T) {
 	}
 }
 
+func TestBotsReviewedHeadCountsPreFireReviews(t *testing.T) {
+	firedAt := time.Now().UTC()
+	// Codex reviewed the head before the CodeRabbit round was triggered; the
+	// round must still count it, exactly as Feedback's ReviewedBy would.
+	early := Review{SubmittedAt: firedAt.Add(-10 * time.Minute), CommitID: "abcdef1234567890"}
+	early.User.Login = "chatgpt-codex-connector"
+	late := Review{SubmittedAt: firedAt.Add(time.Minute), CommitID: "abcdef1234567890"}
+	late.User.Login = "coderabbitai[bot]"
+	bots := botSet([]string{"coderabbitai[bot]", "chatgpt-codex-connector"})
+	if !botsReviewedHead([]Review{early, late}, bots, "abcdef123", firedAt) {
+		t.Fatal("a required bot's pre-fire review of the same head must complete the round")
+	}
+	other := Review{SubmittedAt: firedAt.Add(time.Minute), CommitID: "0123456789abcdef"}
+	other.User.Login = "chatgpt-codex-connector"
+	if botsReviewedHead([]Review{other, late}, bots, "abcdef123", firedAt) {
+		t.Fatal("a review of a different commit must not complete the round")
+	}
+}
+
 func TestPumpSweepsWaitAfterReactedRoundCompletes(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{
