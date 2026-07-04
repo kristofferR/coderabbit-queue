@@ -790,6 +790,56 @@ func TestPumpDoesNotAdoptCommandOlderThanForcePush(t *testing.T) {
 	}
 }
 
+func TestPumpDoesNotAdoptCommandAlreadyAnsweredByReview(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		ReviewCommand:       "@coderabbitai review",
+		MinInterval:         0,
+		InflightTimeout:     time.Minute,
+		FeedbackWaitTimeout: time.Minute,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	// A commit created before an old review command was pushed later: the
+	// commit-date cutoff cannot exclude the command, but the bot's review
+	// answering it proves the command belongs to a finished round.
+	commitTime := time.Now().UTC().Add(-time.Hour)
+	commandAt := commitTime.Add(10 * time.Minute)
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	gc := gitCommit{SHA: pull.Head.SHA}
+	gc.Committer.Date = commitTime
+	gh.commits[pull.Head.SHA] = gc
+	command := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: commandAt, UpdatedAt: commandAt}
+	command.User.Login = "kristofferR"
+	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{command}
+	answered := Review{SubmittedAt: commandAt.Add(5 * time.Minute), CommitID: "9876543210fedcba"}
+	answered.User.Login = cfg.Bot
+	gh.reviews[fakeKey("owner/repo", 12)] = []Review{answered}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+
+	if _, err := service.Enqueue(ctx, "owner/repo", 12); err != nil {
+		t.Fatal(err)
+	}
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "fired" || pumped.Reason == "review command already posted" {
+		t.Fatalf("an already-answered command must not be adopted, got %#v", pumped)
+	}
+	if len(gh.posted) != 1 {
+		t.Fatalf("expected a fresh review command for the new head, posted=%v", gh.posted)
+	}
+}
+
 func TestPumpDryRunDoesNotDedupeMutably(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{

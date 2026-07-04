@@ -521,6 +521,28 @@ func (s *Service) existingReviewCommand(ctx context.Context, repo string, pr int
 			ok = true
 		}
 	}
+	if !ok {
+		return IssueComment{}, false, nil
+	}
+	// A command the bot has already answered with a review belongs to a
+	// completed round for an earlier head. No cutoff can prove this case away:
+	// a regular push has no timestamped head-update event, and the new head's
+	// committer date can predate an old command (a local commit pushed later).
+	// Adopting a consumed command would mark the new head fired without ever
+	// reviewing it — skip adoption instead; the worst case is a duplicate
+	// command, the pre-adoption behavior.
+	reviews, err := s.gh.ListReviews(ctx, repo, pr)
+	if err != nil {
+		if _, ok := rateLimitWait(err); ok {
+			return IssueComment{}, false, err
+		}
+		return IssueComment{}, false, nil
+	}
+	for _, review := range reviews {
+		if s.isConfiguredBot(review.User.Login) && !review.SubmittedAt.Before(bestAt) {
+			return IssueComment{}, false, nil
+		}
+	}
 	return best, ok, nil
 }
 
