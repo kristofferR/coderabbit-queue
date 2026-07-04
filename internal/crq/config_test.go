@@ -1,6 +1,7 @@
 package crq
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -83,6 +84,46 @@ func TestLoadConfigFeedbackBotsOverride(t *testing.T) {
 	}
 	if len(cfg.FeedbackBots) != 1 || cfg.FeedbackBots[0] != "only-this[bot]" {
 		t.Fatalf("CRQ_FEEDBACK_BOTS should override the default, got %#v", cfg.FeedbackBots)
+	}
+}
+
+func TestLoadConfigPreservesEmptyCompletionMarker(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_COMPLETION_MARKER", "")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CompletionMarker != "" {
+		t.Fatalf("explicit empty CRQ_COMPLETION_MARKER should disable completion matching, got %q", cfg.CompletionMarker)
+	}
+}
+
+func TestLoadConfigPreservesEmptyCompletionMarkerFromFile(t *testing.T) {
+	old, had := os.LookupEnv("CRQ_COMPLETION_MARKER")
+	if err := os.Unsetenv("CRQ_COMPLETION_MARKER"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if had {
+			os.Setenv("CRQ_COMPLETION_MARKER", old)
+		} else {
+			os.Unsetenv("CRQ_COMPLETION_MARKER")
+		}
+	})
+	path := filepath.Join(t.TempDir(), "env")
+	if err := os.WriteFile(path, []byte("CRQ_COMPLETION_MARKER=\"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRQ_CONFIG", path)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CompletionMarker != "" {
+		t.Fatalf("explicit empty CRQ_COMPLETION_MARKER in config file should be preserved, got %q", cfg.CompletionMarker)
 	}
 }
 

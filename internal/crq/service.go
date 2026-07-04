@@ -543,6 +543,9 @@ func (s *Service) existingReviewCommand(ctx context.Context, repo string, pr int
 			return IssueComment{}, false, nil
 		}
 	}
+	if s.reviewCommandHasCompletionReply(comments, reviews, best.ID) {
+		return IssueComment{}, false, nil
+	}
 	return best, ok, nil
 }
 
@@ -937,12 +940,11 @@ func notBefore(t, baseline time.Time) bool { return !t.Before(baseline) }
 // a wait that Feedback would still report as waiting on another required bot.
 // With no required bots configured, the configured reviewer's response that
 // produced the Done is all there is to wait for.
-func (s *Service) requiredFeedbackComplete(inf *InFlight, reviews []Review) bool {
-	required := botSet(s.cfg.RequiredBots)
-	if len(required) == 0 {
+func (s *Service) requiredFeedbackComplete(inf *InFlight, reviews []Review, comments []IssueComment) bool {
+	if len(s.cfg.RequiredBots) == 0 {
 		return true
 	}
-	return botsReviewedHead(reviews, required, inf.Head, *inf.FiredAt)
+	return s.feedbackCompleteForRound(reviews, comments, s.cfg.RequiredBots, inf.Head, *inf.FiredAt)
 }
 
 // botsReviewedHead reports whether every bot in the set has reviewed head —
@@ -953,26 +955,42 @@ func (s *Service) requiredFeedbackComplete(inf *InFlight, reviews []Review) bool
 // time (at/after since) gate the round, so a review for some other push never
 // counts toward it.
 func botsReviewedHead(reviews []Review, bots map[string]struct{}, head string, since time.Time) bool {
+	return allReviewed(reviewedByForRound(reviews, bots, head, since))
+}
+
+func (s *Service) feedbackCompleteForRound(reviews []Review, comments []IssueComment, awaited []string, head string, since time.Time) bool {
+	reviewedBy := reviewedByForRound(reviews, botSet(awaited), head, since)
+	if needsConfiguredBotReview(reviewedBy, s.cfg.Bot) && s.completionReplyForFiredCommand(comments, reviews, since) {
+		markReviewed(reviewedBy, s.cfg.Bot)
+	}
+	return allReviewed(reviewedBy)
+}
+
+func reviewedByForRound(reviews []Review, bots map[string]struct{}, head string, since time.Time) map[string]bool {
+	reviewedBy := map[string]bool{}
 	for bot := range bots {
-		norm := normalizeBotName(bot)
-		responded := false
-		for _, review := range reviews {
-			if normalizeBotName(review.User.Login) != norm {
-				continue
-			}
-			if head != "" {
-				if strings.HasPrefix(review.CommitID, head) {
-					responded = true
-					break
-				}
-				continue
-			}
-			if notBefore(review.SubmittedAt, since) {
-				responded = true
-				break
-			}
+		reviewedBy[bot] = false
+	}
+	for _, review := range reviews {
+		if !inBots(bots, review.User.Login) {
+			continue
 		}
-		if !responded {
+		if head != "" {
+			if strings.HasPrefix(review.CommitID, head) {
+				markReviewed(reviewedBy, review.User.Login)
+			}
+			continue
+		}
+		if notBefore(review.SubmittedAt, since) {
+			markReviewed(reviewedBy, review.User.Login)
+		}
+	}
+	return reviewedBy
+}
+
+func allReviewed(reviewedBy map[string]bool) bool {
+	for _, reviewed := range reviewedBy {
+		if !reviewed {
 			return false
 		}
 	}
@@ -1009,7 +1027,7 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 	}
 	for _, review := range reviews {
 		if s.isConfiguredBot(review.User.Login) && notBefore(review.SubmittedAt, *inf.FiredAt) {
-			return inflightCheck{Done: true, Reason: doneReviewSubmitted, FeedbackComplete: s.requiredFeedbackComplete(inf, reviews)}, nil
+			return inflightCheck{Done: true, Reason: doneReviewSubmitted, FeedbackComplete: s.requiredFeedbackComplete(inf, reviews, comments)}, nil
 		}
 	}
 	if inf.FiredCommentID != 0 {
@@ -1027,7 +1045,7 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 	}
 	for _, comment := range comments {
 		if s.isConfiguredBot(comment.User.Login) && comment.ID != inf.FiredCommentID && notBefore(comment.UpdatedAt, *inf.FiredAt) && !s.isRateLimited(comment.Body) {
-			return inflightCheck{Done: true, Reason: doneBotComment, FeedbackComplete: s.requiredFeedbackComplete(inf, reviews)}, nil
+			return inflightCheck{Done: true, Reason: doneBotComment, FeedbackComplete: s.requiredFeedbackComplete(inf, reviews, comments)}, nil
 		}
 	}
 	if time.Since(*inf.FiredAt) > s.cfg.InflightTimeout {
@@ -1119,7 +1137,25 @@ func (s *Service) sweepFeedbackWaits(ctx context.Context, state State) State {
 	if len(awaited) == 0 {
 		awaited = []string{s.cfg.Bot}
 	}
-	if !botsReviewedHead(reviews, botSet(awaited), oldest.Head, oldest.StartedAt) {
+	reviewedBy := reviewedByForRound(reviews, botSet(awaited), oldest.Head, oldest.StartedAt)
+	if allReviewed(reviewedBy) {
+		s.clearFeedbackWait(ctx, oldest.Repo, oldest.PR, oldest.Head)
+		if updated, _, err := s.store.Load(ctx); err == nil {
+			return updated
+		}
+		return state
+	}
+	if !needsConfiguredBotReview(reviewedBy, s.cfg.Bot) {
+		return state
+	}
+	comments, err := s.gh.ListIssueComments(ctx, oldest.Repo, oldest.PR)
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("warning: feedback wait completion sweep for %s#%d failed: %v", oldest.Repo, oldest.PR, err)
+		}
+		return state
+	}
+	if !s.completionReplyForFiredCommand(comments, reviews, oldest.StartedAt) {
 		return state
 	}
 	s.clearFeedbackWait(ctx, oldest.Repo, oldest.PR, oldest.Head)
