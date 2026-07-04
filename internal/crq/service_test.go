@@ -857,6 +857,105 @@ func TestPumpKeepsFeedbackWaitWhenBotOnlyReacted(t *testing.T) {
 	}
 }
 
+func TestPumpKeepsFeedbackWaitUntilAllRequiredBotsReview(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		RequiredBots:        []string{"coderabbitai[bot]", "chatgpt-codex-connector"},
+		ReviewCommand:       "@coderabbitai review",
+		InflightTimeout:     time.Hour,
+		FeedbackWaitTimeout: time.Hour,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	firedAt := time.Now().UTC().Add(-5 * time.Minute)
+	review := Review{SubmittedAt: firedAt.Add(time.Minute)}
+	review.User.Login = cfg.Bot
+	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.InFlight = &InFlight{Repo: "owner/repo", PR: 12, Head: "abcdef123", Token: "tok", Phase: "posted", ReservedAt: firedAt, FiredAt: &firedAt, FiredCommentID: 5}
+		st.AwaitingFeedback[QueueKey("owner/repo", 12)] = FeedbackWait{Repo: "owner/repo", PR: 12, Head: "abcdef123", StartedAt: firedAt, Deadline: firedAt.Add(cfg.FeedbackWaitTimeout)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "cleared" || pumped.Reason != doneReviewSubmitted {
+		t.Fatalf("expected the submitted review to clear the in-flight slot, got %#v", pumped)
+	}
+	state, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wait := state.AwaitingFeedback[QueueKey("owner/repo", 12)]; wait.Head != "abcdef123" {
+		t.Fatalf("the wait must survive while a required bot has not reviewed, got %#v", state.AwaitingFeedback)
+	}
+
+	codex := Review{SubmittedAt: firedAt.Add(2 * time.Minute)}
+	codex.User.Login = "chatgpt-codex-connector"
+	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review, codex}
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.InFlight = &InFlight{Repo: "owner/repo", PR: 12, Head: "abcdef123", Token: "tok2", Phase: "posted", ReservedAt: firedAt, FiredAt: &firedAt, FiredCommentID: 5}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.AwaitingFeedback) != 0 {
+		t.Fatalf("once every required bot reviewed, the wait must be cleared, got %#v", state.AwaitingFeedback)
+	}
+}
+
+func TestPumpDryRunDoesNotPruneWaits(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		ReviewCommand:       "@coderabbitai review",
+		FeedbackWaitTimeout: time.Hour,
+		FiredMax:            500,
+		DryRun:              true,
+	}
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	expired := time.Now().UTC().Add(-2 * time.Hour)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.AwaitingFeedback[QueueKey("owner/repo", 12)] = FeedbackWait{Repo: "owner/repo", PR: 12, Head: "abcdef123", StartedAt: expired, Deadline: expired.Add(time.Hour)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wait := state.AwaitingFeedback[QueueKey("owner/repo", 12)]; wait.Head != "abcdef123" {
+		t.Fatalf("a dry-run pump must not prune persisted waits, got %#v", state.AwaitingFeedback)
+	}
+}
+
 func TestPumpPrunesExpiredFeedbackWaits(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{

@@ -165,14 +165,14 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 				if status.Requeue {
 					s.requeueInflight(st, status)
 				} else {
-					// The review round is over. If feedback actually arrived (a
-					// submitted review or a bot comment), the wait is satisfied —
-					// clear it here, because in autoreview flows no Loop is running
-					// to call clearFeedbackWait and the entry would linger forever.
-					// A bare acknowledgement (bot reacted) means the review is still
-					// in progress, so that wait stays until feedback lands or its
-					// deadline expires.
-					if status.Reason != doneBotReacted {
+					// The review round is over. If every required bot's feedback
+					// arrived, the wait is satisfied — clear it here, because in
+					// autoreview flows no Loop is running to call clearFeedbackWait
+					// and the entry would linger forever. A bare acknowledgement
+					// (bot reacted) or an outstanding required bot means reviewing
+					// is still underway, so that wait stays until feedback lands or
+					// its deadline expires.
+					if status.FeedbackComplete {
 						key := QueueKey(st.InFlight.Repo, st.InFlight.PR)
 						if wait := st.AwaitingFeedback[key]; wait.Head == st.InFlight.Head {
 							delete(st.AwaitingFeedback, key)
@@ -814,6 +814,10 @@ type inflightCheck struct {
 	Requeue      bool
 	Reason       string
 	BlockedUntil *time.Time
+	// FeedbackComplete is set on Done when every required bot has submitted a
+	// review for the fired round, so Pump knows whether the feedback wait is
+	// satisfied or must survive for the bots that are still reviewing.
+	FeedbackComplete bool
 }
 
 // Done reasons from inflightStatus. Pump distinguishes them: a submitted
@@ -829,6 +833,33 @@ const (
 // second-granular, so a bot completion in the same second as the trigger must
 // still count — a strict After would miss it and refire a duplicate review.
 func notBefore(t, baseline time.Time) bool { return !t.Before(baseline) }
+
+// requiredFeedbackComplete reports whether every bot in CRQ_REQUIRED_BOTS has
+// submitted a review for the fired round. It mirrors what flips Feedback's
+// ReviewedBy — submitted reviews only — so Pump never drops a wait that
+// Feedback would still report as waiting on another required bot. With no
+// required bots configured, the configured reviewer's response that produced
+// the Done is all there is to wait for.
+func (s *Service) requiredFeedbackComplete(inf *InFlight, reviews []Review) bool {
+	required := botSet(s.cfg.RequiredBots)
+	if len(required) == 0 {
+		return true
+	}
+	for bot := range required {
+		norm := normalizeBotName(bot)
+		responded := false
+		for _, review := range reviews {
+			if normalizeBotName(review.User.Login) == norm && notBefore(review.SubmittedAt, *inf.FiredAt) {
+				responded = true
+				break
+			}
+		}
+		if !responded {
+			return false
+		}
+	}
+	return true
+}
 
 func (s *Service) inflightStatus(ctx context.Context, state State) (inflightCheck, error) {
 	inf := state.InFlight
@@ -860,7 +891,7 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 	}
 	for _, review := range reviews {
 		if s.isConfiguredBot(review.User.Login) && notBefore(review.SubmittedAt, *inf.FiredAt) {
-			return inflightCheck{Done: true, Reason: doneReviewSubmitted}, nil
+			return inflightCheck{Done: true, Reason: doneReviewSubmitted, FeedbackComplete: s.requiredFeedbackComplete(inf, reviews)}, nil
 		}
 	}
 	if inf.FiredCommentID != 0 {
@@ -878,7 +909,7 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 	}
 	for _, comment := range comments {
 		if s.isConfiguredBot(comment.User.Login) && comment.ID != inf.FiredCommentID && notBefore(comment.UpdatedAt, *inf.FiredAt) && !s.isRateLimited(comment.Body) {
-			return inflightCheck{Done: true, Reason: doneBotComment}, nil
+			return inflightCheck{Done: true, Reason: doneBotComment, FeedbackComplete: s.requiredFeedbackComplete(inf, reviews)}, nil
 		}
 	}
 	if time.Since(*inf.FiredAt) > s.cfg.InflightTimeout {
@@ -895,6 +926,9 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 // gets a fresh clock out of this. Returns the updated state, or nil if nothing
 // was pruned.
 func (s *Service) pruneExpiredWaits(ctx context.Context, state State) *State {
+	if s.cfg.DryRun {
+		return nil
+	}
 	now := time.Now().UTC()
 	stale := false
 	for _, wait := range state.AwaitingFeedback {
