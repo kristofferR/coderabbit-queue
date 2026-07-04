@@ -661,3 +661,12 @@ func TestLoopUsesPersistedFeedbackDeadline(t *testing.T) {
 		t.Fatalf("expired feedback wait should clear after timeout, got %#v", wait)
 	}
 }
+
+func TestPumpEveryForNeverPumpsMoreThanOncePerMinute(t *testing.T) {
+	if got := pumpEveryFor(15 * time.Second); got != time.Minute {
+		t.Fatalf("fast polls must clamp pump cadence to a minute, got %v", got)
+	}
+	if got := pumpEveryFor(5 * time.Minute); got != 5*time.Minute {
+		t.Fatalf("slow polls pump once per poll, got %v", got)
+	}
+}
