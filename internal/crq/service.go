@@ -454,6 +454,22 @@ func (s *Service) existingReviewCommand(ctx context.Context, repo string, pr int
 	if err != nil {
 		return IssueComment{}, false, err
 	}
+	command := strings.TrimSpace(s.cfg.ReviewCommand)
+	if command == "" {
+		return IssueComment{}, false, nil
+	}
+	// The head-guard and cutoff lookups below cost REST/GraphQL calls; in the
+	// common case — no command comment on the PR at all — skip them entirely.
+	hasCandidate := false
+	for _, comment := range comments {
+		if strings.TrimSpace(comment.Body) == command {
+			hasCandidate = true
+			break
+		}
+	}
+	if !hasCandidate {
+		return IssueComment{}, false, nil
+	}
 	cutoff := notBefore
 	pull, err := s.gh.GetPull(ctx, repo, pr)
 	if err != nil {
@@ -478,29 +494,16 @@ func (s *Service) existingReviewCommand(ctx context.Context, repo string, pr int
 			cutoff = commit.Committer.Date
 		}
 	}
+	// A force-push can point the PR at a commit object whose committer date
+	// predates commands made for an earlier head, so the commit date alone
+	// is not a safe cutoff — any command older than the last force-push
+	// belongs to a previous head and must not be adopted.
+	if fp := s.headForcePushCutoff(ctx, repo, pr); fp.After(cutoff) {
+		cutoff = fp
+	}
 	var best IssueComment
 	var bestAt time.Time
 	ok := false
-	command := strings.TrimSpace(s.cfg.ReviewCommand)
-	if command == "" {
-		return IssueComment{}, false, nil
-	}
-	hasCandidate := false
-	for _, comment := range comments {
-		if strings.TrimSpace(comment.Body) == command {
-			hasCandidate = true
-			break
-		}
-	}
-	if hasCandidate {
-		// A force-push can point the PR at a commit object whose committer date
-		// predates commands made for an earlier head, so the commit date alone
-		// is not a safe cutoff — any command older than the last force-push
-		// belongs to a previous head and must not be adopted.
-		if fp := s.headForcePushCutoff(ctx, repo, pr); fp.After(cutoff) {
-			cutoff = fp
-		}
-	}
 	for _, comment := range comments {
 		if strings.TrimSpace(comment.Body) != command {
 			continue
