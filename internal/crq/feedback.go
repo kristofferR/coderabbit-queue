@@ -216,24 +216,8 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 				// fire anchor.
 				firedAt = wait.StartedAt
 			}
-			if !firedAt.IsZero() {
-				for _, comment := range issueComments {
-					// Only the completion marker counts: the bot also posts
-					// acknowledgement/skip/progress replies after a command, and
-					// treating those as a finished review would converge a round
-					// that is still running.
-					if !s.isConfiguredBot(comment.User.Login) || s.isRateLimited(comment.Body) || !s.isCompletionReply(comment.Body) {
-						continue
-					}
-					created := comment.CreatedAt
-					if created.IsZero() {
-						created = comment.UpdatedAt
-					}
-					if notBefore(created, firedAt) {
-						markReviewed(report.ReviewedBy, comment.User.Login)
-						break
-					}
-				}
+			if !firedAt.IsZero() && s.completionReplyForFiredCommand(issueComments, firedAt) {
+				markReviewed(report.ReviewedBy, s.cfg.Bot)
 			}
 		}
 	}
@@ -1013,6 +997,64 @@ func (s *Service) isCompletionReply(body string) bool {
 		return false
 	}
 	return strings.Contains(strings.ToLower(body), strings.ToLower(marker))
+}
+
+// isAutoReply reports whether body is one of the bot's auto-generated replies
+// to a command — completion, rate-limit, skip, or progress. The bot posts
+// exactly one per command, which is what lets completions be paired to the
+// command they answer.
+func (s *Service) isAutoReply(body string) bool {
+	marker := strings.TrimSpace(s.cfg.CalibrationMarker)
+	if marker == "" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(body), strings.ToLower(marker))
+}
+
+// completionReplyForFiredCommand reports whether the command fired at/after
+// firedAt received a completion reply. A raw timestamp check is not enough: an
+// earlier round still finishing can post its "Review finished" after the new
+// head's command was fired, which would converge the new round before its
+// review ran. The bot answers every command with exactly one auto-generated
+// reply, so replies are paired chronologically with the earliest unanswered
+// command, and only a completion whose paired command belongs to this round
+// counts. Anything unpairable is ignored — the fallback then fails toward the
+// old behavior (wait, then time out).
+func (s *Service) completionReplyForFiredCommand(comments []IssueComment, firedAt time.Time) bool {
+	command := strings.TrimSpace(s.cfg.ReviewCommand)
+	if command == "" {
+		return false
+	}
+	sorted := append([]IssueComment(nil), comments...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if !commentTime(sorted[i]).Equal(commentTime(sorted[j])) {
+			return commentTime(sorted[i]).Before(commentTime(sorted[j]))
+		}
+		return sorted[i].ID < sorted[j].ID
+	})
+	var pending []time.Time // unanswered command times, ascending
+	for _, c := range sorted {
+		if strings.TrimSpace(c.Body) == command && !s.isConfiguredBot(c.User.Login) {
+			pending = append(pending, commentTime(c))
+			continue
+		}
+		if !s.isConfiguredBot(c.User.Login) || !s.isAutoReply(c.Body) || len(pending) == 0 {
+			continue
+		}
+		cmdAt := pending[0]
+		pending = pending[1:]
+		if s.isCompletionReply(c.Body) && !s.isRateLimited(c.Body) && notBefore(cmdAt, firedAt) {
+			return true
+		}
+	}
+	return false
+}
+
+func commentTime(c IssueComment) time.Time {
+	if !c.CreatedAt.IsZero() {
+		return c.CreatedAt
+	}
+	return c.UpdatedAt
 }
 
 // needsConfiguredBotReview reports whether login gates convergence (has a

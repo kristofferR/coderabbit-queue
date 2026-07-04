@@ -75,10 +75,12 @@ func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 	// ReviewedBy when crq state proves the command was fired for this head —
 	// otherwise the loop times out on a complete round.
 	cfg := Config{
-		Bot:              "coderabbitai[bot]",
-		RequiredBots:     []string{"coderabbitai[bot]"},
-		RateLimitMarker:  "rate limited by coderabbit.ai",
-		CompletionMarker: "Review finished",
+		Bot:               "coderabbitai[bot]",
+		RequiredBots:      []string{"coderabbitai[bot]"},
+		ReviewCommand:     "@coderabbitai review",
+		RateLimitMarker:   "rate limited by coderabbit.ai",
+		CalibrationMarker: "auto-generated reply by CodeRabbit",
+		CompletionMarker:  "Review finished",
 	}
 	sha := "abcdef1234567890"
 	head := sha[:9]
@@ -151,6 +153,68 @@ func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 	}
 	if rep.ReviewedBy["coderabbitai[bot]"] || rep.Converged {
 		t.Fatalf("an ack reply without the completion marker must not satisfy the configured bot, got %#v", rep)
+	}
+}
+
+func TestFeedbackRejectsCompletionReplyFromEarlierRound(t *testing.T) {
+	// Overlapping rounds: an old command's review is still finishing when the
+	// PR is pushed and a new command fires. The old round's "Review finished"
+	// lands after the new firedAt, but pairs with the old command — it must
+	// not converge the new round. The completion answering the new command
+	// must.
+	cfg := Config{
+		Bot:               "coderabbitai[bot]",
+		RequiredBots:      []string{"coderabbitai[bot]"},
+		ReviewCommand:     "@coderabbitai review",
+		RateLimitMarker:   "rate limited by coderabbit.ai",
+		CalibrationMarker: "auto-generated reply by CodeRabbit",
+		CompletionMarker:  "Review finished",
+	}
+	sha := "abcdef1234567890"
+	head := sha[:9]
+	firedAt := time.Now().UTC().Add(-10 * time.Minute)
+	completion := "<!-- This is an auto-generated reply by CodeRabbit -->\n✅ Action performed\n\nReview finished."
+	mk := func(id int64, login, body string, at time.Time) IssueComment {
+		ic := IssueComment{ID: id, Body: body, CreatedAt: at, UpdatedAt: at}
+		ic.User.Login = login
+		return ic
+	}
+	setup := func(comments []IssueComment) *Service {
+		gh := newFakeGitHub()
+		var pull Pull
+		pull.State = "open"
+		pull.Head.SHA = sha
+		gh.pulls[fakeKey("o/repo", 3)] = pull
+		gh.comments[fakeKey("o/repo", 3)] = comments
+		store := NewMemoryStore(cfg)
+		if _, err := store.Update(context.Background(), func(st *State) error {
+			st.History = append(st.History, HistoryItem{Repo: "o/repo", PR: 3, Commit: head, At: firedAt, Host: "testhost"})
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return NewService(cfg, gh, store, nil)
+	}
+
+	oldCmd := mk(1, "kristofferR", "@coderabbitai review", firedAt.Add(-5*time.Minute))
+	newCmd := mk(2, "kristofferR", "@coderabbitai review", firedAt)
+	oldDone := mk(3, "coderabbitai[bot]", completion, firedAt.Add(30*time.Second))
+
+	rep, err := setup([]IssueComment{oldCmd, newCmd, oldDone}).Feedback(context.Background(), "o/repo", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.ReviewedBy["coderabbitai[bot]"] || rep.Converged {
+		t.Fatalf("the old round's completion must not converge the new round, got %#v", rep)
+	}
+
+	newDone := mk(4, "coderabbitai[bot]", completion, firedAt.Add(2*time.Minute))
+	rep, err = setup([]IssueComment{oldCmd, newCmd, oldDone, newDone}).Feedback(context.Background(), "o/repo", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.ReviewedBy["coderabbitai[bot]"] || !rep.Converged {
+		t.Fatalf("the completion answering the new command must converge the round, got %#v", rep)
 	}
 }
 
