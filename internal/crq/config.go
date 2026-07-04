@@ -92,7 +92,7 @@ func LoadConfig() (Config, error) {
 		RateLimitMarker:     stringEnv(env, "CRQ_RL_MARKER", "rate limited by coderabbit.ai"),
 		CalibrationMarker:   stringEnv(env, "CRQ_CAL_REPLY_MARKER", "auto-generated reply by CodeRabbit"),
 		ReviewDoneMarker:    stringEnv(env, "CRQ_REVIEW_DONE_MARKER", "summarize by coderabbit.ai"),
-		CompletionMarker:    stringEnv(env, "CRQ_COMPLETION_MARKER", "Review finished"),
+		CompletionMarker:    stringEnvAllowEmpty(env, "CRQ_COMPLETION_MARKER", "Review finished"),
 		Host:                stringEnv(env, "CRQ_HOST", host),
 		Timezone:            env["CRQ_TZ"],
 		MinInterval:         durationEnv(env, "CRQ_MIN_INTERVAL", 90*time.Second),
@@ -165,6 +165,13 @@ func readEnvFile(path string) (map[string]string, error) {
 
 func stringEnv(env map[string]string, key, fallback string) string {
 	if v, ok := env[key]; ok && v != "" {
+		return v
+	}
+	return fallback
+}
+
+func stringEnvAllowEmpty(env map[string]string, key, fallback string) string {
+	if v, ok := env[key]; ok {
 		return v
 	}
 	return fallback

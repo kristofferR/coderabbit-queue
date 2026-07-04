@@ -198,29 +198,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		})
 	}
 
-	// A re-review that finds nothing new produces no review object: CodeRabbit
-	// replies "Review finished" to the command and submits nothing, so the
-	// commit-checked review scan above never flips ReviewedBy and the loop
-	// times out on a round that is in fact complete. The completion reply is
-	// the missing signal — but a bare issue comment carries no commit, so it
-	// only counts when crq's own state proves a command was fired for *this*
-	// head (InFlight/History) and the reply landed at/after that fire. Without
-	// that anchor the rule above stands: issue comments never satisfy
-	// ReviewedBy.
-	if needsConfiguredBotReview(report.ReviewedBy, s.cfg.Bot) {
-		if st, _, serr := s.store.Load(ctx); serr == nil {
-			firedAt := feedbackWaitStart(st, repo, pr, head, time.Time{})
-			if wait := st.AwaitingFeedback[QueueKey(repo, pr)]; firedAt.IsZero() && wait.Head == head && !wait.StartedAt.IsZero() {
-				// History is bounded and shared across the fleet, so the entry can
-				// be evicted during a long wait; the live wait carries the same
-				// fire anchor.
-				firedAt = wait.StartedAt
-			}
-			if !firedAt.IsZero() && s.completionReplyForFiredCommand(issueComments, firedAt) {
-				markReviewed(report.ReviewedBy, s.cfg.Bot)
-			}
-		}
-	}
+	s.applyCompletionReplyFallback(ctx, repo, pr, head, &report, issueComments, reviews)
 
 	report.Findings = dedupeFindings(report.Findings, suppressPromptAt)
 	sort.Slice(report.Findings, func(i, j int) bool {
@@ -1011,43 +989,142 @@ func (s *Service) isAutoReply(body string) bool {
 	return strings.Contains(strings.ToLower(body), strings.ToLower(marker))
 }
 
+// applyCompletionReplyFallback marks the configured bot reviewed when a
+// no-findings re-review completed by issue-comment reply rather than a review
+// object. The state anchor is mandatory because issue comments carry no commit.
+func (s *Service) applyCompletionReplyFallback(ctx context.Context, repo string, pr int, head string, report *FeedbackReport, issueComments []IssueComment, reviews []Review) {
+	if !needsConfiguredBotReview(report.ReviewedBy, s.cfg.Bot) {
+		return
+	}
+	firedAt, ok := s.completionFallbackFiredAt(ctx, repo, pr, head)
+	if !ok {
+		return
+	}
+	if s.completionReplyForFiredCommand(issueComments, reviews, firedAt) {
+		markReviewed(report.ReviewedBy, s.cfg.Bot)
+	}
+}
+
+func (s *Service) completionFallbackFiredAt(ctx context.Context, repo string, pr int, head string) (time.Time, bool) {
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return time.Time{}, false
+	}
+	firedAt := feedbackWaitStart(st, repo, pr, head, time.Time{})
+	if wait := st.AwaitingFeedback[QueueKey(repo, pr)]; firedAt.IsZero() && wait.Head == head && !wait.StartedAt.IsZero() {
+		// History is bounded and shared across the fleet, so the entry can be
+		// evicted during a long wait; the live wait carries the same fire anchor.
+		firedAt = wait.StartedAt
+	}
+	if firedAt.IsZero() {
+		return time.Time{}, false
+	}
+	return firedAt, true
+}
+
+type reviewCommandReply struct {
+	commandID  int64
+	commandAt  time.Time
+	completion bool
+}
+
 // completionReplyForFiredCommand reports whether the command fired at/after
 // firedAt received a completion reply. A raw timestamp check is not enough: an
 // earlier round still finishing can post its "Review finished" after the new
 // head's command was fired, which would converge the new round before its
-// review ran. The bot answers every command with exactly one auto-generated
-// reply, so replies are paired chronologically with the earliest unanswered
-// command, and only a completion whose paired command belongs to this round
-// counts. Anything unpairable is ignored — the fallback then fails toward the
-// old behavior (wait, then time out).
-func (s *Service) completionReplyForFiredCommand(comments []IssueComment, firedAt time.Time) bool {
-	command := strings.TrimSpace(s.cfg.ReviewCommand)
-	if command == "" {
-		return false
-	}
-	sorted := append([]IssueComment(nil), comments...)
-	sort.Slice(sorted, func(i, j int) bool {
-		if !commentTime(sorted[i]).Equal(commentTime(sorted[j])) {
-			return commentTime(sorted[i]).Before(commentTime(sorted[j]))
-		}
-		return sorted[i].ID < sorted[j].ID
-	})
-	var pending []time.Time // unanswered command times, ascending
-	for _, c := range sorted {
-		if strings.TrimSpace(c.Body) == command && !s.isConfiguredBot(c.User.Login) {
-			pending = append(pending, commentTime(c))
-			continue
-		}
-		if !s.isConfiguredBot(c.User.Login) || !s.isAutoReply(c.Body) || len(pending) == 0 {
-			continue
-		}
-		cmdAt := pending[0]
-		pending = pending[1:]
-		if s.isCompletionReply(c.Body) && !s.isRateLimited(c.Body) && notBefore(cmdAt, firedAt) {
+// review ran. Replies are paired chronologically with the earliest unanswered
+// command, while submitted reviews consume the command they answered, so older
+// completed commands cannot steal a later completion reply.
+func (s *Service) completionReplyForFiredCommand(comments []IssueComment, reviews []Review, firedAt time.Time) bool {
+	for _, reply := range s.reviewCommandReplies(comments, reviews) {
+		if reply.completion && notBefore(reply.commandAt, firedAt) {
 			return true
 		}
 	}
 	return false
+}
+
+func (s *Service) reviewCommandHasCompletionReply(comments []IssueComment, reviews []Review, commandID int64) bool {
+	if commandID == 0 {
+		return false
+	}
+	for _, reply := range s.reviewCommandReplies(comments, reviews) {
+		if reply.commandID == commandID && reply.completion {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) reviewCommandReplies(comments []IssueComment, reviews []Review) []reviewCommandReply {
+	command := strings.TrimSpace(s.cfg.ReviewCommand)
+	if command == "" {
+		return nil
+	}
+
+	type eventKind int
+	const (
+		eventCommand eventKind = iota
+		eventAutoReply
+		eventReview
+	)
+	type event struct {
+		kind    eventKind
+		at      time.Time
+		id      int64
+		comment IssueComment
+	}
+
+	var events []event
+	for _, c := range comments {
+		body := strings.TrimSpace(c.Body)
+		switch {
+		case body == command && !s.isConfiguredBot(c.User.Login):
+			events = append(events, event{kind: eventCommand, at: commentTime(c), id: c.ID, comment: c})
+		case s.isConfiguredBot(c.User.Login) && s.isAutoReply(c.Body):
+			events = append(events, event{kind: eventAutoReply, at: commentTime(c), id: c.ID, comment: c})
+		}
+	}
+	for _, review := range reviews {
+		if !s.isConfiguredBot(review.User.Login) || review.SubmittedAt.IsZero() {
+			continue
+		}
+		events = append(events, event{kind: eventReview, at: review.SubmittedAt, id: review.ID})
+	}
+	sort.SliceStable(events, func(i, j int) bool {
+		if !events[i].at.Equal(events[j].at) {
+			return events[i].at.Before(events[j].at)
+		}
+		if events[i].kind != events[j].kind {
+			return events[i].kind < events[j].kind
+		}
+		return events[i].id < events[j].id
+	})
+
+	var out []reviewCommandReply
+	var pending []IssueComment
+	for _, ev := range events {
+		switch ev.kind {
+		case eventCommand:
+			pending = append(pending, ev.comment)
+		case eventReview:
+			if len(pending) > 0 {
+				pending = pending[1:]
+			}
+		case eventAutoReply:
+			if len(pending) == 0 {
+				continue
+			}
+			cmd := pending[0]
+			pending = pending[1:]
+			out = append(out, reviewCommandReply{
+				commandID:  cmd.ID,
+				commandAt:  commentTime(cmd),
+				completion: s.isCompletionReply(ev.comment.Body) && !s.isRateLimited(ev.comment.Body),
+			})
+		}
+	}
+	return out
 }
 
 func commentTime(c IssueComment) time.Time {

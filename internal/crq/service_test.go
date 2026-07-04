@@ -840,6 +840,57 @@ func TestPumpDoesNotAdoptCommandAlreadyAnsweredByReview(t *testing.T) {
 	}
 }
 
+func TestPumpDoesNotAdoptCommandAlreadyAnsweredByCompletionReply(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		ReviewCommand:       "@coderabbitai review",
+		CalibrationMarker:   "auto-generated reply by CodeRabbit",
+		CompletionMarker:    "Review finished",
+		MinInterval:         0,
+		InflightTimeout:     time.Minute,
+		FeedbackWaitTimeout: time.Minute,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	// A later regular push can point at a commit whose committer date predates
+	// an old no-findings command round. The old completion reply proves that
+	// command is consumed and must not be adopted for the new head.
+	commitTime := time.Now().UTC().Add(-time.Hour)
+	commandAt := commitTime.Add(10 * time.Minute)
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	gc := gitCommit{SHA: pull.Head.SHA}
+	gc.Committer.Date = commitTime
+	gh.commits[pull.Head.SHA] = gc
+	command := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: commandAt, UpdatedAt: commandAt}
+	command.User.Login = "kristofferR"
+	reply := IssueComment{ID: 78, Body: "<!-- This is an auto-generated reply by CodeRabbit -->\nReview finished.", CreatedAt: commandAt.Add(time.Minute), UpdatedAt: commandAt.Add(time.Minute)}
+	reply.User.Login = cfg.Bot
+	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{command, reply}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+
+	if _, err := service.Enqueue(ctx, "owner/repo", 12); err != nil {
+		t.Fatal(err)
+	}
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "fired" || pumped.Reason == "review command already posted" {
+		t.Fatalf("a completion-answered command must not be adopted, got %#v", pumped)
+	}
+	if len(gh.posted) != 1 {
+		t.Fatalf("expected a fresh review command for the new head, posted=%v", gh.posted)
+	}
+}
+
 func TestPumpDryRunDoesNotDedupeMutably(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{
@@ -968,6 +1019,54 @@ func TestPumpClearsFeedbackWaitWhenReviewSubmitted(t *testing.T) {
 	}
 	if len(state.AwaitingFeedback) != 0 {
 		t.Fatalf("a submitted review must clear the feedback wait, got %#v", state.AwaitingFeedback)
+	}
+}
+
+func TestPumpClearsFeedbackWaitWhenCompletionReplySubmitted(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		RequiredBots:        []string{"coderabbitai[bot]"},
+		ReviewCommand:       "@coderabbitai review",
+		CalibrationMarker:   "auto-generated reply by CodeRabbit",
+		CompletionMarker:    "Review finished",
+		InflightTimeout:     time.Hour,
+		FeedbackWaitTimeout: time.Hour,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	firedAt := time.Now().UTC().Add(-5 * time.Minute)
+	command := IssueComment{ID: 5, Body: cfg.ReviewCommand, CreatedAt: firedAt, UpdatedAt: firedAt}
+	command.User.Login = "kristofferR"
+	reply := IssueComment{ID: 6, Body: "<!-- This is an auto-generated reply by CodeRabbit -->\nReview finished.", CreatedAt: firedAt.Add(time.Minute), UpdatedAt: firedAt.Add(time.Minute)}
+	reply.User.Login = cfg.Bot
+	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{command, reply}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.InFlight = &InFlight{Repo: "owner/repo", PR: 12, Head: "abcdef123", Token: "tok", Phase: "posted", ReservedAt: firedAt, FiredAt: &firedAt, FiredCommentID: command.ID}
+		st.AwaitingFeedback[QueueKey("owner/repo", 12)] = FeedbackWait{Repo: "owner/repo", PR: 12, Head: "abcdef123", StartedAt: firedAt, Deadline: firedAt.Add(cfg.FeedbackWaitTimeout)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "cleared" || pumped.Reason != doneBotComment {
+		t.Fatalf("expected the completion reply to clear the in-flight slot, got %#v", pumped)
+	}
+	state, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.AwaitingFeedback) != 0 {
+		t.Fatalf("a completion reply must clear the feedback wait, got %#v", state.AwaitingFeedback)
 	}
 }
 
@@ -1166,6 +1265,52 @@ func TestPumpSweepsWaitAfterReactedRoundCompletes(t *testing.T) {
 	}
 	if len(state.AwaitingFeedback) != 0 {
 		t.Fatalf("the sweep must clear a wait whose review has been submitted, got %#v", state.AwaitingFeedback)
+	}
+}
+
+func TestPumpSweepsWaitAfterCompletionOnlyRoundCompletes(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		RequiredBots:        []string{"coderabbitai[bot]"},
+		ReviewCommand:       "@coderabbitai review",
+		CalibrationMarker:   "auto-generated reply by CodeRabbit",
+		CompletionMarker:    "Review finished",
+		FeedbackWaitTimeout: time.Hour,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	startedAt := time.Now().UTC().Add(-5 * time.Minute)
+	command := IssueComment{ID: 5, Body: cfg.ReviewCommand, CreatedAt: startedAt, UpdatedAt: startedAt}
+	command.User.Login = "kristofferR"
+	reply := IssueComment{ID: 6, Body: "<!-- This is an auto-generated reply by CodeRabbit -->\nReview finished.", CreatedAt: startedAt.Add(time.Minute), UpdatedAt: startedAt.Add(time.Minute)}
+	reply.User.Login = cfg.Bot
+	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{command, reply}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.AwaitingFeedback[QueueKey("owner/repo", 12)] = FeedbackWait{Repo: "owner/repo", PR: 12, Head: "abcdef123", StartedAt: startedAt, Deadline: startedAt.Add(cfg.FeedbackWaitTimeout)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "idle" {
+		t.Fatalf("expected idle pump after sweeping the completed wait, got %#v", pumped)
+	}
+	state, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.AwaitingFeedback) != 0 {
+		t.Fatalf("the sweep must clear a completion-backed wait, got %#v", state.AwaitingFeedback)
 	}
 }
 
