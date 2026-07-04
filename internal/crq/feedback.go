@@ -198,6 +198,42 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		})
 	}
 
+	// A re-review that finds nothing new produces no review object: CodeRabbit
+	// replies "Review finished" to the command and submits nothing, so the
+	// commit-checked review scan above never flips ReviewedBy and the loop
+	// times out on a round that is in fact complete. The completion reply is
+	// the missing signal — but a bare issue comment carries no commit, so it
+	// only counts when crq's own state proves a command was fired for *this*
+	// head (InFlight/History) and the reply landed at/after that fire. Without
+	// that anchor the rule above stands: issue comments never satisfy
+	// ReviewedBy.
+	if needsConfiguredBotReview(report.ReviewedBy, s.cfg.Bot) {
+		if st, _, serr := s.store.Load(ctx); serr == nil {
+			firedAt := feedbackWaitStart(st, repo, pr, head, time.Time{})
+			if wait := st.AwaitingFeedback[QueueKey(repo, pr)]; firedAt.IsZero() && wait.Head == head && !wait.StartedAt.IsZero() {
+				// History is bounded and shared across the fleet, so the entry can
+				// be evicted during a long wait; the live wait carries the same
+				// fire anchor.
+				firedAt = wait.StartedAt
+			}
+			if !firedAt.IsZero() {
+				for _, comment := range issueComments {
+					if !s.isConfiguredBot(comment.User.Login) || s.isRateLimited(comment.Body) {
+						continue
+					}
+					created := comment.CreatedAt
+					if created.IsZero() {
+						created = comment.UpdatedAt
+					}
+					if notBefore(created, firedAt) {
+						markReviewed(report.ReviewedBy, comment.User.Login)
+						break
+					}
+				}
+			}
+		}
+	}
+
 	report.Findings = dedupeFindings(report.Findings, suppressPromptAt)
 	sort.Slice(report.Findings, func(i, j int) bool {
 		if rankSeverity(report.Findings[i].Severity) != rankSeverity(report.Findings[j].Severity) {
@@ -962,6 +998,19 @@ func inBots(bots map[string]struct{}, login string) bool {
 
 func normalizeBotName(login string) string {
 	return strings.TrimSuffix(login, "[bot]")
+}
+
+// needsConfiguredBotReview reports whether login gates convergence (has a
+// ReviewedBy key) and its review for the head hasn't been seen yet — the only
+// case where the completion-reply fallback needs to run.
+func needsConfiguredBotReview(reviewedBy map[string]bool, login string) bool {
+	norm := normalizeBotName(login)
+	for bot, reviewed := range reviewedBy {
+		if bot == login || normalizeBotName(bot) == norm {
+			return !reviewed
+		}
+	}
+	return false
 }
 
 // markReviewed flips the configured required-bot key that login matches to true,

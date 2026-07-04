@@ -69,6 +69,80 @@ func TestFeedbackBoundsIssueCommentsToHead(t *testing.T) {
 	}
 }
 
+func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
+	// A re-review with nothing new to say produces no review object: CodeRabbit
+	// only replies "Review finished" to the command. That reply must satisfy
+	// ReviewedBy when crq state proves the command was fired for this head —
+	// otherwise the loop times out on a complete round.
+	cfg := Config{
+		Bot:             "coderabbitai[bot]",
+		RequiredBots:    []string{"coderabbitai[bot]"},
+		RateLimitMarker: "rate limited by coderabbit.ai",
+	}
+	sha := "abcdef1234567890"
+	head := sha[:9]
+	firedAt := time.Now().UTC().Add(-10 * time.Minute)
+	completion := "<!-- This is an auto-generated reply by CodeRabbit -->\n✅ Action performed\n\nReview finished."
+	setup := func(replyAt time.Time, replyBody string, seedHistory bool) *Service {
+		gh := newFakeGitHub()
+		var pull Pull
+		pull.State = "open"
+		pull.Head.SHA = sha
+		gh.pulls[fakeKey("o/repo", 3)] = pull
+		trigger := IssueComment{ID: 1, Body: "@coderabbitai review", CreatedAt: firedAt, UpdatedAt: firedAt}
+		trigger.User.Login = "kristofferR"
+		reply := IssueComment{ID: 2, Body: replyBody, CreatedAt: replyAt, UpdatedAt: replyAt}
+		reply.User.Login = "coderabbitai[bot]"
+		gh.comments[fakeKey("o/repo", 3)] = []IssueComment{trigger, reply}
+		store := NewMemoryStore(cfg)
+		if seedHistory {
+			if _, err := store.Update(context.Background(), func(st *State) error {
+				st.History = append(st.History, HistoryItem{Repo: "o/repo", PR: 3, Commit: head, At: firedAt, Host: "testhost"})
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return NewService(cfg, gh, store, nil)
+	}
+
+	rep, err := setup(firedAt.Add(5*time.Second), completion, true).Feedback(context.Background(), "o/repo", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.ReviewedBy["coderabbitai[bot]"] || !rep.Converged {
+		t.Fatalf("a completion reply after the fired command must satisfy the configured bot, got %#v", rep)
+	}
+
+	// A reply older than the fire belongs to an earlier round.
+	rep, err = setup(firedAt.Add(-time.Minute), completion, true).Feedback(context.Background(), "o/repo", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.ReviewedBy["coderabbitai[bot]"] || rep.Converged {
+		t.Fatalf("a pre-fire reply must not satisfy the configured bot, got %#v", rep)
+	}
+
+	// Without a state anchor tying a fire to this head, issue comments never
+	// satisfy ReviewedBy (the pre-existing rule).
+	rep, err = setup(firedAt.Add(5*time.Second), completion, false).Feedback(context.Background(), "o/repo", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.ReviewedBy["coderabbitai[bot]"] || rep.Converged {
+		t.Fatalf("without a fired-head anchor the reply must not count, got %#v", rep)
+	}
+
+	// A rate-limit reply is not a completion.
+	rep, err = setup(firedAt.Add(5*time.Second), "⚠️ rate limited by coderabbit.ai — please wait", true).Feedback(context.Background(), "o/repo", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.ReviewedBy["coderabbitai[bot]"] || rep.Converged {
+		t.Fatalf("a rate-limit reply must not satisfy the configured bot, got %#v", rep)
+	}
+}
+
 func TestFeedbackSurfacesCodexEvenWhenNotRequired(t *testing.T) {
 	// Regression: Codex (chatgpt-codex-connector) reviews a PR and posts inline
 	// findings, but it isn't in RequiredBots (which is CodeRabbit-only by default).
