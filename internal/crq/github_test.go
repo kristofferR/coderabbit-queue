@@ -386,6 +386,63 @@ func TestSendConditionalGETReplaysCachedBodyOn304(t *testing.T) {
 	}
 }
 
+func TestSendConditionalGETMergesHeadersFrom304(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "test-token")
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch atomic.AddInt32(&calls, 1) {
+		case 1:
+			if r.Header.Get("If-None-Match") != "" {
+				t.Errorf("first request must not be conditional, got If-None-Match=%q", r.Header.Get("If-None-Match"))
+			}
+			w.Header().Set("ETag", `"v1"`)
+			w.Header().Set("Link", `<https://api.github.com/x?page=2>; rel="last"`)
+			w.Header().Set("X-Cached-Only", "preserved")
+			_, _ = w.Write([]byte(`{"n":1}`))
+		default:
+			if got := r.Header.Get("If-None-Match"); got != `"v1"` {
+				t.Errorf("expected If-None-Match %q, got %q", `"v1"`, got)
+			}
+			w.Header().Set("Link", `<https://api.github.com/x?page=3>; rel="last"`)
+			w.Header().Set("Content-Length", "999")
+			w.WriteHeader(http.StatusNotModified)
+		}
+	}))
+	defer srv.Close()
+
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 2, maxWait: time.Second, backoffBase: time.Millisecond, networkMaxWait: time.Second}
+	resp, err := g.send(context.Background(), http.MethodGet, srv.URL+"/x", nil)
+	if err != nil {
+		t.Fatalf("first send returned error: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	resp, err = g.send(context.Background(), http.MethodGet, srv.URL+"/x", nil)
+	if err != nil {
+		t.Fatalf("second send returned error: %v", err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 after replay, got %d", resp.StatusCode)
+	}
+	if resp.ContentLength != int64(len(`{"n":1}`)) {
+		t.Fatalf("expected cached content length %d, got %d", len(`{"n":1}`), resp.ContentLength)
+	}
+	if string(b) != `{"n":1}` {
+		t.Fatalf("cached body mismatch: %q", b)
+	}
+	if got := resp.Header.Get("Link"); !strings.Contains(got, "page=3") {
+		t.Fatalf("expected 304 Link header, got %q", got)
+	}
+	if got := resp.Header.Get("X-Cached-Only"); got != "preserved" {
+		t.Fatalf("cached-only header not preserved: %q", got)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected 2 upstream requests, got %d", got)
+	}
+}
+
 func TestSendConditionalGETRefreshesCacheOnChange(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "test-token")
 	var calls int32

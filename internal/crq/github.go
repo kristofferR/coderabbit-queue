@@ -90,16 +90,39 @@ func (g *GitHub) etagStore(url string, entry *etagEntry) {
 }
 
 // replay converts a cached entry back into the 200 response the caller would
-// have seen, so request/requestPaged (including Link-header pagination) work
-// identically whether GitHub sent a fresh body or a 304.
-func (e *etagEntry) replay(req *http.Request) *http.Response {
-	return &http.Response{
-		Status:     "200 OK (etag cache)",
-		StatusCode: http.StatusOK,
-		Header:     e.header.Clone(),
-		Body:       io.NopCloser(bytes.NewReader(e.body)),
-		Request:    req,
+// have seen, merging fresh 304 metadata so Link-header pagination observes
+// revalidated page boundaries.
+func (e *etagEntry) replay(req *http.Request, revalidated http.Header) *http.Response {
+	header := http.Header{}
+	if e.header != nil {
+		header = e.header.Clone()
 	}
+	for k, values := range revalidated {
+		key := http.CanonicalHeaderKey(k)
+		if shouldMergeRevalidatedHeader(key) {
+			header[key] = append([]string(nil), values...)
+		}
+	}
+	e.header = header.Clone()
+	if etag := e.header.Get("ETag"); etag != "" {
+		e.etag = etag
+	}
+	return &http.Response{
+		Status:        "200 OK (etag cache)",
+		StatusCode:    http.StatusOK,
+		Header:        header,
+		Body:          io.NopCloser(bytes.NewReader(e.body)),
+		ContentLength: int64(len(e.body)),
+		Request:       req,
+	}
+}
+
+func shouldMergeRevalidatedHeader(key string) bool {
+	switch key {
+	case "Cache-Control", "Content-Location", "Date", "ETag", "Expires", "Last-Modified", "Link", "Vary":
+		return true
+	}
+	return strings.HasPrefix(key, "X-Ratelimit-")
 }
 
 type prefixReadCloser struct {
@@ -576,9 +599,9 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 			return nil, &APIError{Method: method, URL: fullURL, Status: resp.StatusCode, Body: string(b)}
 		}
 		if resp.StatusCode == http.StatusNotModified && cached != nil {
-			_, _ = io.Copy(io.Discard, resp.Body)
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 			_ = resp.Body.Close()
-			return cached.replay(req), nil
+			return cached.replay(req, resp.Header), nil
 		}
 		if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
 			if conditional && resp.StatusCode == http.StatusOK {
