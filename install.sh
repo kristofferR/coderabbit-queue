@@ -12,6 +12,21 @@ SKILL_DEST="${CRQ_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/$SKILL_NAME}"
 
 say() { printf 'crq-install: %s\n' "$*"; }
 
+# Replace the installed binary atomically: stage next to the target, then rename.
+# Never write over the existing file in place — on macOS, overwriting an
+# already-executed binary on the same inode leaves the kernel's cached code
+# signature stale and every later run is killed with SIGKILL ("Killed: 9").
+# A rename swaps in a fresh inode, and a running daemon keeps its old one.
+install_binary() {
+  local src="$1"
+  local dest="$2"
+  local staged
+  staged="$(mktemp "$(dirname "$dest")/.$(basename "$dest").tmp.XXXXXX")"
+  cp "$src" "$staged"
+  chmod 0755 "$staged"
+  mv -f "$staged" "$dest"
+}
+
 mkdir -p "$BIN_DIR"
 
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -129,7 +144,7 @@ if [ -z "${CRQ_INSTALL_REF:-}" ] && [ -z "${CRQ_INSTALL_SOURCE_DIR:-}" ]; then
   if download "$release_url" "$rel/crq.tgz" 2>/dev/null \
     && tar -xzf "$rel/crq.tgz" -C "$rel" 2>/dev/null \
     && [ -f "$rel/crq" ]; then
-    install -m 0755 "$rel/crq" "$BIN_DIR/$NAME"
+    install_binary "$rel/crq" "$BIN_DIR/$NAME"
     say "installed to $BIN_DIR/$NAME"
     install_skill
     say "run 'crq help' for the agent loop contract; Codex can also use the installed skill"
@@ -147,7 +162,7 @@ ensure_source_dir
 
 say "building crq"
 ( cd "$src_dir" && go build -trimpath -ldflags "-s -w" -o "$tmp/crq" ./cmd/crq )
-install -m 0755 "$tmp/crq" "$BIN_DIR/$NAME"
+install_binary "$tmp/crq" "$BIN_DIR/$NAME"
 say "installed to $BIN_DIR/$NAME"
 install_skill
 say "run 'crq help' for the agent loop contract; Codex can also use the installed skill"
