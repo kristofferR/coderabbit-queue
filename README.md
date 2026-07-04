@@ -121,7 +121,11 @@ or `CRQ_SKILL_DIR=/custom/path/coderabbit-queue` to install it elsewhere.
 git clone https://github.com/kristofferR/coderabbit-queue.git
 cd coderabbit-queue
 go test ./...
-go build -trimpath -ldflags "-s -w" -o ~/.local/bin/crq ./cmd/crq   # ensure ~/.local/bin is on $PATH
+# Build to a temp file and rename — never `go build -o` straight onto an existing
+# crq: overwriting an already-executed binary in place (same inode) leaves macOS's
+# cached code-signature stale, and every later run dies with "Killed: 9".
+go build -trimpath -ldflags "-s -w" -o ~/.local/bin/crq.new ./cmd/crq   # ensure ~/.local/bin is on $PATH
+mv -f ~/.local/bin/crq.new ~/.local/bin/crq
 mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
 rm -rf "${CODEX_HOME:-$HOME/.codex}/skills/coderabbit-queue"
 cp -R "skills/coderabbit-queue" "${CODEX_HOME:-$HOME/.codex}/skills/coderabbit-queue"
