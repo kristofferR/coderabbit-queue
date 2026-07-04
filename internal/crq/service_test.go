@@ -872,7 +872,7 @@ func TestPumpKeepsFeedbackWaitUntilAllRequiredBotsReview(t *testing.T) {
 	}
 	gh := newFakeGitHub()
 	firedAt := time.Now().UTC().Add(-5 * time.Minute)
-	review := Review{SubmittedAt: firedAt.Add(time.Minute)}
+	review := Review{SubmittedAt: firedAt.Add(time.Minute), CommitID: "abcdef1234567890"}
 	review.User.Login = cfg.Bot
 	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review}
 	store := NewMemoryStore(cfg)
@@ -900,9 +900,9 @@ func TestPumpKeepsFeedbackWaitUntilAllRequiredBotsReview(t *testing.T) {
 		t.Fatalf("the wait must survive while a required bot has not reviewed, got %#v", state.AwaitingFeedback)
 	}
 
-	codex := Review{SubmittedAt: firedAt.Add(2 * time.Minute)}
-	codex.User.Login = "chatgpt-codex-connector"
-	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review, codex}
+	staleCodex := Review{SubmittedAt: firedAt.Add(2 * time.Minute), CommitID: "0123456789abcdef"}
+	staleCodex.User.Login = "chatgpt-codex-connector"
+	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review, staleCodex}
 	if _, err := store.Update(ctx, func(st *State) error {
 		st.InFlight = &InFlight{Repo: "owner/repo", PR: 12, Head: "abcdef123", Token: "tok2", Phase: "posted", ReservedAt: firedAt, FiredAt: &firedAt, FiredCommentID: 5}
 		return nil
@@ -916,8 +916,80 @@ func TestPumpKeepsFeedbackWaitUntilAllRequiredBotsReview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if wait := state.AwaitingFeedback[QueueKey("owner/repo", 12)]; wait.Head != "abcdef123" {
+		t.Fatalf("a required-bot review for another commit must not complete the round, got %#v", state.AwaitingFeedback)
+	}
+
+	codex := Review{SubmittedAt: firedAt.Add(3 * time.Minute), CommitID: "abcdef1234567890"}
+	codex.User.Login = "chatgpt-codex-connector"
+	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review, staleCodex, codex}
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.InFlight = &InFlight{Repo: "owner/repo", PR: 12, Head: "abcdef123", Token: "tok3", Phase: "posted", ReservedAt: firedAt, FiredAt: &firedAt, FiredCommentID: 5}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(state.AwaitingFeedback) != 0 {
-		t.Fatalf("once every required bot reviewed, the wait must be cleared, got %#v", state.AwaitingFeedback)
+		t.Fatalf("once every required bot reviewed the head, the wait must be cleared, got %#v", state.AwaitingFeedback)
+	}
+}
+
+func TestPumpSweepsWaitAfterReactedRoundCompletes(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		ReviewCommand:       "@coderabbitai review",
+		FeedbackWaitTimeout: time.Hour,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	startedAt := time.Now().UTC().Add(-5 * time.Minute)
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		// The round's in-flight slot was already released on a bot reaction;
+		// only the wait remains.
+		st.AwaitingFeedback[QueueKey("owner/repo", 12)] = FeedbackWait{Repo: "owner/repo", PR: 12, Head: "abcdef123", StartedAt: startedAt, Deadline: startedAt.Add(cfg.FeedbackWaitTimeout)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// No review submitted yet: the wait must survive the sweep.
+	if _, err := service.Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wait := state.AwaitingFeedback[QueueKey("owner/repo", 12)]; wait.Head != "abcdef123" {
+		t.Fatalf("the wait must survive while the review is still running, got %#v", state.AwaitingFeedback)
+	}
+
+	// Once the review lands for the fired head, the next pump sweeps the wait.
+	review := Review{SubmittedAt: startedAt.Add(2 * time.Minute), CommitID: "abcdef1234567890"}
+	review.User.Login = cfg.Bot
+	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review}
+	if _, err := service.Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.AwaitingFeedback) != 0 {
+		t.Fatalf("the sweep must clear a wait whose review has been submitted, got %#v", state.AwaitingFeedback)
 	}
 }
 

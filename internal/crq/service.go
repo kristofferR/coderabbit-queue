@@ -202,6 +202,7 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if pruned := s.pruneExpiredWaits(ctx, state); pruned != nil {
 		state = *pruned
 	}
+	state = s.sweepFeedbackWaits(ctx, state)
 	queue := state.SortedQueue()
 	if len(queue) == 0 {
 		return PumpResult{Action: "idle"}, nil
@@ -836,23 +837,35 @@ func notBefore(t, baseline time.Time) bool { return !t.Before(baseline) }
 
 // requiredFeedbackComplete reports whether every bot in CRQ_REQUIRED_BOTS has
 // submitted a review for the fired round. It mirrors what flips Feedback's
-// ReviewedBy — submitted reviews only — so Pump never drops a wait that
-// Feedback would still report as waiting on another required bot. With no
-// required bots configured, the configured reviewer's response that produced
-// the Done is all there is to wait for.
+// ReviewedBy — submitted reviews matching the fired head — so Pump never drops
+// a wait that Feedback would still report as waiting on another required bot.
+// With no required bots configured, the configured reviewer's response that
+// produced the Done is all there is to wait for.
 func (s *Service) requiredFeedbackComplete(inf *InFlight, reviews []Review) bool {
 	required := botSet(s.cfg.RequiredBots)
 	if len(required) == 0 {
 		return true
 	}
-	for bot := range required {
+	return botsReviewedHead(reviews, required, inf.Head, *inf.FiredAt)
+}
+
+// botsReviewedHead reports whether every bot in the set has a review submitted
+// at/after since whose commit matches head — the same head check Feedback uses
+// before flipping ReviewedBy, so a delayed review for some other push never
+// counts toward the fired round.
+func botsReviewedHead(reviews []Review, bots map[string]struct{}, head string, since time.Time) bool {
+	for bot := range bots {
 		norm := normalizeBotName(bot)
 		responded := false
 		for _, review := range reviews {
-			if normalizeBotName(review.User.Login) == norm && notBefore(review.SubmittedAt, *inf.FiredAt) {
-				responded = true
-				break
+			if normalizeBotName(review.User.Login) != norm || !notBefore(review.SubmittedAt, since) {
+				continue
 			}
+			if head != "" && !strings.HasPrefix(review.CommitID, head) {
+				continue
+			}
+			responded = true
+			break
 		}
 		if !responded {
 			return false
@@ -961,6 +974,54 @@ func (s *Service) pruneExpiredWaits(ctx context.Context, state State) *State {
 	}
 	s.sync(ctx, updated)
 	return &updated
+}
+
+// sweepFeedbackWaits checks at most one lingering feedback wait per pump — the
+// oldest — against the PR's submitted reviews, and clears it once every awaited
+// bot (CRQ_REQUIRED_BOTS, or the configured reviewer when none are set) has
+// reviewed the fired head. This is what finishes a round whose in-flight slot
+// was released on a bare bot reaction: once InFlight is nil no Pump path runs
+// inflightStatus again, and without a Loop nothing else would clear the wait
+// before the deadline prune. One wait per pump bounds the sweep's use of the
+// shared REST quota; the deadline prune stays the backstop for rounds whose
+// feedback never becomes a head-matched review.
+func (s *Service) sweepFeedbackWaits(ctx context.Context, state State) State {
+	if s.cfg.DryRun || len(state.AwaitingFeedback) == 0 {
+		return state
+	}
+	var oldest FeedbackWait
+	found := false
+	for _, wait := range state.AwaitingFeedback {
+		if wait.Head == "" {
+			continue
+		}
+		if !found || wait.StartedAt.Before(oldest.StartedAt) {
+			oldest = wait
+			found = true
+		}
+	}
+	if !found {
+		return state
+	}
+	reviews, err := s.gh.ListReviews(ctx, oldest.Repo, oldest.PR)
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("warning: feedback wait sweep for %s#%d failed: %v", oldest.Repo, oldest.PR, err)
+		}
+		return state
+	}
+	awaited := s.cfg.RequiredBots
+	if len(awaited) == 0 {
+		awaited = []string{s.cfg.Bot}
+	}
+	if !botsReviewedHead(reviews, botSet(awaited), oldest.Head, oldest.StartedAt) {
+		return state
+	}
+	s.clearFeedbackWait(ctx, oldest.Repo, oldest.PR, oldest.Head)
+	if updated, _, err := s.store.Load(ctx); err == nil {
+		return updated
+	}
+	return state
 }
 
 func (s *Service) requeueInflight(st *State, status inflightCheck) {
