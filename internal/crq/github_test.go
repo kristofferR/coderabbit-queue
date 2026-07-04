@@ -422,6 +422,49 @@ func TestSendConditionalGETRefreshesCacheOnChange(t *testing.T) {
 	}
 }
 
+func TestSendConditionalGETPreservesOversizedUncachedBody(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "test-token")
+	largeBody := strings.Repeat("x", maxETagBody+1)
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch atomic.AddInt32(&calls, 1) {
+		case 1:
+			if r.Header.Get("If-None-Match") != "" {
+				t.Errorf("oversized first request must not be conditional, got If-None-Match=%q", r.Header.Get("If-None-Match"))
+			}
+			w.Header().Set("ETag", `"large"`)
+			_, _ = w.Write([]byte(largeBody))
+		default:
+			if got := r.Header.Get("If-None-Match"); got != "" {
+				t.Errorf("oversized response must not be cached, got If-None-Match=%q", got)
+			}
+			w.Header().Set("ETag", `"small"`)
+			_, _ = w.Write([]byte(`{"n":2}`))
+		}
+	}))
+	defer srv.Close()
+
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 2, maxWait: time.Second, backoffBase: time.Millisecond, networkMaxWait: time.Second}
+	resp, err := g.send(context.Background(), http.MethodGet, srv.URL+"/x", nil)
+	if err != nil {
+		t.Fatalf("send returned error: %v", err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if string(b) != largeBody {
+		t.Fatalf("oversized body was not preserved: got %d bytes, want %d", len(b), len(largeBody))
+	}
+
+	resp, err = g.send(context.Background(), http.MethodGet, srv.URL+"/x", nil)
+	if err != nil {
+		t.Fatalf("second send returned error: %v", err)
+	}
+	_ = resp.Body.Close()
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected 2 upstream requests, got %d", got)
+	}
+}
+
 func TestRequestPagedFollowsLinksThroughETagCache(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "test-token")
 	var calls int32

@@ -102,15 +102,37 @@ func (e *etagEntry) replay(req *http.Request) *http.Response {
 	}
 }
 
+type prefixReadCloser struct {
+	reader io.Reader
+	closer io.Closer
+}
+
+func (r *prefixReadCloser) Read(p []byte) (int, error) {
+	return r.reader.Read(p)
+}
+
+func (r *prefixReadCloser) Close() error {
+	return r.closer.Close()
+}
+
 // cacheGET reads a fresh 200 GET body, remembers it under its ETag, and hands
 // the caller an equivalent response. Responses without an ETag or over the size
 // cap pass through uncached.
 func (g *GitHub) cacheGET(url string, resp *http.Response) (*http.Response, error) {
-	b, err := io.ReadAll(io.LimitReader(resp.Body, maxETagBody+1))
-	resp.Body.Close()
+	body := resp.Body
+	b, err := io.ReadAll(io.LimitReader(body, maxETagBody+1))
 	if err != nil {
+		_ = body.Close()
 		return nil, err
 	}
+	if len(b) > maxETagBody {
+		resp.Body = &prefixReadCloser{
+			reader: io.MultiReader(bytes.NewReader(b), body),
+			closer: body,
+		}
+		return resp, nil
+	}
+	_ = body.Close()
 	if etag := resp.Header.Get("ETag"); etag != "" && len(b) <= maxETagBody {
 		g.etagStore(url, &etagEntry{etag: etag, body: b, header: resp.Header.Clone()})
 	}
@@ -554,8 +576,8 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 			return nil, &APIError{Method: method, URL: fullURL, Status: resp.StatusCode, Body: string(b)}
 		}
 		if resp.StatusCode == http.StatusNotModified && cached != nil {
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
 			return cached.replay(req), nil
 		}
 		if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
