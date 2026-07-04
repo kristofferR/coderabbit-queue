@@ -76,6 +76,15 @@ non-outdated review threads), so no manual cross-review audit is needed.
 Long waits are not hangs. During queue/rate-limit waits, missing required-bot reviews, and
 network/GitHub outages, crq logs progress to stderr; stdout stays reserved for the final JSON.
 
+Keep the loop alive: harnesses often kill plain background shell jobs between agent turns, which
+orphans the wait. Run `crq loop` under the harness's persistent long-running-task primitive (in
+Claude Code: the Monitor tool with `persistent: true`, e.g.
+`set +e; crq loop OWNER/REPO PR > crq-feedback.json; echo "CRQ_EXIT:$?"` so the exit line is the
+completion event — the `set +e` keeps an errexit shell from dying on the meaningful non-zero exits
+(10 = findings, 2 = timeout) before it can echo). If a runner is killed anyway, the PR stays
+enqueued — re-running the same `crq loop` is
+idempotent and re-attaches to the wait. Never replace the runner with a `crq status` polling loop.
+
 Agent communication rule: do not relay every stderr progress line or send repeated "still waiting"
 updates. Tell the user once when a long `crq loop` wait begins, then stay quiet until the state
 changes (fired, feedback wait, findings, convergence, timeout, rate-limit/window change, network
