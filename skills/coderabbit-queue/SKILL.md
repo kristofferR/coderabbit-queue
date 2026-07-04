@@ -75,7 +75,7 @@ silently orphans the wait. Run `crq loop` under the harness's *persistent* long-
 primitive instead of a fire-and-forget background shell. In Claude Code that is the Monitor tool
 with `persistent: true`, redirecting the findings JSON to a file and emitting one final event line:
 
-```
+```js
 Monitor({
   command: 'set +e; crq loop OWNER/REPO PR > /path/to/crq-feedback.json; echo "CRQ_EXIT:$?"',
   description: 'crq review loop on OWNER/REPO#PR',
