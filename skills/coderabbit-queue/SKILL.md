@@ -94,11 +94,25 @@ If a loop runner is killed anyway, nothing is lost: the PR stays enqueued. Re-ru
 `crq loop` command is safe and re-attaches to the wait — enqueueing is idempotent. Do not
 substitute a hand-rolled `crq status` polling loop for the runner.
 
-User-facing updates must be sparse during those waits. Do not narrate every stderr progress line or
-send repeated "still waiting" messages. Say once that `crq loop` is waiting, then update only when
-the state changes (review fired, feedback wait started, findings arrived, convergence, timeout,
-rate-limit/window change, network outage/recovery), when the user asks, or after at least 10 minutes
-without any update.
+## User-Facing Updates During Waits
+
+This section overrides generic agent progress-update habits. While `crq loop` is in an ordinary
+waiting state, do not send periodic heartbeat updates to the user and do not narrate repeated stderr
+lines such as "waiting for a review slot" or "waiting for review feedback".
+
+Send a user update only for a real state change or action:
+
+- review command fired
+- feedback wait started or resumed for a head
+- findings, convergence, timeout, or unexpected failure returned
+- rate-limit/window state is first discovered or changes materially
+- network outage or recovery is detected
+- findings were fixed, declined, or resolved
+- the user asks for status
+
+If the only new information is elapsed time on the same wait, stay silent. If crq reports a long
+blocked-until window, summarize it once with the absolute unblock time, then stay silent until the
+state changes or the user asks.
 
 ## Feedback
 

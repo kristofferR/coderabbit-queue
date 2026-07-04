@@ -55,3 +55,53 @@ func TestNormalizeCapsProtectedHistoryMarkers(t *testing.T) {
 		t.Fatalf("older history marker should not exceed FiredMax protection budget: %#v", st.Fired)
 	}
 }
+
+func TestNormalizeProtectsAwaitingFeedbackMarkers(t *testing.T) {
+	cfg := Config{FiredMax: 1, FeedbackWaitTimeout: time.Minute}
+	now := time.Now().UTC()
+	st := State{
+		Fired: map[string]string{
+			"owner/aaa#1": "head-aaa",
+			"owner/zzz#1": "head-zzz",
+		},
+		AwaitingFeedback: map[string]FeedbackWait{
+			"owner/aaa#1": {
+				Repo:      "owner/aaa",
+				PR:        1,
+				Head:      "head-aaa",
+				StartedAt: now,
+				Deadline:  now.Add(time.Minute),
+			},
+		},
+	}
+	st.Normalize(cfg)
+
+	if st.Fired["owner/aaa#1"] != "head-aaa" {
+		t.Fatalf("awaiting feedback marker must protect its fired dedupe marker: %#v", st.Fired)
+	}
+	if len(st.Fired) != cfg.FiredMax {
+		t.Fatalf("expected FiredMax trimming to keep exactly one marker, got %#v", st.Fired)
+	}
+}
+
+func TestNormalizeRestoresFiredFromAwaitingFeedback(t *testing.T) {
+	now := time.Now().UTC()
+	st := State{
+		AwaitingFeedback: map[string]FeedbackWait{
+			"Owner/Repo#7": {
+				Head:      "abcdef123",
+				StartedAt: now,
+				Deadline:  now.Add(time.Minute),
+			},
+		},
+	}
+	st.Normalize(Config{FiredMax: 500})
+
+	key := QueueKey("owner/repo", 7)
+	if st.Fired[key] != "abcdef123" {
+		t.Fatalf("normalization should restore the fired marker from awaiting feedback, got %#v", st.Fired)
+	}
+	if wait := st.AwaitingFeedback[key]; wait.Repo != "owner/repo" || wait.PR != 7 {
+		t.Fatalf("awaiting feedback key/fields should normalize together, got %#v", st.AwaitingFeedback)
+	}
+}

@@ -539,3 +539,125 @@ func TestLoopRequiresAllRequiredBotsAfterDedupe(t *testing.T) {
 		t.Fatalf("expected timeout waiting for the missing required bot, code=%d report=%#v", code, report)
 	}
 }
+
+func TestLoopResumesAwaitingFeedbackWithoutRefiring(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		RequiredBots:        []string{"chatgpt-codex-connector[bot]"},
+		ReviewCommand:       "@coderabbitai review",
+		PollInterval:        time.Millisecond,
+		FeedbackWaitTimeout: time.Minute,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	comment := IssueComment{ID: 91, Body: "Actionable finding on the current head", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	comment.User.Login = "chatgpt-codex-connector[bot]"
+	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	store := NewMemoryStore(cfg)
+	started := time.Now().UTC().Add(-time.Minute)
+	if _, err := store.Update(ctx, func(st *State) error {
+		key := QueueKey("owner/repo", 12)
+		st.Fired[key] = "abcdef123"
+		st.AwaitingFeedback[key] = FeedbackWait{
+			Repo:      "owner/repo",
+			PR:        12,
+			Head:      "abcdef123",
+			StartedAt: started,
+			Deadline:  started.Add(cfg.FeedbackWaitTimeout),
+			ByHost:    "oldhost",
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	report, code, err := svc.Loop(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 10 || len(report.Findings) != 1 {
+		t.Fatalf("expected resumed loop to return the persisted review feedback, code=%d report=%#v", code, report)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("resuming an awaiting head must not post another review command, posted=%d", len(gh.posted))
+	}
+	state, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wait := state.AwaitingFeedback[QueueKey("owner/repo", 12)]; wait.Head != "" {
+		t.Fatalf("feedback wait should clear after findings are collected, got %#v", wait)
+	}
+	if state.Fired[QueueKey("owner/repo", 12)] != "abcdef123" {
+		t.Fatalf("fired marker should remain for dedupe after collection: %#v", state.Fired)
+	}
+}
+
+func TestLoopUsesPersistedFeedbackDeadline(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		RequiredBots:        []string{"coderabbitai[bot]"},
+		ReviewCommand:       "@coderabbitai review",
+		PollInterval:        time.Hour,
+		FeedbackWaitTimeout: time.Hour,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	store := NewMemoryStore(cfg)
+	started := time.Now().UTC().Add(-2 * time.Hour)
+	if _, err := store.Update(ctx, func(st *State) error {
+		key := QueueKey("owner/repo", 12)
+		st.Fired[key] = "abcdef123"
+		st.AwaitingFeedback[key] = FeedbackWait{
+			Repo:      "owner/repo",
+			PR:        12,
+			Head:      "abcdef123",
+			StartedAt: started,
+			Deadline:  started.Add(cfg.FeedbackWaitTimeout),
+			ByHost:    "oldhost",
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	begin := time.Now()
+	report, code, err := svc.Loop(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(begin); elapsed > 250*time.Millisecond {
+		t.Fatalf("expired persisted deadline should not reset to a fresh hour; elapsed=%s", elapsed)
+	}
+	if code != 2 || report.Status != "timeout" {
+		t.Fatalf("expected timeout from the persisted deadline, code=%d report=%#v", code, report)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("expired feedback wait still must not refire the same head, posted=%d", len(gh.posted))
+	}
+	state, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wait := state.AwaitingFeedback[QueueKey("owner/repo", 12)]; wait.Head != "" {
+		t.Fatalf("expired feedback wait should clear after timeout, got %#v", wait)
+	}
+}

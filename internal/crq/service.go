@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -61,8 +62,21 @@ func (s *Service) Enqueue(ctx context.Context, repo string, pr int) (EnqueueResu
 			return ErrNoChange
 		}
 		key := QueueKey(repo, pr)
+		head := ""
+		if wait := state.AwaitingFeedback[key]; wait.Head != "" {
+			var err error
+			head, err = s.headShort(ctx, repo, pr)
+			if err == nil && head == wait.Head {
+				result.Deduped = true
+				result.Head = head
+				return ErrNoChange
+			}
+		}
 		if fired := state.Fired[key]; fired != "" {
-			head, err := s.headShort(ctx, repo, pr)
+			var err error
+			if head == "" {
+				head, err = s.headShort(ctx, repo, pr)
+			}
 			if err == nil && head == fired {
 				result.Deduped = true
 				result.Head = head
@@ -151,6 +165,19 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 				if status.Requeue {
 					s.requeueInflight(st, status)
 				} else {
+					// The review round is over. If every required bot's feedback
+					// arrived, the wait is satisfied — clear it here, because in
+					// autoreview flows no Loop is running to call clearFeedbackWait
+					// and the entry would linger forever. A bare acknowledgement
+					// (bot reacted) or an outstanding required bot means reviewing
+					// is still underway, so that wait stays until feedback lands or
+					// its deadline expires.
+					if status.FeedbackComplete {
+						key := QueueKey(st.InFlight.Repo, st.InFlight.PR)
+						if wait := st.AwaitingFeedback[key]; wait.Head == st.InFlight.Head {
+							delete(st.AwaitingFeedback, key)
+						}
+					}
 					st.InFlight = nil
 					st.Warn = ""
 				}
@@ -172,6 +199,10 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if err != nil {
 		return PumpResult{}, err
 	}
+	if pruned := s.pruneExpiredWaits(ctx, state); pruned != nil {
+		state = *pruned
+	}
+	state = s.sweepFeedbackWaits(ctx, state)
 	queue := state.SortedQueue()
 	if len(queue) == 0 {
 		return PumpResult{Action: "idle"}, nil
@@ -197,6 +228,27 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if err != nil {
 		return PumpResult{}, err
 	}
+	if s.cfg.DryRun {
+		// A dry-run pump only reports the action it would take. Every branch
+		// below this point mutates persisted state (dropping closed PRs,
+		// deduping reviewed heads, adopting commands, firing), so simulate the
+		// same decisions read-only instead of falling through to them.
+		key := QueueKey(item.Repo, item.PR)
+		switch {
+		case !open:
+			return PumpResult{Action: "skipped", Repo: item.Repo, PR: item.PR, Reason: "pr closed"}, nil
+		case !isShortSHA(head):
+			return PumpResult{Action: "skipped", Repo: item.Repo, PR: item.PR, Reason: "could not read head"}, nil
+		case state.Fired[key] == head || state.AwaitingFeedback[key].Head == head:
+			return PumpResult{Action: "deduped", Repo: item.Repo, PR: item.PR, Head: head}, nil
+		}
+		if reviewed, err := s.botReviewedHead(ctx, item.Repo, item.PR, head); err == nil && reviewed {
+			return PumpResult{Action: "deduped", Repo: item.Repo, PR: item.PR, Head: head, Reason: "bot already reviewed head"}, nil
+		} else if err != nil {
+			return PumpResult{}, err
+		}
+		return PumpResult{Action: "dry_run", Repo: item.Repo, PR: item.PR, Head: head}, nil
+	}
 	if !open {
 		// PR was closed or merged after queueing — drop it rather than fire a review
 		// at a dead PR that can never converge.
@@ -214,13 +266,31 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		return PumpResult{Action: "skipped", Repo: item.Repo, PR: item.PR, Reason: "could not read head"}, nil
 	}
 	key := QueueKey(item.Repo, item.PR)
-	if state.Fired[key] == head {
+	pending := state.AwaitingFeedback[key]
+	if state.Fired[key] == head || pending.Head == head {
+		deduped := false
 		updated, err := s.store.Update(ctx, func(st *State) error {
+			deduped = false
+			q := st.SortedQueue()
+			if len(q) == 0 || q[0].Seq != item.Seq {
+				return ErrNoChange
+			}
+			currentPending := st.AwaitingFeedback[key]
+			if st.Fired[key] != head && currentPending.Head != head {
+				return ErrNoChange
+			}
 			removeQueued(st, item.Seq)
+			if currentPending.Head == head {
+				st.Fired[key] = head
+			}
+			deduped = true
 			return nil
 		})
 		if err != nil {
 			return PumpResult{}, err
+		}
+		if !deduped {
+			return PumpResult{Action: "lost_race"}, nil
 		}
 		s.sync(ctx, updated)
 		return PumpResult{Action: "deduped", Repo: item.Repo, PR: item.PR, Head: head}, nil
@@ -239,9 +309,25 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	} else if err != nil {
 		return PumpResult{}, err
 	}
-
-	if s.cfg.DryRun {
-		return PumpResult{Action: "dry_run", Repo: item.Repo, PR: item.PR, Head: head}, nil
+	if existing, ok, err := s.existingReviewCommand(ctx, item.Repo, item.PR, head, item.adoptCutoff()); err != nil {
+		return PumpResult{}, err
+	} else if ok {
+		firedAt := existing.CreatedAt.UTC()
+		if firedAt.IsZero() {
+			firedAt = existing.UpdatedAt.UTC()
+		}
+		if firedAt.IsZero() {
+			firedAt = time.Now().UTC()
+		}
+		updated, err := s.recordExistingReviewPosted(ctx, item, head, existing.ID, firedAt)
+		if err != nil {
+			if errors.Is(err, ErrNoChange) {
+				return PumpResult{Action: "lost_race"}, nil
+			}
+			return PumpResult{}, err
+		}
+		s.sync(ctx, updated)
+		return PumpResult{Action: "fired", Repo: item.Repo, PR: item.PR, Head: head, Reason: "review command already posted"}, nil
 	}
 
 	token := randomToken()
@@ -307,6 +393,9 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		defer cancel()
 		updated, err = s.markReviewPosted(retryCtx, token, item, head, comment.ID, firedAt)
 		if err != nil {
+			if errors.Is(err, ErrNoChange) {
+				return PumpResult{Action: "lost_race"}, nil
+			}
 			return PumpResult{}, err
 		}
 	}
@@ -329,12 +418,211 @@ func (s *Service) markReviewPosted(ctx context.Context, token string, item Queue
 		st.LastFired = &firedAt
 		st.Warn = ""
 		st.Fired[key] = head
+		if st.AwaitingFeedback == nil {
+			st.AwaitingFeedback = map[string]FeedbackWait{}
+		}
+		st.AwaitingFeedback[key] = s.newFeedbackWait(item.Repo, item.PR, head, firedAt)
 		st.History = append([]HistoryItem{{
 			Repo:   item.Repo,
 			PR:     item.PR,
 			Commit: head,
 			At:     firedAt,
 			Host:   s.cfg.Host,
+		}}, st.History...)
+		if len(st.History) > 20 {
+			st.History = st.History[:20]
+		}
+		return nil
+	})
+	if err != nil {
+		return State{}, err
+	}
+	if !recorded {
+		return state, ErrNoChange
+	}
+	return state, nil
+}
+
+// existingReviewCommand looks for a review command already posted at the PR's
+// current head so Pump can adopt it instead of posting a duplicate. notBefore
+// bounds adoption: comments created before it (e.g. the stale command left
+// behind by a requeued fire) are never adopted — re-adopting one would replay
+// the very rate-limit reply or timeout that caused the requeue, looping forever
+// without ever posting a fresh command.
+func (s *Service) existingReviewCommand(ctx context.Context, repo string, pr int, expectedHead string, notBefore time.Time) (IssueComment, bool, error) {
+	comments, err := s.gh.ListIssueComments(ctx, repo, pr)
+	if err != nil {
+		return IssueComment{}, false, err
+	}
+	command := strings.TrimSpace(s.cfg.ReviewCommand)
+	if command == "" {
+		return IssueComment{}, false, nil
+	}
+	// The head-guard and cutoff lookups below cost REST/GraphQL calls; in the
+	// common case — no command comment on the PR at all — skip them entirely.
+	hasCandidate := false
+	for _, comment := range comments {
+		if strings.TrimSpace(comment.Body) == command {
+			hasCandidate = true
+			break
+		}
+	}
+	if !hasCandidate {
+		return IssueComment{}, false, nil
+	}
+	cutoff := notBefore
+	pull, err := s.gh.GetPull(ctx, repo, pr)
+	if err != nil {
+		return IssueComment{}, false, err
+	}
+	if pull.Head.SHA != "" {
+		if shortOID(pull.Head.SHA) != expectedHead {
+			return IssueComment{}, false, nil
+		}
+		commit, err := s.gh.GetCommit(ctx, repo, pull.Head.SHA)
+		if err != nil {
+			if _, ok := rateLimitWait(err); ok {
+				return IssueComment{}, false, err
+			}
+			// No head-commit cutoff available (e.g. an unreadable or 404 head):
+			// skip adoption rather than wedging the queue on this PR — the worst
+			// case is posting a command that already exists, which is exactly the
+			// pre-adoption behavior.
+			return IssueComment{}, false, nil
+		}
+		if commit.Committer.Date.After(cutoff) {
+			cutoff = commit.Committer.Date
+		}
+	}
+	// A force-push can point the PR at a commit object whose committer date
+	// predates commands made for an earlier head, so the commit date alone
+	// is not a safe cutoff — any command older than the last force-push
+	// belongs to a previous head and must not be adopted.
+	if fp := s.headForcePushCutoff(ctx, repo, pr); fp.After(cutoff) {
+		cutoff = fp
+	}
+	var best IssueComment
+	var bestAt time.Time
+	ok := false
+	for _, comment := range comments {
+		if strings.TrimSpace(comment.Body) != command {
+			continue
+		}
+		when := comment.CreatedAt
+		if when.IsZero() {
+			when = comment.UpdatedAt
+		}
+		if !cutoff.IsZero() && when.Before(cutoff) {
+			continue
+		}
+		if !ok || when.After(bestAt) {
+			best = comment
+			bestAt = when
+			ok = true
+		}
+	}
+	if !ok {
+		return IssueComment{}, false, nil
+	}
+	// A command the bot has already answered with a review belongs to a
+	// completed round for an earlier head. No cutoff can prove this case away:
+	// a regular push has no timestamped head-update event, and the new head's
+	// committer date can predate an old command (a local commit pushed later).
+	// Adopting a consumed command would mark the new head fired without ever
+	// reviewing it — skip adoption instead; the worst case is a duplicate
+	// command, the pre-adoption behavior.
+	reviews, err := s.gh.ListReviews(ctx, repo, pr)
+	if err != nil {
+		if _, ok := rateLimitWait(err); ok {
+			return IssueComment{}, false, err
+		}
+		return IssueComment{}, false, nil
+	}
+	for _, review := range reviews {
+		if s.isConfiguredBot(review.User.Login) && !review.SubmittedAt.Before(bestAt) {
+			return IssueComment{}, false, nil
+		}
+	}
+	return best, ok, nil
+}
+
+// headForcePushCutoff returns when the PR head was last force-pushed, zero if
+// unknown or never. Best-effort: on GraphQL failure adoption falls back to the
+// commit-date cutoff rather than blocking the pump.
+func (s *Service) headForcePushCutoff(ctx context.Context, repo string, pr int) time.Time {
+	owner, name, found := strings.Cut(repo, "/")
+	if !found {
+		return time.Time{}
+	}
+	var result struct {
+		Repository struct {
+			PullRequest struct {
+				TimelineItems struct {
+					Nodes []struct {
+						CreatedAt time.Time `json:"createdAt"`
+					} `json:"nodes"`
+				} `json:"timelineItems"`
+			} `json:"pullRequest"`
+		} `json:"repository"`
+	}
+	query := `query($owner:String!, $name:String!, $number:Int!) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$number) {
+      timelineItems(itemTypes: HEAD_REF_FORCE_PUSHED_EVENT, last: 1) {
+        nodes { ... on HeadRefForcePushedEvent { createdAt } }
+      }
+    }
+  }
+}`
+	if err := s.gh.GraphQL(ctx, query, map[string]any{"owner": owner, "name": name, "number": pr}, &result); err != nil {
+		return time.Time{}
+	}
+	nodes := result.Repository.PullRequest.TimelineItems.Nodes
+	if len(nodes) == 0 {
+		return time.Time{}
+	}
+	return nodes[len(nodes)-1].CreatedAt.UTC()
+}
+
+func (s *Service) recordExistingReviewPosted(ctx context.Context, item QueueItem, head string, commentID int64, firedAt time.Time) (State, error) {
+	key := QueueKey(item.Repo, item.PR)
+	recorded := false
+	state, err := s.store.Update(ctx, func(st *State) error {
+		recorded = false
+		if st.InFlight != nil {
+			return ErrNoChange
+		}
+		q := st.SortedQueue()
+		if len(q) == 0 || q[0].Seq != item.Seq {
+			return ErrNoChange
+		}
+		recorded = true
+		removeQueued(st, item.Seq)
+		st.InFlight = &InFlight{
+			Seq:            item.Seq,
+			Repo:           item.Repo,
+			PR:             item.PR,
+			Head:           head,
+			Token:          randomToken(),
+			Phase:          "posted",
+			ReservedAt:     firedAt,
+			FiredAt:        &firedAt,
+			FiredCommentID: commentID,
+			ByHost:         firstNonEmpty(item.Host, s.cfg.Host),
+		}
+		st.LastFired = &firedAt
+		st.Warn = ""
+		st.Fired[key] = head
+		if st.AwaitingFeedback == nil {
+			st.AwaitingFeedback = map[string]FeedbackWait{}
+		}
+		st.AwaitingFeedback[key] = s.newFeedbackWait(item.Repo, item.PR, head, firedAt)
+		st.History = append([]HistoryItem{{
+			Repo:   item.Repo,
+			PR:     item.PR,
+			Commit: head,
+			At:     firedAt,
+			Host:   firstNonEmpty(item.Host, s.cfg.Host),
 		}}, st.History...)
 		if len(st.History) > 20 {
 			st.History = st.History[:20]
@@ -425,6 +713,7 @@ func (s *Service) Cancel(ctx context.Context, repo string, pr int) error {
 			st.InFlight = nil
 		}
 		delete(st.Fired, QueueKey(repo, pr))
+		delete(st.AwaitingFeedback, QueueKey(repo, pr))
 		return nil
 	})
 	if err != nil {
@@ -622,12 +911,73 @@ type inflightCheck struct {
 	Requeue      bool
 	Reason       string
 	BlockedUntil *time.Time
+	// FeedbackComplete is set on Done when every required bot has submitted a
+	// review for the fired round, so Pump knows whether the feedback wait is
+	// satisfied or must survive for the bots that are still reviewing.
+	FeedbackComplete bool
 }
+
+// Done reasons from inflightStatus. Pump distinguishes them: a submitted
+// review or bot comment means feedback arrived, while a bare reaction only
+// acknowledges the command — the review is still in progress.
+const (
+	doneReviewSubmitted = "review submitted"
+	doneBotReacted      = "bot reacted"
+	doneBotComment      = "bot comment"
+)
 
 // notBefore reports whether t is at or after baseline. GitHub timestamps are
 // second-granular, so a bot completion in the same second as the trigger must
 // still count — a strict After would miss it and refire a duplicate review.
 func notBefore(t, baseline time.Time) bool { return !t.Before(baseline) }
+
+// requiredFeedbackComplete reports whether every bot in CRQ_REQUIRED_BOTS has
+// submitted a review for the fired round. It mirrors what flips Feedback's
+// ReviewedBy — submitted reviews matching the fired head — so Pump never drops
+// a wait that Feedback would still report as waiting on another required bot.
+// With no required bots configured, the configured reviewer's response that
+// produced the Done is all there is to wait for.
+func (s *Service) requiredFeedbackComplete(inf *InFlight, reviews []Review) bool {
+	required := botSet(s.cfg.RequiredBots)
+	if len(required) == 0 {
+		return true
+	}
+	return botsReviewedHead(reviews, required, inf.Head, *inf.FiredAt)
+}
+
+// botsReviewedHead reports whether every bot in the set has reviewed head —
+// the same check Feedback uses before flipping ReviewedBy: a review whose
+// commit matches the fired head counts regardless of when it was submitted,
+// because a required bot may have reviewed the commit before this round was
+// even triggered. Only when there is no head to match does the submission
+// time (at/after since) gate the round, so a review for some other push never
+// counts toward it.
+func botsReviewedHead(reviews []Review, bots map[string]struct{}, head string, since time.Time) bool {
+	for bot := range bots {
+		norm := normalizeBotName(bot)
+		responded := false
+		for _, review := range reviews {
+			if normalizeBotName(review.User.Login) != norm {
+				continue
+			}
+			if head != "" {
+				if strings.HasPrefix(review.CommitID, head) {
+					responded = true
+					break
+				}
+				continue
+			}
+			if notBefore(review.SubmittedAt, since) {
+				responded = true
+				break
+			}
+		}
+		if !responded {
+			return false
+		}
+	}
+	return true
+}
 
 func (s *Service) inflightStatus(ctx context.Context, state State) (inflightCheck, error) {
 	inf := state.InFlight
@@ -659,7 +1009,7 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 	}
 	for _, review := range reviews {
 		if s.isConfiguredBot(review.User.Login) && notBefore(review.SubmittedAt, *inf.FiredAt) {
-			return inflightCheck{Done: true, Reason: "review submitted"}, nil
+			return inflightCheck{Done: true, Reason: doneReviewSubmitted, FeedbackComplete: s.requiredFeedbackComplete(inf, reviews)}, nil
 		}
 	}
 	if inf.FiredCommentID != 0 {
@@ -671,13 +1021,13 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 		}
 		for _, reaction := range reactions {
 			if s.isConfiguredBot(reaction.User.Login) {
-				return inflightCheck{Done: true, Reason: "bot reacted"}, nil
+				return inflightCheck{Done: true, Reason: doneBotReacted}, nil
 			}
 		}
 	}
 	for _, comment := range comments {
 		if s.isConfiguredBot(comment.User.Login) && comment.ID != inf.FiredCommentID && notBefore(comment.UpdatedAt, *inf.FiredAt) && !s.isRateLimited(comment.Body) {
-			return inflightCheck{Done: true, Reason: "bot comment"}, nil
+			return inflightCheck{Done: true, Reason: doneBotComment, FeedbackComplete: s.requiredFeedbackComplete(inf, reviews)}, nil
 		}
 	}
 	if time.Since(*inf.FiredAt) > s.cfg.InflightTimeout {
@@ -686,23 +1036,121 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 	return inflightCheck{}, nil
 }
 
+// pruneExpiredWaits drops AwaitingFeedback entries whose deadline has passed.
+// A wait can outlive its review round — a crashed loop, or an autoreview fire
+// whose in-flight slot was released on a bot reaction before the review was
+// submitted — and nothing else removes it. Any loop resumed after pruning
+// reconstructs its start from History and times out immediately, so no wait
+// gets a fresh clock out of this. Returns the updated state, or nil if nothing
+// was pruned.
+func (s *Service) pruneExpiredWaits(ctx context.Context, state State) *State {
+	if s.cfg.DryRun {
+		return nil
+	}
+	now := time.Now().UTC()
+	stale := false
+	for _, wait := range state.AwaitingFeedback {
+		if !wait.Deadline.IsZero() && now.After(wait.Deadline) {
+			stale = true
+			break
+		}
+	}
+	if !stale {
+		return nil
+	}
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		changed := false
+		for key, wait := range st.AwaitingFeedback {
+			if !wait.Deadline.IsZero() && now.After(wait.Deadline) {
+				delete(st.AwaitingFeedback, key)
+				changed = true
+			}
+		}
+		if !changed {
+			return ErrNoChange
+		}
+		return nil
+	})
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("warning: failed to prune expired feedback waits: %v", err)
+		}
+		return nil
+	}
+	s.sync(ctx, updated)
+	return &updated
+}
+
+// sweepFeedbackWaits checks at most one lingering feedback wait per pump — the
+// oldest — against the PR's submitted reviews, and clears it once every awaited
+// bot (CRQ_REQUIRED_BOTS, or the configured reviewer when none are set) has
+// reviewed the fired head. This is what finishes a round whose in-flight slot
+// was released on a bare bot reaction: once InFlight is nil no Pump path runs
+// inflightStatus again, and without a Loop nothing else would clear the wait
+// before the deadline prune. One wait per pump bounds the sweep's use of the
+// shared REST quota; the deadline prune stays the backstop for rounds whose
+// feedback never becomes a head-matched review.
+func (s *Service) sweepFeedbackWaits(ctx context.Context, state State) State {
+	if s.cfg.DryRun || len(state.AwaitingFeedback) == 0 {
+		return state
+	}
+	var oldest FeedbackWait
+	found := false
+	for _, wait := range state.AwaitingFeedback {
+		if wait.Head == "" {
+			continue
+		}
+		if !found || wait.StartedAt.Before(oldest.StartedAt) {
+			oldest = wait
+			found = true
+		}
+	}
+	if !found {
+		return state
+	}
+	reviews, err := s.gh.ListReviews(ctx, oldest.Repo, oldest.PR)
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("warning: feedback wait sweep for %s#%d failed: %v", oldest.Repo, oldest.PR, err)
+		}
+		return state
+	}
+	awaited := s.cfg.RequiredBots
+	if len(awaited) == 0 {
+		awaited = []string{s.cfg.Bot}
+	}
+	if !botsReviewedHead(reviews, botSet(awaited), oldest.Head, oldest.StartedAt) {
+		return state
+	}
+	s.clearFeedbackWait(ctx, oldest.Repo, oldest.PR, oldest.Head)
+	if updated, _, err := s.store.Load(ctx); err == nil {
+		return updated
+	}
+	return state
+}
+
 func (s *Service) requeueInflight(st *State, status inflightCheck) {
 	if st.InFlight == nil {
 		return
 	}
 	inf := *st.InFlight
+	now := time.Now().UTC()
 	st.Queue = append(st.Queue, QueueItem{
-		Seq:        inf.Seq,
-		Owner:      ownerOf(inf.Repo),
-		Repo:       inf.Repo,
-		PR:         inf.PR,
-		Host:       inf.ByHost,
-		EnqueuedAt: time.Now().UTC(),
+		Seq:   inf.Seq,
+		Owner: ownerOf(inf.Repo),
+		Repo:  inf.Repo,
+		PR:    inf.PR,
+		Host:  inf.ByHost,
+		// The command comment from the abandoned fire is still on the PR and
+		// still newer than the head commit; RequeuedAt keeps the next fire from
+		// adopting it (see existingReviewCommand).
+		EnqueuedAt: now,
+		RequeuedAt: &now,
 	})
 	sort.Slice(st.Queue, func(i, j int) bool { return st.Queue[i].Seq < st.Queue[j].Seq })
 	delete(st.Fired, QueueKey(inf.Repo, inf.PR))
+	delete(st.AwaitingFeedback, QueueKey(inf.Repo, inf.PR))
 	st.InFlight = nil
-	now := time.Now().UTC()
 	if status.Reason == warnRateLimited {
 		// A rate limit is shown by the Blocked state (the dashboard's Rate-limit
 		// row), not a sticky Warn — otherwise once the window passes the table says
