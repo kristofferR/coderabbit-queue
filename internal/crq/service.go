@@ -228,6 +228,27 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if err != nil {
 		return PumpResult{}, err
 	}
+	if s.cfg.DryRun {
+		// A dry-run pump only reports the action it would take. Every branch
+		// below this point mutates persisted state (dropping closed PRs,
+		// deduping reviewed heads, adopting commands, firing), so simulate the
+		// same decisions read-only instead of falling through to them.
+		key := QueueKey(item.Repo, item.PR)
+		switch {
+		case !open:
+			return PumpResult{Action: "skipped", Repo: item.Repo, PR: item.PR, Reason: "pr closed"}, nil
+		case !isShortSHA(head):
+			return PumpResult{Action: "skipped", Repo: item.Repo, PR: item.PR, Reason: "could not read head"}, nil
+		case state.Fired[key] == head || state.AwaitingFeedback[key].Head == head:
+			return PumpResult{Action: "deduped", Repo: item.Repo, PR: item.PR, Head: head}, nil
+		}
+		if reviewed, err := s.botReviewedHead(ctx, item.Repo, item.PR, head); err == nil && reviewed {
+			return PumpResult{Action: "deduped", Repo: item.Repo, PR: item.PR, Head: head, Reason: "bot already reviewed head"}, nil
+		} else if err != nil {
+			return PumpResult{}, err
+		}
+		return PumpResult{Action: "dry_run", Repo: item.Repo, PR: item.PR, Head: head}, nil
+	}
 	if !open {
 		// PR was closed or merged after queueing — drop it rather than fire a review
 		// at a dead PR that can never converge.
@@ -288,10 +309,6 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	} else if err != nil {
 		return PumpResult{}, err
 	}
-	if s.cfg.DryRun {
-		return PumpResult{Action: "dry_run", Repo: item.Repo, PR: item.PR, Head: head}, nil
-	}
-
 	if existing, ok, err := s.existingReviewCommand(ctx, item.Repo, item.PR, head, item.adoptCutoff()); err != nil {
 		return PumpResult{}, err
 	} else if ok {
@@ -468,6 +485,22 @@ func (s *Service) existingReviewCommand(ctx context.Context, repo string, pr int
 	if command == "" {
 		return IssueComment{}, false, nil
 	}
+	hasCandidate := false
+	for _, comment := range comments {
+		if strings.TrimSpace(comment.Body) == command {
+			hasCandidate = true
+			break
+		}
+	}
+	if hasCandidate {
+		// A force-push can point the PR at a commit object whose committer date
+		// predates commands made for an earlier head, so the commit date alone
+		// is not a safe cutoff — any command older than the last force-push
+		// belongs to a previous head and must not be adopted.
+		if fp := s.headForcePushCutoff(ctx, repo, pr); fp.After(cutoff) {
+			cutoff = fp
+		}
+	}
 	for _, comment := range comments {
 		if strings.TrimSpace(comment.Body) != command {
 			continue
@@ -486,6 +519,44 @@ func (s *Service) existingReviewCommand(ctx context.Context, repo string, pr int
 		}
 	}
 	return best, ok, nil
+}
+
+// headForcePushCutoff returns when the PR head was last force-pushed, zero if
+// unknown or never. Best-effort: on GraphQL failure adoption falls back to the
+// commit-date cutoff rather than blocking the pump.
+func (s *Service) headForcePushCutoff(ctx context.Context, repo string, pr int) time.Time {
+	owner, name, found := strings.Cut(repo, "/")
+	if !found {
+		return time.Time{}
+	}
+	var result struct {
+		Repository struct {
+			PullRequest struct {
+				TimelineItems struct {
+					Nodes []struct {
+						CreatedAt time.Time `json:"createdAt"`
+					} `json:"nodes"`
+				} `json:"timelineItems"`
+			} `json:"pullRequest"`
+		} `json:"repository"`
+	}
+	query := `query($owner:String!, $name:String!, $number:Int!) {
+  repository(owner:$owner, name:$name) {
+    pullRequest(number:$number) {
+      timelineItems(itemTypes: HEAD_REF_FORCE_PUSHED_EVENT, last: 1) {
+        nodes { ... on HeadRefForcePushedEvent { createdAt } }
+      }
+    }
+  }
+}`
+	if err := s.gh.GraphQL(ctx, query, map[string]any{"owner": owner, "name": name, "number": pr}, &result); err != nil {
+		return time.Time{}
+	}
+	nodes := result.Repository.PullRequest.TimelineItems.Nodes
+	if len(nodes) == 0 {
+		return time.Time{}
+	}
+	return nodes[len(nodes)-1].CreatedAt.UTC()
 }
 
 func (s *Service) recordExistingReviewPosted(ctx context.Context, item QueueItem, head string, commentID int64, firedAt time.Time) (State, error) {

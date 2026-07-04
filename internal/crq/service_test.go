@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"sync"
@@ -21,6 +22,7 @@ type fakeGitHub struct {
 	posted         []string
 	deleted        []int64
 	commentID      int64
+	graphQL        func(query string, vars map[string]any, out any) error
 }
 
 type failNthUpdateStore struct {
@@ -218,7 +220,13 @@ func (f *fakeGitHub) EachOpenPR(context.Context, string, bool, func(SearchPR) (b
 	return nil
 }
 
-func (f *fakeGitHub) GraphQL(context.Context, string, map[string]any, any) error {
+func (f *fakeGitHub) GraphQL(_ context.Context, query string, vars map[string]any, out any) error {
+	f.mu.Lock()
+	handler := f.graphQL
+	f.mu.Unlock()
+	if handler != nil {
+		return handler(query, vars, out)
+	}
 	return errors.New("graphql unavailable")
 }
 
@@ -728,6 +736,105 @@ func TestPumpIgnoresStaleCommandAfterRequeue(t *testing.T) {
 	}
 	if state.InFlight == nil || state.InFlight.FiredCommentID == stale.ID {
 		t.Fatalf("in-flight must track the fresh command, not the stale one, got %#v", state.InFlight)
+	}
+}
+
+func TestPumpDoesNotAdoptCommandOlderThanForcePush(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		ReviewCommand:       "@coderabbitai review",
+		MinInterval:         0,
+		InflightTimeout:     time.Minute,
+		FeedbackWaitTimeout: time.Minute,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	// The PR was force-pushed to a commit object that predates the stale
+	// command: the committer date alone would let the command be adopted.
+	commitTime := time.Now().UTC().Add(-time.Hour)
+	staleAt := commitTime.Add(10 * time.Minute)
+	forcePushAt := commitTime.Add(30 * time.Minute)
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	gc := gitCommit{SHA: pull.Head.SHA}
+	gc.Committer.Date = commitTime
+	gh.commits[pull.Head.SHA] = gc
+	stale := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: staleAt, UpdatedAt: staleAt}
+	stale.User.Login = "kristofferR"
+	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{stale}
+	gh.graphQL = func(_ string, _ map[string]any, out any) error {
+		payload := `{"repository":{"pullRequest":{"timelineItems":{"nodes":[{"createdAt":"` + forcePushAt.Format(time.RFC3339) + `"}]}}}}`
+		return json.Unmarshal([]byte(payload), out)
+	}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+
+	if _, err := service.Enqueue(ctx, "owner/repo", 12); err != nil {
+		t.Fatal(err)
+	}
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "fired" || pumped.Reason == "review command already posted" {
+		t.Fatalf("a command older than the head force-push must not be adopted, got %#v", pumped)
+	}
+	if len(gh.posted) != 1 {
+		t.Fatalf("expected a fresh review command for the force-pushed head, posted=%v", gh.posted)
+	}
+}
+
+func TestPumpDryRunDoesNotDedupeMutably(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		ReviewCommand:       "@coderabbitai review",
+		MinInterval:         0,
+		InflightTimeout:     time.Minute,
+		FeedbackWaitTimeout: time.Hour,
+		FiredMax:            500,
+		DryRun:              true,
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+
+	if _, err := service.Enqueue(ctx, "owner/repo", 12); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.AwaitingFeedback[QueueKey("owner/repo", 12)] = FeedbackWait{Repo: "owner/repo", PR: 12, Head: "abcdef123", StartedAt: started, Deadline: started.Add(cfg.FeedbackWaitTimeout)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "deduped" {
+		t.Fatalf("dry-run should report the dedupe it would perform, got %#v", pumped)
+	}
+	state, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Queue) != 1 {
+		t.Fatalf("a dry-run dedupe must not remove the queued item, got %#v", state.Queue)
 	}
 }
 
