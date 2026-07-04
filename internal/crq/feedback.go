@@ -263,6 +263,10 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		start = time.Now().UTC()
 	}
 	var lastLog time.Time
+	// Pump keeps the queue moving while we wait, but once a minute is plenty (the
+	// autoreview daemon pumps too); pumping on every tick just burns REST quota.
+	var lastPump time.Time
+	pumpEvery := pumpEveryFor(s.cfg.PollInterval)
 	for {
 		report, err := s.Feedback(ctx, repo, pr)
 		if err != nil {
@@ -296,9 +300,14 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			return report, 0, nil
 		}
 		// Keep the queue moving (re-fire once a rate-limit window clears) and pick up
-		// the Blocked state it leaves behind.
-		if _, err := s.Pump(ctx); err != nil && s.log != nil {
-			s.log.Printf("warning: pump while waiting for feedback failed: %v", err)
+		// the Blocked state it leaves behind. Pumping every poll tick is redundant —
+		// with several loops waiting concurrently it multiplies into real REST-quota
+		// cost — so each waiter pumps at most once per pumpEvery.
+		if lastPump.IsZero() || time.Since(lastPump) >= pumpEvery {
+			if _, err := s.Pump(ctx); err != nil && s.log != nil {
+				s.log.Printf("warning: pump while waiting for feedback failed: %v", err)
+			}
+			lastPump = time.Now()
 		}
 		// While the account is rate-limited the PR can't be reviewed yet — it just
 		// stays queued — so that wait must not count against the feedback timeout, and
@@ -500,6 +509,17 @@ func (s *Service) waitToFire(ctx context.Context, repo string, pr int) (PumpResu
 // nothing can be fetched until the window clears, so wait until just past the
 // reset instead of every PollInterval — capped so the loop still re-checks
 // periodically. Keeps a long queue wait from draining the shared GitHub REST quota.
+// pumpEveryFor bounds how often a waiting feedback loop pumps the queue: never
+// more than once a minute, and never more often than it polls. Several loops
+// waiting concurrently each used to pump every tick, which multiplied into real
+// REST-quota drain for zero extra queue throughput.
+func pumpEveryFor(poll time.Duration) time.Duration {
+	if poll < time.Minute {
+		return time.Minute
+	}
+	return poll
+}
+
 func blockedPollInterval(blockedUntil, now time.Time, base time.Duration) time.Duration {
 	const maxWait = 5 * time.Minute
 	wait := blockedUntil.Sub(now) + time.Second

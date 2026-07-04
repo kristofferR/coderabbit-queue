@@ -3,6 +3,7 @@ package crq
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -337,5 +338,235 @@ func TestRateLimitFrom(t *testing.T) {
 	}), "")
 	if rl == nil || rl.Kind != "primary" {
 		t.Fatalf("429 primary mismatch: %#v", rl)
+	}
+}
+
+func TestSendConditionalGETReplaysCachedBodyOn304(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "test-token")
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch atomic.AddInt32(&calls, 1) {
+		case 1:
+			if r.Header.Get("If-None-Match") != "" {
+				t.Errorf("first request must not be conditional, got If-None-Match=%q", r.Header.Get("If-None-Match"))
+			}
+			w.Header().Set("ETag", `"v1"`)
+			w.Header().Set("Link", `<https://api.github.com/x?page=2>; rel="last"`)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"n":1}`))
+		default:
+			if got := r.Header.Get("If-None-Match"); got != `"v1"` {
+				t.Errorf("expected If-None-Match %q, got %q", `"v1"`, got)
+			}
+			w.WriteHeader(http.StatusNotModified)
+		}
+	}))
+	defer srv.Close()
+
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 2, maxWait: time.Second, backoffBase: time.Millisecond, networkMaxWait: time.Second}
+	for i := 1; i <= 2; i++ {
+		resp, err := g.send(context.Background(), http.MethodGet, srv.URL+"/x", nil)
+		if err != nil {
+			t.Fatalf("send %d returned error: %v", i, err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("send %d: expected 200, got %d", i, resp.StatusCode)
+		}
+		if string(b) != `{"n":1}` {
+			t.Fatalf("send %d: body mismatch: %q", i, b)
+		}
+		if got := resp.Header.Get("Link"); !strings.Contains(got, "page=2") {
+			t.Fatalf("send %d: Link header lost: %q", i, got)
+		}
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected 2 upstream requests, got %d", got)
+	}
+}
+
+func TestSendConditionalGETMergesHeadersFrom304(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "test-token")
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch atomic.AddInt32(&calls, 1) {
+		case 1:
+			if r.Header.Get("If-None-Match") != "" {
+				t.Errorf("first request must not be conditional, got If-None-Match=%q", r.Header.Get("If-None-Match"))
+			}
+			w.Header().Set("ETag", `"v1"`)
+			w.Header().Set("Link", `<https://api.github.com/x?page=2>; rel="last"`)
+			w.Header().Set("X-Cached-Only", "preserved")
+			_, _ = w.Write([]byte(`{"n":1}`))
+		default:
+			if got := r.Header.Get("If-None-Match"); got != `"v1"` {
+				t.Errorf("expected If-None-Match %q, got %q", `"v1"`, got)
+			}
+			w.Header().Set("Link", `<https://api.github.com/x?page=3>; rel="last"`)
+			w.Header().Set("Content-Length", "999")
+			w.WriteHeader(http.StatusNotModified)
+		}
+	}))
+	defer srv.Close()
+
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 2, maxWait: time.Second, backoffBase: time.Millisecond, networkMaxWait: time.Second}
+	resp, err := g.send(context.Background(), http.MethodGet, srv.URL+"/x", nil)
+	if err != nil {
+		t.Fatalf("first send returned error: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	resp, err = g.send(context.Background(), http.MethodGet, srv.URL+"/x", nil)
+	if err != nil {
+		t.Fatalf("second send returned error: %v", err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 after replay, got %d", resp.StatusCode)
+	}
+	if resp.ContentLength != int64(len(`{"n":1}`)) {
+		t.Fatalf("expected cached content length %d, got %d", len(`{"n":1}`), resp.ContentLength)
+	}
+	if string(b) != `{"n":1}` {
+		t.Fatalf("cached body mismatch: %q", b)
+	}
+	if got := resp.Header.Get("Link"); !strings.Contains(got, "page=3") {
+		t.Fatalf("expected 304 Link header, got %q", got)
+	}
+	if got := resp.Header.Get("X-Cached-Only"); got != "preserved" {
+		t.Fatalf("cached-only header not preserved: %q", got)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected 2 upstream requests, got %d", got)
+	}
+}
+
+func TestSendConditionalGETRefreshesCacheOnChange(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "test-token")
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch atomic.AddInt32(&calls, 1) {
+		case 1:
+			w.Header().Set("ETag", `"v1"`)
+			_, _ = w.Write([]byte(`{"n":1}`))
+		case 2:
+			// Content changed: full 200 with a new ETag replaces the cache entry.
+			w.Header().Set("ETag", `"v2"`)
+			_, _ = w.Write([]byte(`{"n":2}`))
+		default:
+			if got := r.Header.Get("If-None-Match"); got != `"v2"` {
+				t.Errorf("expected refreshed If-None-Match %q, got %q", `"v2"`, got)
+			}
+			w.WriteHeader(http.StatusNotModified)
+		}
+	}))
+	defer srv.Close()
+
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 2, maxWait: time.Second, backoffBase: time.Millisecond, networkMaxWait: time.Second}
+	want := []string{`{"n":1}`, `{"n":2}`, `{"n":2}`}
+	for i, expected := range want {
+		resp, err := g.send(context.Background(), http.MethodGet, srv.URL+"/x", nil)
+		if err != nil {
+			t.Fatalf("send %d returned error: %v", i+1, err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if string(b) != expected {
+			t.Fatalf("send %d: expected body %q, got %q", i+1, expected, b)
+		}
+	}
+}
+
+func TestSendConditionalGETPreservesOversizedUncachedBody(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "test-token")
+	largeBody := strings.Repeat("x", maxETagBody+1)
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch atomic.AddInt32(&calls, 1) {
+		case 1:
+			if r.Header.Get("If-None-Match") != "" {
+				t.Errorf("oversized first request must not be conditional, got If-None-Match=%q", r.Header.Get("If-None-Match"))
+			}
+			w.Header().Set("ETag", `"large"`)
+			_, _ = w.Write([]byte(largeBody))
+		default:
+			if got := r.Header.Get("If-None-Match"); got != "" {
+				t.Errorf("oversized response must not be cached, got If-None-Match=%q", got)
+			}
+			w.Header().Set("ETag", `"small"`)
+			_, _ = w.Write([]byte(`{"n":2}`))
+		}
+	}))
+	defer srv.Close()
+
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 2, maxWait: time.Second, backoffBase: time.Millisecond, networkMaxWait: time.Second}
+	resp, err := g.send(context.Background(), http.MethodGet, srv.URL+"/x", nil)
+	if err != nil {
+		t.Fatalf("send returned error: %v", err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if string(b) != largeBody {
+		t.Fatalf("oversized body was not preserved: got %d bytes, want %d", len(b), len(largeBody))
+	}
+
+	resp, err = g.send(context.Background(), http.MethodGet, srv.URL+"/x", nil)
+	if err != nil {
+		t.Fatalf("second send returned error: %v", err)
+	}
+	_ = resp.Body.Close()
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected 2 upstream requests, got %d", got)
+	}
+}
+
+func TestRequestPagedFollowsLinksThroughETagCache(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "test-token")
+	var calls int32
+	var base string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		switch r.URL.Path {
+		case "/items":
+			if r.Header.Get("If-None-Match") == `"p1"` {
+				w.Header().Set("ETag", `"p1"`)
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("ETag", `"p1"`)
+			w.Header().Set("Link", `<`+base+`/items2>; rel="next"`)
+			_, _ = w.Write([]byte(`[{"id":1}]`))
+		case "/items2":
+			if r.Header.Get("If-None-Match") == `"p2"` {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("ETag", `"p2"`)
+			_, _ = w.Write([]byte(`[{"id":2}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	base = srv.URL
+
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 2, maxWait: time.Second, backoffBase: time.Millisecond, networkMaxWait: time.Second}
+	for i := 1; i <= 2; i++ {
+		var out []struct {
+			ID int `json:"id"`
+		}
+		if err := g.requestPaged(context.Background(), "/items", &out); err != nil {
+			t.Fatalf("requestPaged pass %d: %v", i, err)
+		}
+		if len(out) != 2 || out[0].ID != 1 || out[1].ID != 2 {
+			t.Fatalf("requestPaged pass %d: unexpected result %#v", i, out)
+		}
+	}
+	// Pass 1 fetches both pages fresh; pass 2 revalidates both as 304s but must
+	// still stitch the full set together from cache.
+	if got := atomic.LoadInt32(&calls); got != 4 {
+		t.Fatalf("expected 4 upstream requests (2 fresh + 2 revalidations), got %d", got)
 	}
 }

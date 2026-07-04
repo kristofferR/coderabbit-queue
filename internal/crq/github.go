@@ -46,6 +46,121 @@ type GitHub struct {
 	networkMaxWait time.Duration
 	acctTypeMu     sync.Mutex
 	acctType       map[string]string // scope login -> "org:" | "user:" search qualifier
+	etagMu         sync.Mutex
+	etags          map[string]*etagEntry // GET URL -> last 200 response, replayed on 304
+}
+
+// etagEntry is a cached 200 GET response. GitHub serves 304 Not Modified for a
+// matching If-None-Match without charging the request against the REST quota,
+// which is what keeps long-running poll loops (crq loop, autoreview) from
+// draining the shared 5000/hr limit.
+type etagEntry struct {
+	etag   string
+	body   []byte
+	header http.Header
+}
+
+// maxETagEntries bounds the per-process cache; polling workloads touch a small,
+// stable set of URLs so anything past this is churn, not working set.
+const maxETagEntries = 1024
+
+// maxETagBody skips caching oversized responses (they'd mostly be one-off blob
+// fetches, and replaying them buys nothing worth the memory).
+const maxETagBody = 1 << 20
+
+func (g *GitHub) etagLookup(url string) *etagEntry {
+	g.etagMu.Lock()
+	defer g.etagMu.Unlock()
+	return g.etags[url]
+}
+
+func (g *GitHub) etagStore(url string, entry *etagEntry) {
+	g.etagMu.Lock()
+	defer g.etagMu.Unlock()
+	if g.etags == nil {
+		g.etags = make(map[string]*etagEntry)
+	}
+	if _, exists := g.etags[url]; !exists && len(g.etags) >= maxETagEntries {
+		for k := range g.etags { // evict an arbitrary entry to stay bounded
+			delete(g.etags, k)
+			break
+		}
+	}
+	g.etags[url] = entry
+}
+
+// replay converts a cached entry back into the 200 response the caller would
+// have seen, merging fresh 304 metadata so Link-header pagination observes
+// revalidated page boundaries.
+func (e *etagEntry) replay(req *http.Request, revalidated http.Header) *http.Response {
+	header := http.Header{}
+	if e.header != nil {
+		header = e.header.Clone()
+	}
+	for k, values := range revalidated {
+		key := http.CanonicalHeaderKey(k)
+		if shouldMergeRevalidatedHeader(key) {
+			header[key] = append([]string(nil), values...)
+		}
+	}
+	e.header = header.Clone()
+	if etag := e.header.Get("ETag"); etag != "" {
+		e.etag = etag
+	}
+	return &http.Response{
+		Status:        "200 OK (etag cache)",
+		StatusCode:    http.StatusOK,
+		Header:        header,
+		Body:          io.NopCloser(bytes.NewReader(e.body)),
+		ContentLength: int64(len(e.body)),
+		Request:       req,
+	}
+}
+
+func shouldMergeRevalidatedHeader(key string) bool {
+	switch key {
+	case "Cache-Control", "Content-Location", "Date", "ETag", "Expires", "Last-Modified", "Link", "Vary":
+		return true
+	}
+	return strings.HasPrefix(key, "X-Ratelimit-")
+}
+
+type prefixReadCloser struct {
+	reader io.Reader
+	closer io.Closer
+}
+
+func (r *prefixReadCloser) Read(p []byte) (int, error) {
+	return r.reader.Read(p)
+}
+
+func (r *prefixReadCloser) Close() error {
+	return r.closer.Close()
+}
+
+// cacheGET reads a fresh 200 GET body, remembers it under its ETag, and hands
+// the caller an equivalent response. Responses without an ETag or over the size
+// cap pass through uncached.
+func (g *GitHub) cacheGET(url string, resp *http.Response) (*http.Response, error) {
+	body := resp.Body
+	b, err := io.ReadAll(io.LimitReader(body, maxETagBody+1))
+	if err != nil {
+		_ = body.Close()
+		return nil, err
+	}
+	if len(b) > maxETagBody {
+		resp.Body = &prefixReadCloser{
+			reader: io.MultiReader(bytes.NewReader(b), body),
+			closer: body,
+		}
+		return resp, nil
+	}
+	_ = body.Close()
+	if etag := resp.Header.Get("ETag"); etag != "" && len(b) <= maxETagBody {
+		g.etagStore(url, &etagEntry{etag: etag, body: b, header: resp.Header.Clone()})
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(b))
+	return resp, nil
 }
 
 // lookupToken resolves a GitHub token from the environment or the gh CLI. gh can
@@ -361,6 +476,13 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 	attempt := 0    // bounded retries for 5xx + rate limits
 	netAttempt := 0 // consecutive transient-network retries
 	var offlineSince time.Time
+	// Conditional GETs: replaying a cached body on 304 keeps repeated polls of
+	// unchanged resources free of REST-quota cost.
+	conditional := method == http.MethodGet && body == nil
+	var cached *etagEntry
+	if conditional {
+		cached = g.etagLookup(fullURL)
+	}
 	for {
 		var rdr io.Reader
 		if body != nil {
@@ -373,6 +495,9 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 		g.decorate(req)
 		if body != nil {
 			req.Header.Set("Content-Type", "application/json")
+		}
+		if cached != nil {
+			req.Header.Set("If-None-Match", cached.etag)
 		}
 		resp, err := g.httpClient.Do(req)
 		if err != nil {
@@ -473,7 +598,15 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 			}
 			return nil, &APIError{Method: method, URL: fullURL, Status: resp.StatusCode, Body: string(b)}
 		}
+		if resp.StatusCode == http.StatusNotModified && cached != nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			_ = resp.Body.Close()
+			return cached.replay(req, resp.Header), nil
+		}
 		if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
+			if conditional && resp.StatusCode == http.StatusOK {
+				return g.cacheGET(fullURL, resp)
+			}
 			return resp, nil
 		}
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
