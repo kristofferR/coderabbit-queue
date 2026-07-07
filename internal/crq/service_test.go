@@ -419,6 +419,23 @@ func TestInflightStatusToleratesBotSuffix(t *testing.T) {
 			t.Fatalf("expected suffixed bot rate-limit comment to requeue with blocked state, got %#v", status)
 		}
 	})
+
+	t.Run("reviews-paused-note-is-not-completion", func(t *testing.T) {
+		gh := newFakeGitHub()
+		comment := IssueComment{Body: "> [!NOTE]\n> ## Reviews paused\n> It looks like this branch is under active development. CodeRabbit has automatically paused this review. Use `@coderabbitai resume` to resume automatic reviews.", UpdatedAt: now.Add(time.Second)}
+		comment.User.Login = "coderabbitai[bot]"
+		gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
+		svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+		status, err := svc.inflightStatus(context.Background(), baseState)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The auto-pause note is not a review of the fired head — the round must keep
+		// waiting for the real review rather than falsely completing with no findings.
+		if status.Done || status.Requeue {
+			t.Fatalf("expected reviews-paused note to leave the in-flight round pending, got %#v", status)
+		}
+	})
 }
 
 func TestRenewLeaderRespectsLiveLease(t *testing.T) {
