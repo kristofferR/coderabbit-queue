@@ -72,12 +72,13 @@ type InFlight struct {
 }
 
 type FeedbackWait struct {
-	Repo      string    `json:"repo"`
-	PR        int       `json:"pr"`
-	Head      string    `json:"head"`
-	StartedAt time.Time `json:"started_at"`
-	Deadline  time.Time `json:"deadline"`
-	ByHost    string    `json:"by_host,omitempty"`
+	Repo           string    `json:"repo"`
+	PR             int       `json:"pr"`
+	Head           string    `json:"head"`
+	StartedAt      time.Time `json:"started_at"`
+	Deadline       time.Time `json:"deadline"`
+	FiredCommentID int64     `json:"fired_comment_id,omitempty"`
+	ByHost         string    `json:"by_host,omitempty"`
 }
 
 type HistoryItem struct {

@@ -24,6 +24,7 @@ type GitHubAPI interface {
 	ListIssueComments(context.Context, string, int) ([]IssueComment, error)
 	ListIssueCommentsPage(context.Context, string, int, int, int) ([]IssueComment, error)
 	ListReviewComments(context.Context, string, int) ([]ReviewComment, error)
+	ListIssueReactions(context.Context, string, int) ([]Reaction, error)
 	ListCommentReactions(context.Context, string, int64) ([]Reaction, error)
 	PostIssueComment(context.Context, string, int, string) (IssueComment, error)
 	DeleteIssueComment(context.Context, string, int64) error
@@ -421,7 +422,7 @@ func (s *Service) markReviewPosted(ctx context.Context, token string, item Queue
 		if st.AwaitingFeedback == nil {
 			st.AwaitingFeedback = map[string]FeedbackWait{}
 		}
-		st.AwaitingFeedback[key] = s.newFeedbackWait(item.Repo, item.PR, head, firedAt)
+		st.AwaitingFeedback[key] = s.newFeedbackWait(item.Repo, item.PR, head, firedAt, commentID)
 		st.History = append([]HistoryItem{{
 			Repo:   item.Repo,
 			PR:     item.PR,
@@ -619,7 +620,7 @@ func (s *Service) recordExistingReviewPosted(ctx context.Context, item QueueItem
 		if st.AwaitingFeedback == nil {
 			st.AwaitingFeedback = map[string]FeedbackWait{}
 		}
-		st.AwaitingFeedback[key] = s.newFeedbackWait(item.Repo, item.PR, head, firedAt)
+		st.AwaitingFeedback[key] = s.newFeedbackWait(item.Repo, item.PR, head, firedAt, commentID)
 		st.History = append([]HistoryItem{{
 			Repo:   item.Repo,
 			PR:     item.PR,

@@ -844,8 +844,10 @@ type ReviewComment struct {
 }
 
 type Reaction struct {
-	ID   int64 `json:"id"`
-	User struct {
+	ID        int64     `json:"id"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+	User      struct {
 		Login string `json:"login"`
 	} `json:"user"`
 }
@@ -926,6 +928,12 @@ func (g *GitHub) ListReviewComments(ctx context.Context, repo string, pr int) ([
 func (g *GitHub) ListReviews(ctx context.Context, repo string, pr int) ([]Review, error) {
 	var out []Review
 	err := g.requestPaged(ctx, fmt.Sprintf("/repos/%s/pulls/%d/reviews?per_page=100", repoPath(repo), pr), &out)
+	return out, err
+}
+
+func (g *GitHub) ListIssueReactions(ctx context.Context, repo string, issue int) ([]Reaction, error) {
+	var out []Reaction
+	err := g.requestPaged(ctx, fmt.Sprintf("/repos/%s/issues/%d/reactions?per_page=100", repoPath(repo), issue), &out)
 	return out, err
 }
 

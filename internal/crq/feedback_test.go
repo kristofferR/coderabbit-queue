@@ -538,6 +538,258 @@ func TestFeedbackSkipsConfiguredBotIssueCommentsAcrossSuffix(t *testing.T) {
 	}
 }
 
+func TestFeedbackMarksCurrentNoActionCompletionCommentReviewed(t *testing.T) {
+	ctx := context.Background()
+	started := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	cfg := Config{
+		Bot:          "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]"},
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("o/repo", 1)] = pull
+	comment := IssueComment{
+		ID:        1,
+		Body:      "No actionable comments were generated in the recent review. 🎉",
+		CreatedAt: started.Add(time.Minute),
+		UpdatedAt: started.Add(time.Minute),
+	}
+	comment.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		key := QueueKey("o/repo", 1)
+		st.Fired[key] = "abcdef123"
+		st.AwaitingFeedback[key] = FeedbackWait{
+			Repo:      "o/repo",
+			PR:        1,
+			Head:      "abcdef123",
+			StartedAt: started,
+			Deadline:  started.Add(time.Hour),
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	report, err := svc.Feedback(ctx, "o/repo", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Converged || report.Status != "converged" {
+		t.Fatalf("expected completion comment to converge the round, got %#v", report)
+	}
+	if !report.ReviewedBy["coderabbitai[bot]"] {
+		t.Fatalf("expected CodeRabbit to be marked reviewed, ReviewedBy=%#v", report.ReviewedBy)
+	}
+	if len(report.Findings) != 0 {
+		t.Fatalf("completion comment must not become a finding: %#v", report.Findings)
+	}
+}
+
+func TestFeedbackIgnoresStaleNoActionCompletionComment(t *testing.T) {
+	ctx := context.Background()
+	started := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	cfg := Config{
+		Bot:          "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]"},
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("o/repo", 1)] = pull
+	comment := IssueComment{
+		ID:        1,
+		Body:      "No actionable comments were generated in the recent review. 🎉",
+		CreatedAt: started.Add(-time.Minute),
+		UpdatedAt: started.Add(-time.Minute),
+	}
+	comment.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		key := QueueKey("o/repo", 1)
+		st.Fired[key] = "abcdef123"
+		st.AwaitingFeedback[key] = FeedbackWait{
+			Repo:      "o/repo",
+			PR:        1,
+			Head:      "abcdef123",
+			StartedAt: started,
+			Deadline:  started.Add(time.Hour),
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	report, err := svc.Feedback(ctx, "o/repo", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Converged || report.Status != "waiting" || report.ReviewedBy["coderabbitai[bot]"] {
+		t.Fatalf("stale completion comment must not satisfy the current round, got %#v", report)
+	}
+}
+
+func TestFeedbackDoesNotUseNoActionCompletionWhileCodexRequiredWithoutThumbsUp(t *testing.T) {
+	ctx := context.Background()
+	started := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	cfg := Config{
+		Bot:          "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("o/repo", 1)] = pull
+	comment := IssueComment{
+		ID:        1,
+		Body:      "No actionable comments were generated in the recent review. 🎉",
+		CreatedAt: started.Add(time.Minute),
+		UpdatedAt: started.Add(time.Minute),
+	}
+	comment.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		key := QueueKey("o/repo", 1)
+		st.Fired[key] = "abcdef123"
+		st.AwaitingFeedback[key] = FeedbackWait{
+			Repo:      "o/repo",
+			PR:        1,
+			Head:      "abcdef123",
+			StartedAt: started,
+			Deadline:  started.Add(time.Hour),
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	report, err := svc.Feedback(ctx, "o/repo", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Converged || report.Status != "waiting" {
+		t.Fatalf("expected to keep waiting for Codex without a thumbs-up, got %#v", report)
+	}
+	if report.ReviewedBy["coderabbitai[bot]"] || report.ReviewedBy["chatgpt-codex-connector[bot]"] {
+		t.Fatalf("no-action comment must not satisfy the round while Codex is active without +1: %#v", report.ReviewedBy)
+	}
+}
+
+func TestFeedbackUsesNoActionCompletionAfterCodexThumbsUp(t *testing.T) {
+	ctx := context.Background()
+	started := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	cfg := Config{
+		Bot:          "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("o/repo", 1)] = pull
+	comment := IssueComment{
+		ID:        1,
+		Body:      "No actionable comments were generated in the recent review. 🎉",
+		CreatedAt: started.Add(time.Minute),
+		UpdatedAt: started.Add(time.Minute),
+	}
+	comment.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
+	thumb := Reaction{Content: "+1", CreatedAt: started.Add(2 * time.Minute)}
+	thumb.User.Login = "chatgpt-codex-connector[bot]"
+	gh.reactions[99] = []Reaction{thumb}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		key := QueueKey("o/repo", 1)
+		st.Fired[key] = "abcdef123"
+		st.AwaitingFeedback[key] = FeedbackWait{
+			Repo:           "o/repo",
+			PR:             1,
+			Head:           "abcdef123",
+			StartedAt:      started,
+			Deadline:       started.Add(time.Hour),
+			FiredCommentID: 99,
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	report, err := svc.Feedback(ctx, "o/repo", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Converged || report.Status != "converged" {
+		t.Fatalf("expected CodeRabbit no-action plus Codex +1 to converge, got %#v", report)
+	}
+	if !report.ReviewedBy["coderabbitai[bot]"] || !report.ReviewedBy["chatgpt-codex-connector[bot]"] {
+		t.Fatalf("expected both bots reviewed, ReviewedBy=%#v", report.ReviewedBy)
+	}
+}
+
+func TestLoopConvergesOnCurrentNoActionCompletionComment(t *testing.T) {
+	ctx := context.Background()
+	started := time.Now().UTC().Add(-2 * time.Millisecond)
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		RequiredBots:        []string{"coderabbitai[bot]"},
+		PollInterval:        time.Nanosecond,
+		FeedbackWaitTimeout: time.Millisecond,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	comment := IssueComment{
+		ID:        1,
+		Body:      "No actionable comments were generated in the recent review. 🎉",
+		CreatedAt: started.Add(500 * time.Microsecond),
+		UpdatedAt: started.Add(500 * time.Microsecond),
+	}
+	comment.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		key := QueueKey("owner/repo", 12)
+		st.Fired[key] = "abcdef123"
+		st.AwaitingFeedback[key] = FeedbackWait{
+			Repo:      "owner/repo",
+			PR:        12,
+			Head:      "abcdef123",
+			StartedAt: started,
+			Deadline:  started.Add(time.Millisecond),
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	report, code, err := svc.Loop(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 || !report.Converged {
+		t.Fatalf("expected loop to stop converged on completion comment, code=%d report=%#v", code, report)
+	}
+}
+
 func TestDedupeFindingsDropsNonActionableBotArtifacts(t *testing.T) {
 	findings := []Finding{
 		{Bot: "coderabbitai", Title: "> Skipped: comment is from another GitHub bot.", Body: "> Skipped: comment is from another GitHub bot.", Source: "review_thread"},

@@ -154,6 +154,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// head: a bot finding posted before this head was committed belongs to an earlier
 	// round and must not trap crq loop on stale, already-addressed feedback. The
 	// head commit time is resolved lazily — only when there's an actionable candidate.
+	completion := s.feedbackCompletionContext(ctx, repo, pr, head)
 	headCutoff := time.Time{}
 	headCutoffLoaded := false
 	headCutoffOf := func() time.Time {
@@ -176,8 +177,19 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		}
 		// Issue comments carry no commit SHA, so a stale completion summary from an
 		// earlier commit must not be treated as a review of the current head — rely on
-		// commit-checked reviews/threads for ReviewedBy instead.
+		// the persisted current-round feedback wait before treating a configured-bot
+		// no-action summary as the review completion signal.
 		if s.isConfiguredBot(comment.User.Login) {
+			if completion.OK && isNoActionReviewCompletion(comment.Body) && notBefore(issueCommentTime(comment), completion.Cutoff) {
+				codexOK, err := s.codexInactiveOrThumbed(ctx, repo, pr, head, completion, issueComments, reviews, report.ReviewedBy)
+				if err != nil {
+					return report, err
+				}
+				if !codexOK {
+					continue
+				}
+				markReviewed(report.ReviewedBy, comment.User.Login)
+			}
 			continue
 		}
 		if isNonActionableText(comment.Body) {
@@ -220,6 +232,102 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		report.Status = "waiting"
 	}
 	return report, nil
+}
+
+type feedbackCompletionContext struct {
+	Cutoff         time.Time
+	FiredCommentID int64
+	OK             bool
+}
+
+func (s *Service) feedbackCompletionContext(ctx context.Context, repo string, pr int, head string) feedbackCompletionContext {
+	state, _, err := s.store.Load(ctx)
+	if err != nil {
+		return feedbackCompletionContext{}
+	}
+	key := QueueKey(repo, pr)
+	if wait := state.AwaitingFeedback[key]; wait.Head == head && !wait.StartedAt.IsZero() {
+		firedCommentID := wait.FiredCommentID
+		if firedCommentID == 0 {
+			firedCommentID = feedbackWaitFiredCommentID(state, repo, pr, head)
+		}
+		return feedbackCompletionContext{Cutoff: wait.StartedAt.UTC(), FiredCommentID: firedCommentID, OK: true}
+	}
+	if state.InFlight != nil && state.InFlight.Repo == repo && state.InFlight.PR == pr && state.InFlight.Head == head && state.InFlight.FiredAt != nil {
+		return feedbackCompletionContext{Cutoff: state.InFlight.FiredAt.UTC(), FiredCommentID: state.InFlight.FiredCommentID, OK: true}
+	}
+	for _, item := range state.History {
+		if NormalizeRepo(item.Repo) == repo && item.PR == pr && item.Commit == head && !item.At.IsZero() {
+			return feedbackCompletionContext{Cutoff: item.At.UTC(), OK: true}
+		}
+	}
+	return feedbackCompletionContext{}
+}
+
+func (s *Service) codexInactiveOrThumbed(ctx context.Context, repo string, pr int, head string, completion feedbackCompletionContext, issueComments []IssueComment, reviews []Review, reviewedBy map[string]bool) (bool, error) {
+	codexActive := hasCodexBot(s.cfg.RequiredBots)
+	codexReviewed := reviewedByBot(reviewedBy, "chatgpt-codex-connector[bot]")
+	for _, review := range reviews {
+		if !isCodexBot(review.User.Login) {
+			continue
+		}
+		if head != "" && review.CommitID != "" && strings.HasPrefix(review.CommitID, head) {
+			codexActive = true
+			codexReviewed = true
+			break
+		}
+		if review.CommitID == "" && !review.SubmittedAt.IsZero() && notBefore(review.SubmittedAt, completion.Cutoff) {
+			codexActive = true
+			codexReviewed = true
+			break
+		}
+	}
+	if codexReviewed {
+		return true, nil
+	}
+	if !codexActive {
+		for _, comment := range issueComments {
+			if isCodexBot(comment.User.Login) && !isNonActionableText(comment.Body) && notBefore(issueCommentTime(comment), completion.Cutoff) {
+				codexActive = true
+				break
+			}
+		}
+	}
+	if !codexActive {
+		return true, nil
+	}
+	if ok, err := s.codexThumbedUp(ctx, repo, pr, completion); err != nil {
+		return false, err
+	} else if ok {
+		markReviewed(reviewedBy, "chatgpt-codex-connector[bot]")
+		return true, nil
+	}
+	return false, nil
+}
+
+func (s *Service) codexThumbedUp(ctx context.Context, repo string, pr int, completion feedbackCompletionContext) (bool, error) {
+	reactions, err := s.gh.ListIssueReactions(ctx, repo, pr)
+	if err != nil {
+		return false, err
+	}
+	for _, reaction := range reactions {
+		if isCurrentCodexThumbsUp(reaction, completion.Cutoff) {
+			return true, nil
+		}
+	}
+	if completion.FiredCommentID == 0 {
+		return false, nil
+	}
+	reactions, err = s.gh.ListCommentReactions(ctx, repo, completion.FiredCommentID)
+	if err != nil {
+		return false, err
+	}
+	for _, reaction := range reactions {
+		if isCurrentCodexThumbsUp(reaction, completion.Cutoff) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport, int, error) {
@@ -346,18 +454,19 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 	}
 }
 
-func (s *Service) newFeedbackWait(repo string, pr int, head string, started time.Time) FeedbackWait {
+func (s *Service) newFeedbackWait(repo string, pr int, head string, started time.Time, firedCommentID int64) FeedbackWait {
 	started = started.UTC()
 	if started.IsZero() {
 		started = time.Now().UTC()
 	}
 	return FeedbackWait{
-		Repo:      NormalizeRepo(repo),
-		PR:        pr,
-		Head:      head,
-		StartedAt: started,
-		Deadline:  started.Add(s.cfg.FeedbackWaitTimeout),
-		ByHost:    s.cfg.Host,
+		Repo:           NormalizeRepo(repo),
+		PR:             pr,
+		Head:           head,
+		StartedAt:      started,
+		Deadline:       started.Add(s.cfg.FeedbackWaitTimeout),
+		FiredCommentID: firedCommentID,
+		ByHost:         s.cfg.Host,
 	}
 }
 
@@ -371,6 +480,7 @@ func (s *Service) ensureFeedbackWait(ctx context.Context, repo string, pr int, h
 		if st.AwaitingFeedback == nil {
 			st.AwaitingFeedback = map[string]FeedbackWait{}
 		}
+		firedCommentID := feedbackWaitFiredCommentID(*st, repo, pr, head)
 		if existing := st.AwaitingFeedback[key]; existing.Head == head {
 			wait = existing
 			if wait.StartedAt.IsZero() {
@@ -387,6 +497,10 @@ func (s *Service) ensureFeedbackWait(ctx context.Context, repo string, pr int, h
 				wait.ByHost = s.cfg.Host
 				changed = true
 			}
+			if wait.FiredCommentID == 0 && firedCommentID != 0 {
+				wait.FiredCommentID = firedCommentID
+				changed = true
+			}
 			if changed {
 				st.AwaitingFeedback[key] = wait
 				st.Fired[key] = head
@@ -395,7 +509,7 @@ func (s *Service) ensureFeedbackWait(ctx context.Context, repo string, pr int, h
 			return ErrNoChange
 		}
 		started := feedbackWaitStart(*st, repo, pr, head, time.Now().UTC())
-		wait = s.newFeedbackWait(repo, pr, head, started)
+		wait = s.newFeedbackWait(repo, pr, head, started, firedCommentID)
 		st.AwaitingFeedback[key] = wait
 		st.Fired[key] = head
 		changed = true
@@ -408,6 +522,13 @@ func (s *Service) ensureFeedbackWait(ctx context.Context, repo string, pr int, h
 		s.sync(ctx, state)
 	}
 	return wait, nil
+}
+
+func feedbackWaitFiredCommentID(st State, repo string, pr int, head string) int64 {
+	if st.InFlight != nil && st.InFlight.Repo == repo && st.InFlight.PR == pr && st.InFlight.Head == head {
+		return st.InFlight.FiredCommentID
+	}
+	return 0
 }
 
 func feedbackWaitStart(st State, repo string, pr int, head string, fallback time.Time) time.Time {
@@ -1167,6 +1288,26 @@ func needsConfiguredBotReview(reviewedBy map[string]bool, login string) bool {
 	return false
 }
 
+func isCodexBot(login string) bool {
+	return normalizeBotName(login) == "chatgpt-codex-connector"
+}
+
+func hasCodexBot(bots []string) bool {
+	for _, bot := range bots {
+		if isCodexBot(bot) {
+			return true
+		}
+	}
+	return false
+}
+
+func isCurrentCodexThumbsUp(reaction Reaction, since time.Time) bool {
+	if !isCodexBot(reaction.User.Login) || reaction.Content != "+1" {
+		return false
+	}
+	return reaction.CreatedAt.IsZero() || notBefore(reaction.CreatedAt, since)
+}
+
 // markReviewed flips the configured required-bot key that login matches to true,
 // tolerating the "[bot]" suffix difference between REST ("coderabbitai[bot]") and
 // GraphQL ("coderabbitai") logins. It updates the existing key rather than
@@ -1180,6 +1321,16 @@ func markReviewed(reviewedBy map[string]bool, login string) {
 			return
 		}
 	}
+}
+
+func reviewedByBot(reviewedBy map[string]bool, login string) bool {
+	norm := normalizeBotName(login)
+	for bot, reviewed := range reviewedBy {
+		if reviewed && (bot == login || normalizeBotName(bot) == norm) {
+			return true
+		}
+	}
+	return false
 }
 
 func severityOf(text string) string {
@@ -1313,6 +1464,17 @@ func isNonActionableText(text string) bool {
 		}
 	}
 	return false
+}
+
+func isNoActionReviewCompletion(text string) bool {
+	return strings.Contains(strings.ToLower(text), "no actionable comments were generated in the recent review")
+}
+
+func issueCommentTime(comment IssueComment) time.Time {
+	if comment.UpdatedAt.After(comment.CreatedAt) {
+		return comment.UpdatedAt.UTC()
+	}
+	return comment.CreatedAt.UTC()
 }
 
 func shortOID(oid string) string {

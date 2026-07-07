@@ -18,6 +18,7 @@ type fakeGitHub struct {
 	reviews        map[string][]Review
 	comments       map[string][]IssueComment
 	reviewComments map[string][]ReviewComment
+	issueReactions map[string][]Reaction
 	reactions      map[int64][]Reaction
 	posted         []string
 	deleted        []int64
@@ -123,6 +124,7 @@ func newFakeGitHub() *fakeGitHub {
 		reviews:        map[string][]Review{},
 		comments:       map[string][]IssueComment{},
 		reviewComments: map[string][]ReviewComment{},
+		issueReactions: map[string][]Reaction{},
 		reactions:      map[int64][]Reaction{},
 	}
 }
@@ -164,6 +166,12 @@ func (f *fakeGitHub) ListReviewComments(_ context.Context, repo string, pr int) 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]ReviewComment(nil), f.reviewComments[fakeKey(repo, pr)]...), nil
+}
+
+func (f *fakeGitHub) ListIssueReactions(_ context.Context, repo string, pr int) ([]Reaction, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]Reaction(nil), f.issueReactions[fakeKey(repo, pr)]...), nil
 }
 
 func (f *fakeGitHub) ListCommentReactions(_ context.Context, _ string, id int64) ([]Reaction, error) {
