@@ -1044,7 +1044,7 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 		}
 	}
 	for _, comment := range comments {
-		if s.isConfiguredBot(comment.User.Login) && comment.ID != inf.FiredCommentID && notBefore(comment.UpdatedAt, *inf.FiredAt) && !s.isRateLimited(comment.Body) {
+		if s.isConfiguredBot(comment.User.Login) && comment.ID != inf.FiredCommentID && notBefore(comment.UpdatedAt, *inf.FiredAt) && !s.isRateLimited(comment.Body) && !s.isReviewsPaused(comment.Body) {
 			return inflightCheck{Done: true, Reason: doneBotComment, FeedbackComplete: s.requiredFeedbackComplete(inf, reviews, comments)}, nil
 		}
 	}
@@ -1298,6 +1298,22 @@ func (s *Service) isRateLimited(body string) bool {
 	return strings.Contains(l, "currently rate limited") ||
 		strings.Contains(l, "rate limited under") ||
 		strings.Contains(l, "fair usage limits policy")
+}
+
+// isReviewsPaused reports whether a CodeRabbit comment is the "Reviews paused"
+// auto-pause notice. CodeRabbit posts this when a branch is under active
+// development (an influx of new commits) and auto_pause_after_reviewed_commits
+// kicks in. It acknowledges the branch but is not a review of the fired head, so
+// — like a rate-limit notice — it must not be mistaken for a completed review
+// round: doing so would falsely converge a loop with zero findings. crq keeps
+// triggering reviews explicitly, and "@coderabbitai review" still produces a
+// single review while auto-review is paused, so the round completes on the real
+// review, not this note.
+func (s *Service) isReviewsPaused(body string) bool {
+	l := strings.ToLower(body)
+	return strings.Contains(l, "reviews paused") ||
+		strings.Contains(l, "automatically paused this review") ||
+		strings.Contains(l, "auto_pause_after_reviewed_commits")
 }
 
 func parseAvailableIn(text string, base time.Time) *time.Time {
