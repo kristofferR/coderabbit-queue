@@ -647,6 +647,8 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 	start := time.Now()
 	enqueued := false
 	var lastLog time.Time
+	var lastFeedbackCheck time.Time
+	feedbackCheckEvery := queuedFeedbackCheckEvery(s.cfg.PollInterval)
 	for {
 		if s.cfg.WaitTimeout > 0 && time.Since(start) > s.cfg.WaitTimeout {
 			return PumpResult{Action: "timeout", Repo: repo, PR: pr}, 2, nil
@@ -659,6 +661,25 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 			enqueued = result.Queued || result.AlreadyQueued
 			if result.Deduped {
 				return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
+			}
+		}
+		if lastFeedbackCheck.IsZero() || time.Since(lastFeedbackCheck) >= feedbackCheckEvery {
+			report, err := s.Feedback(ctx, repo, pr)
+			if err != nil {
+				return PumpResult{}, 1, err
+			}
+			lastFeedbackCheck = time.Now()
+			if len(report.Findings) > 0 {
+				if s.log != nil {
+					s.log.Printf("crq: %s#%d feedback already available on %s; leaving review slot wait", repo, pr, report.Head)
+				}
+				return PumpResult{
+					Action: "deduped",
+					Repo:   repo,
+					PR:     pr,
+					Head:   report.Head,
+					Reason: "feedback already available",
+				}, 3, nil
 			}
 		}
 		result, err := s.Pump(ctx)
@@ -702,6 +723,16 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 		case <-time.After(s.cfg.PollInterval):
 		}
 	}
+}
+
+func queuedFeedbackCheckEvery(poll time.Duration) time.Duration {
+	if poll <= 0 {
+		return 30 * time.Second
+	}
+	if poll < 30*time.Second {
+		return poll
+	}
+	return 30 * time.Second
 }
 
 func (s *Service) Cancel(ctx context.Context, repo string, pr int) error {

@@ -1061,6 +1061,60 @@ func TestLoopResumesAwaitingFeedbackWithoutRefiring(t *testing.T) {
 	}
 }
 
+func TestLoopReturnsFeedbackWhileQueuedBehindBlockedSlot(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		RequiredBots:        []string{"coderabbitai[bot]"},
+		FeedbackBots:        []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
+		ReviewCommand:       "@coderabbitai review",
+		PollInterval:        time.Millisecond,
+		WaitTimeout:         25 * time.Millisecond,
+		FeedbackWaitTimeout: time.Minute,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	headTime := time.Now().UTC().Add(-time.Minute)
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	gc := gitCommit{SHA: pull.Head.SHA}
+	gc.Committer.Date = headTime
+	gh.commits[pull.Head.SHA] = gc
+	comment := IssueComment{
+		ID:        91,
+		Body:      "Actionable finding on the current head",
+		CreatedAt: headTime.Add(time.Second),
+		UpdatedAt: headTime.Add(time.Second),
+	}
+	comment.User.Login = "chatgpt-codex-connector[bot]"
+	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	store := NewMemoryStore(cfg)
+	blockedUntil := time.Now().UTC().Add(time.Hour)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Blocked.BlockedUntil = &blockedUntil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	report, code, err := svc.Loop(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 10 || len(report.Findings) != 1 {
+		t.Fatalf("expected visible feedback to stop the slot wait, code=%d report=%#v", code, report)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("feedback that is already visible must not fire a review, posted=%d", len(gh.posted))
+	}
+}
+
 func TestLoopUsesPersistedFeedbackDeadline(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{
