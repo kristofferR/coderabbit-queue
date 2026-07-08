@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1508,6 +1509,64 @@ func TestWaitReenqueuesAfterClearingStaleInflight(t *testing.T) {
 	}
 	if code != 0 || result.Action != "fired" || result.Head != "abcdef999" {
 		t.Fatalf("expected stale in-flight clear to re-enqueue and fire new head, code=%d result=%#v", code, result)
+	}
+	if len(gh.posted) != 1 {
+		t.Fatalf("expected one review command for the new head, posted=%d", len(gh.posted))
+	}
+}
+
+func TestWaitFiresRealReviewWhenOnlyCarriedThreadVisible(t *testing.T) {
+	// Regression: a freshly pushed head whose only visible feedback is a
+	// carried-over unresolved inline thread from an EARLIER commit must trigger a
+	// real review of the new head, not short-circuit the review-slot wait. Before
+	// the fix, any finding (including such a stale thread) ended the wait with
+	// "feedback already available", so the new head was never actually re-reviewed.
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		RequiredBots:        []string{"coderabbitai[bot]"},
+		ReviewCommand:       "@coderabbitai review",
+		MinInterval:         0,
+		InflightTimeout:     time.Hour,
+		PollInterval:        time.Millisecond,
+		WaitTimeout:         time.Second,
+		FeedbackWaitTimeout: time.Minute,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	headTime := time.Now().UTC().Add(-time.Minute)
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	gc := gitCommit{SHA: pull.Head.SHA}
+	gc.Committer.Date = headTime
+	gh.commits[pull.Head.SHA] = gc
+	// No bot review of the new head; only an unresolved CodeRabbit thread whose
+	// comment was filed on an earlier commit. Feedback surfaces it across commits.
+	threadCreated := headTime.Add(-time.Hour).Format(time.RFC3339)
+	gh.graphQL = func(query string, _ map[string]any, out any) error {
+		if strings.Contains(query, "reviewThreads") {
+			payload := `{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},` +
+				`"nodes":[{"id":"THREAD1","isResolved":false,"isOutdated":false,"path":"a.go","line":1,` +
+				`"comments":{"nodes":[{"databaseId":55,"body":"Carried-over finding","url":"http://x","path":"a.go","line":1,` +
+				`"createdAt":"` + threadCreated + `","author":{"login":"coderabbitai[bot]"},"commit":{"oid":"fedcba9876543210"}}]}}]}}}}`
+			return json.Unmarshal([]byte(payload), out)
+		}
+		return json.Unmarshal([]byte(`{}`), out)
+	}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+
+	result, code, err := service.Wait(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 || result.Action != "fired" {
+		t.Fatalf("a carried-over thread on a freshly pushed head must fire a real review, code=%d result=%#v", code, result)
 	}
 	if len(gh.posted) != 1 {
 		t.Fatalf("expected one review command for the new head, posted=%d", len(gh.posted))

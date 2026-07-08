@@ -669,7 +669,16 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 				return PumpResult{}, 1, err
 			}
 			lastFeedbackCheck = time.Now()
-			if len(report.Findings) > 0 {
+			// Only short-circuit the review-slot wait when the feedback genuinely
+			// belongs to the CURRENT head: either every required bot has reviewed
+			// report.Head, or a finding is head-current (not a carried-over thread).
+			// Feedback surfaces unresolved inline threads (source "review_thread")
+			// across commits even when no bot has reviewed the current head, so
+			// those ALONE must not end the wait — otherwise a freshly pushed head
+			// reports a round without ever being re-reviewed (a "fake" round). When
+			// only stale carried-over threads are visible, fall through and fire a
+			// real review of the new head.
+			if len(report.Findings) > 0 && (allReviewed(report.ReviewedBy) || hasHeadCurrentFinding(report.Findings)) {
 				if s.log != nil {
 					s.log.Printf("crq: %s#%d feedback already available on %s; leaving review slot wait", repo, pr, report.Head)
 				}
@@ -1027,6 +1036,24 @@ func allReviewed(reviewedBy map[string]bool) bool {
 		}
 	}
 	return true
+}
+
+// hasHeadCurrentFinding reports whether any finding genuinely belongs to the
+// current head rather than being a carried-over open inline thread from an
+// earlier commit. Feedback surfaces unresolved threads (source "review_thread")
+// no matter which commit their comments sit on, so on a freshly pushed head the
+// only visible findings can be stale threads that predate it. Every other source
+// is head-current: issue comments are bounded to the head, and review body/prompt
+// findings arrive with a review of the head (which also flips ReviewedBy). Used
+// to gate the "feedback already available" short-circuit so stale threads alone
+// never stand in for a real review of the new head.
+func hasHeadCurrentFinding(findings []Finding) bool {
+	for _, f := range findings {
+		if f.Source != "review_thread" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) inflightStatus(ctx context.Context, state State) (inflightCheck, error) {
