@@ -78,16 +78,33 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	if err != nil {
 		return report, err
 	}
+	// Review-body findings — CodeRabbit's detailed and "Prompt for AI agents"
+	// blocks — carry no per-finding resolution state, only the review's commit.
+	// When inline comments fail to post (GitHub 5xx / code-review limits) that
+	// body block is the ONLY record of the findings, so gating extraction to the
+	// current head silently drops an entire review the moment the head moves on
+	// (a rebase, a squash-merge). Extract instead from each bot's LATEST review
+	// regardless of its commit: a newer review from the same bot supersedes it,
+	// and resolved/outdated inline threads still suppress individual prompt
+	// duplicates below. Convergence (markReviewed) stays gated to a review whose
+	// commit matches the head, so the loop still waits for a real head review.
+	latestReview := map[string]Review{}
 	for _, review := range reviews {
-		if !inBots(extractBots, review.User.Login) {
+		login := review.User.Login
+		if !inBots(extractBots, login) {
 			continue
 		}
 		if head != "" && strings.HasPrefix(review.CommitID, head) {
 			// markReviewed only flips existing ReviewedBy keys (required bots), so a
 			// non-required extract bot reviewing here is a harmless no-op.
-			markReviewed(report.ReviewedBy, review.User.Login)
+			markReviewed(report.ReviewedBy, login)
 		}
-		if head != "" && review.CommitID != "" && !strings.HasPrefix(review.CommitID, head) {
+		if cur, ok := latestReview[login]; !ok || reviewNewer(review, cur) {
+			latestReview[login] = review
+		}
+	}
+	for _, review := range reviews {
+		if lr, ok := latestReview[review.User.Login]; !ok || lr.ID != review.ID {
 			continue
 		}
 		report.Findings = append(report.Findings, parseReviewBodyFindings(review, review.User.Login)...)
@@ -865,6 +882,15 @@ var (
 	boldTitleRE    = regexp.MustCompile(`(?m)^\*\*([^*\n]+)\*\*`)
 	crCommentRE    = regexp.MustCompile(`<!--\s*cr-comment:v1:([a-f0-9]+)\s*-->`)
 )
+
+// reviewNewer reports whether review a supersedes b: later submission wins, and
+// a higher ID breaks ties (equal/zero timestamps) so selection is deterministic.
+func reviewNewer(a, b Review) bool {
+	if !a.SubmittedAt.Equal(b.SubmittedAt) {
+		return a.SubmittedAt.After(b.SubmittedAt)
+	}
+	return a.ID > b.ID
+}
 
 func parseReviewBodyFindings(review Review, bot string) []Finding {
 	body := strings.TrimSpace(review.Body)

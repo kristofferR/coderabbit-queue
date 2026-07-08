@@ -426,6 +426,105 @@ In @README.md:
 	}
 }
 
+func TestFeedbackSurfacesBodyFindingsFromSupersededCommit(t *testing.T) {
+	// Regression: CodeRabbit's inline comments failed to post (GitHub 5xx / code
+	// review limits), so 2 findings exist ONLY in the review body's prompt block,
+	// on a commit that is no longer the head (the branch was rebased / squash-
+	// merged after the review). Gating body extraction to the head silently drops
+	// the whole review; crq must still surface those findings since no newer
+	// CodeRabbit review supersedes them.
+	cfg := Config{
+		Bot:          "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]"},
+		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, extraFeedbackBots),
+	}
+	gh := newFakeGitHub()
+	head := "9999999999999999"
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = head
+	gh.pulls[fakeKey("o/repo", 5)] = pull
+
+	review := Review{
+		ID: 7,
+		Body: `**Actionable comments posted: 2**
+<details>
+<summary>🤖 Prompt for all review comments with AI agents</summary>
+
+` + "```" + `
+Verify each finding against current code.
+
+Inline comments:
+In ` + "`@src/app.ts`" + `:
+- Around line 12-14: The parser accepts stale state. Re-read the latest state.
+- Around line 40-42: Validate the HTTP status before decoding the body.
+` + "```" + `
+</details>`,
+		// Reviewed an earlier commit; the head has since moved on.
+		CommitID:    "1111111111111111",
+		SubmittedAt: time.Now().UTC().Add(-time.Hour),
+	}
+	review.User.Login = "coderabbitai[bot]"
+	gh.reviews[fakeKey("o/repo", 5)] = []Review{review}
+
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+	rep, err := svc.Feedback(context.Background(), "o/repo", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Findings) != 2 {
+		t.Fatalf("expected 2 body findings from the superseded-commit review, got %d: %#v", len(rep.Findings), rep.Findings)
+	}
+	// The review never landed on the head, so convergence must still wait.
+	if rep.Converged {
+		t.Fatal("must not converge: CodeRabbit has not reviewed the current head")
+	}
+	if reviewed := rep.ReviewedBy["coderabbitai[bot]"]; reviewed {
+		t.Fatalf("CodeRabbit must not be marked reviewed for a non-head commit, ReviewedBy=%#v", rep.ReviewedBy)
+	}
+}
+
+func TestFeedbackNewerHeadReviewSupersedesOldBodyFindings(t *testing.T) {
+	// The companion to the above: once CodeRabbit re-reviews the current head and
+	// finds nothing (empty body), its newer review supersedes the older body
+	// findings so the loop can converge instead of resurfacing addressed items.
+	cfg := Config{
+		Bot:          "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]"},
+		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, extraFeedbackBots),
+	}
+	gh := newFakeGitHub()
+	head := "9999999999999999"
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = head
+	gh.pulls[fakeKey("o/repo", 5)] = pull
+
+	old := Review{
+		ID: 7,
+		Body: "**Actionable comments posted: 1**\n<details>\n<summary>🤖 Prompt for all review comments with AI agents</summary>\n\n" +
+			"```\nIn `@src/app.ts`:\n- Around line 12-14: Stale state.\n```\n</details>",
+		CommitID:    "1111111111111111",
+		SubmittedAt: time.Now().UTC().Add(-time.Hour),
+	}
+	old.User.Login = "coderabbitai[bot]"
+	fresh := Review{ID: 9, Body: "", CommitID: head, SubmittedAt: time.Now().UTC()}
+	fresh.User.Login = "coderabbitai[bot]"
+	gh.reviews[fakeKey("o/repo", 5)] = []Review{old, fresh}
+
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+	rep, err := svc.Feedback(context.Background(), "o/repo", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Findings) != 0 {
+		t.Fatalf("newer head review should supersede the old body findings, got %#v", rep.Findings)
+	}
+	if !rep.Converged {
+		t.Fatalf("should converge: fresh head review is clean, ReviewedBy=%#v", rep.ReviewedBy)
+	}
+}
+
 func TestThreadFindingsSurfacesUnresolvedAcrossCommits(t *testing.T) {
 	bots := botSet([]string{"coderabbitai[bot]"})
 	mk := func(resolved, outdated bool, oid string) reviewThread {
