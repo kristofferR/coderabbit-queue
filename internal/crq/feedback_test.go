@@ -73,7 +73,10 @@ func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 	// A re-review with nothing new to say produces no review object: CodeRabbit
 	// only replies "Review finished" to the command. That reply must satisfy
 	// ReviewedBy when crq state proves the command was fired for this head —
-	// otherwise the loop times out on a complete round.
+	// otherwise the loop times out on a complete round. It only counts when the
+	// bot has actually reviewed the PR before: on a never-reviewed PR the same
+	// ack can arrive seconds after the trigger while the real review is still
+	// queued on CodeRabbit's side.
 	cfg := Config{
 		Bot:               "coderabbitai[bot]",
 		RequiredBots:      []string{"coderabbitai[bot]"},
@@ -86,7 +89,7 @@ func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 	head := sha[:9]
 	firedAt := time.Now().UTC().Add(-10 * time.Minute)
 	completion := "<!-- This is an auto-generated reply by CodeRabbit -->\n✅ Action performed\n\nReview finished."
-	setup := func(replyAt time.Time, replyBody string, seedHistory bool) *Service {
+	setup := func(replyAt time.Time, replyBody string, seedHistory, priorReview bool) *Service {
 		gh := newFakeGitHub()
 		var pull Pull
 		pull.State = "open"
@@ -97,6 +100,14 @@ func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 		reply := IssueComment{ID: 2, Body: replyBody, CreatedAt: replyAt, UpdatedAt: replyAt}
 		reply.User.Login = "coderabbitai[bot]"
 		gh.comments[fakeKey("o/repo", 3)] = []IssueComment{trigger, reply}
+		if priorReview {
+			// A no-findings re-review presupposes an earlier review of the PR
+			// (on some older commit); without one the completion reply must
+			// not stand in for a review (covered by the dedicated case below).
+			prior := Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour)}
+			prior.User.Login = "coderabbitai[bot]"
+			gh.reviews[fakeKey("o/repo", 3)] = []Review{prior}
+		}
 		store := NewMemoryStore(cfg)
 		if seedHistory {
 			if _, err := store.Update(context.Background(), func(st *State) error {
@@ -109,7 +120,7 @@ func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 		return NewService(cfg, gh, store, nil)
 	}
 
-	rep, err := setup(firedAt.Add(5*time.Second), completion, true).Feedback(context.Background(), "o/repo", 3)
+	rep, err := setup(firedAt.Add(5*time.Second), completion, true, true).Feedback(context.Background(), "o/repo", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +129,7 @@ func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 	}
 
 	// A reply older than the fire belongs to an earlier round.
-	rep, err = setup(firedAt.Add(-time.Minute), completion, true).Feedback(context.Background(), "o/repo", 3)
+	rep, err = setup(firedAt.Add(-time.Minute), completion, true, true).Feedback(context.Background(), "o/repo", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +139,7 @@ func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 
 	// Without a state anchor tying a fire to this head, issue comments never
 	// satisfy ReviewedBy (the pre-existing rule).
-	rep, err = setup(firedAt.Add(5*time.Second), completion, false).Feedback(context.Background(), "o/repo", 3)
+	rep, err = setup(firedAt.Add(5*time.Second), completion, false, true).Feedback(context.Background(), "o/repo", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +148,7 @@ func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 	}
 
 	// A rate-limit reply is not a completion.
-	rep, err = setup(firedAt.Add(5*time.Second), "⚠️ rate limited by coderabbit.ai — please wait", true).Feedback(context.Background(), "o/repo", 3)
+	rep, err = setup(firedAt.Add(5*time.Second), "⚠️ rate limited by coderabbit.ai — please wait", true, true).Feedback(context.Background(), "o/repo", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +158,7 @@ func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 
 	// An acknowledgement/progress reply without the completion marker is not a
 	// completion either — the review is still running.
-	rep, err = setup(firedAt.Add(5*time.Second), "<!-- This is an auto-generated reply by CodeRabbit -->\n✅ Action performed\n\nFull review triggered.", true).Feedback(context.Background(), "o/repo", 3)
+	rep, err = setup(firedAt.Add(5*time.Second), "<!-- This is an auto-generated reply by CodeRabbit -->\n✅ Action performed\n\nFull review triggered.", true, true).Feedback(context.Background(), "o/repo", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,8 +166,19 @@ func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 		t.Fatalf("an ack reply without the completion marker must not satisfy the configured bot, got %#v", rep)
 	}
 
+	// A completion reply on a PR the bot has never reviewed is CodeRabbit
+	// racing its own scheduler (instant "Review finished" ack, real review
+	// still to come) — it must not converge the round.
+	rep, err = setup(firedAt.Add(5*time.Second), completion, true, false).Feedback(context.Background(), "o/repo", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.ReviewedBy["coderabbitai[bot]"] || rep.Converged {
+		t.Fatalf("a completion reply without any prior review must not satisfy the configured bot, got %#v", rep)
+	}
+
 	cfg.CompletionMarker = ""
-	rep, err = setup(firedAt.Add(5*time.Second), completion, true).Feedback(context.Background(), "o/repo", 3)
+	rep, err = setup(firedAt.Add(5*time.Second), completion, true, true).Feedback(context.Background(), "o/repo", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,6 +217,11 @@ func TestFeedbackRejectsCompletionReplyFromEarlierRound(t *testing.T) {
 		pull.Head.SHA = sha
 		gh.pulls[fakeKey("o/repo", 3)] = pull
 		gh.comments[fakeKey("o/repo", 3)] = comments
+		// The completion fallback requires a prior review by the bot (the old
+		// round's review of the previous head).
+		prior := Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour)}
+		prior.User.Login = "coderabbitai[bot]"
+		gh.reviews[fakeKey("o/repo", 3)] = []Review{prior}
 		store := NewMemoryStore(cfg)
 		if _, err := store.Update(context.Background(), func(st *State) error {
 			st.History = append(st.History, HistoryItem{Repo: "o/repo", PR: 3, Commit: head, At: firedAt, Host: "testhost"})

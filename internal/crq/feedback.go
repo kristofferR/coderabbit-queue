@@ -1158,7 +1158,10 @@ func (s *Service) isAutoReply(body string) bool {
 
 // applyCompletionReplyFallback marks the configured bot reviewed when a
 // no-findings re-review completed by issue-comment reply rather than a review
-// object. The state anchor is mandatory because issue comments carry no commit.
+// object. The state anchor is mandatory because issue comments carry no commit,
+// and a prior submitted review by the bot is mandatory because only a
+// re-review can complete without posting a review object (see
+// completionReplyForFiredCommand).
 func (s *Service) applyCompletionReplyFallback(ctx context.Context, repo string, pr int, head string, report *FeedbackReport, issueComments []IssueComment, reviews []Review) {
 	if !needsConfiguredBotReview(report.ReviewedBy, s.cfg.Bot) {
 		return
@@ -1202,9 +1205,36 @@ type reviewCommandReply struct {
 // review ran. Replies are paired chronologically with the earliest unanswered
 // command, while submitted reviews consume the command they answered, so older
 // completed commands cannot steal a later completion reply.
+//
+// The completion reply only stands in for a review when the bot has already
+// submitted at least one review on the PR: it models a no-findings re-review
+// ("nothing new since my last review"), which presupposes a prior review.
+// CodeRabbit can answer the first-ever command on a PR with an instant
+// "Review finished" while the real review is still queued on its side
+// (observed: ack 5s after the trigger, review with 11 findings landing
+// minutes later) — counting that ack converged the round with zero findings
+// and cleared the feedback wait, which also let autoreview fire a duplicate
+// command for the same head.
 func (s *Service) completionReplyForFiredCommand(comments []IssueComment, reviews []Review, firedAt time.Time) bool {
+	if !botHasAnyReview(reviews, s.cfg.Bot) {
+		return false
+	}
 	for _, reply := range s.reviewCommandReplies(comments, reviews) {
 		if reply.completion && notBefore(reply.commandAt, firedAt) {
+			return true
+		}
+	}
+	return false
+}
+
+// botHasAnyReview reports whether login has a submitted review on the PR, on
+// any commit. A CodeRabbit review that actually ran always submits a review
+// object ("Actionable comments posted: N"), so its absence means the PR was
+// never reviewed and a completion reply cannot mean "nothing new to re-review".
+func botHasAnyReview(reviews []Review, login string) bool {
+	bots := botSet([]string{login})
+	for _, review := range reviews {
+		if inBots(bots, review.User.Login) {
 			return true
 		}
 	}

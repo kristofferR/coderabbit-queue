@@ -1070,6 +1070,11 @@ func TestPumpClearsFeedbackWaitWhenCompletionReplySubmitted(t *testing.T) {
 	reply := IssueComment{ID: 6, Body: "<!-- This is an auto-generated reply by CodeRabbit -->\nReview finished.", CreatedAt: firedAt.Add(time.Minute), UpdatedAt: firedAt.Add(time.Minute)}
 	reply.User.Login = cfg.Bot
 	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{command, reply}
+	// The completion-only round is a re-review: the bot's earlier review of a
+	// previous head must exist for the reply to stand in for a review.
+	prior := Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour)}
+	prior.User.Login = cfg.Bot
+	gh.reviews[fakeKey("owner/repo", 12)] = []Review{prior}
 	store := NewMemoryStore(cfg)
 	service := NewService(cfg, gh, store, nil)
 	if _, err := store.Update(ctx, func(st *State) error {
@@ -1093,6 +1098,62 @@ func TestPumpClearsFeedbackWaitWhenCompletionReplySubmitted(t *testing.T) {
 	}
 	if len(state.AwaitingFeedback) != 0 {
 		t.Fatalf("a completion reply must clear the feedback wait, got %#v", state.AwaitingFeedback)
+	}
+}
+
+func TestPumpKeepsFeedbackWaitWhenCompletionReplyOnUnreviewedPR(t *testing.T) {
+	// Incident regression: CodeRabbit answered the first-ever review command on
+	// a PR with "Review finished" five seconds after the trigger, while the
+	// real review (11 findings) was still queued on its side. With no review
+	// ever submitted on the PR, the ack must not complete the round: the
+	// feedback wait has to survive so the loop keeps waiting for the actual
+	// review instead of converging with zero findings (which also let
+	// autoreview fire a duplicate command for the same head).
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		RequiredBots:        []string{"coderabbitai[bot]"},
+		ReviewCommand:       "@coderabbitai review",
+		CalibrationMarker:   "auto-generated reply by CodeRabbit",
+		CompletionMarker:    "Review finished",
+		InflightTimeout:     time.Hour,
+		FeedbackWaitTimeout: time.Hour,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	firedAt := time.Now().UTC().Add(-5 * time.Minute)
+	command := IssueComment{ID: 5, Body: cfg.ReviewCommand, CreatedAt: firedAt, UpdatedAt: firedAt}
+	command.User.Login = "kristofferR"
+	reply := IssueComment{ID: 6, Body: "<!-- This is an auto-generated reply by CodeRabbit -->\n✅ Action performed\n\nReview finished.", CreatedAt: firedAt.Add(5 * time.Second), UpdatedAt: firedAt.Add(5 * time.Second)}
+	reply.User.Login = cfg.Bot
+	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{command, reply}
+	// No reviews on the PR at all — the bot has never reviewed it.
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.InFlight = &InFlight{Repo: "owner/repo", PR: 12, Head: "abcdef123", Token: "tok", Phase: "posted", ReservedAt: firedAt, FiredAt: &firedAt, FiredCommentID: command.ID}
+		st.AwaitingFeedback[QueueKey("owner/repo", 12)] = FeedbackWait{Repo: "owner/repo", PR: 12, Head: "abcdef123", StartedAt: firedAt, Deadline: firedAt.Add(cfg.FeedbackWaitTimeout)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "cleared" || pumped.Reason != doneBotComment {
+		t.Fatalf("the ack still ends the in-flight command round, got %#v", pumped)
+	}
+	state, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wait := state.AwaitingFeedback[QueueKey("owner/repo", 12)]; wait.Head != "abcdef123" {
+		t.Fatalf("the feedback wait must survive a completion reply on a never-reviewed PR, got %#v", state.AwaitingFeedback)
 	}
 }
 
@@ -1315,6 +1376,11 @@ func TestPumpSweepsWaitAfterCompletionOnlyRoundCompletes(t *testing.T) {
 	reply := IssueComment{ID: 6, Body: "<!-- This is an auto-generated reply by CodeRabbit -->\nReview finished.", CreatedAt: startedAt.Add(time.Minute), UpdatedAt: startedAt.Add(time.Minute)}
 	reply.User.Login = cfg.Bot
 	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{command, reply}
+	// The completion-only round is a re-review: the bot's earlier review of a
+	// previous head must exist for the sweep to trust the reply.
+	prior := Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: startedAt.Add(-time.Hour)}
+	prior.User.Login = cfg.Bot
+	gh.reviews[fakeKey("owner/repo", 12)] = []Review{prior}
 	store := NewMemoryStore(cfg)
 	service := NewService(cfg, gh, store, nil)
 	if _, err := store.Update(ctx, func(st *State) error {
