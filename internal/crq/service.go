@@ -28,6 +28,7 @@ type GitHubAPI interface {
 	ListCommentReactions(context.Context, string, int64) ([]Reaction, error)
 	PostIssueComment(context.Context, string, int, string) (IssueComment, error)
 	DeleteIssueComment(context.Context, string, int64) error
+	CreateIssue(context.Context, string, string, string) (Issue, error)
 	SearchOpenPRs(context.Context, string, bool, int) ([]SearchPR, error)
 	EachOpenPR(context.Context, string, bool, func(SearchPR) (bool, error)) error
 	GraphQL(context.Context, string, map[string]any, any) error
@@ -328,6 +329,9 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 			return PumpResult{}, err
 		}
 		s.sync(ctx, updated)
+		if s.log != nil {
+			s.log.Printf("crq: fire %s@%s (adopted existing review command)", key, head)
+		}
 		return PumpResult{Action: "fired", Repo: item.Repo, PR: item.PR, Head: head, Reason: "review command already posted"}, nil
 	}
 
@@ -401,6 +405,9 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		}
 	}
 	s.sync(ctx, updated)
+	if s.log != nil {
+		s.log.Printf("crq: fire %s@%s (posted %s)", key, head, strings.TrimSpace(s.cfg.ReviewCommand))
+	}
 	return PumpResult{Action: "fired", Repo: item.Repo, PR: item.PR, Head: head}, nil
 }
 
@@ -795,7 +802,7 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 	if state.Blocked.CalibAskedAt == nil && state.Blocked.CheckedAt != nil && now.Sub(*state.Blocked.CheckedAt) < s.cfg.CalibrationTTL {
 		return state, nil
 	}
-	blocked, err := s.readQuota(ctx, now, state.Blocked.CalibAskedAt)
+	blocked, err := s.readQuota(ctx, s.calibrationIssue(state), now, state.Blocked.CalibAskedAt)
 	if err != nil {
 		return state, err
 	}
@@ -803,7 +810,15 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 		if st.Blocked.CalibAskedAt == nil && st.Blocked.CheckedAt != nil && time.Since(*st.Blocked.CheckedAt) < s.cfg.CalibrationTTL {
 			return ErrNoChange
 		}
+		// A fresh calibrate reading replaces the whole Blocked struct; carry the
+		// rate-limit comment identity over so requeueInflight can still recognise an
+		// edited comment it already accounted for.
+		rlID, rlUpdated := st.Blocked.RLCommentID, st.Blocked.RLCommentUpdated
 		st.Blocked = blocked
+		if st.Blocked.RLCommentID == 0 {
+			st.Blocked.RLCommentID = rlID
+			st.Blocked.RLCommentUpdated = rlUpdated
+		}
 		// Clear a stale "rate limited" warning once the window has passed, so the
 		// dashboard can't show both "not currently limited" and a rate-limit warn.
 		if st.Warn == warnRateLimited && (blocked.BlockedUntil == nil || !blocked.BlockedUntil.After(now)) {
@@ -818,17 +833,57 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 	return updated, nil
 }
 
-func (s *Service) readQuota(ctx context.Context, now time.Time, pendingAsked *time.Time) (Blocked, error) {
+// calibrationIssue returns the calibration issue crq should probe: the rotated
+// replacement recorded in state after a cap wedge, or the configured one.
+func (s *Service) calibrationIssue(state State) int {
+	if state.CalibrationIssue > 0 {
+		return state.CalibrationIssue
+	}
+	return s.cfg.CalibrationPR
+}
+
+const calibrationIssueBody = "crq probes CodeRabbit's account-wide rate-limit state here with `@coderabbitai rate limit` so it never spends a real review to calibrate. Auto-created after a prior calibration thread hit GitHub's 2500-comment cap. Managed by crq — safe to leave alone."
+
+// rotateCalibration creates a fresh calibration issue in the gate repo and
+// records its number in the shared state, so the whole fleet abandons a
+// calibration thread that hit GitHub's hard 2500-comment cap. A capped thread is
+// permanently unpostable — pruning can't recover it once every deletable comment
+// is already gone — which otherwise wedges quota calibration and floods the log
+// with 403s. Returns the new issue number.
+func (s *Service) rotateCalibration(ctx context.Context, oldIssue int) (int, error) {
+	issue, err := s.gh.CreateIssue(ctx, s.cfg.GateRepo, "crq rate-limit calibration", calibrationIssueBody)
+	if err != nil {
+		return 0, err
+	}
+	if issue.Number <= 0 {
+		return 0, fmt.Errorf("calibration rotation: created issue has no number")
+	}
+	if _, err := s.store.Update(ctx, func(st *State) error {
+		if st.CalibrationIssue == issue.Number {
+			return ErrNoChange
+		}
+		st.CalibrationIssue = issue.Number
+		return nil
+	}); err != nil && !errors.Is(err, ErrNoChange) {
+		return 0, err
+	}
+	if s.log != nil {
+		s.log.Printf("crq: calibration issue #%d hit the comment cap; rotated to fresh issue #%d", oldIssue, issue.Number)
+	}
+	return issue.Number, nil
+}
+
+func (s *Service) readQuota(ctx context.Context, issue int, now time.Time, pendingAsked *time.Time) (Blocked, error) {
 	blocked := Blocked{Scope: strings.Join(s.cfg.Scope, ","), Source: "calibrate", CheckedAt: &now}
 	cutoff := now.Add(-s.cfg.CalibrationTTL)
 	keepAfter := now.Add(-2 * s.cfg.CalibrationTTL)
-	if reply, ok, err := s.latestCalibrationReply(ctx, cutoff); err != nil {
+	if reply, ok, err := s.latestCalibrationReply(ctx, issue, cutoff); err != nil {
 		return blocked, err
 	} else if ok {
 		remaining, reset := parseQuota(reply.Body, reply.UpdatedAt)
 		blocked.Remaining = remaining
 		blocked.BlockedUntil = reset
-		s.pruneCalibration(ctx, keepAfter, 80)
+		s.pruneCalibration(ctx, issue, keepAfter, 80)
 		return blocked, nil
 	}
 	// A probe from a previous call is still pending and not yet stale, and the check
@@ -838,16 +893,29 @@ func (s *Service) readQuota(ctx context.Context, now time.Time, pendingAsked *ti
 		blocked.CalibAskedAt = pendingAsked
 		return blocked, nil
 	}
-	asked, err := s.gh.PostIssueComment(ctx, s.cfg.GateRepo, s.cfg.CalibrationPR, s.cfg.RateLimitCommand)
+	asked, err := s.gh.PostIssueComment(ctx, s.cfg.GateRepo, issue, s.cfg.RateLimitCommand)
 	if err != nil {
-		// The calibration PR hit GitHub's 2500-comment cap; prune our old probe
-		// comments to drop back under it, then retry once.
+		// The calibration thread hit GitHub's 2500-comment cap. Prune our old probe
+		// comments and retry once; if pruning can't drop us back under the cap (all
+		// deletable comments are already gone), rotate to a fresh issue and retry
+		// there instead of failing every cycle.
 		if isCommentCapError(err) {
-			if pruned := s.pruneCalibration(ctx, keepAfter, 100); pruned > 0 {
-				asked, err = s.gh.PostIssueComment(ctx, s.cfg.GateRepo, s.cfg.CalibrationPR, s.cfg.RateLimitCommand)
+			if pruned := s.pruneCalibration(ctx, issue, keepAfter, 100); pruned > 0 {
+				asked, err = s.gh.PostIssueComment(ctx, s.cfg.GateRepo, issue, s.cfg.RateLimitCommand)
+			}
+			if err != nil && isCommentCapError(err) {
+				if newIssue, rerr := s.rotateCalibration(ctx, issue); rerr == nil {
+					issue = newIssue
+					asked, err = s.gh.PostIssueComment(ctx, s.cfg.GateRepo, issue, s.cfg.RateLimitCommand)
+				} else if s.log != nil {
+					s.log.Printf("crq: calibration rotation failed: %v", rerr)
+				}
 			}
 		}
 		if err != nil {
+			if s.log != nil {
+				s.log.Printf("crq: calibration probe on #%d failed: %v", issue, err)
+			}
 			return blocked, err
 		}
 	}
@@ -858,7 +926,7 @@ func (s *Service) readQuota(ctx context.Context, now time.Time, pendingAsked *ti
 			return blocked, ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
-		reply, ok, err := s.latestCalibrationReply(ctx, asked.CreatedAt.Add(-time.Second))
+		reply, ok, err := s.latestCalibrationReply(ctx, issue, asked.CreatedAt.Add(-time.Second))
 		if err != nil {
 			return blocked, err
 		}
@@ -867,7 +935,7 @@ func (s *Service) readQuota(ctx context.Context, now time.Time, pendingAsked *ti
 			blocked.Remaining = remaining
 			blocked.BlockedUntil = reset
 			blocked.CalibAskedAt = nil
-			s.pruneCalibration(ctx, keepAfter, 80)
+			s.pruneCalibration(ctx, issue, keepAfter, 80)
 			return blocked, nil
 		}
 	}
@@ -879,11 +947,11 @@ func (s *Service) readQuota(ctx context.Context, now time.Time, pendingAsked *ti
 // cap (which silently wedges the whole queue). It reads only the oldest page and
 // deletes up to max comments older than keepAfter, so cost stays bounded and the
 // most recent reading is preserved.
-func (s *Service) pruneCalibration(ctx context.Context, keepAfter time.Time, max int) int {
-	if s.cfg.CalibrationPR <= 0 || max <= 0 {
+func (s *Service) pruneCalibration(ctx context.Context, issue int, keepAfter time.Time, max int) int {
+	if issue <= 0 || max <= 0 {
 		return 0
 	}
-	comments, err := s.gh.ListIssueCommentsPage(ctx, s.cfg.GateRepo, s.cfg.CalibrationPR, 1, 100)
+	comments, err := s.gh.ListIssueCommentsPage(ctx, s.cfg.GateRepo, issue, 1, 100)
 	if err != nil {
 		if s.log != nil {
 			s.log.Printf("calibration prune: list failed: %v", err)
@@ -910,7 +978,7 @@ func (s *Service) pruneCalibration(ctx context.Context, keepAfter time.Time, max
 		deleted++
 	}
 	if deleted > 0 && s.log != nil {
-		s.log.Printf("calibration prune: removed %d old comment(s) from PR #%d", deleted, s.cfg.CalibrationPR)
+		s.log.Printf("calibration prune: removed %d old comment(s) from #%d", deleted, issue)
 	}
 	return deleted
 }
@@ -924,8 +992,8 @@ func (s *Service) isCalibrationNoise(c IssueComment) bool {
 	return s.isConfiguredBot(c.User.Login) && strings.Contains(c.Body, s.cfg.CalibrationMarker)
 }
 
-func (s *Service) latestCalibrationReply(ctx context.Context, after time.Time) (IssueComment, bool, error) {
-	comments, err := s.gh.ListIssueComments(ctx, s.cfg.GateRepo, s.cfg.CalibrationPR)
+func (s *Service) latestCalibrationReply(ctx context.Context, issue int, after time.Time) (IssueComment, bool, error) {
+	comments, err := s.gh.ListIssueComments(ctx, s.cfg.GateRepo, issue)
 	if err != nil {
 		return IssueComment{}, false, err
 	}
@@ -959,6 +1027,11 @@ type inflightCheck struct {
 	// review for the fired round, so Pump knows whether the feedback wait is
 	// satisfied or must survive for the bots that are still reviewing.
 	FeedbackComplete bool
+	// RLCommentID/RLCommentUpdated identify the rate-limit comment that produced a
+	// warnRateLimited requeue, so requeueInflight can tell a fresh rate-limit event
+	// from a re-observation of the same edited comment.
+	RLCommentID      int64
+	RLCommentUpdated time.Time
 }
 
 // Done reasons from inflightStatus. Pump distinguishes them: a submitted
@@ -968,6 +1041,7 @@ const (
 	doneReviewSubmitted = "review submitted"
 	doneBotReacted      = "bot reacted"
 	doneBotComment      = "bot comment"
+	doneAlreadyReviewed = "head already reviewed"
 )
 
 // notBefore reports whether t is at or after baseline. GitHub timestamps are
@@ -1071,13 +1145,26 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 	if err != nil {
 		return inflightCheck{}, err
 	}
+	// Terminal-ack pass first, across ALL comments: CodeRabbit's "does not
+	// re-review already reviewed commits" note means no review will ever be posted
+	// for this head, so the round is done. This must win over the rate-limit pass
+	// below — the two co-occur, and if a rate-limit comment sorted first we would
+	// requeue forever on a head that has no review and never will.
+	for _, comment := range comments {
+		if !s.isConfiguredBot(comment.User.Login) || comment.UpdatedAt.Before(*inf.FiredAt) {
+			continue
+		}
+		if s.isReviewAlreadyDone(comment.Body) {
+			return inflightCheck{Done: true, Reason: doneAlreadyReviewed, FeedbackComplete: true}, nil
+		}
+	}
 	for _, comment := range comments {
 		if !s.isConfiguredBot(comment.User.Login) || comment.UpdatedAt.Before(*inf.FiredAt) {
 			continue
 		}
 		if s.isRateLimited(comment.Body) {
 			reset := parseAvailableIn(comment.Body, comment.UpdatedAt)
-			return inflightCheck{Requeue: true, Reason: warnRateLimited, BlockedUntil: reset}, nil
+			return inflightCheck{Requeue: true, Reason: warnRateLimited, BlockedUntil: reset, RLCommentID: comment.ID, RLCommentUpdated: comment.UpdatedAt}, nil
 		}
 	}
 	reviews, err := s.gh.ListReviews(ctx, inf.Repo, inf.PR)
@@ -1243,16 +1330,28 @@ func (s *Service) requeueInflight(st *State, status inflightCheck) {
 		RequeuedAt: &now,
 	})
 	sort.Slice(st.Queue, func(i, j int) bool { return st.Queue[i].Seq < st.Queue[j].Seq })
-	delete(st.Fired, QueueKey(inf.Repo, inf.PR))
-	delete(st.AwaitingFeedback, QueueKey(inf.Repo, inf.PR))
+	key := QueueKey(inf.Repo, inf.PR)
+	delete(st.Fired, key)
+	delete(st.AwaitingFeedback, key)
 	st.InFlight = nil
 	if status.Reason == warnRateLimited {
 		// A rate limit is shown by the Blocked state (the dashboard's Rate-limit
 		// row), not a sticky Warn — otherwise once the window passes the table says
 		// "not currently limited" while a stale "rate limited" warning lingers.
 		until := status.BlockedUntil
+		// CodeRabbit edits one rate-limit comment in place, so a later fire sees the
+		// same comment with an advanced UpdatedAt. Don't let that re-observation
+		// extend the block on every bounce: if this is the comment that already set
+		// the standing block and its window is still open, keep the existing window.
+		sameComment := status.RLCommentID != 0 && status.RLCommentID == st.Blocked.RLCommentID
+		if sameComment && st.Blocked.BlockedUntil != nil && st.Blocked.BlockedUntil.After(now) {
+			until = st.Blocked.BlockedUntil
+		}
 		if until == nil || !until.After(now) {
-			t := now.Add(s.cfg.CalibrationTTL) // no parseable reset; re-calibrate soon
+			// No parseable "available in" window: back off a conservative fixed
+			// interval instead of a short re-calibrate, so an unrecognised phrasing
+			// can't drop us into a couple-of-minutes retry against the shared quota.
+			t := now.Add(s.rateLimitFallback())
 			until = &t
 		}
 		zero := 0
@@ -1260,10 +1359,50 @@ func (s *Service) requeueInflight(st *State, status inflightCheck) {
 		st.Blocked.Remaining = &zero
 		st.Blocked.Source = "warning"
 		st.Blocked.CheckedAt = &now
+		if status.RLCommentID != 0 {
+			st.Blocked.RLCommentID = status.RLCommentID
+			u := status.RLCommentUpdated
+			st.Blocked.RLCommentUpdated = &u
+		}
 		st.Warn = ""
+		// Per-head cooldown that survives this requeue: needsReview refuses to
+		// re-enqueue inf.Head until the window passes. Fired is cleared above so a
+		// genuinely throttled PR can still retry once the window clears, and this
+		// cooldown is what keeps that gap from letting the same head be re-fired
+		// before then — the guard whose absence let one head fire seven times.
+		setCooldown(st, key, inf.Head, *until)
 	} else {
 		st.Warn = status.Reason
 	}
+	if s.log != nil {
+		blockedUntil := "-"
+		if st.Blocked.BlockedUntil != nil {
+			blockedUntil = st.Blocked.BlockedUntil.UTC().Format(time.RFC3339)
+		}
+		s.log.Printf("crq: requeue %s@%s reason=%q blocked_until=%s", key, inf.Head, status.Reason, blockedUntil)
+	}
+}
+
+// rateLimitFallback is the block window applied when a rate-limit comment carries
+// no parseable "available in" duration. CodeRabbit's real windows run to tens of
+// minutes, so a conservative floor is far safer than retrying in a minute or two.
+func (s *Service) rateLimitFallback() time.Duration {
+	if s.cfg.RateLimitFallback > 0 {
+		return s.cfg.RateLimitFallback
+	}
+	return 15 * time.Minute
+}
+
+// setCooldown records a per-head fire cooldown, ignoring an empty head or an
+// already-passed deadline so the map never carries dead entries.
+func setCooldown(st *State, key, head string, until time.Time) {
+	if head == "" || !until.After(time.Now().UTC()) {
+		return
+	}
+	if st.Cooldown == nil {
+		st.Cooldown = map[string]FireCooldown{}
+	}
+	st.Cooldown[strings.ToLower(key)] = FireCooldown{Head: head, Until: until}
 }
 
 func (s *Service) headShort(ctx context.Context, repo string, pr int) (string, error) {
@@ -1375,25 +1514,65 @@ func (s *Service) isReviewsPaused(body string) bool {
 		strings.Contains(l, "auto_pause_after_reviewed_commits")
 }
 
+// isReviewAlreadyDone reports whether a CodeRabbit comment is the "✅ Action
+// performed / Review finished" acknowledgement that the fired head was ALREADY
+// reviewed and will not be re-reviewed — its incremental engine's "does not
+// re-review already reviewed commits" note. crq only ever fires when no review
+// exists at the head, so this ack means no GitHub review object will ever be
+// posted for it via "@coderabbitai review" (only a "full review" would). It is
+// therefore terminal: crq must treat the round as complete and stop firing.
+// Missing this is what let the daemon fire the same head seven times — a
+// rate-limit comment co-occurred and requeued the round before this ack could end
+// it. The same boilerplate can appear inside a rate-limit notice's help section,
+// so a comment that is itself a rate limit (transient, retry when it clears) is
+// excluded.
+func (s *Service) isReviewAlreadyDone(body string) bool {
+	l := strings.ToLower(body)
+	if !strings.Contains(l, "does not re-review already reviewed") &&
+		!strings.Contains(l, "already reviewed commit") {
+		return false
+	}
+	return !s.isRateLimited(l)
+}
+
+// parseAvailableIn extracts CodeRabbit's "next review available in <duration>"
+// window from a rate-limit comment and returns base+duration. It tolerates the
+// markdown and punctuation CodeRabbit now wraps the value in — the current
+// phrasing is "**Next review available in:** **40 minutes**", where a colon and
+// bold markers sit between "in" and the number. An unparseable body returns nil;
+// the caller then falls back to a conservative fixed window rather than a short
+// retry (getting this wrong is exactly what let the daemon re-fire every couple
+// of minutes instead of honouring a 40-minute limit).
 func parseAvailableIn(text string, base time.Time) *time.Time {
 	lower := strings.ToLower(text)
-	idx := strings.Index(lower, "available in ")
+	idx := strings.Index(lower, "available in")
 	if idx < 0 {
 		return nil
 	}
-	frag := lower[idx+len("available in "):]
-	if dot := strings.Index(frag, "."); dot >= 0 {
+	frag := lower[idx+len("available in"):]
+	// Normalise markdown/punctuation to spaces so "in:** **40 minutes**" scans as
+	// "40 minutes". Do this before splitting into fields so bold/colon can't fuse
+	// onto the number ("**40") and defeat the numeric parse.
+	frag = strings.Map(func(r rune) rune {
+		switch r {
+		case '*', ':', '`', ',', '_', '(', ')':
+			return ' '
+		}
+		return r
+	}, frag)
+	// Stop at a sentence boundary so a later number in the body isn't read as part
+	// of the window.
+	if dot := strings.IndexByte(frag, '.'); dot >= 0 {
 		frag = frag[:dot]
 	}
 	fields := strings.Fields(frag)
 	var d time.Duration
 	for i := 0; i+1 < len(fields); i++ {
-		n, err := strconv.Atoi(strings.Trim(fields[i], ","))
+		n, err := strconv.Atoi(fields[i])
 		if err != nil {
 			continue
 		}
-		unit := strings.Trim(fields[i+1], ",")
-		switch {
+		switch unit := fields[i+1]; {
 		case strings.HasPrefix(unit, "hour"):
 			d += time.Duration(n) * time.Hour
 		case strings.HasPrefix(unit, "minute"):

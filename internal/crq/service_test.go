@@ -12,19 +12,22 @@ import (
 )
 
 type fakeGitHub struct {
-	mu             sync.Mutex
-	pulls          map[string]Pull
-	commits        map[string]gitCommit
-	commitErrs     map[string]error
-	reviews        map[string][]Review
-	comments       map[string][]IssueComment
-	reviewComments map[string][]ReviewComment
-	issueReactions map[string][]Reaction
-	reactions      map[int64][]Reaction
-	posted         []string
-	deleted        []int64
-	commentID      int64
-	graphQL        func(query string, vars map[string]any, out any) error
+	mu              sync.Mutex
+	pulls           map[string]Pull
+	commits         map[string]gitCommit
+	commitErrs      map[string]error
+	reviews         map[string][]Review
+	comments        map[string][]IssueComment
+	reviewComments  map[string][]ReviewComment
+	issueReactions  map[string][]Reaction
+	reactions       map[int64][]Reaction
+	posted          []string
+	deleted         []int64
+	commentID       int64
+	createdIssues   []int
+	nextIssueNumber int
+	postErrs        map[string]error
+	graphQL         func(query string, vars map[string]any, out any) error
 }
 
 type failNthUpdateStore struct {
@@ -184,11 +187,25 @@ func (f *fakeGitHub) ListCommentReactions(_ context.Context, _ string, id int64)
 func (f *fakeGitHub) PostIssueComment(_ context.Context, repo string, pr int, body string) (IssueComment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.postErrs[fakeKey(repo, pr)]; err != nil {
+		return IssueComment{}, err
+	}
 	f.commentID++
 	f.posted = append(f.posted, repo+"#"+strconv.Itoa(pr)+":"+body)
 	comment := IssueComment{ID: f.commentID, Body: body, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 	comment.User.Login = "kristofferR"
 	return comment, nil
+}
+
+func (f *fakeGitHub) CreateIssue(_ context.Context, _ string, _ string, _ string) (Issue, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.nextIssueNumber == 0 {
+		f.nextIssueNumber = 1000
+	}
+	f.nextIssueNumber++
+	f.createdIssues = append(f.createdIssues, f.nextIssueNumber)
+	return Issue{Number: f.nextIssueNumber, State: "open"}, nil
 }
 
 func (f *fakeGitHub) ListIssueCommentsPage(_ context.Context, repo string, pr, page, perPage int) ([]IssueComment, error) {
@@ -265,7 +282,7 @@ func TestPruneCalibrationDeletesOldNoiseKeepsRecent(t *testing.T) {
 		mkc(4, "kristofferR", "@coderabbitai rate limit", now),                                      // recent -> keep
 	}
 
-	deleted := svc.pruneCalibration(context.Background(), now.Add(-2*time.Minute), 80)
+	deleted := svc.pruneCalibration(context.Background(), 1, now.Add(-2*time.Minute), 80)
 	if deleted != 2 {
 		t.Fatalf("expected 2 deletions, got %d", deleted)
 	}
@@ -370,7 +387,7 @@ func TestLatestCalibrationReplyToleratesBotSuffix(t *testing.T) {
 	comment.User.Login = "coderabbitai[bot]"
 	gh.comments[fakeKey("o/gate", 1)] = []IssueComment{comment}
 
-	got, ok, err := svc.latestCalibrationReply(context.Background(), now.Add(-time.Minute))
+	got, ok, err := svc.latestCalibrationReply(context.Background(), 1, now.Add(-time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1892,5 +1909,268 @@ func TestMemoryStoreConcurrentUpdatesDoNotLoseMutations(t *testing.T) {
 	}
 	if state.NextSeq != 50 {
 		t.Fatalf("lost updates: got %d want 50", state.NextSeq)
+	}
+}
+
+// --- Runaway re-fire loop regression tests (carrier#82) ---
+
+func TestParseAvailableInHandlesMarkdownAndColon(t *testing.T) {
+	base := time.Date(2026, 7, 11, 18, 24, 0, 0, time.UTC)
+	// Verbatim of CodeRabbit's current rate-limit body: a colon and bold markers
+	// sit between "available in" and the duration. The old parser required a
+	// literal "available in " (trailing space) and choked on "**40", yielding no
+	// reset — which dropped the block to a ~2m fallback and drove the runaway.
+	body := "## Review limit reached\n\nYou have reached your review limit.\n\n**Next review available in:** **40 minutes**"
+	got := parseAvailableIn(body, base)
+	if got == nil {
+		t.Fatal("expected a parsed reset for the verbatim rate-limit body, got nil")
+	}
+	if want := base.Add(40 * time.Minute); !got.Equal(want) {
+		t.Fatalf("expected reset %v (base+40m), got %v", want, *got)
+	}
+}
+
+func TestParseAvailableInPlainFormatStillWorks(t *testing.T) {
+	base := time.Date(2026, 7, 11, 18, 0, 0, 0, time.UTC)
+	got := parseAvailableIn("You are rate limited. Reviews available in 3 minutes.", base)
+	if got == nil || !got.Equal(base.Add(3*time.Minute)) {
+		t.Fatalf("expected base+3m for the plain format, got %v", got)
+	}
+	got = parseAvailableIn("available in 1 hour and 30 minutes", base)
+	if got == nil || !got.Equal(base.Add(90*time.Minute)) {
+		t.Fatalf("expected base+90m for compound duration, got %v", got)
+	}
+}
+
+func TestInflightStatusAlreadyReviewedAckIsTerminalOverRateLimit(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := Config{Bot: "coderabbitai", RateLimitMarker: "rate limited by coderabbit.ai", InflightTimeout: time.Hour}
+	gh := newFakeGitHub()
+	// Rate-limit comment sorted BEFORE the dedup ack: the terminal ack must still
+	// win, or the round requeues forever on a head that has no review and never
+	// will (CodeRabbit "does not re-review already reviewed commits").
+	rl := IssueComment{ID: 1, Body: "<!-- rate limited by coderabbit.ai -->\n> ## Review limit reached\n> **Next review available in:** **40 minutes**", UpdatedAt: now.Add(time.Second)}
+	rl.User.Login = "coderabbitai[bot]"
+	ack := IssueComment{ID: 2, Body: "<details>\n<summary>✅ Action performed</summary>\n\nReview finished.\n\n> Note: CodeRabbit is an incremental review system and does not re-review already reviewed commits. This command is applicable only when automatic reviews are paused.\n</details>", UpdatedAt: now.Add(2 * time.Second)}
+	ack.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/repo", 82)] = []IssueComment{rl, ack}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+	// Guard the premises: the two real CodeRabbit comments are cleanly separable —
+	// the rate-limit notice carries the RL marker but not the terminal note, and
+	// the ack the reverse.
+	if !svc.isRateLimited(rl.Body) || svc.isReviewAlreadyDone(rl.Body) {
+		t.Fatal("rate-limit comment must classify as rate-limited, not terminal")
+	}
+	if svc.isRateLimited(ack.Body) || !svc.isReviewAlreadyDone(ack.Body) {
+		t.Fatal("ack must classify as terminal already-reviewed, not rate-limited")
+	}
+	state := State{InFlight: &InFlight{Repo: "o/repo", PR: 82, Phase: "posted", FiredAt: &now, FiredCommentID: 99}}
+	status, err := svc.inflightStatus(context.Background(), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Done || status.Reason != doneAlreadyReviewed {
+		t.Fatalf("expected terminal already-reviewed Done, got %#v", status)
+	}
+	if status.Requeue {
+		t.Fatal("already-reviewed ack must not requeue")
+	}
+}
+
+// TestLoopFiresOnceForAlreadyReviewedHead reproduces the carrier#82 runaway: a
+// fire draws a dedup ack plus an edited rate-limit comment and no GitHub review.
+// It must fire exactly once and never re-enqueue the head.
+func TestLoopFiresOnceForAlreadyReviewedHead(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo: "o/gate", Scope: []string{"o"}, Host: "h",
+		Bot: "coderabbitai", RateLimitMarker: "rate limited by coderabbit.ai",
+		ReviewCommand: "@coderabbitai review", InflightTimeout: time.Hour,
+	}
+	gh := newFakeGitHub()
+	head := "a0646f010"
+	pull := Pull{State: "open"}
+	pull.Head.SHA = head + "abcdef0"
+	gh.pulls[fakeKey("o/carrier", 82)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	if _, err := svc.Enqueue(ctx, "o/carrier", 82); err != nil {
+		t.Fatal(err)
+	}
+	res, err := svc.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Action != "fired" {
+		t.Fatalf("expected first pump to fire, got %#v", res)
+	}
+
+	// CodeRabbit answers: edits a rate-limit comment AND posts a dedup ack, no review.
+	answer := time.Now().UTC().Add(time.Minute)
+	rl := IssueComment{ID: 501, Body: "<!-- rate limited by coderabbit.ai -->\n> ## Review limit reached\n> **Next review available in:** **40 minutes**", CreatedAt: answer, UpdatedAt: answer}
+	rl.User.Login = "coderabbitai[bot]"
+	ack := IssueComment{ID: 502, Body: "<details><summary>✅ Action performed</summary>\n\nReview finished.\n\n> Note: CodeRabbit is an incremental review system and does not re-review already reviewed commits.</details>", CreatedAt: answer, UpdatedAt: answer}
+	ack.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/carrier", 82)] = []IssueComment{rl, ack}
+
+	res, err = svc.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Action != "cleared" || res.Reason != doneAlreadyReviewed {
+		t.Fatalf("expected cleared already-reviewed, got %#v", res)
+	}
+	st, _, _ := store.Load(ctx)
+	if st.Fired[QueueKey("o/carrier", 82)] != head {
+		t.Fatalf("expected Fired to retain head %q, got %#v", head, st.Fired)
+	}
+	if st.Blocked.BlockedUntil != nil {
+		t.Fatalf("terminal ack must not set a rate-limit block, got %v", st.Blocked.BlockedUntil)
+	}
+
+	need, err := svc.needsReview(ctx, st, "o/carrier", 82, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if need {
+		t.Fatal("needsReview re-enqueued an already-reviewed head")
+	}
+
+	if _, err := svc.Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+	fires := 0
+	for _, p := range gh.posted {
+		if strings.HasSuffix(p, ":@coderabbitai review") {
+			fires++
+		}
+	}
+	if fires != 1 {
+		t.Fatalf("expected exactly one review fire, got %d (%v)", fires, gh.posted)
+	}
+}
+
+func TestNeedsReviewSkipsCooledDownHead(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{Bot: "coderabbitai", Host: "h"}
+	gh := newFakeGitHub()
+	head := "a0646f010"
+	pull := Pull{State: "open"}
+	pull.Head.SHA = head + "aaaaaa0"
+	gh.pulls[fakeKey("o/carrier", 82)] = pull
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	st := DefaultState(cfg)
+	st.Cooldown[QueueKey("o/carrier", 82)] = FireCooldown{Head: head, Until: time.Now().UTC().Add(40 * time.Minute)}
+
+	need, err := svc.needsReview(ctx, st, "o/carrier", 82, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if need {
+		t.Fatal("needsReview must skip a head under an active fire cooldown")
+	}
+
+	// A new head is not blocked by the prior head's cooldown.
+	pull.Head.SHA = "bbbbbbbbbccccc"
+	gh.pulls[fakeKey("o/carrier", 82)] = pull
+	need, err = svc.needsReview(ctx, st, "o/carrier", 82, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !need {
+		t.Fatal("a new head must not be blocked by a prior head's cooldown")
+	}
+}
+
+func TestRequeueRateLimitSetsCooldownAndDoesNotExtendSameComment(t *testing.T) {
+	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, RateLimitFallback: 15 * time.Minute, Host: "h"}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	reset := time.Now().UTC().Add(40 * time.Minute)
+	st := &State{
+		InFlight: &InFlight{Repo: "o/a", PR: 1, Head: "abc123def", Seq: 5},
+		Fired:    map[string]string{"o/a#1": "abc123def"},
+		Cooldown: map[string]FireCooldown{},
+	}
+	svc.requeueInflight(st, inflightCheck{Requeue: true, Reason: warnRateLimited, BlockedUntil: &reset, RLCommentID: 77, RLCommentUpdated: time.Now().UTC()})
+
+	cd, ok := st.Cooldown["o/a#1"]
+	if !ok || cd.Head != "abc123def" || !cd.Until.Equal(reset) {
+		t.Fatalf("expected cooldown until reset for the fired head, got %#v (ok=%v)", cd, ok)
+	}
+	if st.Blocked.RLCommentID != 77 {
+		t.Fatalf("expected rate-limit comment id tracked, got %d", st.Blocked.RLCommentID)
+	}
+	firstUntil := *st.Blocked.BlockedUntil
+
+	// Re-observe the SAME edited rate-limit comment with an advanced UpdatedAt and a
+	// later parsed window: the standing block must not be pushed out again.
+	st.InFlight = &InFlight{Repo: "o/a", PR: 1, Head: "abc123def", Seq: 6}
+	st.Fired = map[string]string{"o/a#1": "abc123def"}
+	later := reset.Add(30 * time.Minute)
+	svc.requeueInflight(st, inflightCheck{Requeue: true, Reason: warnRateLimited, BlockedUntil: &later, RLCommentID: 77, RLCommentUpdated: time.Now().UTC()})
+	if !st.Blocked.BlockedUntil.Equal(firstUntil) {
+		t.Fatalf("re-observed same rate-limit comment must reuse standing block %v, got %v", firstUntil, *st.Blocked.BlockedUntil)
+	}
+}
+
+func TestRequeueRateLimitNoResetUsesFallbackNotShortTTL(t *testing.T) {
+	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, CalibrationTTL: 2 * time.Minute, RateLimitFallback: 15 * time.Minute, Host: "h"}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	now := time.Now().UTC()
+	st := &State{InFlight: &InFlight{Repo: "o/a", PR: 1, Head: "abc123def"}, Fired: map[string]string{}, Cooldown: map[string]FireCooldown{}}
+	svc.requeueInflight(st, inflightCheck{Requeue: true, Reason: warnRateLimited})
+	if st.Blocked.BlockedUntil == nil {
+		t.Fatal("expected a block window on an unparseable rate limit")
+	}
+	if got := st.Blocked.BlockedUntil.Sub(now); got < 10*time.Minute {
+		t.Fatalf("unparseable rate limit should fall back to the conservative window, got %v", got)
+	}
+}
+
+func TestRotateCalibrationPersistsNewIssue(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{GateRepo: "o/gate", CalibrationPR: 1, Scope: []string{"o"}}
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	n, err := svc.rotateCalibration(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n <= 0 {
+		t.Fatalf("expected a fresh issue number, got %d", n)
+	}
+	st, _, _ := store.Load(ctx)
+	if st.CalibrationIssue != n {
+		t.Fatalf("expected state.CalibrationIssue=%d, got %d", n, st.CalibrationIssue)
+	}
+	if svc.calibrationIssue(st) != n {
+		t.Fatalf("calibrationIssue should return the rotated issue %d, got %d", n, svc.calibrationIssue(st))
+	}
+	if len(gh.createdIssues) != 1 {
+		t.Fatalf("expected exactly one issue created, got %d", len(gh.createdIssues))
+	}
+}
+
+func TestNormalizePrunesExpiredCooldowns(t *testing.T) {
+	cfg := Config{Scope: []string{"o"}}
+	st := DefaultState(cfg)
+	now := time.Now().UTC()
+	st.Cooldown["o/a#1"] = FireCooldown{Head: "aaa", Until: now.Add(30 * time.Minute)} // live
+	st.Cooldown["o/b#2"] = FireCooldown{Head: "bbb", Until: now.Add(-time.Minute)}      // expired
+	st.Cooldown["o/c#3"] = FireCooldown{Head: "", Until: now.Add(time.Hour)}            // headless
+	st.Normalize(cfg)
+	if _, ok := st.Cooldown["o/a#1"]; !ok {
+		t.Fatal("live cooldown must survive Normalize")
+	}
+	if _, ok := st.Cooldown["o/b#2"]; ok {
+		t.Fatal("expired cooldown must be pruned")
+	}
+	if _, ok := st.Cooldown["o/c#3"]; ok {
+		t.Fatal("headless cooldown must be pruned")
 	}
 }

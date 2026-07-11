@@ -27,13 +27,30 @@ type State struct {
 	LastFired        *time.Time              `json:"last_fired"`
 	Warn             string                  `json:"warn,omitempty"`
 	Fired            map[string]string       `json:"fired"`
+	Cooldown         map[string]FireCooldown `json:"cooldown,omitempty"`
 	AwaitingFeedback map[string]FeedbackWait `json:"awaiting_feedback,omitempty"`
 	History          []HistoryItem           `json:"history"`
 	Blocked          Blocked                 `json:"blocked"`
 	Leader           *LeaderLease            `json:"leader,omitempty"`
-	GCAt             *time.Time              `json:"gc_at,omitempty"`
-	UpdatedAt        *time.Time              `json:"wrote_at,omitempty"`
-	DashboardSHA     string                  `json:"dashboard_sha,omitempty"`
+	// CalibrationIssue overrides the configured calibration PR/issue when the
+	// original hit GitHub's hard 2500-comment cap and crq rotated to a fresh one.
+	// Persisted in the shared state so the whole fleet uses the new issue.
+	CalibrationIssue int        `json:"calibration_issue,omitempty"`
+	GCAt             *time.Time `json:"gc_at,omitempty"`
+	UpdatedAt        *time.Time `json:"wrote_at,omitempty"`
+	DashboardSHA     string     `json:"dashboard_sha,omitempty"`
+}
+
+// FireCooldown records the head last fired for a queue key and the earliest time
+// that head may be fired again. Unlike Fired (which is cleared on a rate-limited
+// requeue so a genuinely throttled PR can retry once the window clears), a
+// cooldown survives the requeue, so needsReview refuses to re-enqueue the same
+// repo#pr@head until the block window passes — the guard that stops a bouncing
+// rate limit from re-firing the same head over and over. Cooldowns are pruned
+// once expired (see Normalize), so the map stays bounded.
+type FireCooldown struct {
+	Head  string    `json:"head"`
+	Until time.Time `json:"until"`
 }
 
 type QueueItem struct {
@@ -96,6 +113,14 @@ type Blocked struct {
 	Source       string     `json:"source"`
 	CheckedAt    *time.Time `json:"checked_at"`
 	CalibAskedAt *time.Time `json:"calib_asked_at"`
+	// RLCommentID/RLCommentUpdated identify the rate-limit comment whose "next
+	// review available in" window produced the current block. CodeRabbit edits a
+	// single rate-limit comment in place instead of posting a new one, so its
+	// UpdatedAt advances past every later fire; tracking it lets a re-observed
+	// edit reuse the standing block instead of being counted as a fresh event
+	// that extends the window on every bounce.
+	RLCommentID      int64      `json:"rl_comment_id,omitempty"`
+	RLCommentUpdated *time.Time `json:"rl_comment_updated,omitempty"`
 }
 
 type LeaderLease struct {
@@ -110,6 +135,7 @@ func DefaultState(cfg Config) State {
 		Version:          1,
 		Rev:              0,
 		Fired:            map[string]string{},
+		Cooldown:         map[string]FireCooldown{},
 		AwaitingFeedback: map[string]FeedbackWait{},
 		Blocked:          Blocked{Scope: strings.Join(cfg.Scope, ","), Source: "init"},
 	}
@@ -121,6 +147,9 @@ func (s *State) Normalize(cfg Config) {
 	}
 	if s.Fired == nil {
 		s.Fired = map[string]string{}
+	}
+	if s.Cooldown == nil {
+		s.Cooldown = map[string]FireCooldown{}
 	}
 	if s.AwaitingFeedback == nil {
 		s.AwaitingFeedback = map[string]FeedbackWait{}
@@ -146,6 +175,17 @@ func (s *State) Normalize(cfg Config) {
 		folded[strings.ToLower(k)] = v
 	}
 	s.Fired = folded
+	// Fold cooldown keys the same way and drop entries whose window has passed,
+	// so a bounded map of live per-head cooldowns is all that persists.
+	now := time.Now().UTC()
+	cooldown := map[string]FireCooldown{}
+	for k, cd := range s.Cooldown {
+		if cd.Head == "" || cd.Until.IsZero() || !cd.Until.After(now) {
+			continue
+		}
+		cooldown[strings.ToLower(k)] = cd
+	}
+	s.Cooldown = cooldown
 	awaiting := map[string]FeedbackWait{}
 	for k, wait := range s.AwaitingFeedback {
 		repo, pr := wait.Repo, wait.PR
@@ -275,6 +315,15 @@ func (s State) Contains(repo string, pr int) bool {
 		}
 	}
 	return false
+}
+
+// CooledDown reports whether the given repo#pr@head is under an active fire
+// cooldown — a rate-limited requeue that must not be re-fired (or re-enqueued)
+// until its window passes. Keyed on head, so a new commit is never blocked by a
+// prior head's cooldown.
+func (s State) CooledDown(repo string, pr int, head string, now time.Time) bool {
+	cd, ok := s.Cooldown[strings.ToLower(QueueKey(repo, pr))]
+	return ok && cd.Head == head && cd.Until.After(now)
 }
 
 func (s State) SortedQueue() []QueueItem {

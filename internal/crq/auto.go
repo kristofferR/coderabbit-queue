@@ -296,6 +296,12 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 	if state.Fired[QueueKey(repo, pr)] == head {
 		return false, nil
 	}
+	// A rate-limited requeue clears Fired[key] so the PR can retry once the window
+	// clears, but the head is under a cooldown until then. Honour it here so a
+	// bouncing rate limit can't be re-enqueued (and re-fired) every pass.
+	if state.CooledDown(repo, pr, head, time.Now().UTC()) {
+		return false, nil
+	}
 	reviews, err := s.gh.ListReviews(ctx, repo, pr)
 	if err != nil {
 		return false, err
@@ -308,7 +314,11 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 		}
 	}
 	if incremental {
-		return lastBotReview != head, nil
+		need := lastBotReview != head
+		if need {
+			s.logEnqueue(repo, pr, head, "no bot review at head")
+		}
+		return need, nil
 	}
 	if lastBotReview != "" {
 		return false, nil
@@ -329,5 +339,14 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 	if strings.Contains(pull.Body, s.cfg.ReviewDoneMarker) {
 		return false, nil
 	}
+	s.logEnqueue(repo, pr, head, "never reviewed")
 	return true, nil
+}
+
+// logEnqueue records one line per autoreview enqueue decision so a runaway is
+// visible in the daemon log (repo#pr, head, and why it was queued).
+func (s *Service) logEnqueue(repo string, pr int, head, reason string) {
+	if s.log != nil {
+		s.log.Printf("crq: enqueue %s@%s reason=%q", QueueKey(repo, pr), head, reason)
+	}
 }

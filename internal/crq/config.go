@@ -39,6 +39,7 @@ type Config struct {
 	PollInterval        time.Duration
 	WaitTimeout         time.Duration
 	CalibrationTTL      time.Duration
+	RateLimitFallback   time.Duration
 	AutoReviewPoll      time.Duration
 	AutoReviewMaxScan   int
 	LeaderTTL           time.Duration
@@ -100,6 +101,7 @@ func LoadConfig() (Config, error) {
 		PollInterval:        durationEnv(env, "CRQ_POLL", 15*time.Second),
 		WaitTimeout:         durationEnv(env, "CRQ_WAIT_TIMEOUT", 0),
 		CalibrationTTL:      durationEnv(env, "CRQ_CALIBRATE_TTL", 2*time.Minute),
+		RateLimitFallback:   durationEnv(env, "CRQ_RL_FALLBACK", 15*time.Minute),
 		AutoReviewPoll:      durationEnv(env, "CRQ_AUTOREVIEW_POLL", time.Minute),
 		AutoReviewMaxScan:   intEnv(env, "CRQ_AUTOREVIEW_MAX_SCAN", 400),
 		LeaderTTL:           durationEnv(env, "CRQ_LEADER_TTL", 3*time.Minute),
