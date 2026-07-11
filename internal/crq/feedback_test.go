@@ -392,6 +392,55 @@ func TestParseReviewBodyFindingsExtractsOutsideDiffItems(t *testing.T) {
 	}
 }
 
+func TestParseReviewBodyFindingsExtractsNestedQuoteSections(t *testing.T) {
+	// CodeRabbit nests "Outside diff range" / "Duplicate" / nitpick sections
+	// two-plus blockquote levels deep. A single-level quote strip leaves
+	// "> " prefixes that break the anchored line-range header match, so
+	// every finding in those sections used to be silently dropped.
+	review := Review{
+		ID: 100,
+		Body: "> [!WARNING]\n" +
+			"> Review had issues posting inline.\n" +
+			">\n" +
+			"> <details>\n" +
+			"> <summary>Outside diff range comments (2)</summary><blockquote>\n" +
+			">\n" +
+			"> > <details>\n" +
+			"> > <summary>internal/deep.go (1)</summary><blockquote>\n" +
+			"> >\n" +
+			"> > `10-12`: _Functional Correctness_ | _Major_\n" +
+			"> >\n" +
+			"> > **Nested finding one.**\n" +
+			"> >\n" +
+			"> > Body of the first nested finding.\n" +
+			"> >\n" +
+			"> > </blockquote></details>\n" +
+			"> > <details>\n" +
+			"> > <summary>internal/deeper.go (1)</summary><blockquote>\n" +
+			"> >\n" +
+			"> > > `20-21`: _Maintainability_ | _Minor_\n" +
+			"> > >\n" +
+			"> > > **Nested finding two.**\n" +
+			"> > >\n" +
+			"> > > Body of the second, even deeper finding.\n" +
+			"> >\n" +
+			"> > </blockquote></details>\n" +
+			"> </blockquote></details>",
+		CommitID:    "abcdef1234567890",
+		SubmittedAt: time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC),
+	}
+	findings := parseReviewBodyFindings(review, "coderabbitai[bot]")
+	if len(findings) != 2 {
+		t.Fatalf("expected 2 findings, got %d: %#v", len(findings), findings)
+	}
+	if findings[0].Path != "internal/deep.go" || findings[0].Line != 10 || findings[0].Title != "Nested finding one." {
+		t.Fatalf("first finding mismatch: %#v", findings[0])
+	}
+	if findings[1].Path != "internal/deeper.go" || findings[1].Line != 20 || findings[1].Title != "Nested finding two." {
+		t.Fatalf("second finding mismatch: %#v", findings[1])
+	}
+}
+
 func TestParseReviewBodyFindingsExtractsCommentsFailedToPost(t *testing.T) {
 	// CodeRabbit's "Comments failed to post" section uses un-backticked line
 	// headers (561-573:) unlike the backticked "Outside diff range" form.

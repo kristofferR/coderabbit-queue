@@ -1445,8 +1445,13 @@ func stripMarkdownQuote(body string) string {
 	lines := strings.Split(body, "\n")
 	for i, line := range lines {
 		line = strings.TrimRight(line, " \t")
-		line = strings.TrimPrefix(line, "> ")
-		line = strings.TrimPrefix(line, ">")
+		// CodeRabbit nests review-body sections (outside-diff-range,
+		// duplicates, nitpicks) several blockquote levels deep — strip
+		// every leading quote marker, not just the first.
+		for strings.HasPrefix(line, ">") {
+			line = strings.TrimPrefix(line, ">")
+			line = strings.TrimPrefix(line, " ")
+		}
 		lines[i] = line
 	}
 	return strings.Join(lines, "\n")
