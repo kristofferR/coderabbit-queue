@@ -237,6 +237,9 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			if len(s.cfg.AllowRepos) > 0 && !s.cfg.AllowRepos[repo] {
 				return false, nil
 			}
+			if s.cfg.SkipAuthors[normalizeBotName(strings.ToLower(pr.Author))] {
+				return false, nil
+			}
 			scanned++
 			// Heartbeat: renew the lease partway through a long pass so a standby
 			// can't steal it mid-scan and cause brief double-leadership (#4).

@@ -19,6 +19,10 @@ type Config struct {
 	Scope             []string
 	AllowRepos        map[string]bool
 	ExcludeRepos      map[string]bool
+	// SkipAuthors lists PR authors autoreview never enqueues (normalized: lowercase,
+	// no "[bot]" suffix). Defaults to dependabot; set CRQ_AUTOREVIEW_SKIP_AUTHORS=""
+	// to review bot PRs too. Manual `crq review` is unaffected.
+	SkipAuthors       map[string]bool
 	StateRef          string
 	Bot               string
 	RequiredBots      []string
@@ -84,6 +88,7 @@ func LoadConfig() (Config, error) {
 		Scope:               listEnv(env, "CRQ_SCOPE", ownerOf(env["CRQ_REPO"])),
 		AllowRepos:          repoSet(env["CRQ_REPOS"]),
 		ExcludeRepos:        repoSet(env["CRQ_EXCLUDE"]),
+		SkipAuthors:         authorSet(stringEnvAllowEmpty(env, "CRQ_AUTOREVIEW_SKIP_AUTHORS", "dependabot[bot]")),
 		StateRef:            stringEnv(env, "CRQ_STATE_REF", "crq-state"),
 		Bot:                 bot,
 		RequiredBots:        requiredBots,
@@ -257,6 +262,20 @@ func repoSet(value string) map[string]bool {
 	set := map[string]bool{}
 	for _, item := range strings.Split(value, ",") {
 		item = NormalizeRepo(item)
+		if item != "" {
+			set[item] = true
+		}
+	}
+	return set
+}
+
+// authorSet normalizes a comma-separated login list the same way scan results
+// are matched: lowercase with the "[bot]" suffix stripped, so "dependabot",
+// "Dependabot" and "dependabot[bot]" all name the same author.
+func authorSet(value string) map[string]bool {
+	set := map[string]bool{}
+	for _, item := range strings.Split(value, ",") {
+		item = normalizeBotName(strings.ToLower(strings.TrimSpace(item)))
 		if item != "" {
 			set[item] = true
 		}

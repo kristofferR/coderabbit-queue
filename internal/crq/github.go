@@ -977,6 +977,9 @@ func (g *GitHub) EachOpenPR(ctx context.Context, target string, byRepo bool, fn 
 			Items []struct {
 				Number        int    `json:"number"`
 				RepositoryURL string `json:"repository_url"`
+				User          struct {
+					Login string `json:"login"`
+				} `json:"user"`
 			} `json:"items"`
 		}
 		if err := g.request(ctx, http.MethodGet, "/search/issues?"+values.Encode(), nil, &result); err != nil {
@@ -990,7 +993,7 @@ func (g *GitHub) EachOpenPR(ctx context.Context, target string, byRepo bool, fn 
 			if repo == "" {
 				continue
 			}
-			stop, err := fn(SearchPR{Repo: repo, Number: item.Number})
+			stop, err := fn(SearchPR{Repo: repo, Number: item.Number, Author: item.User.Login})
 			if err != nil {
 				return err
 			}
@@ -1050,6 +1053,7 @@ func (g *GitHub) searchOwnerQualifier(ctx context.Context, login string) (string
 type SearchPR struct {
 	Repo   string
 	Number int
+	Author string
 }
 
 type gitRef struct {

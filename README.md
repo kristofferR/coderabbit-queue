@@ -196,6 +196,7 @@ crq autoreview --once           # a single pass (e.g. from cron or a timer)
 
 By default `autoreview` covers every open PR in `CRQ_SCOPE`. To limit it to specific repos, set an
 allowlist (`CRQ_REPOS=owner/a,owner/b`) — or exclude a few with a denylist (`CRQ_EXCLUDE=owner/c`).
+Dependabot PRs are skipped out of the box; tune that with `CRQ_AUTOREVIEW_SKIP_AUTHORS`.
 
 Each pass enqueues any open PR in scope whose latest commit CodeRabbit hasn't reviewed yet (a new PR →
 its first review; new commits → an incremental review), then fires them FIFO until **every** PR is
@@ -388,6 +389,7 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_STATE_REF` | `crq-state` | git ref that stores the typed CAS state |
 | `CRQ_REPOS` | _(all in scope)_ | `autoreview` allowlist — only these `owner/name` repos (comma-separated) |
 | `CRQ_EXCLUDE` | _(none)_ | `autoreview` denylist — never these `owner/name` repos (comma-separated) |
+| `CRQ_AUTOREVIEW_SKIP_AUTHORS` | `dependabot[bot]` | PR authors `autoreview` never enqueues (comma-separated; case and `[bot]` suffix don't matter) — set to empty to auto-review bot PRs too; manual `crq review` is unaffected |
 | `CRQ_REQUIRED_BOTS` | `coderabbitai[bot]` | bots that must review the head for convergence (crq waits for all of them) |
 | `CRQ_FEEDBACK_BOTS` | required bots + `chatgpt-codex-connector[bot]` | bots whose findings are surfaced — a superset of required bots, so Codex reviews show up without gating convergence on repos where Codex isn't installed |
 | `CRQ_TZ` | `UTC` | dashboard display timezone (IANA name, e.g. `Europe/Oslo`) |

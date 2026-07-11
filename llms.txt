@@ -96,6 +96,9 @@ Fleet review:
 crq autoreview
 ```
 
+Autoreview skips PRs authored by dependabot by default (`CRQ_AUTOREVIEW_SKIP_AUTHORS`,
+comma-separated logins; set empty to include bot PRs). Manual `crq review` ignores this filter.
+
 Diagnostics only:
 
 ```bash

@@ -156,3 +156,37 @@ func TestLoadConfigDefaultRequiredBotFollowsCustomBot(t *testing.T) {
 		t.Fatalf("default required bots should follow custom CRQ_BOT, got %#v", cfg.RequiredBots)
 	}
 }
+
+func TestLoadConfigSkipsDependabotByDefault(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_AUTOREVIEW_SKIP_AUTHORS", "dependabot[bot]")
+	os.Unsetenv("CRQ_AUTOREVIEW_SKIP_AUTHORS")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SkipAuthors["dependabot"] {
+		t.Fatalf("autoreview should skip dependabot PRs by default, got %#v", cfg.SkipAuthors)
+	}
+}
+
+func TestLoadConfigEmptySkipAuthorsDisablesFilter(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_AUTOREVIEW_SKIP_AUTHORS", "")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.SkipAuthors) != 0 {
+		t.Fatalf("explicit empty CRQ_AUTOREVIEW_SKIP_AUTHORS should re-enable bot PR reviews, got %#v", cfg.SkipAuthors)
+	}
+}
+
+func TestAuthorSetNormalizesCaseAndBotSuffix(t *testing.T) {
+	set := authorSet("Dependabot[bot], renovate ,")
+	if len(set) != 2 || !set["dependabot"] || !set["renovate"] {
+		t.Fatalf("expected normalized {dependabot, renovate}, got %#v", set)
+	}
+}

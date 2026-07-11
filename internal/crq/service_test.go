@@ -28,6 +28,7 @@ type fakeGitHub struct {
 	nextIssueNumber int
 	postErrs        map[string]error
 	graphQL         func(query string, vars map[string]any, out any) error
+	searchPRs       []SearchPR
 }
 
 type failNthUpdateStore struct {
@@ -242,7 +243,19 @@ func (f *fakeGitHub) SearchOpenPRs(context.Context, string, bool, int) ([]Search
 	return nil, nil
 }
 
-func (f *fakeGitHub) EachOpenPR(context.Context, string, bool, func(SearchPR) (bool, error)) error {
+func (f *fakeGitHub) EachOpenPR(_ context.Context, _ string, _ bool, fn func(SearchPR) (bool, error)) error {
+	f.mu.Lock()
+	prs := append([]SearchPR(nil), f.searchPRs...)
+	f.mu.Unlock()
+	for _, pr := range prs {
+		stop, err := fn(pr)
+		if err != nil {
+			return err
+		}
+		if stop {
+			return nil
+		}
+	}
 	return nil
 }
 
@@ -313,6 +326,55 @@ func TestAutoReviewOnceReleasesLeader(t *testing.T) {
 	}
 	if st.Leader != nil {
 		t.Fatalf("one-shot autoreview should release its leader lease, got %#v", st.Leader)
+	}
+}
+
+func TestAutoReviewScanSkipsConfiguredAuthors(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:          "o/gate",
+		Scope:             []string{"o"},
+		Host:              "h",
+		LeaderTTL:         time.Minute,
+		AutoReviewMaxScan: 10,
+		SkipAuthors:       authorSet("dependabot[bot]"),
+	}
+	gh := newFakeGitHub()
+	gh.searchPRs = []SearchPR{
+		{Repo: "o/app", Number: 1, Author: "dependabot[bot]"},
+		{Repo: "o/app", Number: 2, Author: "Dependabot"}, // case + suffix variants match too
+		{Repo: "o/app", Number: 3, Author: "alice"},
+	}
+	// All three PRs are enqueueable if the author filter fails, so a broken
+	// filter yields 3 queued items rather than a false pass via missing pulls.
+	for pr := 1; pr <= 3; pr++ {
+		var pull Pull
+		pull.State = "open"
+		pull.Head.SHA = "abcdef1234567890"
+		gh.pulls[fakeKey("o/app", pr)] = pull
+	}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	if err := svc.AutoReview(ctx, AutoOptions{Once: true, Incremental: true}); err != nil {
+		t.Fatal(err)
+	}
+	// The one-shot pass also pumps, so the enqueued PR moves queue → fired.
+	st, _, err := svc.store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Fired) != 1 || st.Fired["o/app#3"] == "" {
+		t.Fatalf("only the human-authored PR should be enqueued and fired, got fired=%#v", st.Fired)
+	}
+	for _, item := range st.Queue {
+		if item.PR != 3 {
+			t.Fatalf("bot-authored PR #%d must not be queued, got %#v", item.PR, st.Queue)
+		}
+	}
+	for _, h := range st.History {
+		if h.PR != 3 {
+			t.Fatalf("bot-authored PR #%d must never fire, got history %#v", h.PR, st.History)
+		}
 	}
 }
 
