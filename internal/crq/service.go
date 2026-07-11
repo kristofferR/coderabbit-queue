@@ -330,7 +330,7 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		}
 		s.sync(ctx, updated)
 		if s.log != nil {
-			s.log.Printf("crq: fire %s@%s (adopted existing review command)", key, head)
+			s.log.Printf("fire %s@%s (adopted existing review command)", key, head)
 		}
 		return PumpResult{Action: "fired", Repo: item.Repo, PR: item.PR, Head: head, Reason: "review command already posted"}, nil
 	}
@@ -406,7 +406,7 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	}
 	s.sync(ctx, updated)
 	if s.log != nil {
-		s.log.Printf("crq: fire %s@%s (posted %s)", key, head, strings.TrimSpace(s.cfg.ReviewCommand))
+		s.log.Printf("fire %s@%s (posted %s)", key, head, strings.TrimSpace(s.cfg.ReviewCommand))
 	}
 	return PumpResult{Action: "fired", Repo: item.Repo, PR: item.PR, Head: head}, nil
 }
@@ -687,7 +687,7 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 			// real review of the new head.
 			if len(report.Findings) > 0 && (allReviewed(report.ReviewedBy) || hasHeadCurrentFinding(report.Findings)) {
 				if s.log != nil {
-					s.log.Printf("crq: %s#%d feedback already available on %s; leaving review slot wait", repo, pr, report.Head)
+					s.log.Printf("%s#%d feedback already available on %s; leaving review slot wait", repo, pr, report.Head)
 				}
 				return PumpResult{
 					Action: "deduped",
@@ -730,7 +730,7 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 			if reason == "" {
 				reason = result.Action
 			}
-			s.log.Printf("crq: %s#%d waiting for a review slot — %s (%s elapsed)", repo, pr, reason, time.Since(start).Round(time.Second))
+			s.log.Printf("%s#%d waiting for a review slot — %s (%s elapsed)", repo, pr, reason, time.Since(start).Round(time.Second))
 			lastLog = time.Now()
 		}
 		select {
@@ -868,7 +868,7 @@ func (s *Service) rotateCalibration(ctx context.Context, oldIssue int) (int, err
 		return 0, err
 	}
 	if s.log != nil {
-		s.log.Printf("crq: calibration issue #%d hit the comment cap; rotated to fresh issue #%d", oldIssue, issue.Number)
+		s.log.Printf("calibration issue #%d hit the comment cap; rotated to fresh issue #%d", oldIssue, issue.Number)
 	}
 	return issue.Number, nil
 }
@@ -908,13 +908,13 @@ func (s *Service) readQuota(ctx context.Context, issue int, now time.Time, pendi
 					issue = newIssue
 					asked, err = s.gh.PostIssueComment(ctx, s.cfg.GateRepo, issue, s.cfg.RateLimitCommand)
 				} else if s.log != nil {
-					s.log.Printf("crq: calibration rotation failed: %v", rerr)
+					s.log.Printf("calibration rotation failed: %v", rerr)
 				}
 			}
 		}
 		if err != nil {
 			if s.log != nil {
-				s.log.Printf("crq: calibration probe on #%d failed: %v", issue, err)
+				s.log.Printf("calibration probe on #%d failed: %v", issue, err)
 			}
 			return blocked, err
 		}
@@ -1379,7 +1379,7 @@ func (s *Service) requeueInflight(st *State, status inflightCheck) {
 		if st.Blocked.BlockedUntil != nil {
 			blockedUntil = st.Blocked.BlockedUntil.UTC().Format(time.RFC3339)
 		}
-		s.log.Printf("crq: requeue %s@%s reason=%q blocked_until=%s", key, inf.Head, status.Reason, blockedUntil)
+		s.log.Printf("requeue %s@%s reason=%q blocked_until=%s", key, inf.Head, status.Reason, blockedUntil)
 	}
 }
 

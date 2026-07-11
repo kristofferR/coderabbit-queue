@@ -347,6 +347,6 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 // visible in the daemon log (repo#pr, head, and why it was queued).
 func (s *Service) logEnqueue(repo string, pr int, head, reason string) {
 	if s.log != nil {
-		s.log.Printf("crq: enqueue %s@%s reason=%q", QueueKey(repo, pr), head, reason)
+		s.log.Printf("enqueue %s@%s reason=%q", QueueKey(repo, pr), head, reason)
 	}
 }

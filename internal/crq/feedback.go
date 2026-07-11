@@ -405,7 +405,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 				}
 				deadline = deadline.Add(wait)
 				if s.log != nil {
-					s.log.Printf("crq: %s#%d GitHub API rate-limited; waiting %s for the reset, then resuming", repo, pr, wait.Round(time.Second))
+					s.log.Printf("%s#%d GitHub API rate-limited; waiting %s for the reset, then resuming", repo, pr, wait.Round(time.Second))
 				}
 				s.extendFeedbackWaitDeadline(ctx, repo, pr, head, deadline)
 				if serr := sleepCtx(ctx, wait); serr != nil {
@@ -457,9 +457,9 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		}
 		if s.log != nil && time.Since(lastLog) >= 30*time.Second {
 			if blockedUntil != nil {
-				s.log.Printf("crq: %s#%d queued — account rate-limited until %s; waiting, not counting it against the %s review wait (%s elapsed)", repo, pr, blockedUntil.UTC().Format(time.RFC3339), s.cfg.FeedbackWaitTimeout, time.Since(start).Round(time.Second))
+				s.log.Printf("%s#%d queued — account rate-limited until %s; waiting, not counting it against the %s review wait (%s elapsed)", repo, pr, blockedUntil.UTC().Format(time.RFC3339), s.cfg.FeedbackWaitTimeout, time.Since(start).Round(time.Second))
 			} else {
-				s.log.Printf("crq: %s#%d waiting for review feedback on %s — reviewed %s (%s / %s)", repo, pr, report.Head, reviewedSummary(report.ReviewedBy), time.Since(start).Round(time.Second), s.cfg.FeedbackWaitTimeout)
+				s.log.Printf("%s#%d waiting for review feedback on %s — reviewed %s (%s / %s)", repo, pr, report.Head, reviewedSummary(report.ReviewedBy), time.Since(start).Round(time.Second), s.cfg.FeedbackWaitTimeout)
 			}
 			lastLog = time.Now()
 		}
@@ -635,7 +635,7 @@ func (s *Service) waitToFire(ctx context.Context, repo string, pr int) (PumpResu
 			wait = s.cfg.PollInterval
 		}
 		if s.log != nil {
-			s.log.Printf("crq: %s#%d GitHub API rate-limited before firing; waiting %s for the reset, then retrying", repo, pr, wait.Round(time.Second))
+			s.log.Printf("%s#%d GitHub API rate-limited before firing; waiting %s for the reset, then retrying", repo, pr, wait.Round(time.Second))
 		}
 		if serr := sleepCtx(ctx, wait); serr != nil {
 			return result, code, serr
