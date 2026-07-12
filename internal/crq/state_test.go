@@ -1,6 +1,7 @@
 package crq
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -103,5 +104,18 @@ func TestNormalizeRestoresFiredFromAwaitingFeedback(t *testing.T) {
 	}
 	if wait := st.AwaitingFeedback[key]; wait.Repo != "owner/repo" || wait.PR != 7 {
 		t.Fatalf("awaiting feedback key/fields should normalize together, got %#v", st.AwaitingFeedback)
+	}
+}
+
+func TestDashboardLabelsFireHistoryAsRequested(t *testing.T) {
+	state := DefaultState(Config{})
+	state.History = []HistoryItem{{Repo: "owner/repo", PR: 7, Commit: "abcdef123", At: time.Now().UTC(), Host: "host"}}
+	dashboard := renderDashboard(state, Config{})
+
+	if !strings.Contains(dashboard, "Recently requested") || !strings.Contains(dashboard, "| PR | commit | requested | host |") {
+		t.Fatalf("fire history must be labeled as requested, got:\n%s", dashboard)
+	}
+	if strings.Contains(dashboard, "Recently reviewed") {
+		t.Fatalf("fire history must not claim reviews completed, got:\n%s", dashboard)
 	}
 }

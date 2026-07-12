@@ -1098,7 +1098,7 @@ func TestPumpClearsFeedbackWaitWhenReviewSubmitted(t *testing.T) {
 	}
 	gh := newFakeGitHub()
 	firedAt := time.Now().UTC().Add(-5 * time.Minute)
-	review := Review{SubmittedAt: firedAt.Add(time.Minute)}
+	review := Review{CommitID: "abcdef1234567890", SubmittedAt: firedAt.Add(time.Minute)}
 	review.User.Login = cfg.Bot
 	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review}
 	store := NewMemoryStore(cfg)
@@ -1815,6 +1815,59 @@ func TestPumpDropsClosedPRWithoutFiring(t *testing.T) {
 	}
 }
 
+func TestPumpDropsClosedPRWhileReviewQuotaIsBlocked(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:        "owner/gate",
+		StateRef:        "crq-state",
+		Host:            "testhost",
+		Bot:             "coderabbitai[bot]",
+		ReviewCommand:   "@coderabbitai review",
+		PollInterval:    time.Millisecond,
+		InflightTimeout: time.Minute,
+		FiredMax:        500,
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "closed"
+	pull.Merged = true
+	// A merged PR with a deleted head must still be removable; no head SHA is
+	// needed once GitHub says the PR is terminal.
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+
+	if _, err := service.Enqueue(ctx, "owner/repo", 12); err != nil {
+		t.Fatal(err)
+	}
+	blockedUntil := time.Now().UTC().Add(time.Hour)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Blocked.BlockedUntil = &blockedUntil
+		st.Blocked.Source = "calibrate"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "skipped" || pumped.Reason != "pr closed" {
+		t.Fatalf("expected merged PR cleanup to bypass the quota block, got %#v", pumped)
+	}
+	state, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Contains("owner/repo", 12) {
+		t.Fatal("merged PR should be removed even while review quota is blocked")
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("must not post a review to a merged PR, posted %d", len(gh.posted))
+	}
+}
+
 func TestPumpDedupesQueuedHeadAwaitingFeedback(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{
@@ -2004,13 +2057,13 @@ func TestParseAvailableInPlainFormatStillWorks(t *testing.T) {
 	}
 }
 
-func TestInflightStatusAlreadyReviewedAckIsTerminalOverRateLimit(t *testing.T) {
+func TestInflightStatusAlreadyReviewedAckWithoutReviewDoesNotOverrideRateLimit(t *testing.T) {
 	now := time.Now().UTC()
 	cfg := Config{Bot: "coderabbitai", RateLimitMarker: "rate limited by coderabbit.ai", InflightTimeout: time.Hour}
 	gh := newFakeGitHub()
-	// Rate-limit comment sorted BEFORE the dedup ack: the terminal ack must still
-	// win, or the round requeues forever on a head that has no review and never
-	// will (CodeRabbit "does not re-review already reviewed commits").
+	// Incident shape from ha-adjustable-bed#435: CodeRabbit rate-limited the first
+	// attempt, then answered the explicit command with misleading already-reviewed
+	// boilerplate even though GitHub had no review for the PR.
 	rl := IssueComment{ID: 1, Body: "<!-- rate limited by coderabbit.ai -->\n> ## Review limit reached\n> **Next review available in:** **40 minutes**", UpdatedAt: now.Add(time.Second)}
 	rl.User.Login = "coderabbitai[bot]"
 	ack := IssueComment{ID: 2, Body: "<details>\n<summary>✅ Action performed</summary>\n\nReview finished.\n\n> Note: CodeRabbit is an incremental review system and does not re-review already reviewed commits. This command is applicable only when automatic reviews are paused.\n</details>", UpdatedAt: now.Add(2 * time.Second)}
@@ -2026,23 +2079,33 @@ func TestInflightStatusAlreadyReviewedAckIsTerminalOverRateLimit(t *testing.T) {
 	if svc.isRateLimited(ack.Body) || !svc.isReviewAlreadyDone(ack.Body) {
 		t.Fatal("ack must classify as terminal already-reviewed, not rate-limited")
 	}
-	state := State{InFlight: &InFlight{Repo: "o/repo", PR: 82, Phase: "posted", FiredAt: &now, FiredCommentID: 99}}
+	state := State{InFlight: &InFlight{Repo: "o/repo", PR: 82, Head: "a0646f010", Phase: "posted", FiredAt: &now, FiredCommentID: 99}}
 	status, err := svc.inflightStatus(context.Background(), state)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !status.Done || status.Reason != doneAlreadyReviewed {
-		t.Fatalf("expected terminal already-reviewed Done, got %#v", status)
+	if !status.Requeue || status.Reason != warnRateLimited {
+		t.Fatalf("an unproven acknowledgement must yield to the rate limit, got %#v", status)
 	}
-	if status.Requeue {
-		t.Fatal("already-reviewed ack must not requeue")
+	if status.Done {
+		t.Fatal("an acknowledgement with no matching GitHub review must not complete the round")
+	}
+
+	// Once GitHub actually has a review for the claimed head, the acknowledgement
+	// is trustworthy and wins over the stale rate-limit comment.
+	review := Review{CommitID: "a0646f010abcdef", SubmittedAt: now.Add(-time.Minute)}
+	review.User.Login = "coderabbitai[bot]"
+	gh.reviews[fakeKey("o/repo", 82)] = []Review{review}
+	status, err = svc.inflightStatus(context.Background(), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Done || status.Requeue || status.Reason != doneAlreadyReviewed {
+		t.Fatalf("a matching GitHub review should validate the acknowledgement, got %#v", status)
 	}
 }
 
-// TestLoopFiresOnceForAlreadyReviewedHead reproduces the carrier#82 runaway: a
-// fire draws a dedup ack plus an edited rate-limit comment and no GitHub review.
-// It must fire exactly once and never re-enqueue the head.
-func TestLoopFiresOnceForAlreadyReviewedHead(t *testing.T) {
+func TestRateLimitedAlreadyReviewedAckWithoutReviewRequeues(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{
 		GateRepo: "o/gate", Scope: []string{"o"}, Host: "h",
@@ -2068,7 +2131,8 @@ func TestLoopFiresOnceForAlreadyReviewedHead(t *testing.T) {
 		t.Fatalf("expected first pump to fire, got %#v", res)
 	}
 
-	// CodeRabbit answers: edits a rate-limit comment AND posts a dedup ack, no review.
+	// CodeRabbit answers with a rate-limit comment and an already-reviewed claim,
+	// but no review object. The PR must remain eligible for a real later attempt.
 	answer := time.Now().UTC().Add(time.Minute)
 	rl := IssueComment{ID: 501, Body: "<!-- rate limited by coderabbit.ai -->\n> ## Review limit reached\n> **Next review available in:** **40 minutes**", CreatedAt: answer, UpdatedAt: answer}
 	rl.User.Login = "coderabbitai[bot]"
@@ -2080,23 +2144,18 @@ func TestLoopFiresOnceForAlreadyReviewedHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Action != "cleared" || res.Reason != doneAlreadyReviewed {
-		t.Fatalf("expected cleared already-reviewed, got %#v", res)
+	if res.Action != "requeued" || res.Reason != warnRateLimited {
+		t.Fatalf("expected rate-limited requeue, got %#v", res)
 	}
 	st, _, _ := store.Load(ctx)
-	if st.Fired[QueueKey("o/carrier", 82)] != head {
-		t.Fatalf("expected Fired to retain head %q, got %#v", head, st.Fired)
+	if st.Fired[QueueKey("o/carrier", 82)] != "" {
+		t.Fatalf("a false completion must not retain a fired marker, got %#v", st.Fired)
 	}
-	if st.Blocked.BlockedUntil != nil {
-		t.Fatalf("terminal ack must not set a rate-limit block, got %v", st.Blocked.BlockedUntil)
+	if st.Blocked.BlockedUntil == nil {
+		t.Fatal("the real rate-limit response must block the next attempt")
 	}
-
-	need, err := svc.needsReview(ctx, st, "o/carrier", 82, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if need {
-		t.Fatal("needsReview re-enqueued an already-reviewed head")
+	if !st.Contains("o/carrier", 82) {
+		t.Fatal("the unreviewed PR must remain queued")
 	}
 
 	if _, err := svc.Pump(ctx); err != nil {
@@ -2223,8 +2282,8 @@ func TestNormalizePrunesExpiredCooldowns(t *testing.T) {
 	st := DefaultState(cfg)
 	now := time.Now().UTC()
 	st.Cooldown["o/a#1"] = FireCooldown{Head: "aaa", Until: now.Add(30 * time.Minute)} // live
-	st.Cooldown["o/b#2"] = FireCooldown{Head: "bbb", Until: now.Add(-time.Minute)}      // expired
-	st.Cooldown["o/c#3"] = FireCooldown{Head: "", Until: now.Add(time.Hour)}            // headless
+	st.Cooldown["o/b#2"] = FireCooldown{Head: "bbb", Until: now.Add(-time.Minute)}     // expired
+	st.Cooldown["o/c#3"] = FireCooldown{Head: "", Until: now.Add(time.Hour)}           // headless
 	st.Normalize(cfg)
 	if _, ok := st.Cooldown["o/a#1"]; !ok {
 		t.Fatal("live cooldown must survive Normalize")

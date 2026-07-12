@@ -96,7 +96,7 @@ Everything lives in one small **gate repo** (private is fine):
 | Piece | What it is |
 |-------|-----------|
 | 🔒 **State ref** | The typed queue state is JSON stored in a git ref (`CRQ_STATE_REF`, default `crq-state`), updated with optimistic **compare-and-swap** — a new commit is written only if the ref hasn't moved, so concurrent callers across machines never corrupt the queue. No database, service account, or always-on server. |
-| 📊 **Dashboard issue** | A tracking **issue** renders the live state below a hidden machine-readable block: status, the queue, in-flight review, "recently reviewed" history, and the current quota — every PR linked. The issue **title** is a one-glance status (`🐰 crq — 2 queued`). |
+| 📊 **Dashboard issue** | A tracking **issue** renders the live state below a hidden machine-readable block: status, the queue, in-flight review, recently requested review commands, and the current quota — every PR linked. The issue **title** is a one-glance status (`🐰 crq — 2 queued`). |
 | 🐰 **Calibration PR** | A throwaway draft PR where crq asks `@coderabbitai rate limit` to read your real quota *without spending a review*. crq prunes its own probe comments so the PR never hits GitHub's 2500-comment cap. |
 
 ---

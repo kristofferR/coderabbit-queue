@@ -209,6 +209,16 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if len(queue) == 0 {
 		return PumpResult{Action: "idle"}, nil
 	}
+	// Terminal PR cleanup is independent of review quota and pacing. Check the
+	// queue head before either gate so a PR merged while CodeRabbit is blocked (or
+	// while MinInterval is active) leaves the queue on the next pump instead of
+	// lingering until another review slot becomes available.
+	item := queue[0]
+	if _, open, err := s.pullHead(ctx, item.Repo, item.PR); err != nil {
+		return PumpResult{}, err
+	} else if !open {
+		return s.dropClosedQueueItem(ctx, item)
+	}
 	if refreshed, err := s.RefreshQuota(ctx); err == nil {
 		state = refreshed
 	} else {
@@ -225,7 +235,7 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if len(queue) == 0 {
 		return PumpResult{Action: "idle"}, nil
 	}
-	item := queue[0]
+	item = queue[0]
 	head, open, err := s.pullHead(ctx, item.Repo, item.PR)
 	if err != nil {
 		return PumpResult{}, err
@@ -252,17 +262,7 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		return PumpResult{Action: "dry_run", Repo: item.Repo, PR: item.PR, Head: head}, nil
 	}
 	if !open {
-		// PR was closed or merged after queueing — drop it rather than fire a review
-		// at a dead PR that can never converge.
-		updated, uerr := s.store.Update(ctx, func(st *State) error {
-			removeQueued(st, item.Seq)
-			return nil
-		})
-		if uerr != nil {
-			return PumpResult{}, uerr
-		}
-		s.sync(ctx, updated)
-		return PumpResult{Action: "skipped", Repo: item.Repo, PR: item.PR, Reason: "pr closed"}, nil
+		return s.dropClosedQueueItem(ctx, item)
 	}
 	if !isShortSHA(head) {
 		return PumpResult{Action: "skipped", Repo: item.Repo, PR: item.PR, Reason: "could not read head"}, nil
@@ -409,6 +409,36 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		s.log.Printf("fire %s@%s (posted %s)", key, head, strings.TrimSpace(s.cfg.ReviewCommand))
 	}
 	return PumpResult{Action: "fired", Repo: item.Repo, PR: item.PR, Head: head}, nil
+}
+
+// dropClosedQueueItem removes a closed or merged queue entry without consuming
+// review readiness. The sequence check makes a concurrent cancel/pump a benign
+// lost race instead of writing a no-op state revision.
+func (s *Service) dropClosedQueueItem(ctx context.Context, item QueueItem) (PumpResult, error) {
+	result := PumpResult{Action: "skipped", Repo: item.Repo, PR: item.PR, Reason: "pr closed"}
+	if s.cfg.DryRun {
+		return result, nil
+	}
+	removed := false
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		removed = false
+		for _, queued := range st.Queue {
+			if queued.Seq == item.Seq {
+				removeQueued(st, item.Seq)
+				removed = true
+				return nil
+			}
+		}
+		return ErrNoChange
+	})
+	if err != nil {
+		return PumpResult{}, err
+	}
+	if !removed {
+		return PumpResult{Action: "lost_race"}, nil
+	}
+	s.sync(ctx, updated)
+	return result, nil
 }
 
 func (s *Service) markReviewPosted(ctx context.Context, token string, item QueueItem, head string, commentID int64, firedAt time.Time) (State, error) {
@@ -711,13 +741,13 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 		}
 		if !state.Contains(repo, pr) {
 			head, open, herr := s.pullHead(ctx, repo, pr)
-			if herr == nil && state.Fired[QueueKey(repo, pr)] == head {
-				return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: head}, 3, nil
-			}
 			if herr == nil && !open {
 				// PR was closed/merged and dropped from the queue — nothing to review.
 				// Return a terminal result so crq loop stops instead of polling forever.
 				return PumpResult{Action: "skipped", Repo: repo, PR: pr, Reason: "pr closed"}, 2, nil
+			}
+			if herr == nil && head != "" && state.Fired[QueueKey(repo, pr)] == head {
+				return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: head}, 3, nil
 			}
 			if result.Action == "fired" && result.Repo == repo && result.PR == pr {
 				return result, 0, nil
@@ -1145,18 +1175,34 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 	if err != nil {
 		return inflightCheck{}, err
 	}
-	// Terminal-ack pass first, across ALL comments: CodeRabbit's "does not
-	// re-review already reviewed commits" note means no review will ever be posted
-	// for this head, so the round is done. This must win over the rate-limit pass
-	// below — the two co-occur, and if a rate-limit comment sorted first we would
-	// requeue forever on a head that has no review and never will.
+	reviews, err := s.gh.ListReviews(ctx, inf.Repo, inf.PR)
+	if err != nil {
+		return inflightCheck{}, err
+	}
+	// CodeRabbit can post the "does not re-review already reviewed commits"
+	// boilerplate after a rate-limited first attempt, even though no review exists.
+	// Treat that acknowledgement as terminal only when GitHub has the evidence it
+	// claims: a configured-bot review matching this fired head. Without that proof,
+	// a co-occurring rate-limit notice must requeue the PR for a real later attempt.
+	alreadyReviewedAck := false
 	for _, comment := range comments {
 		if !s.isConfiguredBot(comment.User.Login) || comment.UpdatedAt.Before(*inf.FiredAt) {
 			continue
 		}
 		if s.isReviewAlreadyDone(comment.Body) {
-			return inflightCheck{Done: true, Reason: doneAlreadyReviewed, FeedbackComplete: true}, nil
+			alreadyReviewedAck = true
+			break
 		}
+	}
+	for _, review := range reviews {
+		if !s.isConfiguredBot(review.User.Login) || !reviewMatchesRound(review, inf.Head, *inf.FiredAt) {
+			continue
+		}
+		reason := doneReviewSubmitted
+		if alreadyReviewedAck {
+			reason = doneAlreadyReviewed
+		}
+		return inflightCheck{Done: true, Reason: reason, FeedbackComplete: s.requiredFeedbackComplete(inf, reviews, comments)}, nil
 	}
 	for _, comment := range comments {
 		if !s.isConfiguredBot(comment.User.Login) || comment.UpdatedAt.Before(*inf.FiredAt) {
@@ -1165,15 +1211,6 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 		if s.isRateLimited(comment.Body) {
 			reset := parseAvailableIn(comment.Body, comment.UpdatedAt)
 			return inflightCheck{Requeue: true, Reason: warnRateLimited, BlockedUntil: reset, RLCommentID: comment.ID, RLCommentUpdated: comment.UpdatedAt}, nil
-		}
-	}
-	reviews, err := s.gh.ListReviews(ctx, inf.Repo, inf.PR)
-	if err != nil {
-		return inflightCheck{}, err
-	}
-	for _, review := range reviews {
-		if s.isConfiguredBot(review.User.Login) && notBefore(review.SubmittedAt, *inf.FiredAt) {
-			return inflightCheck{Done: true, Reason: doneReviewSubmitted, FeedbackComplete: s.requiredFeedbackComplete(inf, reviews, comments)}, nil
 		}
 	}
 	if inf.FiredCommentID != 0 {
@@ -1190,7 +1227,7 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 		}
 	}
 	for _, comment := range comments {
-		if s.isConfiguredBot(comment.User.Login) && comment.ID != inf.FiredCommentID && notBefore(comment.UpdatedAt, *inf.FiredAt) && !s.isRateLimited(comment.Body) && !s.isReviewsPaused(comment.Body) {
+		if s.isConfiguredBot(comment.User.Login) && comment.ID != inf.FiredCommentID && notBefore(comment.UpdatedAt, *inf.FiredAt) && !s.isRateLimited(comment.Body) && !s.isReviewsPaused(comment.Body) && !s.isReviewAlreadyDone(comment.Body) {
 			return inflightCheck{Done: true, Reason: doneBotComment, FeedbackComplete: s.requiredFeedbackComplete(inf, reviews, comments)}, nil
 		}
 	}
@@ -1198,6 +1235,16 @@ func (s *Service) inflightStatus(ctx context.Context, state State) (inflightChec
 		return inflightCheck{Requeue: true, Reason: "in-flight timeout"}, nil
 	}
 	return inflightCheck{}, nil
+}
+
+// reviewMatchesRound reports whether a submitted review is evidence for this
+// fired round. A known head must match the review commit; submission time alone
+// could otherwise let a delayed review of an older head complete the new one.
+func reviewMatchesRound(review Review, head string, firedAt time.Time) bool {
+	if head != "" {
+		return strings.HasPrefix(review.CommitID, head)
+	}
+	return notBefore(review.SubmittedAt, firedAt)
 }
 
 // pruneExpiredWaits drops AwaitingFeedback entries whose deadline has passed.
@@ -1426,6 +1473,9 @@ func (s *Service) pullHead(ctx context.Context, repo string, pr int) (head strin
 		return "", false, err
 	}
 	open = pull.State == "open" && !pull.Merged
+	if !open {
+		return "", false, nil
+	}
 	if len(pull.Head.SHA) < 9 {
 		return "", open, fmt.Errorf("invalid head sha")
 	}
@@ -1514,18 +1564,11 @@ func (s *Service) isReviewsPaused(body string) bool {
 		strings.Contains(l, "auto_pause_after_reviewed_commits")
 }
 
-// isReviewAlreadyDone reports whether a CodeRabbit comment is the "✅ Action
-// performed / Review finished" acknowledgement that the fired head was ALREADY
-// reviewed and will not be re-reviewed — its incremental engine's "does not
-// re-review already reviewed commits" note. crq only ever fires when no review
-// exists at the head, so this ack means no GitHub review object will ever be
-// posted for it via "@coderabbitai review" (only a "full review" would). It is
-// therefore terminal: crq must treat the round as complete and stop firing.
-// Missing this is what let the daemon fire the same head seven times — a
-// rate-limit comment co-occurred and requeued the round before this ack could end
-// it. The same boilerplate can appear inside a rate-limit notice's help section,
-// so a comment that is itself a rate limit (transient, retry when it clears) is
-// excluded.
+// isReviewAlreadyDone identifies CodeRabbit's "does not re-review already
+// reviewed commits" acknowledgement. The text is only a claim, not completion
+// evidence: inflightStatus requires a matching GitHub review before trusting it.
+// The same boilerplate can appear inside a rate-limit notice's help section, so
+// a comment that is itself a rate limit is excluded.
 func (s *Service) isReviewAlreadyDone(body string) bool {
 	l := strings.ToLower(body)
 	if !strings.Contains(l, "does not re-review already reviewed") &&

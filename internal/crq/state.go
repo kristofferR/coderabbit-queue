@@ -445,11 +445,11 @@ func renderDashboard(state State, cfg Config) string {
 		}
 	}
 
-	fmt.Fprintf(&b, "\n## ✅ Recently reviewed — last %d\n\n", len(state.History))
+	fmt.Fprintf(&b, "\n## 📨 Recently requested — last %d\n\n", len(state.History))
 	if len(state.History) == 0 {
 		fmt.Fprintf(&b, "_None yet._\n")
 	} else {
-		fmt.Fprintf(&b, "| PR | commit | reviewed | host |\n|---|---|---|---|\n")
+		fmt.Fprintf(&b, "| PR | commit | requested | host |\n|---|---|---|---|\n")
 		for _, item := range state.History {
 			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | `%s` |\n",
 				item.Repo, item.PR, item.Repo, item.PR, item.Commit, fmtStamp(&item.At, loc), item.Host)
