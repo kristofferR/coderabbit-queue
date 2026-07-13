@@ -1181,7 +1181,8 @@ func TestLoopResumesAwaitingFeedbackWithoutRefiring(t *testing.T) {
 		StateRef:            "crq-state",
 		Host:                "testhost",
 		Bot:                 "coderabbitai[bot]",
-		RequiredBots:        []string{"chatgpt-codex-connector[bot]"},
+		RequiredBots:        []string{"coderabbitai[bot]"},
+		FeedbackBots:        []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
 		ReviewCommand:       "@coderabbitai review",
 		PollInterval:        time.Millisecond,
 		FeedbackWaitTimeout: time.Minute,
@@ -1195,6 +1196,9 @@ func TestLoopResumesAwaitingFeedbackWithoutRefiring(t *testing.T) {
 	comment := IssueComment{ID: 91, Body: "Actionable finding on the current head", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 	comment.User.Login = "chatgpt-codex-connector[bot]"
 	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	review := Review{ID: 9, CommitID: pull.Head.SHA, SubmittedAt: time.Now().UTC()}
+	review.User.Login = "coderabbitai[bot]"
+	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review}
 	store := NewMemoryStore(cfg)
 	started := time.Now().UTC().Add(-time.Minute)
 	if _, err := store.Update(ctx, func(st *State) error {
@@ -1302,7 +1306,7 @@ func TestLoopWaitsForReplacementReviewInsteadOfReturningCarriedPrompt(t *testing
 	}
 }
 
-func TestLoopReturnsFeedbackWhileQueuedBehindBlockedSlot(t *testing.T) {
+func TestLoopDoesNotReturnCodexFeedbackBeforeRequiredReviewSlot(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{
 		GateRepo:            "owner/gate",
@@ -1348,11 +1352,78 @@ func TestLoopReturnsFeedbackWhileQueuedBehindBlockedSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code != 10 || len(report.Findings) != 1 {
-		t.Fatalf("expected visible feedback to stop the slot wait, code=%d report=%#v", code, report)
+	if code != 2 || report.Status != "timeout" || len(report.Findings) != 0 {
+		t.Fatalf("Codex feedback must not finish a round before the required review can fire, code=%d report=%#v", code, report)
 	}
 	if len(gh.posted) != 0 {
 		t.Fatalf("feedback that is already visible must not fire a review, posted=%d", len(gh.posted))
+	}
+}
+
+func TestLoopBuffersFasterCodexFeedbackUntilCodeRabbitReviews(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		RequiredBots:        []string{"coderabbitai[bot]"},
+		FeedbackBots:        []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
+		ReviewCommand:       "@coderabbitai review",
+		PollInterval:        time.Millisecond,
+		FeedbackWaitTimeout: time.Second,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	headTime := time.Now().UTC().Add(-time.Minute)
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	gc := gitCommit{SHA: pull.Head.SHA}
+	gc.Committer.Date = headTime
+	gh.commits[pull.Head.SHA] = gc
+	codexFinding := IssueComment{
+		ID:        91,
+		Body:      "Actionable Codex finding on the current head",
+		CreatedAt: headTime.Add(time.Second),
+		UpdatedAt: headTime.Add(time.Second),
+	}
+	codexFinding.User.Login = "chatgpt-codex-connector[bot]"
+	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{codexFinding}
+	store := NewMemoryStore(cfg)
+	started := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		key := QueueKey("owner/repo", 12)
+		st.Fired[key] = "abcdef123"
+		st.AwaitingFeedback[key] = FeedbackWait{
+			Repo:      "owner/repo",
+			PR:        12,
+			Head:      "abcdef123",
+			StartedAt: started,
+			Deadline:  started.Add(cfg.FeedbackWaitTimeout),
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		fresh := Review{ID: 9, CommitID: pull.Head.SHA, SubmittedAt: time.Now().UTC()}
+		fresh.User.Login = "coderabbitai[bot]"
+		gh.mu.Lock()
+		gh.reviews[fakeKey("owner/repo", 12)] = append(gh.reviews[fakeKey("owner/repo", 12)], fresh)
+		gh.mu.Unlock()
+	}()
+
+	svc := NewService(cfg, gh, store, nil)
+	report, code, err := svc.Loop(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 10 || len(report.Findings) != 1 || !report.ReviewedBy["coderabbitai[bot]"] {
+		t.Fatalf("loop should return Codex feedback only after CodeRabbit completes the round, code=%d report=%#v", code, report)
 	}
 }
 

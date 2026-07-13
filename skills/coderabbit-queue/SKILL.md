@@ -67,6 +67,11 @@ Long waits are expected when the queue is blocked, GitHub is rate-limited, a req
 reviewed yet, or the network is down. crq logs progress to stderr; do not kill it just because stdout
 is quiet.
 
+`crq loop` does not emit a round merely because an extraction-only bot such as Codex responds first.
+It buffers those findings until every `CRQ_REQUIRED_BOTS` reviewer (normally CodeRabbit) has reviewed
+the current head, then returns the complete round. Do not act on an early `crq feedback` snapshot as
+if the round had completed.
+
 ## Keeping the Loop Alive in an Agent Harness
 
 A single `crq loop` call can wait an hour or more when the queue is deep or the account is
@@ -89,6 +94,12 @@ event would never arrive even though `crq-feedback.json` was written.
 
 The `CRQ_EXIT:<code>` line is the completion event (map it to the exit codes above); crq's stderr
 progress stays in the task's output file for diagnosis without generating event noise.
+
+Do **not** replace this wait with a timer, scheduled wake-up, reminder, heartbeat automation, or a
+guessed CodeRabbit response delay. Codex and CodeRabbit have independent latency and quota windows,
+so time-based wake-ups routinely run before the required review exists. The persistent `crq loop`
+process is the waiter. In a harness without a dedicated monitor primitive, keep the foreground PTY
+session attached; if the turn is interrupted, re-run the same idempotent `crq loop` command to resume.
 
 If a loop runner is killed anyway, nothing is lost: the PR stays enqueued. Re-running the same
 `crq loop` command is safe and re-attaches to the wait — enqueueing is idempotent. Do not

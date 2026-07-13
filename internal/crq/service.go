@@ -709,13 +709,13 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 				if err != nil {
 					return PumpResult{}, 1, err
 				}
-				if allReviewed(report.ReviewedBy) || hasHeadCurrentFinding(report.Findings, report.Head) {
+				if allReviewed(report.ReviewedBy) {
 					return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
 				}
 				// Older versions could mark a head fired after mistaking carried-over
-				// review prompts for current feedback. With no active wait, current
-				// review, or current finding, remove that poisoned marker and enqueue
-				// the real replacement review.
+				// review prompts or a faster non-required bot for completion. With no
+				// active wait or completed required-bot gate, remove that poisoned
+				// marker and enqueue the real replacement review.
 				updated, err := s.store.Update(ctx, func(st *State) error {
 					if st.Fired[key] != result.Head || st.AwaitingFeedback[key].Head == result.Head || st.Contains(repo, pr) {
 						return ErrNoChange
@@ -737,16 +737,10 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 				return PumpResult{}, 1, err
 			}
 			lastFeedbackCheck = time.Now()
-			// Only short-circuit the review-slot wait when the feedback genuinely
-			// belongs to the CURRENT head: either every required bot has reviewed
-			// report.Head, or a finding is head-current (not a carried-over thread).
-			// Feedback surfaces unresolved inline threads (source "review_thread")
-			// across commits even when no bot has reviewed the current head, so
-			// those ALONE must not end the wait — otherwise a freshly pushed head
-			// reports a round without ever being re-reviewed (a "fake" round). When
-			// only stale carried-over threads are visible, fall through and fire a
-			// real review of the new head.
-			if len(report.Findings) > 0 && (allReviewed(report.ReviewedBy) || hasHeadCurrentFinding(report.Findings, report.Head)) {
+			// Findings from extraction-only bots such as Codex can arrive before the
+			// required CodeRabbit review. They must never end the slot wait: a round
+			// is available only after every configured required bot reviewed the head.
+			if len(report.Findings) > 0 && allReviewed(report.ReviewedBy) {
 				if s.log != nil {
 					s.log.Printf("%s#%d feedback already available on %s; leaving review slot wait", repo, pr, report.Head)
 				}
@@ -1171,27 +1165,6 @@ func allReviewed(reviewedBy map[string]bool) bool {
 		}
 	}
 	return true
-}
-
-// hasHeadCurrentFinding reports whether any finding genuinely belongs to the
-// current head rather than being a carried-over open inline thread from an
-// earlier commit. Feedback surfaces unresolved threads (source "review_thread")
-// and the latest review body/prompt no matter which commit they sit on. The latter
-// deliberately survive a head change until a newer review supersedes them, so a
-// commit-bearing finding is current only when its commit matches the head. Findings
-// without a commit (for example head-time-bounded issue comments) are current.
-// Used to gate the "feedback already available" short-circuit so carried-over
-// feedback never stands in for a real review of the new head.
-func hasHeadCurrentFinding(findings []Finding, head string) bool {
-	for _, f := range findings {
-		if f.Source == "review_thread" {
-			continue
-		}
-		if f.Commit == "" || shortOID(f.Commit) == shortOID(head) {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Service) inflightStatus(ctx context.Context, state State) (inflightCheck, error) {
