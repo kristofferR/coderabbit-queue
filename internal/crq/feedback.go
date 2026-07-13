@@ -192,6 +192,17 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		if s.isRateLimited(comment.Body) {
 			continue
 		}
+		// Codex reports a clean review as a top-level issue comment rather than a
+		// submitted GitHub review. Treat that message as a completion signal when
+		// Codex gates this round, and never surface it as an actionable finding when
+		// Codex is extraction-only. The persisted wait is the only safe way to bind
+		// an issue comment (which has no commit SHA) to the current head.
+		if isCodexBot(comment.User.Login) && isCodexNoActionReviewCompletion(comment.Body) {
+			if completion.OK && notBefore(issueCommentTime(comment), completion.Cutoff) {
+				markReviewed(report.ReviewedBy, comment.User.Login)
+			}
+			continue
+		}
 		// Issue comments carry no commit SHA, so a stale completion summary from an
 		// earlier commit must not be treated as a review of the current head — rely on
 		// the persisted current-round feedback wait before treating a configured-bot
@@ -1509,7 +1520,10 @@ func isActionableFinding(finding Finding) bool {
 }
 
 func isNonActionableText(text string) bool {
-	text = strings.ToLower(text)
+	text = normalizeReviewText(text)
+	if isCodexNoActionReviewCompletion(text) {
+		return true
+	}
 	nonActionable := []string{
 		"lgtm",
 		"also applies to:",
@@ -1531,7 +1545,19 @@ func isNonActionableText(text string) bool {
 }
 
 func isNoActionReviewCompletion(text string) bool {
-	return strings.Contains(strings.ToLower(text), "no actionable comments were generated in the recent review")
+	text = normalizeReviewText(text)
+	return strings.Contains(text, "no actionable comments were generated in the recent review") ||
+		isCodexNoActionReviewCompletion(text)
+}
+
+func isCodexNoActionReviewCompletion(text string) bool {
+	text = normalizeReviewText(text)
+	return strings.Contains(text, "didn't find any major issues") &&
+		strings.Contains(text, "keep them coming")
+}
+
+func normalizeReviewText(text string) string {
+	return strings.NewReplacer("’", "'", "‘", "'").Replace(strings.ToLower(text))
 }
 
 func issueCommentTime(comment IssueComment) time.Time {

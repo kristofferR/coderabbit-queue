@@ -72,6 +72,12 @@ It buffers those findings until every `CRQ_REQUIRED_BOTS` reviewer (normally Cod
 the current head, then returns the complete round. Do not act on an early `crq feedback` snapshot as
 if the round had completed.
 
+Codex's clean summary (`Codex Review: Didn't find any major issues. Keep them coming!`) is a successful
+review signal, not a finding. crq suppresses it when Codex is extraction-only and counts it in
+`reviewed_by` when `chatgpt-codex-connector[bot]` is included in `CRQ_REQUIRED_BOTS`. The signal is
+accepted only when it was posted after the persisted wait for the current head began, because GitHub
+issue comments do not contain a commit SHA.
+
 ## Keeping the Loop Alive in an Agent Harness
 
 A single `crq loop` call can wait an hour or more when the queue is deep or the account is

@@ -407,6 +407,12 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 **Other review bots:** crq isn't CodeRabbit-specific. Point `CRQ_BOT`, `CRQ_REVIEW_CMD`,
 `CRQ_RATELIMIT_CMD`, and `CRQ_RL_MARKER` at any bot with a similar command surface.
 
+Codex clean reviews are posted as top-level issue comments with `Didn't find any major issues. Keep
+them coming!`. crq recognizes that text as a successful, non-actionable review. If Codex is listed in
+`CRQ_REQUIRED_BOTS`, the current-head wait must be active and the comment must be newer than that wait
+before it satisfies the Codex gate; otherwise the clean summary is simply ignored rather than emitted
+as a false finding.
+
 **Multiple orgs:** CodeRabbit's quota is per-org, so PRs in different orgs draw from *different*
 buckets. Run a separate gate (its own `CRQ_REPO`) per org rather than mixing them — otherwise you'd
 serialize reviews that don't actually compete.

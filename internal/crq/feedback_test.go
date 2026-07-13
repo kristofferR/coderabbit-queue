@@ -913,6 +913,155 @@ func TestFeedbackUsesNoActionCompletionAfterCodexThumbsUp(t *testing.T) {
 	}
 }
 
+func TestFeedbackIgnoresOptionalCodexCleanReviewSummary(t *testing.T) {
+	cfg := Config{
+		Bot:          "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]"},
+		FeedbackBots: []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("o/repo", 1)] = pull
+	review := Review{ID: 9, CommitID: pull.Head.SHA, SubmittedAt: time.Now().UTC()}
+	review.User.Login = "coderabbitai[bot]"
+	gh.reviews[fakeKey("o/repo", 1)] = []Review{review}
+	comment := IssueComment{
+		ID:        10,
+		Body:      "## Codex Review\n\nDidn't find any major issues. Keep them coming!",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	comment.User.Login = "chatgpt-codex-connector[bot]"
+	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	report, err := svc.Feedback(context.Background(), "o/repo", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Converged || report.Status != "converged" {
+		t.Fatalf("optional Codex clean summary must not block a clean required review: %#v", report)
+	}
+	if len(report.Findings) != 0 {
+		t.Fatalf("Codex clean summary must not become a finding: %#v", report.Findings)
+	}
+	if _, tracked := report.ReviewedBy["chatgpt-codex-connector[bot]"]; tracked {
+		t.Fatalf("optional Codex must remain outside the convergence gate: %#v", report.ReviewedBy)
+	}
+}
+
+func TestFeedbackMarksRequiredCodexCleanReviewSummaryReviewed(t *testing.T) {
+	ctx := context.Background()
+	started := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	cfg := Config{
+		Bot:          "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("o/repo", 1)] = pull
+	review := Review{ID: 9, CommitID: pull.Head.SHA, SubmittedAt: started.Add(time.Minute)}
+	review.User.Login = "coderabbitai[bot]"
+	gh.reviews[fakeKey("o/repo", 1)] = []Review{review}
+	comment := IssueComment{
+		ID:        10,
+		Body:      "## Codex Review\n\nDidn't find any major issues. Keep them coming!",
+		CreatedAt: started.Add(2 * time.Minute),
+		UpdatedAt: started.Add(2 * time.Minute),
+	}
+	comment.User.Login = "chatgpt-codex-connector[bot]"
+	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		key := QueueKey("o/repo", 1)
+		st.Fired[key] = "abcdef123"
+		st.AwaitingFeedback[key] = FeedbackWait{
+			Repo:      "o/repo",
+			PR:        1,
+			Head:      "abcdef123",
+			StartedAt: started,
+			Deadline:  started.Add(time.Hour),
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	report, err := svc.Feedback(ctx, "o/repo", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Converged || report.Status != "converged" {
+		t.Fatalf("current Codex clean summary should converge both required bots: %#v", report)
+	}
+	if !report.ReviewedBy["coderabbitai[bot]"] || !report.ReviewedBy["chatgpt-codex-connector[bot]"] {
+		t.Fatalf("expected both required bots reviewed: %#v", report.ReviewedBy)
+	}
+	if len(report.Findings) != 0 {
+		t.Fatalf("Codex clean summary must not become a finding: %#v", report.Findings)
+	}
+}
+
+func TestFeedbackDoesNotUseStaleCodexCleanReviewSummary(t *testing.T) {
+	ctx := context.Background()
+	started := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	cfg := Config{
+		Bot:          "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("o/repo", 1)] = pull
+	review := Review{ID: 9, CommitID: pull.Head.SHA, SubmittedAt: started.Add(time.Minute)}
+	review.User.Login = "coderabbitai[bot]"
+	gh.reviews[fakeKey("o/repo", 1)] = []Review{review}
+	comment := IssueComment{
+		ID:        10,
+		Body:      "Codex Review: Didn’t find any major issues. Keep them coming!",
+		CreatedAt: started.Add(-time.Minute),
+		UpdatedAt: started.Add(-time.Minute),
+	}
+	comment.User.Login = "chatgpt-codex-connector[bot]"
+	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		key := QueueKey("o/repo", 1)
+		st.Fired[key] = "abcdef123"
+		st.AwaitingFeedback[key] = FeedbackWait{
+			Repo:      "o/repo",
+			PR:        1,
+			Head:      "abcdef123",
+			StartedAt: started,
+			Deadline:  started.Add(time.Hour),
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	report, err := svc.Feedback(ctx, "o/repo", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Converged || report.Status != "waiting" {
+		t.Fatalf("stale Codex clean summary must not satisfy the current round: %#v", report)
+	}
+	if !report.ReviewedBy["coderabbitai[bot]"] || report.ReviewedBy["chatgpt-codex-connector[bot]"] {
+		t.Fatalf("only CodeRabbit should be current: %#v", report.ReviewedBy)
+	}
+	if len(report.Findings) != 0 {
+		t.Fatalf("stale Codex clean summary must still be non-actionable: %#v", report.Findings)
+	}
+}
+
 func TestLoopConvergesOnCurrentNoActionCompletionComment(t *testing.T) {
 	ctx := context.Background()
 	started := time.Now().UTC().Add(-2 * time.Millisecond)
