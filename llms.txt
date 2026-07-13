@@ -72,6 +72,9 @@ crq feedback OWNER/REPO PR_NUMBER
 
 `crq feedback`/`crq loop` also surface still-open findings from earlier commits (unresolved,
 non-outdated review threads), so no manual cross-review audit is needed.
+Review bodies have no resolution flag: crq retains the latest body before a new round starts, but
+suppresses body findings older than the persisted current-head round so addressed feedback is not
+re-emitted. Unresolved cross-commit threads remain visible.
 
 Long waits are not hangs. During queue/rate-limit waits, missing required-bot reviews, and
 network/GitHub outages, crq logs progress to stderr; stdout stays reserved for the final JSON.

@@ -73,6 +73,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	for bot := range requiredBots {
 		report.ReviewedBy[bot] = false
 	}
+	completion := s.feedbackCompletionContext(ctx, repo, pr, head)
 
 	reviews, err := s.gh.ListReviews(ctx, repo, pr)
 	if err != nil {
@@ -92,6 +93,15 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	for _, review := range reviews {
 		login := review.User.Login
 		if !inBots(extractBots, login) {
+			continue
+		}
+		// Once a fresh review round has started for this head, a body submitted
+		// before that round belongs to the previous head. Unresolved threads are
+		// still surfaced below across commits, while thread-less body findings
+		// must be re-reported by the current round instead of trapping the loop.
+		if completion.OK &&
+			(head == "" || !strings.HasPrefix(review.CommitID, head)) &&
+			!notBefore(review.SubmittedAt, completion.Cutoff) {
 			continue
 		}
 		if head != "" && strings.HasPrefix(review.CommitID, head) {
@@ -171,7 +181,6 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// head: a bot finding posted before this head was committed belongs to an earlier
 	// round and must not trap crq loop on stale, already-addressed feedback. The
 	// head commit time is resolved lazily — only when there's an actionable candidate.
-	completion := s.feedbackCompletionContext(ctx, repo, pr, head)
 	headCutoff := time.Time{}
 	headCutoffLoaded := false
 	headCutoffOf := func() time.Time {

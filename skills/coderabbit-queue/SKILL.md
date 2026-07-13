@@ -147,6 +147,11 @@ commit, and bot.
 reports. It also surfaces still-open findings from earlier commits (any unresolved, non-outdated
 review thread), so there is no need to audit past reviews by hand.
 
+Review-body findings have no GitHub resolution state. Before a new review round starts, crq keeps
+the newest body so failed-to-post comments are not lost after a rebase. Once a round is persisted
+for the current head, body findings written before that round are suppressed; the current reviewer
+must report them again. Cross-commit unresolved threads are still surfaced normally.
+
 Parse fields defensively. Each finding has `bot`, `severity`, `title`, `body`, and `source`; `path`,
 `line`, `url`, and `thread_id` are optional. Review-body/outside-diff findings often have no
 resolvable `thread_id`.

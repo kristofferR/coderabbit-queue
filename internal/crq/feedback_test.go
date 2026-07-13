@@ -601,6 +601,67 @@ func TestFeedbackNewerHeadReviewSupersedesOldBodyFindings(t *testing.T) {
 	}
 }
 
+func TestFeedbackCurrentRoundDoesNotResurfacePreRoundBodyFindings(t *testing.T) {
+	ctx := context.Background()
+	started := time.Date(2026, 7, 13, 8, 0, 0, 0, time.UTC)
+	cfg := Config{
+		Bot:          "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]"},
+		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, extraFeedbackBots),
+	}
+	gh := newFakeGitHub()
+	head := "9999999999999999"
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = head
+	gh.pulls[fakeKey("o/repo", 5)] = pull
+
+	old := Review{
+		ID: 7,
+		Body: "**Actionable comments posted: 1**\n<details>\n<summary>🤖 Prompt for all review comments with AI agents</summary>\n\n" +
+			"```\nIn `@src/app.ts`:\n- Around line 12-14: Stale state.\n```\n</details>",
+		CommitID:    "1111111111111111",
+		SubmittedAt: started.Add(-time.Hour),
+	}
+	old.User.Login = "coderabbitai[bot]"
+	gh.reviews[fakeKey("o/repo", 5)] = []Review{old}
+	completion := IssueComment{
+		ID:        10,
+		Body:      "No actionable comments were generated in the recent review. 🎉",
+		CreatedAt: started.Add(time.Minute),
+		UpdatedAt: started.Add(time.Minute),
+	}
+	completion.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/repo", 5)] = []IssueComment{completion}
+
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		key := QueueKey("o/repo", 5)
+		st.Fired[key] = head[:9]
+		st.AwaitingFeedback[key] = FeedbackWait{
+			Repo:      "o/repo",
+			PR:        5,
+			Head:      head[:9],
+			StartedAt: started,
+			Deadline:  started.Add(time.Hour),
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := NewService(cfg, gh, store, nil).Feedback(ctx, "o/repo", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Findings) != 0 {
+		t.Fatalf("pre-round body findings must not be re-emitted: %#v", rep.Findings)
+	}
+	if !rep.Converged || !rep.ReviewedBy["coderabbitai[bot]"] {
+		t.Fatalf("current clean completion should converge: %#v", rep)
+	}
+}
+
 func TestThreadFindingsSurfacesUnresolvedAcrossCommits(t *testing.T) {
 	bots := botSet([]string{"coderabbitai[bot]"})
 	mk := func(resolved, outdated bool, oid string) reviewThread {
