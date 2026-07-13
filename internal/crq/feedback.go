@@ -904,6 +904,7 @@ var (
 	promptBulletRE = regexp.MustCompile("^- (?:Around line|Line)\\s+([0-9]+)(?:\\s*-\\s*([0-9]+))?:\\s*(.*)$")
 	boldTitleRE    = regexp.MustCompile(`(?m)^\*\*([^*\n]+)\*\*`)
 	crCommentRE    = regexp.MustCompile(`<!--\s*cr-comment:v1:([a-f0-9]+)\s*-->`)
+	htmlCommentRE  = regexp.MustCompile(`(?s)<!--.*?-->`)
 )
 
 // reviewNewer reports whether review a supersedes b: later submission wins, and
@@ -1482,6 +1483,7 @@ func stripMarkdownQuote(body string) string {
 
 func compactReviewBody(body string) string {
 	body = crCommentRE.ReplaceAllString(body, "")
+	body = htmlCommentRE.ReplaceAllString(body, "")
 	body = strings.ReplaceAll(body, "\r\n", "\n")
 	lines := strings.Split(body, "\n")
 	var out []string
@@ -1497,7 +1499,8 @@ func compactReviewBody(body string) string {
 			strings.HasPrefix(trimmed, "<blockquote") || strings.HasPrefix(trimmed, "</blockquote") {
 			continue
 		}
-		if trimmed != "" {
+		isRule := len(trimmed) >= 3 && strings.Trim(trimmed, "-_* ") == ""
+		if trimmed != "" && !isRule {
 			out = append(out, trimmed)
 		}
 	}
@@ -1521,10 +1524,12 @@ func looksLikePath(summary string) bool {
 }
 
 func isActionableFinding(finding Finding) bool {
-	if strings.TrimSpace(finding.Body) == "" && strings.TrimSpace(finding.Title) == "" {
+	title := compactReviewBody(finding.Title)
+	body := compactReviewBody(finding.Body)
+	if title == "" && body == "" {
 		return false
 	}
-	text := strings.ToLower(finding.Title + "\n" + finding.Body)
+	text := strings.ToLower(title + "\n" + body)
 	return !isNonActionableText(text)
 }
 
@@ -1542,6 +1547,11 @@ func isNonActionableText(text string) bool {
 		"version claim",
 		"both referenced files exist",
 		"good regression test",
+		"already fixed",
+		"now fixed",
+		"no further action is needed",
+		"confirm intended ux",
+		"worth confirming",
 		"skipped: comment is from another github bot",
 		"you have reached your codex usage limits for code reviews",
 	}

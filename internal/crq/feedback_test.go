@@ -1179,6 +1179,9 @@ func TestDedupeFindingsDropsNonActionableBotArtifacts(t *testing.T) {
 	findings := []Finding{
 		{Bot: "coderabbitai", Title: "> Skipped: comment is from another GitHub bot.", Body: "> Skipped: comment is from another GitHub bot.", Source: "review_thread"},
 		{Bot: "chatgpt-codex-connector[bot]", Title: "You have reached your Codex usage limits for code reviews.", Body: "You have reached your Codex usage limits for code reviews.", Source: "issue_comment"},
+		{Bot: "coderabbitai", Title: "<!-- cr-comment:v1:abcdef -->", Body: "---\n<!-- cr-indicator-types:nitpick -->", Source: "review_body"},
+		{Bot: "coderabbitai", Title: "Past review finding", Body: "The previously flagged issue is now fixed. No further action is needed.", Source: "review_body"},
+		{Bot: "coderabbitai", Title: "Biometric flow", Body: "Worth confirming this is the intended UX.", Source: "review_body"},
 	}
 	if got := dedupeFindings(findings, nil); len(got) != 0 {
 		t.Fatalf("expected non-actionable bot artifacts to be dropped, got %#v", got)
