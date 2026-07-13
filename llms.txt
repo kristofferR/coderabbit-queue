@@ -101,6 +101,10 @@ crq autoreview
 
 Autoreview skips PRs authored by dependabot by default (`CRQ_AUTOREVIEW_SKIP_AUTHORS`,
 comma-separated logins; set empty to include bot PRs). Manual `crq review` ignores this filter.
+For an intentionally low-risk PR that already had enough local review, include the hidden
+`<!-- crq:skip-autoreview -->` marker in its body before creation. Fleet autoreview skips it, while
+an explicit `crq loop` still works. Configure or disable the exact marker with
+`CRQ_AUTOREVIEW_SKIP_MARKER`.
 
 Diagnostics only:
 

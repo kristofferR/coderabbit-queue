@@ -240,6 +240,9 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			if s.cfg.SkipAuthors[normalizeBotName(strings.ToLower(pr.Author))] {
 				return false, nil
 			}
+			if s.cfg.SkipMarker != "" && strings.Contains(pr.Body, s.cfg.SkipMarker) {
+				return false, nil
+			}
 			scanned++
 			// Heartbeat: renew the lease partway through a long pass so a standby
 			// can't steal it mid-scan and cause brief double-leadership (#4).

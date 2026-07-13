@@ -184,6 +184,33 @@ func TestLoadConfigEmptySkipAuthorsDisablesFilter(t *testing.T) {
 	}
 }
 
+func TestLoadConfigDefaultAutoReviewSkipMarker(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_AUTOREVIEW_SKIP_MARKER", "restore-after-test")
+	os.Unsetenv("CRQ_AUTOREVIEW_SKIP_MARKER")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SkipMarker != "<!-- crq:skip-autoreview -->" {
+		t.Fatalf("unexpected autoreview skip marker: %q", cfg.SkipMarker)
+	}
+}
+
+func TestLoadConfigEmptyAutoReviewSkipMarkerDisablesOptOut(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_AUTOREVIEW_SKIP_MARKER", "")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SkipMarker != "" {
+		t.Fatalf("explicit empty marker should disable the opt-out, got %q", cfg.SkipMarker)
+	}
+}
+
 func TestAuthorSetNormalizesCaseAndBotSuffix(t *testing.T) {
 	set := authorSet("Dependabot[bot], renovate ,")
 	if len(set) != 2 || !set["dependabot"] || !set["renovate"] {

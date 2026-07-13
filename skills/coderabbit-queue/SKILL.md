@@ -186,6 +186,10 @@ crq autoreview --once
 crq autoreview --no-incremental
 ```
 
+For an intentionally low-risk PR that has already had enough local review, add
+`<!-- crq:skip-autoreview -->` to the PR body before creating it. The marker is hidden in rendered
+Markdown and prevents only fleet auto-review; an explicit `crq loop` still reviews the PR.
+
 ## Optional Local Preflight
 
 If the official CodeRabbit CLI is installed, agents can run a normalized local pre-push review:

@@ -13,16 +13,19 @@ import (
 const Version = "2.0.0-dev"
 
 type Config struct {
-	GateRepo          string
-	DashboardIssue    int
-	CalibrationPR     int
-	Scope             []string
-	AllowRepos        map[string]bool
-	ExcludeRepos      map[string]bool
+	GateRepo       string
+	DashboardIssue int
+	CalibrationPR  int
+	Scope          []string
+	AllowRepos     map[string]bool
+	ExcludeRepos   map[string]bool
 	// SkipAuthors lists PR authors autoreview never enqueues (normalized: lowercase,
 	// no "[bot]" suffix). Defaults to dependabot; set CRQ_AUTOREVIEW_SKIP_AUTHORS=""
 	// to review bot PRs too. Manual `crq review` is unaffected.
-	SkipAuthors       map[string]bool
+	SkipAuthors map[string]bool
+	// SkipMarker suppresses fleet auto-review when present in a PR body.
+	// Manual `crq loop` remains unaffected so an explicit review can override it.
+	SkipMarker        string
 	StateRef          string
 	Bot               string
 	RequiredBots      []string
@@ -89,6 +92,7 @@ func LoadConfig() (Config, error) {
 		AllowRepos:          repoSet(env["CRQ_REPOS"]),
 		ExcludeRepos:        repoSet(env["CRQ_EXCLUDE"]),
 		SkipAuthors:         authorSet(stringEnvAllowEmpty(env, "CRQ_AUTOREVIEW_SKIP_AUTHORS", "dependabot[bot]")),
+		SkipMarker:          stringEnvAllowEmpty(env, "CRQ_AUTOREVIEW_SKIP_MARKER", "<!-- crq:skip-autoreview -->"),
 		StateRef:            stringEnv(env, "CRQ_STATE_REF", "crq-state"),
 		Bot:                 bot,
 		RequiredBots:        requiredBots,
