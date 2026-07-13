@@ -715,7 +715,7 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 			// reports a round without ever being re-reviewed (a "fake" round). When
 			// only stale carried-over threads are visible, fall through and fire a
 			// real review of the new head.
-			if len(report.Findings) > 0 && (allReviewed(report.ReviewedBy) || hasHeadCurrentFinding(report.Findings)) {
+			if len(report.Findings) > 0 && (allReviewed(report.ReviewedBy) || hasHeadCurrentFinding(report.Findings, report.Head)) {
 				if s.log != nil {
 					s.log.Printf("%s#%d feedback already available on %s; leaving review slot wait", repo, pr, report.Head)
 				}
@@ -1145,15 +1145,18 @@ func allReviewed(reviewedBy map[string]bool) bool {
 // hasHeadCurrentFinding reports whether any finding genuinely belongs to the
 // current head rather than being a carried-over open inline thread from an
 // earlier commit. Feedback surfaces unresolved threads (source "review_thread")
-// no matter which commit their comments sit on, so on a freshly pushed head the
-// only visible findings can be stale threads that predate it. Every other source
-// is head-current: issue comments are bounded to the head, and review body/prompt
-// findings arrive with a review of the head (which also flips ReviewedBy). Used
-// to gate the "feedback already available" short-circuit so stale threads alone
-// never stand in for a real review of the new head.
-func hasHeadCurrentFinding(findings []Finding) bool {
+// and the latest review body/prompt no matter which commit they sit on. The latter
+// deliberately survive a head change until a newer review supersedes them, so a
+// commit-bearing finding is current only when its commit matches the head. Findings
+// without a commit (for example head-time-bounded issue comments) are current.
+// Used to gate the "feedback already available" short-circuit so carried-over
+// feedback never stands in for a real review of the new head.
+func hasHeadCurrentFinding(findings []Finding, head string) bool {
 	for _, f := range findings {
-		if f.Source != "review_thread" {
+		if f.Source == "review_thread" {
+			continue
+		}
+		if f.Commit == "" || shortOID(f.Commit) == shortOID(head) {
 			return true
 		}
 	}

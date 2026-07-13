@@ -1718,6 +1718,58 @@ func TestWaitFiresRealReviewWhenOnlyCarriedThreadVisible(t *testing.T) {
 	}
 }
 
+func TestWaitFiresRealReviewWhenOnlyCarriedReviewPromptVisible(t *testing.T) {
+	// Review-body prompts intentionally remain visible after a head change until a
+	// newer review supersedes them. They must not be mistaken for feedback on the
+	// new head or the replacement review will never be requested.
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		RequiredBots:        []string{"coderabbitai[bot]"},
+		FeedbackBots:        []string{"coderabbitai[bot]"},
+		ReviewCommand:       "@coderabbitai review",
+		MinInterval:         0,
+		InflightTimeout:     time.Hour,
+		PollInterval:        time.Millisecond,
+		WaitTimeout:         time.Second,
+		FeedbackWaitTimeout: time.Minute,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	headTime := time.Now().UTC().Add(-time.Minute)
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	gc := gitCommit{SHA: pull.Head.SHA}
+	gc.Committer.Date = headTime
+	gh.commits[pull.Head.SHA] = gc
+	stale := Review{
+		ID:          7,
+		Body:        "<details><summary>Prompt for AI agents</summary>\n\n```\nIn `@a.go`:\n- Around line 1: Carried-over finding.\n```\n</details>",
+		CommitID:    "fedcba9876543210",
+		SubmittedAt: headTime.Add(-time.Hour),
+	}
+	stale.User.Login = "coderabbitai[bot]"
+	gh.reviews[fakeKey("owner/repo", 12)] = []Review{stale}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+
+	result, code, err := service.Wait(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 || result.Action != "fired" {
+		t.Fatalf("a carried-over review prompt on a new head must fire a real review, code=%d result=%#v", code, result)
+	}
+	if len(gh.posted) != 1 {
+		t.Fatalf("expected one review command for the new head, posted=%d", len(gh.posted))
+	}
+}
+
 func TestBotReviewedHeadToleratesBotSuffix(t *testing.T) {
 	// CRQ_BOT configured suffix-less, but REST reviews come back as coderabbitai[bot].
 	cfg := Config{Bot: "coderabbitai", GateRepo: "o/gate", Scope: []string{"o"}}
