@@ -378,6 +378,44 @@ func TestAutoReviewScanSkipsConfiguredAuthors(t *testing.T) {
 	}
 }
 
+func TestAutoReviewScanSkipsMarkedPRs(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:          "o/gate",
+		Scope:             []string{"o"},
+		Host:              "h",
+		LeaderTTL:         time.Minute,
+		AutoReviewMaxScan: 10,
+		SkipMarker:        "<!-- crq:skip-autoreview -->",
+	}
+	gh := newFakeGitHub()
+	gh.searchPRs = []SearchPR{
+		{Repo: "o/app", Number: 1, Author: "alice", Body: "Tiny maintenance change.\n\n<!-- crq:skip-autoreview -->"},
+		{Repo: "o/app", Number: 2, Author: "alice", Body: "Review this change."},
+	}
+	for pr := 1; pr <= 2; pr++ {
+		var pull Pull
+		pull.State = "open"
+		pull.Head.SHA = "abcdef1234567890"
+		gh.pulls[fakeKey("o/app", pr)] = pull
+	}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	if err := svc.AutoReview(ctx, AutoOptions{Once: true, Incremental: true}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := svc.store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Fired) != 1 || st.Fired["o/app#2"] == "" {
+		t.Fatalf("only the unmarked PR should be reviewed, got fired=%#v", st.Fired)
+	}
+	if st.Fired["o/app#1"] != "" {
+		t.Fatalf("marked PR must never fire, got fired=%#v", st.Fired)
+	}
+}
+
 func TestEnqueueBatchAppendsOncePerPR(t *testing.T) {
 	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, Host: "h"}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)

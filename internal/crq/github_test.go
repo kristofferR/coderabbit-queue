@@ -275,6 +275,34 @@ func TestEachOpenPRStopsAtCallerBudgetWithoutOverFetching(t *testing.T) {
 	}
 }
 
+func TestEachOpenPRIncludesBody(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "t")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/users/alice" {
+			_, _ = w.Write([]byte(`{"type":"User"}`))
+			return
+		}
+		if r.URL.Path == "/search/issues" {
+			_, _ = w.Write([]byte(`{"items":[{"number":7,"repository_url":"https://api.github.com/repos/alice/repo","body":"notes\\n<!-- crq:skip-autoreview -->","user":{"login":"alice"}}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 2, maxWait: time.Second, backoffBase: time.Millisecond, networkMaxWait: time.Second}
+
+	var got SearchPR
+	if err := g.EachOpenPR(context.Background(), "alice", false, func(pr SearchPR) (bool, error) {
+		got = pr
+		return true, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got.Number != 7 || got.Author != "alice" || !strings.Contains(got.Body, "crq:skip-autoreview") {
+		t.Fatalf("search PR metadata mismatch: %#v", got)
+	}
+}
+
 func TestIsRetryableStatus(t *testing.T) {
 	for _, c := range []int{500, 502, 503, 504} {
 		if !isRetryableStatus(c) {

@@ -977,6 +977,7 @@ func (g *GitHub) EachOpenPR(ctx context.Context, target string, byRepo bool, fn 
 			Items []struct {
 				Number        int    `json:"number"`
 				RepositoryURL string `json:"repository_url"`
+				Body          string `json:"body"`
 				User          struct {
 					Login string `json:"login"`
 				} `json:"user"`
@@ -993,7 +994,7 @@ func (g *GitHub) EachOpenPR(ctx context.Context, target string, byRepo bool, fn 
 			if repo == "" {
 				continue
 			}
-			stop, err := fn(SearchPR{Repo: repo, Number: item.Number, Author: item.User.Login})
+			stop, err := fn(SearchPR{Repo: repo, Number: item.Number, Author: item.User.Login, Body: item.Body})
 			if err != nil {
 				return err
 			}
@@ -1054,6 +1055,7 @@ type SearchPR struct {
 	Repo   string
 	Number int
 	Author string
+	Body   string
 }
 
 type gitRef struct {
