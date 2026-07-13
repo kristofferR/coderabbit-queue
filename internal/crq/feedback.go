@@ -403,10 +403,6 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		return FeedbackReport{}, 1, err
 	}
 	deadline := wait.Deadline
-	start := wait.StartedAt
-	if start.IsZero() {
-		start = time.Now().UTC()
-	}
 	var lastLog time.Time
 	// Pump keeps the queue moving while we wait, but once a minute is plenty (the
 	// autoreview daemon pumps too); pumping on every tick just burns REST quota.
@@ -464,25 +460,31 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		// REST quota (and re-hit its rate limit) every PollInterval.
 		poll := s.cfg.PollInterval
 		var blockedUntil *time.Time
-		if st, _, lerr := s.store.Load(ctx); lerr == nil && st.Blocked.BlockedUntil != nil && st.Blocked.BlockedUntil.After(time.Now()) {
-			blockedUntil = st.Blocked.BlockedUntil
-			extended := extendDeadlineForBlock(deadline, blockedUntil, time.Now(), s.cfg.FeedbackWaitTimeout)
+		now := time.Now().UTC()
+		if st, _, lerr := s.store.Load(ctx); lerr == nil {
+			if until, ok := feedbackBlockedUntil(st, repo, pr, head, now); ok {
+				blockedUntil = &until
+			}
+		}
+		if blockedUntil != nil {
+			extended := extendDeadlineForBlock(deadline, blockedUntil, now, s.cfg.FeedbackWaitTimeout)
 			if extended.After(deadline) {
 				deadline = extended
 				s.extendFeedbackWaitDeadline(ctx, repo, pr, head, deadline)
 			}
-			poll = blockedPollInterval(*blockedUntil, time.Now(), s.cfg.PollInterval)
+			poll = blockedPollInterval(*blockedUntil, now, s.cfg.PollInterval)
 		}
-		if time.Now().After(deadline) {
+		if now.After(deadline) {
 			report.Status = "timeout"
 			s.clearFeedbackWait(ctx, repo, pr, head)
 			return report, 2, nil
 		}
 		if s.log != nil && time.Since(lastLog) >= 30*time.Second {
+			activeElapsed := feedbackWaitElapsed(deadline, s.cfg.FeedbackWaitTimeout, now)
 			if blockedUntil != nil {
-				s.log.Printf("%s#%d queued — account rate-limited until %s; waiting, not counting it against the %s review wait (%s elapsed)", repo, pr, blockedUntil.UTC().Format(time.RFC3339), s.cfg.FeedbackWaitTimeout, time.Since(start).Round(time.Second))
+				s.log.Printf("%s#%d queued — account rate-limited until %s; waiting, not counting it against the %s review wait (%s active)", repo, pr, blockedUntil.UTC().Format(time.RFC3339), s.cfg.FeedbackWaitTimeout, activeElapsed.Round(time.Second))
 			} else {
-				s.log.Printf("%s#%d waiting for review feedback on %s — reviewed %s (%s / %s)", repo, pr, report.Head, reviewedSummary(report.ReviewedBy), time.Since(start).Round(time.Second), s.cfg.FeedbackWaitTimeout)
+				s.log.Printf("%s#%d waiting for review feedback on %s — reviewed %s (%s / %s)", repo, pr, report.Head, reviewedSummary(report.ReviewedBy), activeElapsed.Round(time.Second), s.cfg.FeedbackWaitTimeout)
 			}
 			lastLog = time.Now()
 		}
@@ -706,6 +708,39 @@ func extendDeadlineForBlock(deadline time.Time, blockedUntil *time.Time, now tim
 		return extended
 	}
 	return deadline
+}
+
+// feedbackBlockedUntil returns the latest active block that prevents this exact
+// PR head from firing. The account-wide Blocked value can be cleared or replaced
+// by a later calibration pass, while the per-head cooldown intentionally
+// survives a rate-limited requeue. Feedback waiters must honor both or they can
+// claim to be waiting on a review that crq is still forbidden to request.
+func feedbackBlockedUntil(st State, repo string, pr int, head string, now time.Time) (time.Time, bool) {
+	var until time.Time
+	if st.Blocked.BlockedUntil != nil && st.Blocked.BlockedUntil.After(now) {
+		until = st.Blocked.BlockedUntil.UTC()
+	}
+	if cooldown, ok := st.Cooldown[QueueKey(repo, pr)]; ok && cooldown.Head == head && cooldown.Until.After(now) && cooldown.Until.After(until) {
+		until = cooldown.Until.UTC()
+	}
+	return until, !until.IsZero()
+}
+
+// feedbackWaitElapsed reports only reviewable time. A rate-limit block extends
+// deadline, so deriving progress from the remaining budget excludes the blocked
+// interval and can never produce impossible output such as "35m / 20m".
+func feedbackWaitElapsed(deadline time.Time, budget time.Duration, now time.Time) time.Duration {
+	if budget <= 0 {
+		return 0
+	}
+	elapsed := budget - deadline.Sub(now)
+	if elapsed < 0 {
+		return 0
+	}
+	if elapsed > budget {
+		return budget
+	}
+	return elapsed
 }
 
 func reviewedSummary(m map[string]bool) string {

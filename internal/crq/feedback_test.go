@@ -1299,6 +1299,58 @@ func TestExtendDeadlineForBlock(t *testing.T) {
 	}
 }
 
+func TestFeedbackBlockedUntilHonorsPerHeadCooldownAfterGlobalBlockClears(t *testing.T) {
+	now := time.Date(2026, 7, 13, 14, 4, 0, 0, time.UTC)
+	cooldownUntil := now.Add(15 * time.Minute)
+	st := State{
+		Cooldown: map[string]FireCooldown{
+			QueueKey("owner/repo", 947): {Head: "168df6ae6", Until: cooldownUntil},
+		},
+	}
+
+	got, ok := feedbackBlockedUntil(st, "owner/repo", 947, "168df6ae6", now)
+	if !ok || !got.Equal(cooldownUntil) {
+		t.Fatalf("matching head cooldown must keep feedback wait blocked: got %v, ok=%v", got, ok)
+	}
+	if _, ok := feedbackBlockedUntil(st, "owner/repo", 947, "different", now); ok {
+		t.Fatal("a cooldown for an older head must not block the current head")
+	}
+}
+
+func TestFeedbackBlockedUntilUsesLatestAccountOrHeadWindow(t *testing.T) {
+	now := time.Date(2026, 7, 13, 14, 4, 0, 0, time.UTC)
+	accountUntil := now.Add(20 * time.Minute)
+	cooldownUntil := now.Add(15 * time.Minute)
+	st := State{
+		Blocked: Blocked{BlockedUntil: &accountUntil},
+		Cooldown: map[string]FireCooldown{
+			QueueKey("owner/repo", 947): {Head: "168df6ae6", Until: cooldownUntil},
+		},
+	}
+
+	got, ok := feedbackBlockedUntil(st, "owner/repo", 947, "168df6ae6", now)
+	if !ok || !got.Equal(accountUntil) {
+		t.Fatalf("latest blocking window must win: got %v, ok=%v", got, ok)
+	}
+}
+
+func TestFeedbackWaitElapsedExcludesBlockedTimeAndClampsProgress(t *testing.T) {
+	budget := 20 * time.Minute
+	blockStarts := time.Date(2026, 7, 13, 14, 4, 0, 0, time.UTC)
+	blockEnds := blockStarts.Add(15 * time.Minute)
+	deadline := blockEnds.Add(budget)
+
+	if got := feedbackWaitElapsed(deadline, budget, blockStarts); got != 0 {
+		t.Fatalf("blocked time must not consume review budget: got %v", got)
+	}
+	if got := feedbackWaitElapsed(deadline, budget, blockEnds.Add(5*time.Minute)); got != 5*time.Minute {
+		t.Fatalf("reviewable time after the block must count normally: got %v", got)
+	}
+	if got := feedbackWaitElapsed(deadline, budget, deadline.Add(time.Hour)); got != budget {
+		t.Fatalf("displayed progress must clamp at the configured budget: got %v", got)
+	}
+}
+
 func TestBlockedPollInterval(t *testing.T) {
 	now := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
 	base := 15 * time.Second
