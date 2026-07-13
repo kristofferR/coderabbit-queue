@@ -415,7 +415,10 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			}
 			return report, 1, err
 		}
-		if len(report.Findings) > 0 {
+		// The latest review body/prompt intentionally survives a head change until
+		// that bot submits a replacement review. Do not return those carried-over
+		// findings as the new round's result while the replacement is still pending.
+		if len(report.Findings) > 0 && (allReviewed(report.ReviewedBy) || hasHeadCurrentFinding(report.Findings, report.Head)) {
 			report.Status = "feedback"
 			s.clearFeedbackWait(ctx, repo, pr, head)
 			return report, 10, nil

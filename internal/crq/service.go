@@ -697,7 +697,38 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 			}
 			enqueued = result.Queued || result.AlreadyQueued
 			if result.Deduped {
-				return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
+				state, _, err := s.store.Load(ctx)
+				if err != nil {
+					return PumpResult{}, 1, err
+				}
+				key := QueueKey(repo, pr)
+				if state.AwaitingFeedback[key].Head == result.Head {
+					return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
+				}
+				report, err := s.Feedback(ctx, repo, pr)
+				if err != nil {
+					return PumpResult{}, 1, err
+				}
+				if allReviewed(report.ReviewedBy) || hasHeadCurrentFinding(report.Findings, report.Head) {
+					return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
+				}
+				// Older versions could mark a head fired after mistaking carried-over
+				// review prompts for current feedback. With no active wait, current
+				// review, or current finding, remove that poisoned marker and enqueue
+				// the real replacement review.
+				updated, err := s.store.Update(ctx, func(st *State) error {
+					if st.Fired[key] != result.Head || st.AwaitingFeedback[key].Head == result.Head || st.Contains(repo, pr) {
+						return ErrNoChange
+					}
+					delete(st.Fired, key)
+					return nil
+				})
+				if err != nil {
+					return PumpResult{}, 1, err
+				}
+				s.sync(ctx, updated)
+				enqueued = false
+				continue
 			}
 		}
 		if lastFeedbackCheck.IsZero() || time.Since(lastFeedbackCheck) >= feedbackCheckEvery {

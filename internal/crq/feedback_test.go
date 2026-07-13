@@ -1236,6 +1236,72 @@ func TestLoopResumesAwaitingFeedbackWithoutRefiring(t *testing.T) {
 	}
 }
 
+func TestLoopWaitsForReplacementReviewInsteadOfReturningCarriedPrompt(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		RequiredBots:        []string{"coderabbitai[bot]"},
+		FeedbackBots:        []string{"coderabbitai[bot]"},
+		ReviewCommand:       "@coderabbitai review",
+		PollInterval:        time.Millisecond,
+		FeedbackWaitTimeout: time.Second,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	stale := Review{
+		ID:          7,
+		Body:        "<details><summary>Prompt for AI agents</summary>\n\n```\nIn `@a.go`:\n- Around line 1: Carried-over finding.\n```\n</details>",
+		CommitID:    "fedcba9876543210",
+		SubmittedAt: time.Now().UTC().Add(-time.Hour),
+	}
+	stale.User.Login = "coderabbitai[bot]"
+	gh.reviews[fakeKey("owner/repo", 12)] = []Review{stale}
+	store := NewMemoryStore(cfg)
+	started := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		key := QueueKey("owner/repo", 12)
+		st.Fired[key] = "abcdef123"
+		st.AwaitingFeedback[key] = FeedbackWait{
+			Repo:      "owner/repo",
+			PR:        12,
+			Head:      "abcdef123",
+			StartedAt: started,
+			Deadline:  started.Add(cfg.FeedbackWaitTimeout),
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		fresh := Review{ID: 9, CommitID: pull.Head.SHA, SubmittedAt: time.Now().UTC()}
+		fresh.User.Login = "coderabbitai[bot]"
+		gh.mu.Lock()
+		gh.reviews[fakeKey("owner/repo", 12)] = append(gh.reviews[fakeKey("owner/repo", 12)], fresh)
+		gh.mu.Unlock()
+	}()
+
+	svc := NewService(cfg, gh, store, nil)
+	report, code, err := svc.Loop(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 || !report.Converged || len(report.Findings) != 0 {
+		t.Fatalf("loop should wait for the clean replacement review, code=%d report=%#v", code, report)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("an existing feedback wait must not post another command, posted=%d", len(gh.posted))
+	}
+}
+
 func TestLoopReturnsFeedbackWhileQueuedBehindBlockedSlot(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{
