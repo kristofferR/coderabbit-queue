@@ -502,6 +502,43 @@ In @README.md:
 	}
 }
 
+func TestParseReviewBodyFindingsExtractsCodexOutsideDiffItem(t *testing.T) {
+	review := Review{
+		ID: 101,
+		Body: `
+### 💡 Codex Review
+
+https://github.com/kristofferR/krisHQ/blob/347388ffda8ae3eb7060a6b960ea437a78780045/convex/sections/aiCommands.ts#L2170-L2174
+**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Query learning history by topic before taking**
+
+Taking the newest sessions for the whole user before filtering can hide older sessions for the requested topic.
+
+<details><summary>ℹ️ About Codex in GitHub</summary>
+This boilerplate must not become part of the finding.
+</details>`,
+		CommitID:    "850772b68de27efabc7ec5eeda30bb5ea138eb29",
+		SubmittedAt: time.Date(2026, 7, 14, 13, 46, 14, 0, time.UTC),
+		HTMLURL:     "https://github.com/kristofferR/krisHQ/pull/947#pullrequestreview-1",
+	}
+	findings := parseReviewBodyFindings(review, "chatgpt-codex-connector[bot]")
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 Codex review-body finding, got %d: %#v", len(findings), findings)
+	}
+	finding := findings[0]
+	if finding.Path != "convex/sections/aiCommands.ts" || finding.Line != 2170 {
+		t.Fatalf("location mismatch: %#v", finding)
+	}
+	if finding.Title != "Query learning history by topic before taking" || finding.Severity != "minor" {
+		t.Fatalf("metadata mismatch: %#v", finding)
+	}
+	if finding.Commit != "347388ffd" || finding.Source != "review_body" {
+		t.Fatalf("source mismatch: %#v", finding)
+	}
+	if strings.Contains(finding.Body, "boilerplate") || !strings.Contains(finding.Body, "newest sessions") {
+		t.Fatalf("unexpected finding body: %q", finding.Body)
+	}
+}
+
 func TestFeedbackSurfacesBodyFindingsFromSupersededCommit(t *testing.T) {
 	// Regression: CodeRabbit's inline comments failed to post (GitHub 5xx / code
 	// review limits), so 2 findings exist ONLY in the review body's prompt block,
@@ -659,6 +696,60 @@ func TestFeedbackCurrentRoundDoesNotResurfacePreRoundBodyFindings(t *testing.T) 
 	}
 	if !rep.Converged || !rep.ReviewedBy["coderabbitai[bot]"] {
 		t.Fatalf("current clean completion should converge: %#v", rep)
+	}
+}
+
+func TestFeedbackCurrentCodeRabbitRoundKeepsLatestCodexBodyFinding(t *testing.T) {
+	ctx := context.Background()
+	started := time.Date(2026, 7, 14, 14, 15, 0, 0, time.UTC)
+	cfg := Config{
+		Bot:          "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]"},
+		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, extraFeedbackBots),
+	}
+	gh := newFakeGitHub()
+	head := "850772b68de27efabc7ec5eeda30bb5ea138eb29"
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = head
+	gh.pulls[fakeKey("o/repo", 5)] = pull
+
+	codeRabbit := Review{ID: 8, CommitID: head, SubmittedAt: started.Add(time.Minute)}
+	codeRabbit.User.Login = "coderabbitai[bot]"
+	codex := Review{
+		ID: 7,
+		Body: `https://github.com/o/repo/blob/347388ffda8ae3eb7060a6b960ea437a78780045/convex/sections/aiCommands.ts#L2170-L2174
+**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub> Query learning history by topic before taking**
+
+Fetch by topic before applying the result limit.`,
+		CommitID:    "347388ffda8ae3eb7060a6b960ea437a78780045",
+		SubmittedAt: started.Add(-30 * time.Minute),
+	}
+	codex.User.Login = "chatgpt-codex-connector[bot]"
+	gh.reviews[fakeKey("o/repo", 5)] = []Review{codex, codeRabbit}
+
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		key := QueueKey("o/repo", 5)
+		st.Fired[key] = head[:9]
+		st.AwaitingFeedback[key] = FeedbackWait{
+			Repo:      "o/repo",
+			PR:        5,
+			Head:      head[:9],
+			StartedAt: started,
+			Deadline:  started.Add(time.Hour),
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := NewService(cfg, gh, store, nil).Feedback(ctx, "o/repo", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Findings) != 1 || rep.Findings[0].Source != "review_body" {
+		t.Fatalf("the current CodeRabbit round must not suppress the latest Codex body finding: %#v", rep.Findings)
 	}
 }
 

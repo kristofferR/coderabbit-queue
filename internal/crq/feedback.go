@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -99,7 +100,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		// before that round belongs to the previous head. Unresolved threads are
 		// still surfaced below across commits, while thread-less body findings
 		// must be re-reported by the current round instead of trapping the loop.
-		if completion.OK &&
+		if completion.OK && s.isConfiguredBot(login) &&
 			(head == "" || !strings.HasPrefix(review.CommitID, head)) &&
 			!notBefore(review.SubmittedAt, completion.Cutoff) {
 			continue
@@ -933,13 +934,16 @@ var (
 	detailSummaryRE = regexp.MustCompile(`(?i)<summary>\s*([^<]+?)\s+\([0-9]+\)\s*</summary>`)
 	// Line headers come backticked in "Outside diff range comments" (`12-15`:) and
 	// un-backticked in "Comments failed to post" (12-15:) — accept both.
-	detailHeaderRE = regexp.MustCompile("^`?([0-9]+)(?:\\s*-\\s*([0-9]+))?`?: *(.*)$")
-	promptBlockRE  = regexp.MustCompile("(?is)<summary>[^<]*Prompt for all review comments with AI agents[^<]*</summary>.*?```\\s*(.*?)\\s*```")
-	promptFileRE   = regexp.MustCompile("^In (?:`@([^`]+)`|@([^:]+)):$")
-	promptBulletRE = regexp.MustCompile("^- (?:Around line|Line)\\s+([0-9]+)(?:\\s*-\\s*([0-9]+))?:\\s*(.*)$")
-	boldTitleRE    = regexp.MustCompile(`(?m)^\*\*([^*\n]+)\*\*`)
-	crCommentRE    = regexp.MustCompile(`<!--\s*cr-comment:v1:([a-f0-9]+)\s*-->`)
-	htmlCommentRE  = regexp.MustCompile(`(?s)<!--.*?-->`)
+	detailHeaderRE  = regexp.MustCompile("^`?([0-9]+)(?:\\s*-\\s*([0-9]+))?`?: *(.*)$")
+	promptBlockRE   = regexp.MustCompile("(?is)<summary>[^<]*Prompt for all review comments with AI agents[^<]*</summary>.*?```\\s*(.*?)\\s*```")
+	promptFileRE    = regexp.MustCompile("^In (?:`@([^`]+)`|@([^:]+)):$")
+	promptBulletRE  = regexp.MustCompile("^- (?:Around line|Line)\\s+([0-9]+)(?:\\s*-\\s*([0-9]+))?:\\s*(.*)$")
+	boldTitleRE     = regexp.MustCompile(`(?m)^\*\*([^*\n]+)\*\*`)
+	codexBlobLinkRE = regexp.MustCompile(`(?m)^https://github\.com/[^/\s]+/[^/\s]+/blob/([0-9a-fA-F]{7,64})/(.+?)#L([0-9]+)(?:-L([0-9]+))?\s*$`)
+	markdownImageRE = regexp.MustCompile(`!\[[^]]*\]\([^)]+\)`)
+	subTagRE        = regexp.MustCompile(`(?i)</?sub>`)
+	crCommentRE     = regexp.MustCompile(`<!--\s*cr-comment:v1:([a-f0-9]+)\s*-->`)
+	htmlCommentRE   = regexp.MustCompile(`(?s)<!--.*?-->`)
 )
 
 // reviewNewer reports whether review a supersedes b: later submission wins, and
@@ -959,7 +963,82 @@ func parseReviewBodyFindings(review Review, bot string) []Finding {
 	clean := stripMarkdownQuote(body)
 	out := parseDetailedReviewFindings(clean, review, bot)
 	out = append(out, parsePromptReviewFindings(clean, review, bot)...)
+	out = append(out, parseCodexReviewFindings(clean, review, bot)...)
 	return out
+}
+
+// parseCodexReviewFindings extracts findings that Codex can only place in the
+// review body when the referenced line is outside GitHub's current diff. Codex
+// anchors each item with a blob URL followed by a bold priority/title line.
+func parseCodexReviewFindings(body string, review Review, bot string) []Finding {
+	if !isCodexBot(bot) {
+		return nil
+	}
+	matches := codexBlobLinkRE.FindAllStringSubmatchIndex(body, -1)
+	out := make([]Finding, 0, len(matches))
+	for index, match := range matches {
+		blockEnd := len(body)
+		if index+1 < len(matches) {
+			blockEnd = matches[index+1][0]
+		}
+		block := strings.TrimSpace(body[match[1]:blockEnd])
+		if details := strings.Index(strings.ToLower(block), "<details"); details >= 0 {
+			block = strings.TrimSpace(block[:details])
+		}
+		if block == "" {
+			continue
+		}
+
+		path, err := url.PathUnescape(body[match[4]:match[5]])
+		if err != nil {
+			path = body[match[4]:match[5]]
+		}
+		line, _ := strconv.Atoi(body[match[6]:match[7]])
+		title := ""
+		if titleMatch := boldTitleRE.FindStringSubmatch(block); titleMatch != nil {
+			title = cleanCodexReviewText(titleMatch[1])
+		}
+		if title == "" {
+			title = titleOf(block)
+		}
+		finding := Finding{
+			Bot:       bot,
+			Severity:  codexPrioritySeverity(block),
+			Path:      path,
+			Line:      line,
+			Title:     title,
+			Body:      cleanCodexReviewText(compactReviewBody(block)),
+			ReviewID:  review.ID,
+			Commit:    shortOID(body[match[2]:match[3]]),
+			URL:       review.HTMLURL,
+			Source:    "review_body",
+			CreatedAt: review.SubmittedAt,
+		}
+		if isActionableFinding(finding) {
+			out = append(out, finding)
+		}
+	}
+	return out
+}
+
+func cleanCodexReviewText(text string) string {
+	text = markdownImageRE.ReplaceAllString(text, "")
+	text = subTagRE.ReplaceAllString(text, "")
+	return strings.TrimSpace(text)
+}
+
+func codexPrioritySeverity(text string) string {
+	lower := strings.ToLower(text)
+	switch {
+	case strings.Contains(lower, "![p0 badge]"):
+		return "critical"
+	case strings.Contains(lower, "![p1 badge]"):
+		return "major"
+	case strings.Contains(lower, "![p2 badge]"), strings.Contains(lower, "![p3 badge]"):
+		return "minor"
+	default:
+		return severityOf(text)
+	}
 }
 
 func parseDetailedReviewFindings(body string, review Review, bot string) []Finding {
