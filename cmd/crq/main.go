@@ -315,20 +315,19 @@ Exit codes:
   2   timed out waiting for feedback
 
 Loop contract:
-  crq feedback owner/repo 123
-  # if .findings is non-empty: fix, validate, push, and resolve it first
+  # Start one review round:
   crq loop owner/repo 123 > crq-feedback.json
-  # if exit 10:
+  # if exit 10 (the round may still have pending reviewers):
   #   inspect .findings[]
   #   fix only still-valid findings
   #   run project validation
   #   if any .reviewed_by value is false: HOLD THE HEAD
   #     fix locally, but do not commit, push, or resolve yet
-  #     keep the queued review alive and poll crq feedback with the same CRQ_REQUIRED_BOTS
+  #     keep the queued review alive; repeat crq feedback with the same CRQ_REQUIRED_BOTS
   #   after every required bot is true:
   #     commit and push once
   #     resolve addressed .thread_id values with crq resolve
-  #   call crq loop again
+  #   only after the held head advances, call crq loop for the next round
 
 Never post @coderabbitai review directly; crq is the only trigger.
 `)
