@@ -370,6 +370,47 @@ func (s *Service) codexThumbedUp(ctx context.Context, repo string, pr int, compl
 
 func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport, int, error) {
 	repo = NormalizeRepo(repo)
+	// Do not spend a new review slot while actionable feedback from an earlier
+	// round is still open. Feedback intentionally carries unresolved threads
+	// across commits; surfacing them here makes "fix, resolve, then re-review" a
+	// hard loop invariant instead of something every agent has to remember.
+	//
+	// An active wait for this head is different: extraction-only bots can answer
+	// before the required reviewer, and those findings must remain buffered until
+	// the configured reviewer gate completes.
+	head, open, err := s.pullHead(ctx, repo, pr)
+	if err != nil {
+		return FeedbackReport{}, 1, err
+	}
+	if open {
+		state, _, loadErr := s.store.Load(ctx)
+		if loadErr != nil {
+			return FeedbackReport{}, 1, loadErr
+		}
+		if state.AwaitingFeedback[QueueKey(repo, pr)].Head != head {
+			for {
+				report, feedbackErr := s.Feedback(ctx, repo, pr)
+				if feedbackErr != nil {
+					if wait, ok := rateLimitWait(feedbackErr); ok {
+						if wait <= 0 {
+							wait = s.cfg.PollInterval
+						}
+						if serr := sleepCtx(ctx, wait); serr != nil {
+							return report, 1, serr
+						}
+						continue
+					}
+					return report, 1, feedbackErr
+				}
+				if len(report.Findings) > 0 {
+					report.Status = "feedback"
+					report.Reason = "unresolved findings must be addressed before a new review round"
+					return report, 10, nil
+				}
+				break
+			}
+		}
+	}
 	waitResult, waitCode, err := s.waitToFire(ctx, repo, pr)
 	if err != nil {
 		return FeedbackReport{}, 1, err
@@ -391,7 +432,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		}
 		return FeedbackReport{Status: status, Repo: NormalizeRepo(repo), PR: pr, Head: waitResult.Head, Reason: waitResult.Reason, ReviewedBy: map[string]bool{}, Findings: []Finding{}}, code, nil
 	}
-	head := waitResult.Head
+	head = waitResult.Head
 	if head == "" {
 		var herr error
 		head, _, herr = s.pullHead(ctx, repo, pr)
@@ -476,8 +517,13 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			poll = blockedPollInterval(*blockedUntil, now, s.cfg.PollInterval)
 		}
 		if now.After(deadline) {
-			report.Status = "timeout"
 			s.clearFeedbackWait(ctx, repo, pr, head)
+			if len(report.Findings) > 0 {
+				report.Status = "feedback"
+				report.Reason = "review wait timed out; actionable findings must be addressed before retrying"
+				return report, 10, nil
+			}
+			report.Status = "timeout"
 			return report, 2, nil
 		}
 		if s.log != nil && time.Since(lastLog) >= 30*time.Second {

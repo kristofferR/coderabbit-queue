@@ -305,6 +305,8 @@ func commandHelp(command string) {
 
 Review round primitive for humans and agents. crq coordinates the review trigger,
 waits for real feedback on the current PR head, and emits one JSON report to stdout.
+It returns unresolved findings before queueing a new round, so agents must drain
+current feedback before waiting for another review.
 
 Exit codes:
   0   converged, no actionable findings, or skipped because there is nothing to review
@@ -312,6 +314,8 @@ Exit codes:
   2   timed out waiting for feedback
 
 Loop contract:
+  crq feedback owner/repo 123
+  # if .findings is non-empty: fix, validate, push, and resolve it first
   crq loop owner/repo 123 > crq-feedback.json
   # if exit 10:
   #   inspect .findings[]

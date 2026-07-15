@@ -44,8 +44,25 @@ Exit codes:
 - `10`: actionable findings were written to JSON
 - `2`: timed out waiting for feedback
 
-The agent reads `crq-feedback.json`, fixes genuine findings, validates, commits, pushes, then
-calls `crq loop` again.
+## Drain Findings Before Waiting
+
+An autonomous review loop is a work loop, not a review-status waiter. Before starting or
+restarting a review round, drain all currently actionable feedback:
+
+1. run `crq feedback "$REPO" "$PR"`,
+2. if `.findings` is non-empty, verify and fix genuine findings immediately,
+3. validate, commit, push, and resolve or explicitly decline every addressed thread,
+4. repeat until current feedback is empty,
+5. only then call `crq loop` for a fresh review round.
+
+`crq loop` enforces this for a new round by returning existing findings before it queues or
+waits. After any loop result, inspect `.findings` **before** interpreting the exit code. Findings
+always mean work now—even if a required reviewer timed out. Never report “still waiting” while
+the JSON already contains actionable findings.
+
+The agent fixes genuine findings, validates, commits, pushes, resolves addressed threads, then
+calls `crq loop` again. A round counts only after its findings are drained and the resulting head
+has received the required reviews.
 
 Minimal implementation:
 
@@ -58,7 +75,13 @@ set -e
 case "$rc" in
   0) echo "converged" ;;
   10) jq '.findings[] | {bot,severity,path,line,title,thread_id,source}' crq-feedback.json ;;
-  2) echo "timed out; do not push stale-feedback fixes" ;;
+  2)
+    if jq -e '.findings | length > 0' crq-feedback.json >/dev/null; then
+      jq '.findings[] | {bot,severity,path,line,title,thread_id,source}' crq-feedback.json
+    else
+      echo "timed out with no findings; retry later"
+    fi
+    ;;
   *) exit "$rc" ;;
 esac
 ```
