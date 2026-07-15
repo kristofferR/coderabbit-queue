@@ -274,6 +274,9 @@ This is the autonomous review loop crq was built for. First drain existing work 
 addressed threads. Do not wait for or trigger another review while actionable feedback is open.
 `crq loop` enforces that invariant by returning unresolved findings before it queues a fresh
 round, and actionable findings take precedence over a feedback timeout.
+If any configured feedback bot reports a finding while another required bot is still pending,
+`crq loop` returns immediately: fix, push, and resolve it before spending more time reviewing that
+known-bad head.
 
 Thread-less review-body summaries from an older commit are informational after a fix is pushed:
 they cannot be resolved on GitHub, so they do not block a current-head review. That review either

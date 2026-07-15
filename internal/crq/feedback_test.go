@@ -1777,7 +1777,7 @@ func TestLoopDoesNotBlockOnThreadlessReviewBodyFromPreviousHead(t *testing.T) {
 	}
 }
 
-func TestLoopReturnsBufferedFindingsAsWorkWhenRequiredReviewerTimesOut(t *testing.T) {
+func TestLoopReturnsFindingsBeforeRequiredReviewerTimeout(t *testing.T) {
 	ctx := context.Background()
 	started := time.Now().UTC().Add(-time.Minute)
 	cfg := Config{
@@ -1829,12 +1829,12 @@ func TestLoopReturnsBufferedFindingsAsWorkWhenRequiredReviewerTimesOut(t *testin
 	if code != 10 || report.Status != "feedback" || len(report.Findings) != 1 {
 		t.Fatalf("buffered actionable feedback must take precedence over timeout, code=%d report=%#v", code, report)
 	}
-	if report.Reason != "review wait timed out; actionable findings must be addressed before retrying" {
-		t.Fatalf("expected an explicit timeout-with-work reason, got %#v", report)
+	if report.Reason != "actionable findings must be addressed before the review round can continue" {
+		t.Fatalf("expected an explicit immediate-work reason, got %#v", report)
 	}
 }
 
-func TestLoopBuffersFasterCodexFeedbackUntilCodeRabbitReviews(t *testing.T) {
+func TestLoopReturnsFasterCodexFeedbackBeforeCodeRabbitReviews(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{
 		GateRepo:            "owner/gate",
@@ -1882,22 +1882,16 @@ func TestLoopBuffersFasterCodexFeedbackUntilCodeRabbitReviews(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	go func() {
-		time.Sleep(5 * time.Millisecond)
-		fresh := Review{ID: 9, CommitID: pull.Head.SHA, SubmittedAt: time.Now().UTC()}
-		fresh.User.Login = "coderabbitai[bot]"
-		gh.mu.Lock()
-		gh.reviews[fakeKey("owner/repo", 12)] = append(gh.reviews[fakeKey("owner/repo", 12)], fresh)
-		gh.mu.Unlock()
-	}()
-
 	svc := NewService(cfg, gh, store, nil)
 	report, code, err := svc.Loop(ctx, "owner/repo", 12)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code != 10 || len(report.Findings) != 1 || !report.ReviewedBy["coderabbitai[bot]"] {
-		t.Fatalf("loop should return Codex feedback only after CodeRabbit completes the round, code=%d report=%#v", code, report)
+	if code != 10 || len(report.Findings) != 1 || report.ReviewedBy["coderabbitai[bot]"] {
+		t.Fatalf("loop should return Codex feedback before CodeRabbit completes the round, code=%d report=%#v", code, report)
+	}
+	if report.Reason != "actionable findings must be addressed before the review round can continue" {
+		t.Fatalf("expected an explicit immediate-work reason, got %#v", report)
 	}
 }
 
