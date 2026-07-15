@@ -709,7 +709,7 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 				if err != nil {
 					return PumpResult{}, 1, err
 				}
-				if allReviewed(report.ReviewedBy) {
+				if len(findingsReportedOnHead(report.Findings, report.Head)) > 0 || allReviewed(report.ReviewedBy) {
 					return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
 				}
 				// Older versions could mark a head fired after mistaking carried-over
@@ -737,10 +737,9 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 				return PumpResult{}, 1, err
 			}
 			lastFeedbackCheck = time.Now()
-			// Findings from extraction-only bots such as Codex can arrive before the
-			// required CodeRabbit review. They must never end the slot wait: a round
-			// is available only after every configured required bot reviewed the head.
-			if len(report.Findings) > 0 && allReviewed(report.ReviewedBy) {
+			// A current-head finding makes the queued review obsolete immediately,
+			// even if the account slot or another required reviewer is still pending.
+			if len(findingsReportedOnHead(report.Findings, report.Head)) > 0 {
 				if s.log != nil {
 					s.log.Printf("%s#%d feedback already available on %s; leaving review slot wait", repo, pr, report.Head)
 				}

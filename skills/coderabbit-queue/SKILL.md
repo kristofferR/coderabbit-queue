@@ -61,7 +61,7 @@ always mean work now—even if a required reviewer timed out. Never report “st
 the JSON already contains actionable findings.
 The loop returns as soon as any configured feedback bot reports a finding, even if another
 required bot is pending. Fix, validate, push, and resolve it immediately; do not wait for the
-remaining reviewers on a head that is already known to need another commit.
+remaining reviewers or a shared review slot on a head that is already known to need another commit.
 
 Thread-less review-body summaries from a previous commit have no GitHub thread to resolve. After
 their fixes are pushed they do not gate the next round; the current-head review supersedes them
