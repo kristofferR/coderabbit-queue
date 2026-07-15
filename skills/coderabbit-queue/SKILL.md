@@ -60,6 +60,10 @@ waits. After any loop result, inspect `.findings` **before** interpreting the ex
 always mean work now—even if a required reviewer timed out. Never report “still waiting” while
 the JSON already contains actionable findings.
 
+Thread-less review-body summaries from a previous commit have no GitHub thread to resolve. After
+their fixes are pushed they do not gate the next round; the current-head review supersedes them
+or re-reports anything that remains valid.
+
 The agent fixes genuine findings, validates, commits, pushes, resolves addressed threads, then
 calls `crq loop` again. A round counts only after its findings are drained and the resulting head
 has received the required reviews.

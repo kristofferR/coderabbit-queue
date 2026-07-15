@@ -368,6 +368,22 @@ func (s *Service) codexThumbedUp(ctx context.Context, repo string, pr int, compl
 	return false, nil
 }
 
+// findingsBlockingFreshReview identifies feedback that can still be acted on or
+// resolved before requesting a review of head. Unresolved threads remain
+// actionable across commits, while thread-less review-body/prompt findings from
+// an older commit cannot be resolved on GitHub. Those older summaries are
+// superseded by the next current-head review and must not deadlock the loop after
+// the caller has pushed its fixes.
+func findingsBlockingFreshReview(findings []Finding, head string) []Finding {
+	blocking := make([]Finding, 0, len(findings))
+	for _, finding := range findings {
+		if finding.ThreadID != "" || finding.Commit == "" || head == "" || strings.HasPrefix(finding.Commit, head) {
+			blocking = append(blocking, finding)
+		}
+	}
+	return blocking
+}
+
 func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport, int, error) {
 	repo = NormalizeRepo(repo)
 	// Do not spend a new review slot while actionable feedback from an earlier
@@ -402,7 +418,9 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 					}
 					return report, 1, feedbackErr
 				}
-				if len(report.Findings) > 0 {
+				blocking := findingsBlockingFreshReview(report.Findings, head)
+				if len(blocking) > 0 {
+					report.Findings = blocking
 					report.Status = "feedback"
 					report.Reason = "unresolved findings must be addressed before a new review round"
 					return report, 10, nil

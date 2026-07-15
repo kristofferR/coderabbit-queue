@@ -45,6 +45,8 @@ timed out. Never describe the PR as “waiting for review” while actionable fi
 
 `crq loop` also enforces this invariant for new rounds: unresolved findings are returned before
 the PR is queued or a review slot is consumed.
+Thread-less review-body findings from a previous commit do not block after fixes are pushed; the
+next current-head review supersedes them or reports the finding again.
 
 ```bash
 crq loop OWNER/REPO PR_NUMBER > crq-feedback.json
