@@ -275,8 +275,11 @@ addressed threads. Do not wait for or trigger another review while actionable fe
 `crq loop` enforces that invariant by returning unresolved findings before it queues a fresh
 round, and actionable findings take precedence over a feedback timeout.
 If any configured feedback bot reports a finding while another required bot is still pending,
-`crq loop` returns immediately: fix, push, and resolve it before spending more time reviewing that
-known-bad head. The same rule applies while the PR is queued for an account-wide review slot.
+`crq loop` returns immediately so you can fix it locally. **Hold the PR head:** do not commit, push,
+or resolve yet, because changing the head restarts the pending checks. Leave the queued review
+alive and poll `crq feedback` with the same `CRQ_REQUIRED_BOTS`. After every `.reviewed_by` value is
+true, combine all fixes into one commit, push once, and resolve the combined thread set. The same
+policy applies while the PR is queued for an account-wide review slot.
 
 Thread-less review-body summaries from an older commit are informational after a fix is pushed:
 they cannot be resolved on GitHub, so they do not block a current-head review. That review either

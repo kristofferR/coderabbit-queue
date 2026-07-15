@@ -505,12 +505,16 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			return report, 1, err
 		}
 		// Findings are work immediately, even when another required reviewer is
-		// still pending. Returning now lets the caller fix, push, and resolve them;
-		// waiting for a "complete" report only wastes review time on a head that is
-		// already known to need another commit.
+		// still pending. Return control so the caller can fix locally, but keep the
+		// reviewed head unchanged until every required bot finishes; pushing early
+		// restarts the remaining checks and wastes the review slot.
 		if len(report.Findings) > 0 {
 			report.Status = "feedback"
-			report.Reason = "actionable findings must be addressed before the review round can continue"
+			if allReviewed(report.ReviewedBy) {
+				report.Reason = "all required reviewers finished; address findings, push once, and resolve threads"
+			} else {
+				report.Reason = "hold current head: fix locally, but do not commit or push until every required reviewer finishes"
+			}
 			s.clearFeedbackWait(ctx, repo, pr, head)
 			return report, 10, nil
 		}
