@@ -269,7 +269,13 @@ Or, if you don't want a long-running process, run `crq autoreview --once` from c
 
 ## ⭐ The recommended PR-review loop
 
-This is the autonomous review loop crq was built for. `crq loop` *is* the loop primitive — it
+This is the autonomous review loop crq was built for. First drain existing work with
+`crq feedback`: while `.findings` is non-empty, fix or explicitly decline it, push, and resolve
+addressed threads. Do not wait for or trigger another review while actionable feedback is open.
+`crq loop` enforces that invariant by returning unresolved findings before it queues a fresh
+round, and actionable findings take precedence over a feedback timeout.
+
+`crq loop` *is* the review-round primitive — it
 enqueues, fires when unblocked, waits for both bots on the current head, and emits normalized JSON —
 so you never hand-poll the GitHub API (which would burn the shared REST quota). Run one per PR, on as
 many PRs and machines as you like; they all share the queue without competing.

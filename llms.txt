@@ -37,6 +37,15 @@ CodeRabbit native auto-review must be off.
 
 ## Agent Loop
 
+Drain-first invariant: before waiting for a new review, run `crq feedback` and address every
+current finding. Fix genuine issues, validate, push, resolve or explicitly decline the threads,
+and repeat until `.findings` is empty. Only then start `crq loop`. After any loop return, inspect
+`.findings` before the exit code; non-empty findings are immediate work even if a required bot
+timed out. Never describe the PR as “waiting for review” while actionable findings are present.
+
+`crq loop` also enforces this invariant for new rounds: unresolved findings are returned before
+the PR is queued or a review slot is consumed.
+
 ```bash
 crq loop OWNER/REPO PR_NUMBER > crq-feedback.json
 rc=$?

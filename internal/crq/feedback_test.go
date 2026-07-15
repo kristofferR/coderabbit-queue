@@ -1662,7 +1662,7 @@ func TestLoopWaitsForReplacementReviewInsteadOfReturningCarriedPrompt(t *testing
 	}
 }
 
-func TestLoopDoesNotReturnCodexFeedbackBeforeRequiredReviewSlot(t *testing.T) {
+func TestLoopReturnsExistingCodexFeedbackBeforeWaitingForReviewSlot(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{
 		GateRepo:            "owner/gate",
@@ -1708,11 +1708,71 @@ func TestLoopDoesNotReturnCodexFeedbackBeforeRequiredReviewSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code != 2 || report.Status != "timeout" || len(report.Findings) != 0 {
-		t.Fatalf("Codex feedback must not finish a round before the required review can fire, code=%d report=%#v", code, report)
+	if code != 10 || report.Status != "feedback" || len(report.Findings) != 1 {
+		t.Fatalf("existing actionable feedback must be drained before a new review round, code=%d report=%#v", code, report)
+	}
+	if report.Reason != "unresolved findings must be addressed before a new review round" {
+		t.Fatalf("expected an explicit drain-first reason, got %#v", report)
 	}
 	if len(gh.posted) != 0 {
-		t.Fatalf("feedback that is already visible must not fire a review, posted=%d", len(gh.posted))
+		t.Fatalf("existing feedback must not fire or enqueue a replacement review, posted=%d", len(gh.posted))
+	}
+}
+
+func TestLoopReturnsBufferedFindingsAsWorkWhenRequiredReviewerTimesOut(t *testing.T) {
+	ctx := context.Background()
+	started := time.Now().UTC().Add(-time.Minute)
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		RequiredBots:        []string{"coderabbitai[bot]"},
+		FeedbackBots:        []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
+		ReviewCommand:       "@coderabbitai review",
+		PollInterval:        time.Nanosecond,
+		FeedbackWaitTimeout: time.Millisecond,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	comment := IssueComment{
+		ID:        91,
+		Body:      "Actionable finding on the current head",
+		CreatedAt: started.Add(time.Second),
+		UpdatedAt: started.Add(time.Second),
+	}
+	comment.User.Login = "chatgpt-codex-connector[bot]"
+	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		key := QueueKey("owner/repo", 12)
+		st.Fired[key] = "abcdef123"
+		st.AwaitingFeedback[key] = FeedbackWait{
+			Repo:      "owner/repo",
+			PR:        12,
+			Head:      "abcdef123",
+			StartedAt: started,
+			Deadline:  started.Add(cfg.FeedbackWaitTimeout),
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	report, code, err := svc.Loop(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 10 || report.Status != "feedback" || len(report.Findings) != 1 {
+		t.Fatalf("buffered actionable feedback must take precedence over timeout, code=%d report=%#v", code, report)
+	}
+	if report.Reason != "review wait timed out; actionable findings must be addressed before retrying" {
+		t.Fatalf("expected an explicit timeout-with-work reason, got %#v", report)
 	}
 }
 
