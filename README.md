@@ -449,8 +449,10 @@ If you're an autonomous agent running a PR-review loop, here's everything you ne
   waiting for a review — that drains the shared account-wide REST quota (also spent by the
   `autoreview` daemon and every other agent) and competes with crq's own polling. Use `crq loop`
   (waits + returns findings), `crq feedback` (current findings, no trigger), or `crq status`.
-- **Exit codes:** `0` converged → done; `10` → read `.findings[]`, fix valid ones, validate, commit,
-  push, then loop again; `2` → timed out, don't push stale-feedback fixes.
+- **Exit codes:** `0` converged → done; `10` → read `.findings[]`, fix valid ones, and validate
+  locally. If any `.reviewed_by` value is false, **hold the head**—do not commit, push, or resolve.
+  After all required bots are true, commit/push once, resolve addressed threads, then loop again;
+  `2` → timed out, don't push stale-feedback fixes.
 - **Resolve / decline:** after fixing a finding, `crq resolve <repo> <pr> --thread <id>`. If you're
   declining one, record why with `crq decline <repo> <pr> --thread <id> --reason "…"` instead of
   leaving it silently open.

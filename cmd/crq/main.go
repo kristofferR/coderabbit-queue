@@ -267,9 +267,10 @@ QUEUE WORKFLOWS
 
 ONE PR ROUND
   1. Run: crq loop <repo> <pr> > crq-feedback.json
-  2. If exit 10, read .findings[], fix only valid findings, validate, commit, push.
-  3. Resolve only addressed threads: crq resolve <repo> <pr> --thread <thread_id>
-  4. Repeat crq loop until exit 0. Never post @coderabbitai review directly.
+  2. If exit 10, read .findings[], fix only valid findings, and validate locally.
+  3. If any .reviewed_by value is false, HOLD THE HEAD: do not commit, push, or resolve.
+  4. After every required bot is true, commit/push once and resolve addressed threads.
+  5. Repeat crq loop until exit 0. Never post @coderabbitai review directly.
 
 USAGE
   crq init                         initialize state in CRQ_REPO

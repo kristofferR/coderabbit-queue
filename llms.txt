@@ -64,7 +64,8 @@ configured required bot (`CRQ_REQUIRED_BOTS`) on the current head, then emits on
 
 Exit codes:
 - `0`: done; converged or no actionable findings.
-- `10`: read `.findings[]`, fix valid issues, validate, commit, push, resolve addressed threads, then repeat.
+- `10`: read `.findings[]`, fix valid issues, and validate locally. If any `.reviewed_by` value is
+  false, hold the head. After all are true, commit/push once, resolve addressed threads, then repeat.
 - `2`: timed out waiting for feedback; do not push a stale-feedback round.
 
 Resolve addressed threads on GitHub (crq keys off GitHub resolution state; a finding keeps
