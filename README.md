@@ -270,16 +270,18 @@ Or, if you don't want a long-running process, run `crq autoreview --once` from c
 ## ⭐ The recommended PR-review loop
 
 This is the autonomous review loop crq was built for. First drain existing work with
-`crq feedback`: while `.findings` is non-empty, fix or explicitly decline it, push, and resolve
-addressed threads. Do not wait for or trigger another review while actionable feedback is open.
+`crq feedback`: while `.findings` is non-empty, fix or explicitly decline it, validate locally, and
+resolve the addressed thread immediately. Do not wait for or trigger another review while actionable
+feedback is open.
 `crq loop` enforces that invariant by returning unresolved findings before it queues a fresh
 round, and actionable findings take precedence over a feedback timeout.
 If any configured feedback bot reports a finding while another required bot is still pending,
-`crq loop` returns immediately so you can fix it locally. **Hold the PR head:** do not commit, push,
-or resolve yet, because changing the head restarts the pending checks. Leave the queued review
-alive and poll `crq feedback` with the same `CRQ_REQUIRED_BOTS`. After every `.reviewed_by` value is
-true, combine all fixes into one commit, push once, and resolve the combined thread set. The same
-policy applies while the PR is queued for an account-wide review slot.
+`crq loop` returns immediately so you can fix it locally. **Hold the PR head:** do not commit or push,
+because changing the head restarts the pending checks. Resolve the addressed thread immediately after
+its local fix—thread resolution does not change the head. Leave the queued review alive and poll
+`crq feedback` with the same `CRQ_REQUIRED_BOTS`. After every `.reviewed_by` value is true, fix and
+resolve the rest, combine all fixes into one commit, and push once. The same policy applies while the
+PR is queued for an account-wide review slot.
 
 Thread-less review-body summaries from an older commit are informational after a fix is pushed:
 they cannot be resolved on GitHub, so they do not block a current-head review. That review either
@@ -308,14 +310,16 @@ while :; do
     *) echo "crq loop error ($rc)"; exit "$rc" ;;
   esac
 
-  # Read findings, fix the real ones, run your tests/linters, then commit & push.
+  # Read findings, fix the real ones, run your tests/linters, then resolve them immediately.
   jq -r '.findings[] | "\(.severity) \(.path // "-"):\(.line // 0) — \(.title)"' crq-feedback.json
-  #   ... apply fixes, validate, git commit, git push ...
+  #   ... apply fixes and validate ...
 
   # Resolve the threads you addressed; record why for any you decline.
   jq -r '.findings[] | select(.thread_id != null) | .thread_id' crq-feedback.json \
     | xargs -I{} crq resolve "$REPO" "$PR" --thread {}
   # crq decline "$REPO" "$PR" --thread <id> --reason "why this one is declined"
+  # If reviewers are still pending, keep the head frozen and resume with crq feedback.
+  # After all required reviewers finish: fix/resolve the rest, then git commit && git push once.
 done
 ```
 
@@ -449,9 +453,10 @@ If you're an autonomous agent running a PR-review loop, here's everything you ne
   waiting for a review — that drains the shared account-wide REST quota (also spent by the
   `autoreview` daemon and every other agent) and competes with crq's own polling. Use `crq loop`
   (waits + returns findings), `crq feedback` (current findings, no trigger), or `crq status`.
-- **Exit codes:** `0` converged → done; `10` → read `.findings[]`, fix valid ones, and validate
-  locally. If any `.reviewed_by` value is false, **hold the head**—do not commit, push, or resolve.
-  After all required bots are true, commit/push once, resolve addressed threads, then loop again;
+- **Exit codes:** `0` converged → done; `10` → read `.findings[]`, fix valid ones, validate locally,
+  and resolve addressed threads immediately. If any `.reviewed_by` value is false, **hold the
+  head**—do not commit or push. After all required bots are true, fix/resolve the rest, commit/push
+  once, then loop again;
   `2` → timed out, don't push stale-feedback fixes.
 - **Resolve / decline:** after fixing a finding, `crq resolve <repo> <pr> --thread <id>`. If you're
   declining one, record why with `crq decline <repo> <pr> --thread <id> --reason "…"` instead of

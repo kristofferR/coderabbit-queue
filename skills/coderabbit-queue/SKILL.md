@@ -51,12 +51,12 @@ restarting a review round, drain all currently actionable feedback:
 
 1. run `crq feedback "$REPO" "$PR"`,
 2. if `.findings` is non-empty, verify and fix genuine findings immediately,
-3. validate locally; if any required reviewer is still pending on the current head, do not commit,
-   push, resolve, or decline yet,
-4. after every required reviewer finishes, commit and push once, then resolve or explicitly decline
-   every addressed thread,
-5. repeat until current feedback is empty,
-6. only then call `crq loop` for a fresh review round.
+3. validate locally, then immediately resolve each addressed thread (or record and resolve a decline),
+4. if any required reviewer is still pending on the current head, do not commit or push,
+5. after every required reviewer finishes, fix and resolve the remaining findings, then commit and
+   push all accumulated fixes once,
+6. repeat until current feedback is empty,
+7. only then call `crq loop` for a fresh review round.
 
 `crq loop` enforces this for a new round by returning existing findings before it queues or
 waits. After any loop result, inspect `.findings` **before** interpreting the exit code. Findings
@@ -64,18 +64,19 @@ always mean work now—even if a required reviewer timed out. Never report “st
 the JSON already contains actionable findings.
 The loop returns as soon as any configured feedback bot reports a finding, even if another
 required bot is pending. Fix and validate it locally immediately, but **hold the PR head** while
-any `.reviewed_by` value is false: do not commit, push, or resolve yet, because changing the head
-restarts the pending checks. Keep the queued review alive and poll `crq feedback` using the same
-`CRQ_REQUIRED_BOTS`. Once every required bot is true, combine all fixes into one commit, push once,
-and resolve the combined thread set.
+any `.reviewed_by` value is false: resolve the addressed thread immediately, but do not commit or
+push, because changing the head restarts the pending checks while resolving a thread does not. Keep
+the queued review alive and poll `crq feedback` using the same `CRQ_REQUIRED_BOTS`. Once every required
+bot is true, fix and resolve the remaining findings, combine all fixes into one commit, and push once.
 
 Thread-less review-body summaries from a previous commit have no GitHub thread to resolve. After
 their fixes are pushed they do not gate the next round; the current-head review supersedes them
 or re-reports anything that remains valid.
 
-The agent fixes genuine findings, validates, commits, pushes, resolves addressed threads, then
-calls `crq loop` again. A round counts only after its findings are drained and the resulting head
-has received the required reviews.
+The agent fixes genuine findings, validates, resolves addressed threads immediately, waits for every
+required reviewer, fixes and resolves the rest, then commits and pushes once before calling `crq loop`
+again. A round counts only after its findings are drained and the resulting head has received the
+required reviews.
 
 Minimal implementation:
 
@@ -105,8 +106,9 @@ is quiet.
 
 If an extraction-only bot such as Codex reports a finding first, `crq loop` emits that finding early
 so work can begin, but it does not mark the round complete and leaves the queued review alive. Fix and
-validate locally, then hold the head until every `CRQ_REQUIRED_BOTS` reviewer has reviewed it. An early
-`crq feedback` snapshot is actionable work, not permission to commit or push.
+validate locally, resolve its thread immediately, then hold the head until every `CRQ_REQUIRED_BOTS`
+reviewer has reviewed it. An early `crq feedback` snapshot is actionable work, not permission to commit
+or push.
 
 Codex's clean summary (`Codex Review: Didn't find any major issues. Keep them coming!`) is a successful
 review signal, not a finding. crq suppresses it when Codex is extraction-only and counts it in
