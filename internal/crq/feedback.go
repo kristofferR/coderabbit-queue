@@ -384,6 +384,19 @@ func findingsBlockingFreshReview(findings []Finding, head string) []Finding {
 	return blocking
 }
 
+// findingsReportedOnHead excludes carried review artifacts from older commits.
+// Wait uses this narrower filter because its job is still to request a review
+// when the only visible feedback predates the queued head.
+func findingsReportedOnHead(findings []Finding, head string) []Finding {
+	current := make([]Finding, 0, len(findings))
+	for _, finding := range findings {
+		if finding.Commit == "" || head == "" || strings.HasPrefix(finding.Commit, head) {
+			current = append(current, finding)
+		}
+	}
+	return current
+}
+
 func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport, int, error) {
 	repo = NormalizeRepo(repo)
 	// Do not spend a new review slot while actionable feedback from an earlier

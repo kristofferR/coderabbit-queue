@@ -1756,6 +1756,52 @@ func TestWaitFiresRealReviewWhenOnlyCarriedThreadVisible(t *testing.T) {
 	}
 }
 
+func TestWaitReturnsCurrentHeadFeedbackBeforeReviewSlot(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		RequiredBots:        []string{"coderabbitai[bot]"},
+		FeedbackBots:        []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
+		ReviewCommand:       "@coderabbitai review",
+		PollInterval:        time.Millisecond,
+		WaitTimeout:         time.Second,
+		FeedbackWaitTimeout: time.Minute,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	headTime := time.Now().UTC().Add(-time.Minute)
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	gc := gitCommit{SHA: pull.Head.SHA}
+	gc.Committer.Date = headTime
+	gh.commits[pull.Head.SHA] = gc
+	comment := IssueComment{
+		ID:        91,
+		Body:      "Actionable Codex finding on the queued head",
+		CreatedAt: headTime.Add(time.Second),
+		UpdatedAt: headTime.Add(time.Second),
+	}
+	comment.User.Login = "chatgpt-codex-connector[bot]"
+	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	service := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	result, code, err := service.Wait(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 3 || result.Reason != "feedback already available" {
+		t.Fatalf("current-head feedback must end the slot wait immediately, code=%d result=%#v", code, result)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("known-bad head must not spend a review slot, posted=%d", len(gh.posted))
+	}
+}
+
 func TestWaitFiresRealReviewWhenOnlyCarriedReviewPromptVisible(t *testing.T) {
 	// Review-body prompts intentionally remain visible after a head change until a
 	// newer review supersedes them. They must not be mistaken for feedback on the
