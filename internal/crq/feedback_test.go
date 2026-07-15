@@ -187,6 +187,65 @@ func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 	}
 }
 
+func TestFeedbackRejectsCompletionReplyWhileTopSummaryIsProcessing(t *testing.T) {
+	cfg := Config{
+		Bot:               "coderabbitai[bot]",
+		RequiredBots:      []string{"coderabbitai[bot]"},
+		ReviewCommand:     "@coderabbitai review",
+		RateLimitMarker:   "rate limited by coderabbit.ai",
+		CalibrationMarker: "auto-generated reply by CodeRabbit",
+		CompletionMarker:  "Review finished",
+	}
+	sha := "abcdef1234567890"
+	head := sha[:9]
+	firedAt := time.Now().UTC().Add(-10 * time.Minute)
+	mk := func(id int64, login, body string, createdAt, updatedAt time.Time) IssueComment {
+		comment := IssueComment{ID: id, Body: body, CreatedAt: createdAt, UpdatedAt: updatedAt}
+		comment.User.Login = login
+		return comment
+	}
+
+	gh := newFakeGitHub()
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey("o/repo", 3)] = pull
+	command := mk(1, "kristofferR", cfg.ReviewCommand, firedAt, firedAt)
+	completion := mk(2, cfg.Bot, "<!-- This is an auto-generated reply by CodeRabbit -->\nReview finished.", firedAt.Add(time.Minute), firedAt.Add(time.Minute))
+	summary := mk(3, cfg.Bot, "<!-- review in progress by coderabbit.ai -->\nCurrently processing new changes in this PR. This may take a few minutes, please wait...", firedAt.Add(-time.Hour), firedAt.Add(2*time.Minute))
+	gh.comments[fakeKey("o/repo", 3)] = []IssueComment{summary, command, completion}
+	prior := Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour)}
+	prior.User.Login = cfg.Bot
+	gh.reviews[fakeKey("o/repo", 3)] = []Review{prior}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.History = append(st.History, HistoryItem{Repo: "o/repo", PR: 3, Commit: head, At: firedAt, Host: "testhost"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(cfg, gh, store, nil)
+
+	report, err := service.Feedback(context.Background(), "o/repo", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.ReviewedBy[cfg.Bot] || report.Converged {
+		t.Fatalf("a completion reply must not converge while the current top summary is processing, got %#v", report)
+	}
+
+	summary.Body = "No actionable comments were generated in the recent review."
+	summary.UpdatedAt = firedAt.Add(3 * time.Minute)
+	gh.comments[fakeKey("o/repo", 3)] = []IssueComment{summary, command, completion}
+	report, err = service.Feedback(context.Background(), "o/repo", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.ReviewedBy[cfg.Bot] || !report.Converged {
+		t.Fatalf("the same completion may converge after the top summary becomes terminal, got %#v", report)
+	}
+}
+
 func TestFeedbackRejectsCompletionReplyFromEarlierRound(t *testing.T) {
 	// Overlapping rounds: an old command's review is still finishing when the
 	// PR is pushed and a new command fires. The old round's "Review finished"

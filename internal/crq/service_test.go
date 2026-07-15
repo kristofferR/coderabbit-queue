@@ -1034,6 +1034,62 @@ func TestPumpDoesNotAdoptCommandAlreadyAnsweredByCompletionReply(t *testing.T) {
 	}
 }
 
+func TestPumpAdoptsCompletionAnsweredCommandWhileTopSummaryIsProcessing(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		ReviewCommand:       "@coderabbitai review",
+		RateLimitMarker:     "rate limited by coderabbit.ai",
+		CalibrationMarker:   "auto-generated reply by CodeRabbit",
+		CompletionMarker:    "Review finished",
+		MinInterval:         0,
+		InflightTimeout:     time.Minute,
+		FeedbackWaitTimeout: time.Minute,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	commitTime := time.Now().UTC().Add(-time.Hour)
+	commandAt := commitTime.Add(10 * time.Minute)
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	gc := gitCommit{SHA: pull.Head.SHA}
+	gc.Committer.Date = commitTime
+	gh.commits[pull.Head.SHA] = gc
+	command := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: commandAt, UpdatedAt: commandAt}
+	command.User.Login = "kristofferR"
+	reply := IssueComment{ID: 78, Body: "<!-- This is an auto-generated reply by CodeRabbit -->\nReview finished.", CreatedAt: commandAt.Add(time.Minute), UpdatedAt: commandAt.Add(time.Minute)}
+	reply.User.Login = cfg.Bot
+	summary := IssueComment{
+		ID:        79,
+		Body:      "<!-- review in progress by coderabbit.ai -->\nCurrently processing new changes in this PR. This may take a few minutes, please wait...",
+		CreatedAt: commandAt.Add(-time.Hour),
+		UpdatedAt: commandAt.Add(2 * time.Minute),
+	}
+	summary.User.Login = cfg.Bot
+	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{summary, command, reply}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+
+	if _, err := service.Enqueue(ctx, "owner/repo", 12); err != nil {
+		t.Fatal(err)
+	}
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "fired" || pumped.Reason != "review command already posted" {
+		t.Fatalf("the still-processing command must be adopted instead of replaced, got %#v", pumped)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("processing must suppress a duplicate review trigger, posted=%v", gh.posted)
+	}
+}
+
 func TestPumpDryRunDoesNotDedupeMutably(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{

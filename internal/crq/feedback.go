@@ -1375,6 +1375,32 @@ func (s *Service) isCompletionReply(body string) bool {
 	return strings.Contains(strings.ToLower(body), strings.ToLower(marker))
 }
 
+// isReviewInProgress reports whether body is CodeRabbit's editable top-summary
+// state for a review that has started but has not finished. CodeRabbit can post
+// a "Review finished" command reply before this summary leaves the processing
+// state, so the reply alone is not a terminal signal.
+func isReviewInProgress(body string) bool {
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, "currently processing new changes in this pr") ||
+		strings.Contains(lower, "review in progress by coderabbit.ai")
+}
+
+// hasNonterminalReviewState reports whether CodeRabbit currently exposes a
+// post-command state that contradicts a terminal completion reply. The top
+// summary is edited in place, so its UpdatedAt, not its original CreatedAt,
+// determines which command round the current body belongs to.
+func (s *Service) hasNonterminalReviewState(comments []IssueComment, since time.Time) bool {
+	for _, comment := range comments {
+		if !s.isConfiguredBot(comment.User.Login) || !notBefore(issueCommentTime(comment), since) {
+			continue
+		}
+		if isReviewInProgress(comment.Body) || s.isRateLimited(comment.Body) || s.isReviewsPaused(comment.Body) {
+			return true
+		}
+	}
+	return false
+}
+
 // isAutoReply reports whether body is one of the bot's auto-generated replies
 // to a command — completion, rate-limit, skip, or progress. The bot posts
 // exactly one per command, which is what lets completions be paired to the
@@ -1451,7 +1477,7 @@ func (s *Service) completionReplyForFiredCommand(comments []IssueComment, review
 		return false
 	}
 	for _, reply := range s.reviewCommandReplies(comments, reviews) {
-		if reply.completion && notBefore(reply.commandAt, firedAt) {
+		if reply.completion && notBefore(reply.commandAt, firedAt) && !s.hasNonterminalReviewState(comments, reply.commandAt) {
 			return true
 		}
 	}
@@ -1477,7 +1503,7 @@ func (s *Service) reviewCommandHasCompletionReply(comments []IssueComment, revie
 		return false
 	}
 	for _, reply := range s.reviewCommandReplies(comments, reviews) {
-		if reply.commandID == commandID && reply.completion {
+		if reply.commandID == commandID && reply.completion && !s.hasNonterminalReviewState(comments, reply.commandAt) {
 			return true
 		}
 	}
