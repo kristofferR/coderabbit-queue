@@ -275,6 +275,10 @@ addressed threads. Do not wait for or trigger another review while actionable fe
 `crq loop` enforces that invariant by returning unresolved findings before it queues a fresh
 round, and actionable findings take precedence over a feedback timeout.
 
+Thread-less review-body summaries from an older commit are informational after a fix is pushed:
+they cannot be resolved on GitHub, so they do not block a current-head review. That review either
+re-reports a still-valid finding or supersedes the stale summary.
+
 `crq loop` *is* the review-round primitive — it
 enqueues, fires when unblocked, waits for both bots on the current head, and emits normalized JSON —
 so you never hand-poll the GitHub API (which would burn the shared REST quota). Run one per PR, on as

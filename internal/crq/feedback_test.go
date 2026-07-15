@@ -1719,6 +1719,64 @@ func TestLoopReturnsExistingCodexFeedbackBeforeWaitingForReviewSlot(t *testing.T
 	}
 }
 
+func TestLoopDoesNotBlockOnThreadlessReviewBodyFromPreviousHead(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:            "owner/gate",
+		StateRef:            "crq-state",
+		Host:                "testhost",
+		Bot:                 "coderabbitai[bot]",
+		RequiredBots:        []string{"coderabbitai[bot]"},
+		FeedbackBots:        []string{"coderabbitai[bot]"},
+		ReviewCommand:       "@coderabbitai review",
+		MinInterval:         0,
+		InflightTimeout:     time.Hour,
+		PollInterval:        time.Millisecond,
+		WaitTimeout:         time.Second,
+		FeedbackWaitTimeout: time.Minute,
+		FiredMax:            500,
+	}
+	gh := newFakeGitHub()
+	headTime := time.Now().UTC().Add(-time.Minute)
+	var pull Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	gc := gitCommit{SHA: pull.Head.SHA}
+	gc.Committer.Date = headTime
+	gh.commits[pull.Head.SHA] = gc
+	stale := Review{
+		ID:          7,
+		Body:        "**Actionable comments posted: 1**\n<details><summary>Prompt for AI agents</summary>\n\n```\nIn `@a.go`:\n- Around line 1: Already fixed on the new head.\n```\n</details>",
+		CommitID:    "fedcba9876543210",
+		SubmittedAt: headTime.Add(-time.Hour),
+	}
+	stale.User.Login = "coderabbitai[bot]"
+	gh.reviews[fakeKey("owner/repo", 12)] = []Review{stale}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		fresh := Review{ID: 8, CommitID: pull.Head.SHA, SubmittedAt: time.Now().UTC()}
+		fresh.User.Login = "coderabbitai[bot]"
+		gh.mu.Lock()
+		gh.reviews[fakeKey("owner/repo", 12)] = append(gh.reviews[fakeKey("owner/repo", 12)], fresh)
+		gh.mu.Unlock()
+	}()
+
+	report, code, err := svc.Loop(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 || !report.Converged || len(report.Findings) != 0 {
+		t.Fatalf("previous-head body summaries must not block a fresh review, code=%d report=%#v", code, report)
+	}
+	if len(gh.posted) != 1 {
+		t.Fatalf("expected one current-head review command, posted=%d", len(gh.posted))
+	}
+}
+
 func TestLoopReturnsBufferedFindingsAsWorkWhenRequiredReviewerTimesOut(t *testing.T) {
 	ctx := context.Background()
 	started := time.Now().UTC().Add(-time.Minute)
