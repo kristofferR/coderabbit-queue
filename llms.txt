@@ -124,6 +124,10 @@ Fleet review:
 crq autoreview
 ```
 
+Run exactly one long-lived autoreview daemon. Manual `crq loop` calls and autoreview share the same
+idempotent queue entry, so after a push either one may enqueue first and the other only re-attaches.
+Never start a second watcher or post a direct CodeRabbit trigger to "help" the daemon.
+
 Autoreview skips PRs authored by dependabot by default (`CRQ_AUTOREVIEW_SKIP_AUTHORS`,
 comma-separated logins; set empty to include bot PRs). Manual `crq review` ignores this filter.
 For an intentionally low-risk PR that already had enough local review, include the hidden

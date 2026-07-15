@@ -372,6 +372,8 @@ By default the thread stays unresolved (an on-the-record disagreement). Pass
 		fmt.Print(`crq autoreview [--once] [--no-incremental]
 
 Keep open PRs in CRQ_SCOPE reviewed, using the same account-wide queue and quota.
+Run only one long-lived autoreview daemon. Manual crq loop calls share its idempotent
+queue entry, so they re-attach to the same wait instead of firing a duplicate review.
 
   --once            scan once and exit
   --no-incremental  only review PRs that have never been reviewed by CodeRabbit
