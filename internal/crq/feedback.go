@@ -1385,6 +1385,16 @@ func isReviewInProgress(body string) bool {
 		strings.Contains(lower, "review in progress by coderabbit.ai")
 }
 
+// isReviewFailure reports whether body is CodeRabbit's editable top-summary
+// failure state. CodeRabbit can still change the command reply to "Review
+// finished" after this summary reports that the review itself failed, so the
+// reply is not evidence that the current head was reviewed successfully.
+func isReviewFailure(body string) bool {
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, "auto-generated comment: failure by coderabbit.ai") ||
+		strings.Contains(lower, "## review failed")
+}
+
 // hasNonterminalReviewState reports whether CodeRabbit currently exposes a
 // post-command state that contradicts a terminal completion reply. The top
 // summary is edited in place, so its UpdatedAt, not its original CreatedAt,
@@ -1395,6 +1405,18 @@ func (s *Service) hasNonterminalReviewState(comments []IssueComment, since time.
 			continue
 		}
 		if isReviewInProgress(comment.Body) || s.isRateLimited(comment.Body) || s.isReviewsPaused(comment.Body) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) hasFailedReviewState(comments []IssueComment, since time.Time) bool {
+	for _, comment := range comments {
+		if !s.isConfiguredBot(comment.User.Login) || !notBefore(issueCommentTime(comment), since) {
+			continue
+		}
+		if isReviewFailure(comment.Body) {
 			return true
 		}
 	}
@@ -1477,7 +1499,9 @@ func (s *Service) completionReplyForFiredCommand(comments []IssueComment, review
 		return false
 	}
 	for _, reply := range s.reviewCommandReplies(comments, reviews) {
-		if reply.completion && notBefore(reply.commandAt, firedAt) && !s.hasNonterminalReviewState(comments, reply.commandAt) {
+		if reply.completion && notBefore(reply.commandAt, firedAt) &&
+			!s.hasNonterminalReviewState(comments, reply.commandAt) &&
+			!s.hasFailedReviewState(comments, reply.commandAt) {
 			return true
 		}
 	}
