@@ -60,8 +60,11 @@ waits. After any loop result, inspect `.findings` **before** interpreting the ex
 always mean work now—even if a required reviewer timed out. Never report “still waiting” while
 the JSON already contains actionable findings.
 The loop returns as soon as any configured feedback bot reports a finding, even if another
-required bot is pending. Fix, validate, push, and resolve it immediately; do not wait for the
-remaining reviewers or a shared review slot on a head that is already known to need another commit.
+required bot is pending. Fix and validate it locally immediately, but **hold the PR head** while
+any `.reviewed_by` value is false: do not commit, push, or resolve yet, because changing the head
+restarts the pending checks. Keep the queued review alive and poll `crq feedback` using the same
+`CRQ_REQUIRED_BOTS`. Once every required bot is true, combine all fixes into one commit, push once,
+and resolve the combined thread set.
 
 Thread-less review-body summaries from a previous commit have no GitHub thread to resolve. After
 their fixes are pushed they do not gate the next round; the current-head review supersedes them

@@ -737,8 +737,9 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 				return PumpResult{}, 1, err
 			}
 			lastFeedbackCheck = time.Now()
-			// A current-head finding makes the queued review obsolete immediately,
-			// even if the account slot or another required reviewer is still pending.
+			// Return current-head findings immediately so the caller can fix locally.
+			// The queue entry stays active: policy requires holding this head until the
+			// account slot and every required reviewer finish.
 			if len(findingsReportedOnHead(report.Findings, report.Head)) > 0 {
 				if s.log != nil {
 					s.log.Printf("%s#%d feedback already available on %s; leaving review slot wait", repo, pr, report.Head)

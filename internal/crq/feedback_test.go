@@ -1829,8 +1829,8 @@ func TestLoopReturnsFindingsBeforeRequiredReviewerTimeout(t *testing.T) {
 	if code != 10 || report.Status != "feedback" || len(report.Findings) != 1 {
 		t.Fatalf("buffered actionable feedback must take precedence over timeout, code=%d report=%#v", code, report)
 	}
-	if report.Reason != "actionable findings must be addressed before the review round can continue" {
-		t.Fatalf("expected an explicit immediate-work reason, got %#v", report)
+	if report.Reason != "hold current head: fix locally, but do not commit or push until every required reviewer finishes" {
+		t.Fatalf("expected an explicit hold-head reason, got %#v", report)
 	}
 }
 
@@ -1890,8 +1890,8 @@ func TestLoopReturnsFasterCodexFeedbackBeforeCodeRabbitReviews(t *testing.T) {
 	if code != 10 || len(report.Findings) != 1 || report.ReviewedBy["coderabbitai[bot]"] {
 		t.Fatalf("loop should return Codex feedback before CodeRabbit completes the round, code=%d report=%#v", code, report)
 	}
-	if report.Reason != "actionable findings must be addressed before the review round can continue" {
-		t.Fatalf("expected an explicit immediate-work reason, got %#v", report)
+	if report.Reason != "hold current head: fix locally, but do not commit or push until every required reviewer finishes" {
+		t.Fatalf("expected an explicit hold-head reason, got %#v", report)
 	}
 }
 

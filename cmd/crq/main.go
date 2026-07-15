@@ -321,8 +321,12 @@ Loop contract:
   #   inspect .findings[]
   #   fix only still-valid findings
   #   run project validation
-  #   commit and push
-  #   resolve addressed .thread_id values with crq resolve
+  #   if any .reviewed_by value is false: HOLD THE HEAD
+  #     fix locally, but do not commit, push, or resolve yet
+  #     keep the queued review alive and poll crq feedback with the same CRQ_REQUIRED_BOTS
+  #   after every required bot is true:
+  #     commit and push once
+  #     resolve addressed .thread_id values with crq resolve
   #   call crq loop again
 
 Never post @coderabbitai review directly; crq is the only trigger.

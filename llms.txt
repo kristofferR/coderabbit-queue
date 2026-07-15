@@ -43,7 +43,11 @@ and repeat until `.findings` is empty. Only then start `crq loop`. After any loo
 `.findings` before the exit code; non-empty findings are immediate work even if a required bot
 timed out. Never describe the PR as “waiting for review” while actionable findings are present.
 The loop also returns as soon as any feedback bot reports a finding; it does not wait for the
-remaining required bots or a shared review slot for a head that already needs another commit.
+remaining required bots or a shared review slot. Fix those findings locally, but HOLD THE HEAD:
+do not commit, push, or resolve while any `.reviewed_by` value is false, because that restarts the
+pending checks. Keep the queued review alive and poll `crq feedback` with the same
+`CRQ_REQUIRED_BOTS`. When every required bot is true, commit all fixes once, push once, and resolve
+the combined thread set.
 
 `crq loop` also enforces this invariant for new rounds: unresolved findings are returned before
 the PR is queued or a review slot is consumed.
