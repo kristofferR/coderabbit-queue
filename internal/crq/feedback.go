@@ -491,11 +491,13 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			}
 			return report, 1, err
 		}
-		// Extraction-only bots such as Codex often respond before the required
-		// CodeRabbit review. Keep their findings buffered until every required bot
-		// has reviewed this head, then return the complete round in one report.
-		if len(report.Findings) > 0 && allReviewed(report.ReviewedBy) {
+		// Findings are work immediately, even when another required reviewer is
+		// still pending. Returning now lets the caller fix, push, and resolve them;
+		// waiting for a "complete" report only wastes review time on a head that is
+		// already known to need another commit.
+		if len(report.Findings) > 0 {
 			report.Status = "feedback"
+			report.Reason = "actionable findings must be addressed before the review round can continue"
 			s.clearFeedbackWait(ctx, repo, pr, head)
 			return report, 10, nil
 		}
