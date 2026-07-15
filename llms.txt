@@ -38,8 +38,10 @@ CodeRabbit native auto-review must be off.
 ## Agent Loop
 
 Drain-first invariant: before waiting for a new review, run `crq feedback` and address every
-current finding. Fix genuine issues, validate, push, resolve or explicitly decline the threads,
-and repeat until `.findings` is empty. Only then start `crq loop`. After any loop return, inspect
+current finding. Fix genuine issues and validate locally. Commit, push, resolve, or decline only
+when every configured required reviewer has a `true` `.reviewed_by` value for the current head;
+otherwise hold the head. Repeat until `.findings` is empty, then start `crq loop`. After any loop
+return, inspect
 `.findings` before the exit code; non-empty findings are immediate work even if a required bot
 timed out. Never describe the PR as “waiting for review” while actionable findings are present.
 The loop also returns as soon as any feedback bot reports a finding; it does not wait for the
@@ -59,8 +61,12 @@ crq loop OWNER/REPO PR_NUMBER > crq-feedback.json
 rc=$?
 ```
 
-`crq loop` queues the PR, triggers CodeRabbit when the account can spend a review, waits for every
-configured required bot (`CRQ_REQUIRED_BOTS`) on the current head, then emits one JSON report.
+`crq loop` queues the PR and triggers CodeRabbit when the account can spend a review. If a bot reports
+actionable findings first, it emits them immediately while leaving the queued round alive. Fix and
+validate locally, but do not commit, push, resolve, or decline while any required bot's `.reviewed_by`
+value is false. Only after every `CRQ_REQUIRED_BOTS` entry is true for the current head may you commit
+and push once, then resolve or decline the combined thread set. Convergence is reported only after
+that same condition is met.
 
 Exit codes:
 - `0`: done; converged or no actionable findings.

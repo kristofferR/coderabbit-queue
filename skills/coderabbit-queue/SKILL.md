@@ -103,10 +103,10 @@ Long waits are expected when the queue is blocked, GitHub is rate-limited, a req
 reviewed yet, or the network is down. crq logs progress to stderr; do not kill it just because stdout
 is quiet.
 
-`crq loop` does not emit a round merely because an extraction-only bot such as Codex responds first.
-It buffers those findings until every `CRQ_REQUIRED_BOTS` reviewer (normally CodeRabbit) has reviewed
-the current head, then returns the complete round. Do not act on an early `crq feedback` snapshot as
-if the round had completed.
+If an extraction-only bot such as Codex reports a finding first, `crq loop` emits that finding early
+so work can begin, but it does not mark the round complete and leaves the queued review alive. Fix and
+validate locally, then hold the head until every `CRQ_REQUIRED_BOTS` reviewer has reviewed it. An early
+`crq feedback` snapshot is actionable work, not permission to commit or push.
 
 Codex's clean summary (`Codex Review: Didn't find any major issues. Keep them coming!`) is a successful
 review signal, not a finding. crq suppresses it when Codex is extraction-only and counts it in
