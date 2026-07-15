@@ -18,10 +18,11 @@ case "$rc" in
   10)
     echo "actionable findings written to $OUT"
     echo "fix valid findings and validate locally"
-    echo "if any .reviewed_by value is false: HOLD THE HEAD; do not commit, push, or resolve"
-    echo "after every required bot is true: commit/push once, then resolve addressed threads:"
+    echo "resolve each addressed thread immediately after its local fix:"
     echo "  jq -r '.findings[] | select(.thread_id != null) | .thread_id' '$OUT'"
     echo "  crq resolve '$REPO' '$PR' --thread THREAD_ID"
+    echo "if any .reviewed_by value is false: HOLD THE HEAD; do not commit or push"
+    echo "after every required bot is true: fix/resolve the rest, then commit/push once"
     ;;
   2)
     echo "timed out waiting for feedback; do not push a stale-feedback round; see $OUT"

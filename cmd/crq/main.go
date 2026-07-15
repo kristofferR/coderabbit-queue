@@ -268,9 +268,10 @@ QUEUE WORKFLOWS
 ONE PR ROUND
   1. Run: crq loop <repo> <pr> > crq-feedback.json
   2. If exit 10, read .findings[], fix only valid findings, and validate locally.
-  3. If any .reviewed_by value is false, HOLD THE HEAD: do not commit, push, or resolve.
-  4. After every required bot is true, commit/push once and resolve addressed threads.
-  5. Repeat crq loop until exit 0. Never post @coderabbitai review directly.
+  3. Resolve each addressed thread immediately after its local fix; do not wait for a push.
+  4. If any .reviewed_by value is false, HOLD THE HEAD: do not commit or push.
+  5. After every required bot is true, fix/resolve the rest, then commit and push once.
+  6. Repeat crq loop until exit 0. Never post @coderabbitai review directly.
 
 USAGE
   crq init                         initialize state in CRQ_REPO
@@ -321,12 +322,13 @@ Loop contract:
   #   inspect .findings[]
   #   fix only still-valid findings
   #   run project validation
+  #   resolve each addressed .thread_id immediately after its local fix
   #   if any .reviewed_by value is false: HOLD THE HEAD
-  #     fix locally, but do not commit, push, or resolve yet
+  #     do not commit or push yet
   #     keep the queued review alive; repeat crq feedback with the same CRQ_REQUIRED_BOTS
   #   after every required bot is true:
-  #     commit and push once
-  #     resolve addressed .thread_id values with crq resolve
+  #     fix and resolve any remaining findings
+  #     commit and push the combined fixes once
   #   only after the held head advances, call crq loop for the next round
 
 Never post @coderabbitai review directly; crq is the only trigger.
