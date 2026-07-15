@@ -51,9 +51,12 @@ restarting a review round, drain all currently actionable feedback:
 
 1. run `crq feedback "$REPO" "$PR"`,
 2. if `.findings` is non-empty, verify and fix genuine findings immediately,
-3. validate, commit, push, and resolve or explicitly decline every addressed thread,
-4. repeat until current feedback is empty,
-5. only then call `crq loop` for a fresh review round.
+3. validate locally; if any required reviewer is still pending on the current head, do not commit,
+   push, resolve, or decline yet,
+4. after every required reviewer finishes, commit and push once, then resolve or explicitly decline
+   every addressed thread,
+5. repeat until current feedback is empty,
+6. only then call `crq loop` for a fresh review round.
 
 `crq loop` enforces this for a new round by returning existing findings before it queues or
 waits. After any loop result, inspect `.findings` **before** interpreting the exit code. Findings
