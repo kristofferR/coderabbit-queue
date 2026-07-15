@@ -224,6 +224,11 @@ crq autoreview --once
 crq autoreview --no-incremental
 ```
 
+Run exactly one long-lived autoreview daemon. If it is already active, do not stop, restart, or
+duplicate it for a manual PR loop. `crq loop` and fleet autoreview use the same account-wide,
+idempotent queue entry: after a push, autoreview may enqueue the new head first and the explicit loop
+simply re-attaches (or vice versa). Neither path should post a direct CodeRabbit trigger.
+
 For an intentionally low-risk PR that has already had enough local review, add
 `<!-- crq:skip-autoreview -->` to the PR body before creating it. The marker is hidden in rendered
 Markdown and prevents only fleet auto-review; an explicit `crq loop` still reviews the PR.

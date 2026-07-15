@@ -292,6 +292,11 @@ enqueues, fires when unblocked, waits for both bots on the current head, and emi
 so you never hand-poll the GitHub API (which would burn the shared REST quota). Run one per PR, on as
 many PRs and machines as you like; they all share the queue without competing.
 
+If the fleet `crq autoreview` daemon is already running, leave it running and do not create another
+watcher. A manual `crq loop` and autoreview coordinate through the same idempotent queue entry. After
+a push, whichever path sees the new head first enqueues it; the other re-attaches without spending a
+second review or posting another CodeRabbit trigger.
+
 ```bash
 #!/usr/bin/env bash
 # review-loop.sh — autonomously address CodeRabbit + Codex feedback until a PR converges.
