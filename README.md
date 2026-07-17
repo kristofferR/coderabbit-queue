@@ -402,6 +402,12 @@ feedback. crq keys resolution off GitHub's own thread state, so a finding keeps 
 surfaces still-open findings from earlier commits, so nothing is silently dropped between passes. A
 finding without `thread_id` came from a review body or comment GitHub can't expose as a resolvable
 thread; CodeRabbit clears those on its next review.
+
+`source: "review_reply"` is special: when you `crq decline --resolve` a finding and the bot replies
+**contesting** the decline ("I'm retaining the finding: …") rather than conceding ("I'm withdrawing
+this finding"), crq re-surfaces that rebuttal as a finding so the loop won't converge over a rebuttal
+you haven't answered. Fix it, or `crq decline` again with a stronger reason; a bot that then withdraws
+clears it. Ambiguous replies surface too — crq never buries a possible rebuttal on a false concession.
 </details>
 
 ## Configuration

@@ -1877,3 +1877,86 @@ func TestCodexCleanSummaryFormats(t *testing.T) {
 		t.Fatal("different shas must not match")
 	}
 }
+
+// addThreadComment appends a comment to a reviewThread (the node type is
+// anonymous, so this hides the verbose literal).
+func addThreadComment(th *reviewThread, id int64, login, body string) {
+	node := th.Comments.Nodes[:0:0]
+	_ = node
+	var n struct {
+		DatabaseID   int64     `json:"databaseId"`
+		Body         string    `json:"body"`
+		URL          string    `json:"url"`
+		Path         string    `json:"path"`
+		Line         int       `json:"line"`
+		OriginalLine int       `json:"originalLine"`
+		CreatedAt    time.Time `json:"createdAt"`
+		Author       struct {
+			Login string `json:"login"`
+		} `json:"author"`
+		Commit struct {
+			OID string `json:"oid"`
+		} `json:"commit"`
+		OriginalCommit struct {
+			OID string `json:"oid"`
+		} `json:"originalCommit"`
+	}
+	n.DatabaseID = id
+	n.Body = body
+	n.Author.Login = login
+	th.Comments.Nodes = append(th.Comments.Nodes, n)
+}
+
+func TestThreadRebuttalSurfacesContestedResolvedThreads(t *testing.T) {
+	bots := dialect.BotSet([]string{"coderabbitai[bot]"})
+	newThread := func(resolved bool) reviewThread {
+		return reviewThread{ID: "PRRT_x", Path: "internal/engine/fire.go", Line: 126, IsResolved: resolved}
+	}
+
+	// Contested rebuttal on a resolved thread → surfaced.
+	th := newThread(true)
+	addThreadComment(&th, 1, "coderabbitai", "**Potential issue** the wait is unbounded")
+	addThreadComment(&th, 2, "kristofferR", "Declined: the loop deadline bounds it.")
+	addThreadComment(&th, 3, "coderabbitai", "I'm retaining the finding: adopt/record the existing command into a timed waiting round.")
+	if got := threadRebuttal(th, bots); got == nil {
+		t.Fatal("a contested bot reply on a resolved thread must surface")
+	} else if got.Source != "review_reply" || got.ThreadID != "PRRT_x" || got.CommentID != 3 {
+		t.Fatalf("rebuttal finding mismatch: %#v", got)
+	}
+
+	// Withdrawn rebuttal → not surfaced.
+	th = newThread(true)
+	addThreadComment(&th, 1, "coderabbitai", "**Potential issue** duplicate declaration")
+	addThreadComment(&th, 2, "kristofferR", "Declined: it compiles, single declaration.")
+	addThreadComment(&th, 3, "coderabbitai", "You're right—my finding was incorrect. I'm withdrawing this comment.")
+	if got := threadRebuttal(th, bots); got != nil {
+		t.Fatalf("a withdrawn finding must not surface, got %#v", got)
+	}
+
+	// Ambiguous bot reply after the agent → surfaced (never bury a rebuttal).
+	th = newThread(true)
+	addThreadComment(&th, 1, "coderabbitai", "**Nitpick** rename this")
+	addThreadComment(&th, 2, "kristofferR", "Declined: name is intentional.")
+	addThreadComment(&th, 3, "coderabbitai", "Here is some additional context on the naming convention.")
+	if got := threadRebuttal(th, bots); got == nil {
+		t.Fatal("an ambiguous (non-withdrawal) reply must surface by default")
+	} else if got.Severity != "major" {
+		t.Fatalf("an unknown-severity rebuttal must floor at major, got %q", got.Severity)
+	}
+
+	// No agent reply (just the bot's finding) → not a rebuttal.
+	th = newThread(true)
+	addThreadComment(&th, 1, "coderabbitai", "**Potential issue** fix this")
+	if got := threadRebuttal(th, bots); got != nil {
+		t.Fatalf("a lone bot finding is not a rebuttal, got %#v", got)
+	}
+
+	// Unresolved thread → threadFindings already covers it; no double-surface.
+	th = newThread(false)
+	addThreadComment(&th, 1, "coderabbitai", "**Potential issue** the wait is unbounded")
+	addThreadComment(&th, 2, "kristofferR", "Declined.")
+	addThreadComment(&th, 3, "coderabbitai", "I'm retaining the finding.")
+	if got := threadRebuttal(th, bots); got != nil {
+		t.Fatalf("unresolved threads are handled by threadFindings, got %#v", got)
+	}
+}

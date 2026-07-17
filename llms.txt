@@ -92,6 +92,12 @@ Decline a finding you are not addressing: post the reason on its thread (left un
 crq decline OWNER/REPO PR_NUMBER --thread THREAD_ID --reason "why declined"
 ```
 
+If the bot replies contesting a decline you resolved ("I'm retaining the finding: ..."), crq
+re-surfaces that reply as a `source: "review_reply"` finding on the next `feedback`/`loop`, so a
+convergence never hides a rebuttal you have not answered. Address it or decline again with a stronger
+reason; the loop clears it once the bot withdraws (or you stop declining and fix it). Ambiguous bot
+replies surface too — crq errs toward showing a possible rebuttal rather than burying it.
+
 Current feedback without triggering a review:
 
 ```bash

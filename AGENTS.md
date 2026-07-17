@@ -12,9 +12,11 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
 
 - `internal/dialect/` — ALL bot-text knowledge, zero deps. CodeRabbit/Codex
   completion, rate-limit, paused, in-progress, failed and clean-review
-  classifiers; finding parsers; SHA/severity vocabulary; the `Finding` type
-  (frozen JSON tags); the typed `BotEvent`/`Classifier`. The only place a bot's
-  literal wording may appear.
+  classifiers; finding parsers; the decline-reply verdict classifiers
+  (`IsReviewFindingWithdrawn`/`IsReviewFindingRetained`) that let crq read a
+  bot's rebuttal to a declined finding; SHA/severity vocabulary; the `Finding`
+  type (frozen JSON tags); the typed `BotEvent`/`Classifier`. The only place a
+  bot's literal wording may appear.
 - `internal/gh/` — GitHub REST/GraphQL transport. Owns the "GitHub REST quota"
   concept under the name **Throttle** (`ThrottleWait`/`IsThrottled`). The only
   package (besides dialect) allowed to say "rate limit".

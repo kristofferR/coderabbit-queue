@@ -132,6 +132,12 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 				for _, key := range promptSuppressKeys(thread, extractBots) {
 					suppressPromptAt[key] = true
 				}
+				// A resolved thread where the bot got the last word contesting the
+				// agent's decline is NOT actually settled — surface the rebuttal so
+				// the loop re-addresses it instead of silently dropping it.
+				if rebuttal := threadRebuttal(thread, extractBots); rebuttal != nil {
+					report.Findings = append(report.Findings, *rebuttal)
+				}
 			}
 		}
 	} else if ghapi.IsThrottled(err) {
@@ -821,6 +827,63 @@ func reviewNewer(a, b ghapi.Review) bool {
 		return a.SubmittedAt.After(b.SubmittedAt)
 	}
 	return a.ID > b.ID
+}
+
+// threadRebuttal surfaces a bot's contested reply on a RESOLVED thread as a
+// finding. When the agent declines a finding with `crq decline --resolve`, the
+// bot often replies conceding ("I'm withdrawing this finding") or contesting
+// ("I'm retaining the finding: ..."). threadFindings drops resolved threads, so
+// a contest would vanish and the loop would converge over an unaddressed
+// rebuttal. This re-surfaces it: the thread's latest comment is a bot reply that
+// follows the agent's own comment and does not clearly withdraw the finding.
+// Ambiguous replies surface too — never bury a rebuttal on a false concession.
+// Returns nil when the thread is unresolved (threadFindings already covers it),
+// when the last word is not the bot's, when the agent never replied, or when the
+// bot withdrew.
+func threadRebuttal(thread reviewThread, bots map[string]struct{}) *dialect.Finding {
+	if !thread.IsResolved && !thread.IsOutdated {
+		return nil
+	}
+	nodes := thread.Comments.Nodes
+	if len(nodes) < 2 {
+		return nil
+	}
+	last := nodes[len(nodes)-1]
+	if !dialect.InBots(bots, last.Author.Login) {
+		return nil // the agent, not the bot, had the last word
+	}
+	agentReplied := false
+	for _, c := range nodes[:len(nodes)-1] {
+		if !dialect.InBots(bots, c.Author.Login) {
+			agentReplied = true
+			break
+		}
+	}
+	if !agentReplied {
+		return nil // the bot is talking to itself, not answering a decline
+	}
+	if dialect.IsReviewFindingWithdrawn(last.Body) {
+		return nil // conceded — the decline stands
+	}
+	// A contested decline deserves attention even when the finding's own severity
+	// is a nitpick, so floor an unknown severity at major.
+	severity := dialect.SeverityOf(last.Body)
+	if severity == "unknown" {
+		severity = "major"
+	}
+	return &dialect.Finding{
+		Bot:       last.Author.Login,
+		Severity:  severity,
+		Path:      firstNonEmpty(thread.Path, last.Path),
+		Line:      firstPositive(thread.Line, last.Line, last.OriginalLine),
+		Title:     "Reviewer contests your reply — re-address or reply again: " + dialect.TitleOf(last.Body),
+		Body:      strings.TrimSpace(last.Body),
+		ThreadID:  thread.ID,
+		CommentID: last.DatabaseID,
+		URL:       last.URL,
+		Source:    "review_reply",
+		CreatedAt: last.CreatedAt,
+	}
 }
 
 // threadFindings turns one GitHub review thread into findings. An unresolved,

@@ -198,3 +198,27 @@ func TestGoldenFindings(t *testing.T) {
 		})
 	}
 }
+
+// TestGoldenReplyVerdict pins the concede/contest classification of a bot's
+// reply to the agent's decline, using CodeRabbit's real replies from PR #30.
+func TestGoldenReplyVerdict(t *testing.T) {
+	cases := []struct {
+		file      string
+		withdrawn bool
+		retained  bool
+	}{
+		{file: "coderabbit/reply-withdrawn.md", withdrawn: true},
+		{file: "coderabbit/reply-retained.md", retained: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.file, func(t *testing.T) {
+			body := readGolden(t, tc.file)
+			if got := IsReviewFindingWithdrawn(body); got != tc.withdrawn {
+				t.Errorf("IsReviewFindingWithdrawn = %v, want %v", got, tc.withdrawn)
+			}
+			if got := IsReviewFindingRetained(body); got != tc.retained {
+				t.Errorf("IsReviewFindingRetained = %v, want %v", got, tc.retained)
+			}
+		})
+	}
+}
