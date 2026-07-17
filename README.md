@@ -433,6 +433,7 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_POLL` | `15s` | how often `crq loop` checks its place in line |
 | `CRQ_WAIT_TIMEOUT` | `0` | give up waiting for a slot after this long (`0` = never) |
 | `CRQ_FEEDBACK_WAIT_TIMEOUT` | `20m` | how long `crq loop` waits for feedback after firing |
+| `CRQ_SETTLE` | `90s` | after convergence the loop keeps polling this long before exiting 0, so a trailing review wave (e.g. a Codex auto-review of the pushed head) is caught by crq, not by a human re-checking the PR |
 | `CRQ_CALIBRATE_TTL` | `2m` | how long to trust a quota reading before re-asking CodeRabbit |
 | `CRQ_AUTOREVIEW_POLL` | `1m` | how often the `autoreview` daemon scans for PRs to enqueue |
 | `CRQ_INFLIGHT_TIMEOUT` | `15m` | backstop to release a stuck in-flight review |

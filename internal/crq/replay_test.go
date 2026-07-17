@@ -63,6 +63,7 @@ func replayConfig() Config {
 	cfg.InflightTimeout = time.Hour
 	cfg.FeedbackWaitTimeout = time.Hour
 	cfg.RateLimitFallback = 15 * time.Minute
+	cfg.SettleWindow = 0 // scenarios assert immediate verdicts; the settle test opts in
 	return cfg
 }
 

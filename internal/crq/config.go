@@ -64,6 +64,11 @@ type Config struct {
 	NoOpen              bool
 	DryRun              bool
 	FeedbackWaitTimeout time.Duration
+	// SettleWindow keeps a converged loop polling briefly before it exits 0, so
+	// a trailing review wave (a Codex auto-review of the just-pushed head, a
+	// CodeRabbit review following its comment shells) is caught by crq instead
+	// of by a human re-checking the PR. 0 disables.
+	SettleWindow time.Duration
 }
 
 func LoadConfig() (Config, error) {
@@ -129,6 +134,7 @@ func LoadConfig() (Config, error) {
 		NoOpen:              env["CRQ_NO_OPEN"] != "",
 		DryRun:              env["CRQ_DRY_RUN"] == "1",
 		FeedbackWaitTimeout: durationEnv(env, "CRQ_FEEDBACK_WAIT_TIMEOUT", 20*time.Minute),
+		SettleWindow:        durationEnv(env, "CRQ_SETTLE", 90*time.Second),
 	}
 	if len(cfg.Scope) == 0 && cfg.GateRepo != "" {
 		cfg.Scope = []string{ownerOf(cfg.GateRepo)}

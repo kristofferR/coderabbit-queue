@@ -325,6 +325,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		return FeedbackReport{}, 1, err
 	}
 	var lastLog time.Time
+	var convergedAt time.Time
 	// Pump keeps the queue moving while we wait, but once a minute is plenty (the
 	// autoreview daemon pumps too); pumping on every tick just burns REST quota.
 	var lastPump time.Time
@@ -372,8 +373,20 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			return report, 10, nil
 		}
 		if report.Converged {
-			s.completeWaitRound(ctx, repo, pr, head)
-			return report, 0, nil
+			// Don't trust the first converged observation: bots deliver in waves
+			// (Codex auto-reviews a pushed head minutes later; CodeRabbit's real
+			// review can trail its comment shells). Hold the verdict for the settle
+			// window and only exit 0 if nothing new lands; any finding or pending
+			// reviewer resets the normal flow above.
+			if convergedAt.IsZero() {
+				convergedAt = s.clock()
+			}
+			if s.cfg.SettleWindow <= 0 || s.clock().Sub(convergedAt) >= s.cfg.SettleWindow {
+				s.completeWaitRound(ctx, repo, pr, head)
+				return report, 0, nil
+			}
+		} else {
+			convergedAt = time.Time{}
 		}
 		// Keep the queue moving (re-fire once an account-block window clears) and pick up
 		// the Blocked state it leaves behind. Pumping every poll tick is redundant —
@@ -406,7 +419,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			}
 			poll = blockedPollInterval(*blockedUntil, now, s.cfg.PollInterval)
 		}
-		if now.After(deadline) {
+		if now.After(deadline) && convergedAt.IsZero() {
 			s.completeWaitRound(ctx, repo, pr, head)
 			if len(report.Findings) > 0 {
 				report.Status = "feedback"

@@ -572,3 +572,58 @@ func TestCoReviewWaitCountsPrePumpLegacySummary(t *testing.T) {
 		t.Fatalf("adopting the human's command must not post another, got %d", got)
 	}
 }
+
+// TestLoopSettleWindowCatchesTrailingWave pins the settle window: a loop that
+// observes convergence must NOT exit 0 immediately — a trailing review wave
+// (Codex auto-reviewing the pushed head) arriving inside the window flips the
+// verdict to findings, and a quiet window exits 0.
+func TestLoopSettleWindowCatchesTrailingWave(t *testing.T) {
+	base := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
+	run := func(inject bool) (int, int) {
+		f := newCodexReplayFixture(t, base, func(cfg *Config) {
+			cfg.SettleWindow = 10 * time.Minute
+		})
+		repo, pr, head := "o/r", 31, "aaaabbbbccccdddd"
+		f.openPull(repo, pr, head)
+		f.setCommitDate(head, base.Add(-time.Hour))
+		f.botReview(repo, pr, 500, head, base.Add(-10*time.Minute)) // converged state
+		// An ACTIVE wait is what the settle protects: without one, Wait's dedupe
+		// path legitimately short-circuits before the feedback poll.
+		seedRound(t, f.store, f.cfg, repo, pr, head[:9], PhaseReviewing, base.Add(-11*time.Minute), 0)
+		type out struct {
+			code int
+			n    int
+		}
+		done := make(chan out, 1)
+		go func() {
+			rep, code, _ := f.svc.Loop(f.ctx, repo, pr)
+			done <- out{code, len(rep.Findings)}
+		}()
+		time.Sleep(50 * time.Millisecond) // loop is now settling on real 1ms polls
+		if inject {
+			// The trailing wave: a fresh CodeRabbit review whose body carries an
+			// outside-diff finding (corpus shape), as after a push.
+			f.gh.mu.Lock()
+			r := ghapi.Review{ID: 501, CommitID: head, State: "COMMENTED", SubmittedAt: f.clk.now(),
+				Body: corpusMessage(t, "coderabbit/findings-outside-diff.md")}
+			r.User.Login = f.bot
+			key := fakeKey(repo, pr)
+			f.gh.reviews[key] = append(f.gh.reviews[key], r)
+			f.gh.mu.Unlock()
+		}
+		f.clk.advance(11 * time.Minute) // past the settle window either way
+		select {
+		case o := <-done:
+			return o.code, o.n
+		case <-time.After(5 * time.Second):
+			t.Fatal("loop did not return")
+			return -1, -1
+		}
+	}
+	if code, n := run(true); code != 10 || n == 0 {
+		t.Fatalf("a wave inside the settle window must surface findings, got code=%d n=%d", code, n)
+	}
+	if code, _ := run(false); code != 0 {
+		t.Fatalf("a quiet settle window must converge, got code=%d", code)
+	}
+}
