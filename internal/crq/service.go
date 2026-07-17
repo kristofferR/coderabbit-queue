@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +44,9 @@ type Service struct {
 	gh    GitHubAPI
 	store StateStore
 	log   Logger
+	// lastParkedSweep rotates sweepParkedClosed's candidate across pumps (see
+	// there); in-memory only, single-writer (the pump caller).
+	lastParkedSweep string
 	// now overrides the wall clock for the scheduling DECISIONS in the
 	// pump/enqueue/sweep/wait paths (see clock). nil in production; the replay
 	// suite injects a controllable fake so an incident can be re-enacted
@@ -903,15 +907,20 @@ func (s *Service) postCodexReviewComment(ctx context.Context, round Round) int64
 // guard (same head, CodexCommandID still unset) makes a concurrent post benign.
 func (s *Service) fireCodexReview(ctx context.Context, round Round) {
 	codexID := s.postCodexReviewComment(ctx, round)
+	if codexID == 0 {
+		// Failed post: KEEP the claim — its TTL is the retry backoff. Clearing it
+		// here would let the very next pump repost, bypassing codexClaimTTL.
+		return
+	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		r := st.Round(round.Repo, round.PR)
-		if r == nil || r.Head != round.Head {
+		// Identity guard: a same-head replacement round (new Seq) must not
+		// inherit this post's result.
+		if !sameRound(r, round) {
 			return ErrNoChange
 		}
-		// Always release the claim; record the id only on success (a failed post
-		// retries after the claim TTL).
 		r.CodexClaimedAt = nil
-		if codexID != 0 && r.CodexCommandID == 0 {
+		if r.CodexCommandID == 0 {
 			r.CodexCommandID = codexID
 		}
 		st.PutRound(*r)
@@ -1443,20 +1452,30 @@ func (s *Service) sweepParkedClosed(ctx context.Context, st State) (PumpResult, 
 	if s.cfg.DryRun {
 		return PumpResult{}, false, nil
 	}
-	var target *Round
+	var keys []string
 	for key := range st.Rounds {
-		r := st.Rounds[key]
-		if r.Phase != PhaseAwaitingRetry {
-			continue
-		}
-		if target == nil || firedOrEnqueuedAt(r).Before(firedOrEnqueuedAt(*target)) {
-			c := r
-			target = &c
+		if st.Rounds[key].Phase == PhaseAwaitingRetry {
+			keys = append(keys, key)
 		}
 	}
-	if target == nil {
+	if len(keys) == 0 {
 		return PumpResult{}, false, nil
 	}
+	// Rotate the inspected candidate across pumps: always taking the oldest
+	// would let one long-cooldown open PR starve the closed-PR check for every
+	// parked round behind it. In-memory rotation is enough — only the leader
+	// daemon sweeps, and a restart merely restarts the cycle.
+	sort.Strings(keys)
+	next := keys[0]
+	for _, k := range keys {
+		if k > s.lastParkedSweep {
+			next = k
+			break
+		}
+	}
+	s.lastParkedSweep = next
+	r := st.Rounds[next]
+	target := &r
 	_, open, err := s.pullHead(ctx, target.Repo, target.PR)
 	if err != nil {
 		return PumpResult{}, false, err

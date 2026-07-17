@@ -106,6 +106,11 @@ func latestCodexEvidence(obs Observation) (latest, prev time.Time, ok bool) {
 		switch {
 		case !ok || at.After(latest):
 			prev, latest, ok = latest, at, true
+		case at.Equal(latest):
+			// prev must stay strictly older: co-timestamped evidence (a review and
+			// its clean summary in the same second) must not close the command
+			// window to a point, or a command at that instant reads as absent and
+			// a commanded review misclassifies as automatic.
 		case at.After(prev):
 			prev = at
 		}

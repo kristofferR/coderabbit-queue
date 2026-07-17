@@ -865,8 +865,14 @@ func threadRebuttal(thread reviewThread, bots map[string]struct{}) *dialect.Find
 	if !dialect.InBots(bots, last.Author.Login) {
 		return nil // the agent, not the bot, had the last word
 	}
+	// The rebuttal shape is strictly bot finding → agent reply → bot last word.
+	// A human-started thread that a bot merely answered is not a declined
+	// finding, and surfacing it would fabricate a contest.
+	if !dialect.InBots(bots, nodes[0].Author.Login) {
+		return nil
+	}
 	agentReplied := false
-	for _, c := range nodes[:len(nodes)-1] {
+	for _, c := range nodes[1 : len(nodes)-1] {
 		if !dialect.InBots(bots, c.Author.Login) {
 			agentReplied = true
 			break
@@ -884,10 +890,7 @@ func threadRebuttal(thread reviewThread, bots map[string]struct{}) *dialect.Find
 	}
 	// A contested decline deserves attention even when the finding's own severity
 	// is a nitpick, so floor an unknown severity at major.
-	severity := dialect.SeverityOf(last.Body)
-	if severity == "unknown" {
-		severity = "major"
-	}
+	severity := dialect.FloorSeverity(dialect.SeverityOf(last.Body), "major")
 	return &dialect.Finding{
 		Bot:       last.Author.Login,
 		Severity:  severity,

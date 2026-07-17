@@ -52,7 +52,9 @@ func IsCodexNoActionReviewCompletion(text string) bool {
 // boilerplate asking the repo owner to create a Codex cloud environment. It is
 // posted as a thread reply and must never read as a finding or a rebuttal.
 func IsCodexEnvironmentNotice(text string) bool {
-	return strings.Contains(NormalizeReviewText(text), "create an environment for this repo")
+	t := NormalizeReviewText(text)
+	return strings.Contains(t, "create an environment for this repo") ||
+		strings.Contains(t, "create a codex account and connect to github")
 }
 
 // IsCodexUsageLimit reports whether a Codex comment is its usage-limit

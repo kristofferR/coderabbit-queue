@@ -449,6 +449,13 @@ func TestCodexAutoActive(t *testing.T) {
 			Reviews: []ReviewSeen{codexReview(t0.Add(time.Minute)), codexReview(t1)},
 			Events:  []dialect.BotEvent{codexCommand(t0)},
 		}, want: true},
+		// A review and its clean summary in the SAME second must not collapse the
+		// command window to a point: the command at that instant still explains
+		// the evidence, so this is commanded, not automatic.
+		{name: "co-timestamped evidence keeps the command window open", obs: Observation{
+			Reviews: []ReviewSeen{codexReview(t1)},
+			Events:  []dialect.BotEvent{codexCommand(t1), codexClean(t1)},
+		}, want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

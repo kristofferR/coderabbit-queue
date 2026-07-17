@@ -533,7 +533,12 @@ func TestPumpAbandonsParkedClosedPR(t *testing.T) {
 		t.Fatalf("a parked closed PR must be abandoned promptly, got %+v", res)
 	}
 	if r := f.round(repo, pr); r != nil {
-		t.Fatalf("round must be archived, got %+v", r)
+		t.Fatalf("round must leave Rounds, got %+v", r)
+	}
+	// Never-delete invariant: the round must land in the archive as abandoned,
+	// not vanish.
+	if a := f.archived(repo, pr, head[:9]); a == nil || a.Phase != PhaseAbandoned {
+		t.Fatalf("closed parked round must be archived abandoned, got %+v", a)
 	}
 }
 

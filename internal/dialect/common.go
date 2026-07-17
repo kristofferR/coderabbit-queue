@@ -28,6 +28,15 @@ func SeverityOf(text string) string {
 	}
 }
 
+// FloorSeverity raises sev to at least floor by rank ("unknown" ranks lowest),
+// so callers never compare severity literals themselves.
+func FloorSeverity(sev, floor string) string {
+	if RankSeverity(sev) < RankSeverity(floor) {
+		return floor
+	}
+	return sev
+}
+
 func RankSeverity(sev string) int {
 	switch sev {
 	case "critical":
