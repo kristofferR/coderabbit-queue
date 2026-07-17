@@ -175,6 +175,46 @@ func TestInflightTimeoutCarriesCooldown(t *testing.T) {
 	}
 }
 
+// TestReviewingRoundDeadlineBoundsCoReviewWait covers the daemon-side co-review
+// bound: a reviewing round past its WaitDeadline completes when the primary bot
+// reviewed the head (its review stands; give up on the silent co-bot). Without a
+// primary review it keeps waiting — the loop bounds and times out its own wait,
+// so the daemon never resets or re-fires an expired head. Before the deadline it
+// keeps waiting on the co-bot too.
+func TestReviewingRoundDeadlineBoundsCoReviewWait(t *testing.T) {
+	codexReq := policy
+	codexReq.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
+	codexReq.CodexCommand = "@codex review"
+
+	reviewing := func() state.Round {
+		r := firedRound(t, "abcdef123")
+		if err := r.Acknowledge(); err != nil {
+			t.Fatal(err)
+		}
+		dl := t0.Add(time.Hour)
+		r.WaitDeadline = &dl
+		return r
+	}
+	crAtHead := Observation{Head: "abcdef123", Open: true,
+		Reviews: []ReviewSeen{{Bot: "coderabbitai[bot]", Commit: "abcdef1234567890", SubmittedAt: t0}}}
+
+	// At the deadline with the primary review standing → complete (co-bot gave up).
+	past := t0.Add(time.Hour).Add(time.Second)
+	if tr := Progress(reviewing(), state.AccountQuota{}, crAtHead, past, codexReq); tr.Outcome != OutComplete {
+		t.Fatalf("primary review at head past the deadline must complete, got %+v", tr)
+	}
+	// At the deadline with NO primary review → keep waiting (the loop times out its
+	// own wait; the daemon must not reset the deadline or re-fire the head).
+	noReview := Observation{Head: "abcdef123", Open: true}
+	if tr := Progress(reviewing(), state.AccountQuota{}, noReview, past, codexReq); tr.Outcome != KeepWaiting {
+		t.Fatalf("no primary review past the deadline must keep waiting, not re-fire, got %+v", tr)
+	}
+	// Before the deadline the bound must not fire: keep waiting on the co-bot.
+	if tr := Progress(reviewing(), state.AccountQuota{}, crAtHead, t0.Add(30*time.Minute), codexReq); tr.Outcome != OutReviewing {
+		t.Fatalf("before the deadline a co-review wait must keep waiting, got %+v", tr)
+	}
+}
+
 func TestDecideFireGuards(t *testing.T) {
 	free := Global{SlotFree: true}
 	now := t0.Add(10 * time.Minute)
@@ -438,10 +478,17 @@ func TestDecideFireCodexDedupe(t *testing.T) {
 	if d := DecideFire(free, queued, obs, now, codexReq); d.Verdict != FireCodexOnly {
 		t.Fatalf("coderabbit-reviewed head with a gating codex must command codex, got %+v", d)
 	}
-	// Same, but Codex auto-reviews: crq must not post; wait for its own review.
+	// Same, but Codex auto-reviews: crq must not post; wait for its own review,
+	// bounded (FireCoReviewWait) rather than left queued with no deadline.
 	autoObs := Observation{Head: head, Open: true, CodexAutoActive: true, Reviews: []ReviewSeen{crReviewed}}
-	if d := DecideFire(free, queued, autoObs, now, codexReq); d.Verdict != FireNo {
-		t.Fatalf("auto-active codex must wait, not dedupe, got %+v", d)
+	if d := DecideFire(free, queued, autoObs, now, codexReq); d.Verdict != FireCoReviewWait {
+		t.Fatalf("auto-active codex must wait (bounded), not dedupe, got %+v", d)
+	}
+	// A live `@codex review` command already on the PR: crq must not repost it;
+	// wait for its answer, bounded.
+	cmdObs := Observation{Head: head, Open: true, Reviews: []ReviewSeen{crReviewed}, CodexCommands: []CommandSeen{{ID: 55, CreatedAt: now}}}
+	if d := DecideFire(free, queued, cmdObs, now, codexReq); d.Verdict != FireCoReviewWait {
+		t.Fatalf("an outstanding codex command must wait (bounded), got %+v", d)
 	}
 	// Codex already reviewed the head → the round is genuinely done.
 	doneObs := Observation{Head: head, Open: true, Reviews: []ReviewSeen{crReviewed, codexReviewed}}

@@ -447,6 +447,8 @@ func (s *Service) applyFire(ctx context.Context, round Round, obs engine.Observa
 		return s.dedupeRound(ctx, round, now, d.Reason)
 	case engine.FireCodexOnly:
 		return s.fireCodexOnly(ctx, round, d.Reason, now)
+	case engine.FireCoReviewWait:
+		return s.fireCoReviewWait(ctx, round, obs, d.Reason, now)
 	case engine.FireSupersede:
 		return s.supersedeRound(ctx, round, obs.Head, now)
 	case engine.FireAdopt:
@@ -758,6 +760,60 @@ func (s *Service) fireCodexOnly(ctx context.Context, round Round, reason string,
 		s.log.Printf("fire %s@%s (coderabbit already reviewed; posted %s)", key, round.Head, strings.TrimSpace(s.cfg.CodexCommand))
 	}
 	return PumpResult{Action: "fired", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}, nil
+}
+
+// newestCommandID returns the id of the most recently created adoptable command,
+// or 0 when there are none.
+func newestCommandID(cmds []engine.CommandSeen) int64 {
+	var best engine.CommandSeen
+	for _, c := range cmds {
+		if best.ID == 0 || c.CreatedAt.After(best.CreatedAt) {
+			best = c
+		}
+	}
+	return best.ID
+}
+
+// fireCoReviewWait bounds a co-review wait: CodeRabbit already reviewed the head
+// but a gating Codex has not yet, and crq must not post (Codex auto-reviews, or a
+// command is already outstanding). Leaving the round queued with no WaitDeadline
+// is the hang — Wait then loops forever. Park it in reviewing with a WaitDeadline
+// instead: no slot is reserved and no command is posted. An existing `@codex
+// review` command on the PR is adopted as the round's CodexCommandID so the
+// self-heal path (which anchors on the round's fire time, later than a pre-existing
+// command) does not re-post it.
+func (s *Service) fireCoReviewWait(ctx context.Context, round Round, obs engine.Observation, reason string, now time.Time) (PumpResult, error) {
+	result := PumpResult{Action: "waiting", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}
+	if s.cfg.DryRun {
+		return result, nil
+	}
+	codexID := newestCommandID(obs.CodexCommands)
+	changed := false
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		changed = false
+		r := st.Round(round.Repo, round.PR)
+		if !sameRound(r, round) || !r.FireEligible(now) {
+			return ErrNoChange
+		}
+		deadline := now.Add(s.cfg.FeedbackWaitTimeout)
+		if err := r.AwaitCoReview(deadline, now); err != nil {
+			return err
+		}
+		if r.CodexCommandID == 0 && codexID != 0 {
+			r.CodexCommandID = codexID
+		}
+		st.PutRound(*r)
+		changed = true
+		return nil
+	})
+	if err != nil {
+		return PumpResult{}, err
+	}
+	if !changed {
+		return PumpResult{Action: "lost_race"}, nil
+	}
+	s.sync(ctx, updated)
+	return result, nil
 }
 
 // recordFire records the posted command on the reserved round, with a 30s retry
@@ -1273,7 +1329,10 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 		if err != nil {
 			return PumpResult{}, 1, err
 		}
-		if r := state.Round(repo, pr); r != nil && r.Phase == PhaseFired {
+		if r := state.Round(repo, pr); r != nil && (r.Phase == PhaseFired || r.Phase == PhaseReviewing) {
+			// A reviewing round is in flight (a fired ack, or a bounded co-review
+			// wait): advance from the slot wait into feedback polling, which the
+			// WaitDeadline bounds — don't spin here.
 			return PumpResult{Action: "fired", Repo: repo, PR: pr, Head: r.Head}, 0, nil
 		}
 		if !state.ContainsActive(repo, pr) {

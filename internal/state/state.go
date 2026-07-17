@@ -249,6 +249,32 @@ func (r *Round) AwaitRetry(retryAt time.Time, reason string, now time.Time) erro
 	return nil
 }
 
+// AwaitCoReview bounds a co-review wait: the configured primary bot already
+// reviewed the head, but a gating co-bot (Codex) has not — so crq waits for it,
+// bounded by deadline, WITHOUT posting a command or holding the fire slot. Legal
+// from queued|awaiting_retry|fired|reviewing → reviewing. FiredAt is the wait
+// anchor: the primary review already stands in as the fire, so it is set to now
+// only when no fire was recorded. Token/ReservedAt are cleared (no slot is held);
+// CodexCommandID is left as-is so an existing Codex command is not re-posted.
+func (r *Round) AwaitCoReview(deadline, now time.Time) error {
+	switch r.Phase {
+	case PhaseQueued, PhaseAwaitingRetry, PhaseFired, PhaseReviewing:
+	default:
+		return r.illegal(PhaseReviewing)
+	}
+	r.Phase = PhaseReviewing
+	dl := deadline.UTC()
+	r.WaitDeadline = &dl
+	if r.FiredAt == nil {
+		t := now.UTC()
+		r.FiredAt = &t
+	}
+	r.Token = ""
+	r.ReservedAt = nil
+	r.Note = "awaiting codex co-review"
+	return nil
+}
+
 // Complete finishes the round: fired|reviewing → completed. A completed round
 // stays in Rounds (it IS the "this head was reviewed" dedup marker) until a
 // new head supersedes it or the PR closes.

@@ -61,6 +61,18 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 	firedAt := r.FiredAt.UTC()
 	completion := Completion(r, obs, p)
 
+	// A reviewing round past its wait deadline whose primary review already
+	// stands: a gating co-bot (Codex) has gone silent too long, so give up on it —
+	// the primary review stands, and re-firing a head the primary already reviewed
+	// would spam. Checked before the review loop below, which would otherwise hold
+	// a co-review wait open forever on the primary review's ack. A reviewing round
+	// with NO primary review is deliberately left to the fall-through (KeepWaiting):
+	// the loop bounds and times out its own wait (exit 2), so an expired deadline
+	// never resets or re-fires the same head.
+	if r.Phase == state.PhaseReviewing && r.WaitDeadline != nil && !now.Before(r.WaitDeadline.UTC()) && primaryReviewedHead(r, obs, p) {
+		return Transition{Outcome: OutComplete, Reason: "co-review wait elapsed; primary review stands"}
+	}
+
 	// An "already reviewed" ack is only trusted alongside real review
 	// evidence; a review matching the round completes or hands off the wait.
 	for _, review := range obs.Reviews {
@@ -148,6 +160,18 @@ func resolveBlockWindow(ev dialect.BotEvent, q state.AccountQuota, now time.Time
 		return t
 	}
 	return until.UTC()
+}
+
+// primaryReviewedHead reports whether the configured primary bot has a submitted
+// review whose commit prefixes the round's head — the review that stands when a
+// co-review wait gives up on a silent co-bot.
+func primaryReviewedHead(r state.Round, obs Observation, p Policy) bool {
+	for _, review := range obs.Reviews {
+		if sameBot(review.Bot, p.Bot) && r.Head != "" && review.Commit != "" && strings.HasPrefix(review.Commit, r.Head) {
+			return true
+		}
+	}
+	return false
 }
 
 // reviewMatchesRound mirrors v2: a known head must match the review commit;

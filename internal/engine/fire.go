@@ -14,13 +14,14 @@ import (
 type FireVerdict int
 
 const (
-	FireNo        FireVerdict = iota // skip this pass (Reason says why)
-	FirePost                         // reserve the slot and post the command
-	FireAdopt                        // a command is already on the PR — adopt it
-	FireDedupe                       // bot already reviewed this head — complete without firing
-	FireCodexOnly                    // CodeRabbit reviewed the head but a required Codex still must — post only the Codex command
-	FireSupersede                    // observed head differs — supersede the round first
-	FireDrop                         // PR closed/merged — abandon the round
+	FireNo           FireVerdict = iota // skip this pass (Reason says why)
+	FirePost                            // reserve the slot and post the command
+	FireAdopt                           // a command is already on the PR — adopt it
+	FireDedupe                          // bot already reviewed this head — complete without firing
+	FireCodexOnly                       // CodeRabbit reviewed the head but a required Codex still must — post only the Codex command
+	FireCoReviewWait                    // CodeRabbit reviewed the head; a gating co-bot has not — wait for it, bounded, without posting or holding the slot
+	FireSupersede                       // observed head differs — supersede the round first
+	FireDrop                            // PR closed/merged — abandon the round
 )
 
 type FireDecision struct {
@@ -108,12 +109,14 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 // If a required-or-auto-active Codex has no review of this head yet, the round is
 // not done: post only the Codex command when crq may (FireCodexOnly). When crq may
 // not post but Codex will still produce evidence on its own — it auto-reviews, or a
-// command is already on the PR awaiting its answer — keep the round queued and wait
-// (FireNo). Only when Codex gates purely by configuration with no way to obtain its
-// review (no command configured/on the PR and no auto-review) fall back to
-// completing on CodeRabbit's review; the feedback gate then surfaces Codex as still
-// pending rather than the round wedging in an un-timed fire loop. Completion counts
-// the existing CodeRabbit review, so a FireCodexOnly round waits on Codex alone.
+// command is already on the PR awaiting its answer — wait for it, bounded, without
+// posting or holding the slot (FireCoReviewWait); leaving the round queued with no
+// deadline is the bug that hangs the loop forever. Only when Codex gates purely by
+// configuration with no way to obtain its review (no command configured/on the PR
+// and no auto-review) fall back to completing on CodeRabbit's review; the feedback
+// gate then surfaces Codex as still pending rather than the round wedging in an
+// un-timed fire loop. Completion counts the existing CodeRabbit review, so a
+// FireCodexOnly round waits on Codex alone.
 func codexAwareDedupe(r state.Round, obs Observation, p Policy) FireDecision {
 	codexGates := dialect.HasCodexBot(p.RequiredBots) || obs.CodexAutoActive
 	if !codexGates || codexReviewedHead(obs) {
@@ -123,7 +126,7 @@ func codexAwareDedupe(r state.Round, obs Observation, p Policy) FireDecision {
 		return FireDecision{Verdict: FireCodexOnly, Reason: "coderabbit reviewed head; codex still required"}
 	}
 	if obs.CodexAutoActive || len(obs.CodexCommands) > 0 || r.CodexCommandID != 0 {
-		return FireDecision{Verdict: FireNo, Reason: "awaiting codex auto review"}
+		return FireDecision{Verdict: FireCoReviewWait, Reason: "awaiting codex co-review"}
 	}
 	return FireDecision{Verdict: FireDedupe, Reason: "bot already reviewed head"}
 }

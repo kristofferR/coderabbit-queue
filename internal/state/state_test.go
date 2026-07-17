@@ -144,6 +144,51 @@ func TestReleaseToQueueKeepsAdoptionCutoff(t *testing.T) {
 	}
 }
 
+// TestAwaitCoReviewBoundsTheWait covers the co-review wait: a queued round with
+// CodeRabbit's review already standing moves to reviewing with a deadline and a
+// fire anchor (so the wait is bounded), and the transition is illegal from a
+// finished round.
+func TestAwaitCoReviewBoundsTheWait(t *testing.T) {
+	s := New()
+	r, err := s.NewRound("owner/repo", 14, "abcdef123", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := t0.Add(time.Hour)
+	if err := r.AwaitCoReview(deadline, t0.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if r.Phase != PhaseReviewing {
+		t.Fatalf("await co-review must move to reviewing, got %s", r.Phase)
+	}
+	if r.WaitDeadline == nil || !r.WaitDeadline.Equal(deadline) {
+		t.Fatalf("wait deadline must be set, got %+v", r.WaitDeadline)
+	}
+	if r.FiredAt == nil || !r.FiredAt.Equal(t0.Add(time.Second)) {
+		t.Fatalf("no prior fire must anchor FiredAt at now, got %+v", r.FiredAt)
+	}
+	if r.Token != "" || r.ReservedAt != nil {
+		t.Fatalf("co-review wait holds no slot: token=%q reserved=%+v", r.Token, r.ReservedAt)
+	}
+
+	// Illegal from a finished round.
+	s2 := New()
+	completed := newFired(t, &s2)
+	if err := completed.Complete(); err != nil {
+		t.Fatal(err)
+	}
+	var te *TransitionError
+	if err := completed.AwaitCoReview(deadline, t0); !errors.As(err, &te) {
+		t.Fatalf("await co-review from completed must be illegal, got %v", err)
+	}
+	s3 := New()
+	abandoned := newFired(t, &s3)
+	abandoned.Abandon("cancelled")
+	if err := abandoned.AwaitCoReview(deadline, t0); !errors.As(err, &te) {
+		t.Fatalf("await co-review from abandoned must be illegal, got %v", err)
+	}
+}
+
 func TestOneRoundPerPR(t *testing.T) {
 	s := New()
 	if _, err := s.NewRound("Owner/Repo", 7, "abcdef123", t0); err != nil {

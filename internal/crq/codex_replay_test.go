@@ -289,6 +289,61 @@ func TestCodexReplayDedupeStillCommandsCodex(t *testing.T) {
 	}
 }
 
+// TestCodexReplayCoReviewWaitBoundsSilentCodex reproduces the hang a CodeRabbit
+// review of our own PR surfaced: CodeRabbit posts a clean review at head with
+// Codex configured-required and a `@codex review` command already on the PR (so
+// crq must not repost — the FireCoReviewWait branch). Before the fix the round
+// stayed queued with no WaitDeadline and Wait looped forever. Now a pump parks it
+// in reviewing WITH a deadline; past the deadline a pump completes it on
+// CodeRabbit's standing review rather than spinning, and crq never posts a second
+// review command of either kind.
+func TestCodexReplayCoReviewWaitBoundsSilentCodex(t *testing.T) {
+	base := time.Date(2026, 7, 17, 9, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = []string{cfg.Bot, codexLogin}
+	})
+	f.gh.graphQL = noForcePush // let the head-commit/force-push cutoff resolve so the codex command is adoptable
+	repo, pr, head := "o/r", 13, "aaaabbbbccccdddd"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Hour))
+	// CodeRabbit already reviewed this head (clean), and a `@codex review` command
+	// is already on the PR awaiting Codex's answer.
+	f.botReview(repo, pr, 500, head, base.Add(-time.Minute))
+	f.humanComment(repo, pr, 600, f.cfg.CodexCommand, base.Add(-30*time.Second))
+
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "waiting" {
+		t.Fatalf("expected a bounded co-review wait, got %+v", res)
+	}
+	r := f.round(repo, pr)
+	if r == nil || r.Phase != PhaseReviewing {
+		t.Fatalf("round must park in reviewing, not stay queued, got %+v", r)
+	}
+	if r.WaitDeadline == nil {
+		t.Fatalf("the co-review wait must be bounded by a WaitDeadline, got %+v", r)
+	}
+	if got := f.codexPosted(repo, pr); got != 0 {
+		t.Fatalf("the wait must not post a codex command, got %d", got)
+	}
+	if got := f.reviewsPosted(repo, pr); got != 0 {
+		t.Fatalf("the wait must not fire @coderabbitai review, got %d", got)
+	}
+
+	// Codex stays silent past the deadline: the next pump completes the round on
+	// CodeRabbit's standing review (Progress OutComplete) rather than looping.
+	f.clk.advance(f.cfg.FeedbackWaitTimeout + time.Minute)
+	f.pump()
+	if r := f.round(repo, pr); r == nil || r.Phase != PhaseCompleted {
+		t.Fatalf("past the deadline the round must complete, got %+v", r)
+	}
+	if got := f.codexPosted(repo, pr); got != 0 {
+		t.Fatalf("no codex command may post across the scenario, got %d", got)
+	}
+	if got := f.reviewsPosted(repo, pr); got != 0 {
+		t.Fatalf("no coderabbit command may post across the scenario, got %d", got)
+	}
+}
+
 // TestObserveScopesShellFilterToCodeRabbit pins fix #1: the empty-COMMENTED
 // review filter (which drops CodeRabbit's inline-comment carrier shells) must
 // not drop another bot's empty review — a Codex-gated round could be waiting on
