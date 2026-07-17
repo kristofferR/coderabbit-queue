@@ -1809,3 +1809,41 @@ func TestParseAvailableInPlainFormatStillWorks(t *testing.T) {
 		t.Fatalf("expected base+90m for compound duration, got %v", got)
 	}
 }
+
+// TestRefreshQuotaPreservesBlockOnInconclusiveProbe pins the anti-spam fix for
+// the calibration path: when a probe is still pending (no fresh reply), a live
+// account block must survive the refresh instead of being wiped after the TTL,
+// which would let Pump fire queued reviews inside the blocked window.
+func TestRefreshQuotaPreservesBlockOnInconclusiveProbe(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo: "owner/gate", StateRef: "crq-state-v3", CalibrationPR: 1,
+		CalibrationMarker: "auto-generated reply by CodeRabbit",
+		RateLimitCommand:  "@coderabbitai rate limit",
+		CalibrationTTL:    2 * time.Minute, Scope: []string{"owner"},
+	}
+	gh := newFakeGitHub() // no calibration reply on the gate issue → probe stays inconclusive
+	store := NewMemoryStore(cfg)
+	now := time.Now().UTC()
+	block := now.Add(30 * time.Minute)
+	askedAt := now.Add(-time.Minute) // a pending probe, still within the TTL window
+	checkedAt := now.Add(-time.Minute)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Account.BlockedUntil = &block
+		st.Account.CalibAskedAt = &askedAt
+		st.Account.CheckedAt = &checkedAt
+		st.Account.Source = "warning"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	updated, err := svc.RefreshQuota(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Account.BlockedUntil == nil || !updated.Account.BlockedUntil.Equal(block) {
+		t.Fatalf("an inconclusive probe must preserve the live block %v, got %v", block, updated.Account.BlockedUntil)
+	}
+}

@@ -1526,8 +1526,13 @@ func TestLoopResumesAwaitingFeedbackWithoutRefiring(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.WaitingHead("owner/repo", 12) != "" {
-		t.Fatalf("feedback wait should clear after findings are collected")
+	// Codex posted a finding but no review verdict, so it dynamically gates this
+	// round and is still pending. Hold-the-head keeps the round active (not
+	// completed) so the daemon keeps observing Codex's review/timeout — the
+	// co-review wait deadline bounds it. The invariant this test guards is that
+	// resuming does not re-fire, which still holds.
+	if state.WaitingHead("owner/repo", 12) != "abcdef123" {
+		t.Fatalf("round must stay active while a gating reviewer is pending, got %q", state.WaitingHead("owner/repo", 12))
 	}
 	if state.FiredMarker("owner/repo", 12) != "abcdef123" {
 		t.Fatalf("fired marker should remain for dedupe after collection")

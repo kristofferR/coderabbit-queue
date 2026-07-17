@@ -360,10 +360,15 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			report.Status = "feedback"
 			if allReviewed(report.ReviewedBy) {
 				report.Reason = "all required reviewers finished; address findings, push once, and resolve threads"
+				s.completeWaitRound(ctx, repo, pr, head)
 			} else {
+				// A required reviewer is still pending (e.g. Codex posted a finding
+				// before CodeRabbit reviewed). Return the findings to work on, but leave
+				// the round active — completing it would release the slot and stop
+				// observing the pending bot's review/rate-limit/timeout, losing evidence
+				// the loop is still obligated to wait for.
 				report.Reason = "hold current head: fix locally, but do not commit or push until every required reviewer finishes"
 			}
-			s.completeWaitRound(ctx, repo, pr, head)
 			return report, 10, nil
 		}
 		if report.Converged {

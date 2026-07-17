@@ -419,7 +419,10 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		r := st.Round(target.Repo, target.PR)
-		if r == nil || (r.Phase != PhaseFired && r.Phase != PhaseReviewing) {
+		// Guard on round identity: a supersede/cancel-and-re-enqueue between observe
+		// and this CAS could otherwise apply the old head's Progress to a replacement
+		// round for a newer head, deduping or cooling it on stale observations.
+		if r == nil || !sameRound(r, *target) || (r.Phase != PhaseFired && r.Phase != PhaseReviewing) {
 			return ErrNoChange
 		}
 		return s.applyTransition(st, r, tr, now)
@@ -974,12 +977,23 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 		// identity over so the engine can still recognise an edited comment it
 		// already accounted for.
 		rlID, rlUpdated := st.Account.RLCommentID, st.Account.RLCommentUpdated
+		prevBlock, prevRemaining := st.Account.BlockedUntil, st.Account.Remaining
 		st.Account = quota
 		if st.Account.RLCommentID == 0 {
 			st.Account.RLCommentID = rlID
 			st.Account.RLCommentUpdated = rlUpdated
 		}
-		if st.Warn == warnRateLimited && (quota.BlockedUntil == nil || !quota.BlockedUntil.After(now)) {
+		// An inconclusive probe (still awaiting a calibration reply) carries no
+		// BlockedUntil, but it is not evidence the account is clear. Preserve a
+		// still-active block until a conclusive reply lands — otherwise the block
+		// vanishes after CalibrationTTL and Pump fires queued reviews inside the
+		// original window, recreating the duplicate attempts this whole system
+		// exists to prevent.
+		if quota.CalibAskedAt != nil && prevBlock != nil && prevBlock.After(now) {
+			st.Account.BlockedUntil = prevBlock
+			st.Account.Remaining = prevRemaining
+		}
+		if st.Warn == warnRateLimited && (st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.After(now)) {
 			st.Warn = ""
 		}
 		return nil
