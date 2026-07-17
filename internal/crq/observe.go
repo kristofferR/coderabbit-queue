@@ -55,8 +55,11 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 		// for its inline-comment batches, minutes before the real review (the
 		// one with an "Actionable comments posted" body) lands. A shell is not
 		// review evidence: counting one converged a round with zero findings at
-		// 17:26 while the real review was still posting until 17:32.
-		if strings.TrimSpace(review.Body) == "" && strings.EqualFold(review.State, "COMMENTED") {
+		// 17:26 while the real review was still posting until 17:32. Scope the
+		// filter to the configured reviewer — only CodeRabbit posts these
+		// carriers, and dropping another bot's empty review could discard real
+		// evidence a Codex-gated round waits on.
+		if s.isConfiguredBot(review.User.Login) && strings.TrimSpace(review.Body) == "" && strings.EqualFold(review.State, "COMMENTED") {
 			continue
 		}
 		o.eng.Reviews = append(o.eng.Reviews, engine.ReviewSeen{

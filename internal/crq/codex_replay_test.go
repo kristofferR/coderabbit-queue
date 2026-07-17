@@ -1,6 +1,7 @@
 package crq
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -285,5 +286,93 @@ func TestCodexReplayDedupeStillCommandsCodex(t *testing.T) {
 	}
 	if got := f.reviewsPosted(repo, pr); got != 0 {
 		t.Fatalf("no coderabbit command may post across the scenario, got %d", got)
+	}
+}
+
+// TestObserveScopesShellFilterToCodeRabbit pins fix #1: the empty-COMMENTED
+// review filter (which drops CodeRabbit's inline-comment carrier shells) must
+// not drop another bot's empty review — a Codex-gated round could be waiting on
+// exactly that evidence.
+func TestObserveScopesShellFilterToCodeRabbit(t *testing.T) {
+	base := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = []string{cfg.Bot, codexLogin}
+	})
+	repo, pr, head := "o/r", 11, "aaaabbbbccccdddd"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Hour))
+
+	// A CodeRabbit shell (empty COMMENTED) and a Codex empty COMMENTED review,
+	// both at head.
+	f.gh.mu.Lock()
+	key := fakeKey(repo, pr)
+	crShell := ghapi.Review{ID: 800, CommitID: head, State: "COMMENTED", SubmittedAt: base}
+	crShell.User.Login = f.bot
+	codexReview := ghapi.Review{ID: 801, CommitID: head, State: "COMMENTED", SubmittedAt: base}
+	codexReview.User.Login = codexLogin
+	f.gh.reviews[key] = []ghapi.Review{crShell, codexReview}
+	f.gh.mu.Unlock()
+
+	obs, err := f.svc.observe(f.ctx, repo, pr, nil, f.clk.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawCR, sawCodex bool
+	for _, r := range obs.eng.Reviews {
+		if r.ReviewID == 800 {
+			sawCR = true
+		}
+		if r.ReviewID == 801 {
+			sawCodex = true
+		}
+	}
+	if sawCR {
+		t.Fatal("CodeRabbit's empty COMMENTED shell must be filtered out")
+	}
+	if !sawCodex {
+		t.Fatal("a non-CodeRabbit empty COMMENTED review must be kept as evidence")
+	}
+}
+
+// TestFireCodexOnlyPostFailureParks pins fix #3: when the Codex-only post fails,
+// the round parks in awaiting_retry with a cooldown instead of re-posting on the
+// very next pump.
+func TestFireCodexOnlyPostFailureParks(t *testing.T) {
+	base := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = []string{cfg.Bot, codexLogin}
+	})
+	repo, pr, head := "o/r", 12, "aaaabbbbccccdddd"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Hour))
+	// CodeRabbit already reviewed the head → DecideFire returns FireCodexOnly.
+	f.botReview(repo, pr, 500, head, base.Add(-time.Minute))
+	// The Codex command post fails.
+	f.gh.mu.Lock()
+	if f.gh.postErrs == nil {
+		f.gh.postErrs = map[string]error{}
+	}
+	f.gh.postErrs[fakeKey(repo, pr)] = errors.New("boom")
+	f.gh.mu.Unlock()
+
+	f.enqueue(repo, pr)
+	// fireCodexOnly returns the post error alongside the post_failed result, so
+	// call Pump directly rather than through the fatal-on-error helper.
+	res, err := f.svc.Pump(f.ctx)
+	if res.Action != "post_failed" {
+		t.Fatalf("expected post_failed, got %+v (err=%v)", res, err)
+	}
+	r := f.round(repo, pr)
+	if r == nil || r.Phase != PhaseAwaitingRetry {
+		t.Fatalf("failed post must park the round, got %+v", r)
+	}
+	if r.RetryAt == nil || !r.RetryAt.Equal(f.clk.now().Add(postFailureBackoff)) {
+		t.Fatalf("park must carry the post-failure cooldown, got RetryAt=%v", r.RetryAt)
+	}
+	if r.FireEligible(f.clk.now()) {
+		t.Fatal("a just-parked round must not be immediately fire-eligible")
+	}
+	if r.FireEligible(f.clk.now().Add(postFailureBackoff)) == false {
+		t.Fatal("the round must become eligible once the cooldown passes")
 	}
 }

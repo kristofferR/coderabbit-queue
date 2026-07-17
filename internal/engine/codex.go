@@ -83,24 +83,31 @@ func CodexActiveThisRound(r state.Round, obs Observation) bool {
 // posting once a later commanded review lands; conversely a command posted before
 // the latest evidence marks that evidence as commanded, not automatic.
 func CodexAutoActive(obs Observation) bool {
-	latest, ok := latestCodexEvidence(obs)
+	latest, prev, ok := latestCodexEvidence(obs)
 	if !ok {
 		return false
 	}
-	return !codexCommandAtOrBefore(obs, latest)
+	// The latest evidence is automatic unless a command plausibly triggered it:
+	// one posted in (prev, latest]. A command older than the previous evidence
+	// belongs to an earlier round and does not explain this review — otherwise a
+	// single manual `@codex review` from three heads ago would suppress posting
+	// forever even after Codex went back to reviewing on its own.
+	return !codexCommandInWindow(obs, prev, latest)
 }
 
-// latestCodexEvidence returns the timestamp of the most recent Codex review or
-// clean-summary event, and whether any exists.
-func latestCodexEvidence(obs Observation) (time.Time, bool) {
-	var latest time.Time
-	ok := false
+// latestCodexEvidence returns the timestamps of the most recent and second-most
+// recent Codex review-or-clean-summary events, and whether any exists. prev is
+// zero when there is only one evidence item.
+func latestCodexEvidence(obs Observation) (latest, prev time.Time, ok bool) {
 	consider := func(at time.Time) {
 		if at.IsZero() {
 			return
 		}
-		if !ok || at.After(latest) {
-			latest, ok = at, true
+		switch {
+		case !ok || at.After(latest):
+			prev, latest, ok = latest, at, true
+		case at.After(prev):
+			prev = at
 		}
 	}
 	for _, review := range obs.Reviews {
@@ -113,16 +120,25 @@ func latestCodexEvidence(obs Observation) (time.Time, bool) {
 			consider(ev.PairTime())
 		}
 	}
-	return latest, ok
+	return latest, prev, ok
 }
 
-// codexCommandAtOrBefore reports whether an `@codex review` command was posted
-// at or before t.
-func codexCommandAtOrBefore(obs Observation, t time.Time) bool {
+// codexCommandInWindow reports whether an `@codex review` command was posted
+// after `after` and at or before `atOrBefore`. A zero `after` means no lower
+// bound (the latest evidence is also the first — any command up to it counts).
+func codexCommandInWindow(obs Observation, after, atOrBefore time.Time) bool {
 	for _, ev := range obs.Events {
-		if ev.Kind == dialect.EvCodexCommand && !ev.PairTime().After(t) {
-			return true
+		if ev.Kind != dialect.EvCodexCommand {
+			continue
 		}
+		at := ev.PairTime()
+		if at.After(atOrBefore) {
+			continue
+		}
+		if !after.IsZero() && !at.After(after) {
+			continue
+		}
+		return true
 	}
 	return false
 }

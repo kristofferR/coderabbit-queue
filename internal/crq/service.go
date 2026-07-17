@@ -645,7 +645,7 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 			if r == nil || r.Token != token {
 				return ErrNoChange
 			}
-			if rerr := r.ReleaseToQueue("failed to post review command: "+err.Error(), now); rerr != nil {
+			if rerr := r.AwaitRetry(now.Add(postFailureBackoff), "failed to post review command: "+err.Error(), now); rerr != nil {
 				return rerr
 			}
 			releaseSlot(st, key)
@@ -727,7 +727,7 @@ func (s *Service) fireCodexOnly(ctx context.Context, round Round, reason string,
 			if r == nil || r.Token != token {
 				return ErrNoChange
 			}
-			if rerr := r.ReleaseToQueue("failed to post codex review command: "+err.Error(), now); rerr != nil {
+			if rerr := r.AwaitRetry(now.Add(postFailureBackoff), "failed to post codex review command: "+err.Error(), now); rerr != nil {
 				return rerr
 			}
 			releaseSlot(st, key)
@@ -1190,6 +1190,11 @@ func isCommentCapError(err error) bool {
 // round for the head is the in-flight wait, a completed round is the "already
 // reviewed" dedup marker, and firedMarker/waitingHead read those states off the
 // round rather than a separate wait record.
+// postFailureBackoff parks a round after a review-command post fails, so a
+// persistent failure (auth, a 4xx, GitHub down past the client's own retries)
+// retries on a bounded cadence instead of re-posting on every pump.
+const postFailureBackoff = 2 * time.Minute
+
 func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, int, error) {
 	repo = NormalizeRepo(repo)
 	// The slot-wait timeout anchors on the injectable clock so replay tests can

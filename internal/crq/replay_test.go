@@ -183,8 +183,10 @@ func (f *replayFixture) editComment(repo string, pr int, id int64, body string, 
 func (f *replayFixture) botReview(repo string, pr int, id int64, commitSHA string, at time.Time) {
 	f.gh.mu.Lock()
 	defer f.gh.mu.Unlock()
+	// A neutral non-empty body: the shell filter keys only on empty-vs-not, and
+	// real bot wording belongs in the dialect corpus, not a test fixture.
 	r := ghapi.Review{ID: id, CommitID: commitSHA, State: "COMMENTED", SubmittedAt: at.UTC(),
-		Body: "**Actionable comments posted: 0**"}
+		Body: "[review body]"}
 	r.User.Login = f.bot
 	key := fakeKey(repo, pr)
 	f.gh.reviews[key] = append(f.gh.reviews[key], r)

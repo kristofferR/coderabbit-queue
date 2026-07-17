@@ -400,6 +400,13 @@ func TestCodexAutoActive(t *testing.T) {
 			Reviews: []ReviewSeen{codexReview(t0), codexReview(t1.Add(time.Minute))},
 			Events:  []dialect.BotEvent{codexCommand(t1)},
 		}, want: false},
+		// An old command, a commanded review, then a LATER unprompted review: the
+		// stale command is before the previous evidence, so it must not mask the
+		// latest review as commanded — auto-review is active again.
+		{name: "stale command does not mask later auto review", obs: Observation{
+			Reviews: []ReviewSeen{codexReview(t0.Add(time.Minute)), codexReview(t1)},
+			Events:  []dialect.BotEvent{codexCommand(t0)},
+		}, want: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
