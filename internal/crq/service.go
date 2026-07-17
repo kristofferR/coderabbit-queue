@@ -1192,13 +1192,16 @@ func isCommentCapError(err error) bool {
 // round rather than a separate wait record.
 func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, int, error) {
 	repo = NormalizeRepo(repo)
-	start := time.Now()
+	// The slot-wait timeout anchors on the injectable clock so replay tests can
+	// drive it deterministically; cadence timers below stay on the wall clock
+	// because they gate real sleeps.
+	start := s.clock()
 	enqueued := false
 	var lastLog time.Time
 	var lastFeedbackCheck time.Time
 	feedbackCheckEvery := queuedFeedbackCheckEvery(s.cfg.PollInterval)
 	for {
-		if s.cfg.WaitTimeout > 0 && time.Since(start) > s.cfg.WaitTimeout {
+		if s.cfg.WaitTimeout > 0 && s.clock().Sub(start) > s.cfg.WaitTimeout {
 			return PumpResult{Action: "timeout", Repo: repo, PR: pr}, 2, nil
 		}
 		if !enqueued {
@@ -1288,7 +1291,7 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 			if reason == "" {
 				reason = result.Action
 			}
-			s.log.Printf("%s#%d waiting for a review slot — %s (%s elapsed)", repo, pr, reason, time.Since(start).Round(time.Second))
+			s.log.Printf("%s#%d waiting for a review slot — %s (%s elapsed)", repo, pr, reason, s.clock().Sub(start).Round(time.Second))
 			lastLog = time.Now()
 		}
 		select {
