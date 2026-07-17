@@ -1983,4 +1983,12 @@ func TestCodexCleanSummaryFormats(t *testing.T) {
 	if got := codexReviewedCommitSHA(legacy); got != "" {
 		t.Fatalf("legacy summary has no sha, got %q", got)
 	}
+	// crq truncates heads to 9 chars while Codex abbreviates to 10 — the
+	// prefix match must work in both directions.
+	if !shaPrefixMatch("4d9e8bca82", "4d9e8bca8") || !shaPrefixMatch("4d9e8bca8", "4d9e8bca82") {
+		t.Fatal("mutual sha prefixes must match")
+	}
+	if shaPrefixMatch("4d9e8bca82", "deadbeef1") {
+		t.Fatal("different shas must not match")
+	}
 }

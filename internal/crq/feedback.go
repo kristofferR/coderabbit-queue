@@ -213,7 +213,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 			// and a matching one counts even when the persisted wait was
 			// lost (e.g. after a crash or an interrupted loop).
 			if sha := codexReviewedCommitSHA(comment.Body); sha != "" {
-				if head != "" && strings.HasPrefix(strings.ToLower(head), sha) {
+				if head != "" && shaPrefixMatch(sha, head) {
 					markReviewed(report.ReviewedBy, comment.User.Login)
 				}
 				continue
@@ -1802,6 +1802,20 @@ func codexReviewedCommitSHA(text string) string {
 		return strings.ToLower(match[1])
 	}
 	return ""
+}
+
+// shaPrefixMatch reports whether two commit-hash abbreviations refer to the
+// same commit: both are prefixes of the full SHA, so the shorter must prefix
+// the longer (crq truncates heads to 9 chars; Codex abbreviates to 10).
+func shaPrefixMatch(a, b string) bool {
+	a, b = strings.ToLower(a), strings.ToLower(b)
+	if a == "" || b == "" {
+		return false
+	}
+	if len(a) <= len(b) {
+		return strings.HasPrefix(b, a)
+	}
+	return strings.HasPrefix(a, b)
 }
 
 func normalizeReviewText(text string) string {
