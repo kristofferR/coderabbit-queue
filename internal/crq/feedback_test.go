@@ -1963,3 +1963,24 @@ func TestPumpEveryForNeverPumpsMoreThanOncePerMinute(t *testing.T) {
 		t.Fatalf("slow polls pump once per poll, got %v", got)
 	}
 }
+
+func TestCodexCleanSummaryFormats(t *testing.T) {
+	legacy := "Codex Review: Didn't find any major issues. Keep them coming!"
+	tada := "Codex Review: Didn't find any major issues. :tada:\n\n**Reviewed commit:** `4d9e8bca82`"
+
+	if !isCodexNoActionReviewCompletion(legacy) {
+		t.Fatal("legacy clean summary must count as a completion")
+	}
+	if !isCodexNoActionReviewCompletion(tada) {
+		t.Fatal("reviewed-commit clean summary must count as a completion")
+	}
+	if isCodexNoActionReviewCompletion("Codex Review: 2 issues need attention") {
+		t.Fatal("a summary with findings must not count as a completion")
+	}
+	if got := codexReviewedCommitSHA(tada); got != "4d9e8bca82" {
+		t.Fatalf("expected the reviewed-commit sha, got %q", got)
+	}
+	if got := codexReviewedCommitSHA(legacy); got != "" {
+		t.Fatalf("legacy summary has no sha, got %q", got)
+	}
+}

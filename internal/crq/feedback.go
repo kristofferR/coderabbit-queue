@@ -208,6 +208,16 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		// Codex is extraction-only. The persisted wait is the only safe way to bind
 		// an issue comment (which has no commit SHA) to the current head.
 		if isCodexBot(comment.User.Login) && isCodexNoActionReviewCompletion(comment.Body) {
+			// The newer summary format names the reviewed commit — bind on
+			// that SHA directly. A summary for another commit never counts,
+			// and a matching one counts even when the persisted wait was
+			// lost (e.g. after a crash or an interrupted loop).
+			if sha := codexReviewedCommitSHA(comment.Body); sha != "" {
+				if head != "" && strings.HasPrefix(strings.ToLower(head), sha) {
+					markReviewed(report.ReviewedBy, comment.User.Login)
+				}
+				continue
+			}
 			if completion.OK && notBefore(issueCommentTime(comment), completion.Cutoff) {
 				markReviewed(report.ReviewedBy, comment.User.Login)
 			}
@@ -1768,8 +1778,30 @@ func isNoActionReviewCompletion(text string) bool {
 
 func isCodexNoActionReviewCompletion(text string) bool {
 	text = normalizeReviewText(text)
-	return strings.Contains(text, "didn't find any major issues") &&
-		strings.Contains(text, "keep them coming")
+	if !strings.Contains(text, "didn't find any major issues") {
+		return false
+	}
+	// Codex has shipped several clean-summary tails: the original
+	// "Keep them coming!", and the newer ":tada:" flourish with a
+	// "**Reviewed commit:** `sha`" line.
+	return strings.Contains(text, "keep them coming") ||
+		strings.Contains(text, ":tada:") ||
+		strings.Contains(text, "🎉") ||
+		codexReviewedCommitSHA(text) != ""
+}
+
+// codexReviewedCommitRE matches Codex's "**Reviewed commit:** `4d9e8bca82`"
+// line in the newer clean-summary format.
+var codexReviewedCommitRE = regexp.MustCompile("(?i)reviewed commit[:*\\s]*`([0-9a-fA-F]{7,40})`")
+
+// codexReviewedCommitSHA extracts the commit hash Codex says it reviewed,
+// or "" when the comment carries no such line.
+func codexReviewedCommitSHA(text string) string {
+	match := codexReviewedCommitRE.FindStringSubmatch(text)
+	if len(match) == 2 {
+		return strings.ToLower(match[1])
+	}
+	return ""
 }
 
 func normalizeReviewText(text string) string {
