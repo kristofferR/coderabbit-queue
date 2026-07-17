@@ -246,12 +246,12 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		}
 	}
 	now = s.clock()
-	if st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now) {
-		return PumpResult{Action: "blocked", Reason: st.Account.BlockedUntil.Format(time.RFC3339)}, nil
-	}
-	if st.LastFired != nil && now.Sub(*st.LastFired) < s.cfg.MinInterval {
-		return PumpResult{Action: "min_interval", Reason: s.cfg.MinInterval.String()}, nil
-	}
+	// No early blocked/min-interval return here: DecideFire owns those gates and
+	// deliberately resolves the quota-free verdicts (dedupe, FireCodexOnly,
+	// FireCoReviewWait) before them, so an account block from another PR does not
+	// delay resolutions that spend no CodeRabbit quota. mapFireNo still reports
+	// "blocked"/"min_interval" for real fires; observing while blocked costs
+	// ETag-cached 304s.
 	next = st.NextEligible(now)
 	if next == nil {
 		return PumpResult{Action: "idle"}, nil
@@ -612,6 +612,13 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 			r.WaitDeadline = &dl
 			st.Warn = ""
 			st.FireSlot = &FireSlot{Key: key, Token: token, Since: now}
+			// Claim the Codex post in the SAME write: the fired state must never be
+			// visible with CodexCommandID == 0 and no claim, or another daemon can
+			// self-heal-post in the gap before fireCodexReview below runs.
+			if postCodex {
+				t := now.UTC()
+				r.CodexClaimedAt = &t
+			}
 			st.PutRound(*r)
 			recorded = true
 			return nil
@@ -804,7 +811,17 @@ func (s *Service) fireCoReviewWait(ctx context.Context, round Round, obs engine.
 		return result, nil
 	}
 	codexID := newestCommandID(obs.CodexCommands)
+	// The anchor is the wait's evidence floor. Prefer the adopted command's
+	// time; with no command (auto-review) fall back to the primary bot's head
+	// review — a SHA-less legacy clean summary posted after either must count,
+	// or an answer that already exists is hidden until the deadline.
 	anchor := now
+	for _, rv := range obs.Reviews {
+		if isConfiguredBotLogin(s.cfg.Bot, rv.Bot) && rv.Commit != "" && strings.HasPrefix(rv.Commit, round.Head) &&
+			!rv.SubmittedAt.IsZero() && rv.SubmittedAt.Before(anchor) {
+			anchor = rv.SubmittedAt
+		}
+	}
 	for _, c := range obs.CodexCommands {
 		if c.ID == codexID && !c.CreatedAt.IsZero() {
 			anchor = c.CreatedAt
@@ -1232,6 +1249,22 @@ func (s *Service) latestCalibrationReply(ctx context.Context, issue int, after t
 	return best, ok, nil
 }
 
+// isConfiguredBotLogin is isConfiguredBot for callers holding only the config
+// value, and reviewedByConfiguredBot checks a ReviewedBy map with the same
+// suffix tolerance.
+func isConfiguredBotLogin(bot, login string) bool {
+	return dialect.NormalizeBotName(login) == dialect.NormalizeBotName(bot)
+}
+
+func reviewedByConfiguredBot(reviewedBy map[string]bool, bot string) bool {
+	for login, ok := range reviewedBy {
+		if ok && isConfiguredBotLogin(bot, login) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) isConfiguredBot(login string) bool {
 	return dialect.NormalizeBotName(login) == dialect.NormalizeBotName(s.cfg.Bot)
 }
@@ -1351,6 +1384,12 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 					return PumpResult{}, 1, err
 				}
 				if len(engine.FindingsOnHead(report.Findings, report.Head)) > 0 || allReviewed(report.ReviewedBy) {
+					return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
+				}
+				// A real primary review at this head is NOT a poisoned marker even with
+				// a co-bot pending (a deliberate dedupe when Codex is unobtainable).
+				// Deleting it would requeue the same head into ack-and-dedupe churn.
+				if reviewedByConfiguredBot(report.ReviewedBy, s.cfg.Bot) {
 					return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
 				}
 				// A completed round at this head with no real head review is a poisoned
