@@ -1,0 +1,142 @@
+package dialect
+
+import (
+	"net/url"
+	"regexp"
+	"strconv"
+	"strings"
+)
+
+var (
+	codexBlobLinkRE = regexp.MustCompile(`(?m)^https://github\.com/[^/\s]+/[^/\s]+/blob/([0-9a-fA-F]{7,64})/(.+?)#L([0-9]+)(?:-L([0-9]+))?\s*$`)
+	markdownImageRE = regexp.MustCompile(`!\[[^]]*\]\([^)]+\)`)
+	subTagRE        = regexp.MustCompile(`(?i)</?sub>`)
+	// codexReviewedCommitRE matches Codex's "**Reviewed commit:** `4d9e8bca82`"
+	// line in the newer clean-summary format.
+	codexReviewedCommitRE = regexp.MustCompile("(?i)reviewed commit[:*\\s]*`([0-9a-fA-F]{7,40})`")
+)
+
+func IsCodexBot(login string) bool {
+	return NormalizeBotName(login) == "chatgpt-codex-connector"
+}
+
+func HasCodexBot(bots []string) bool {
+	for _, bot := range bots {
+		if IsCodexBot(bot) {
+			return true
+		}
+	}
+	return false
+}
+
+func IsCodexNoActionReviewCompletion(text string) bool {
+	text = NormalizeReviewText(text)
+	if !strings.Contains(text, "didn't find any major issues") {
+		return false
+	}
+	// Codex has shipped several clean-summary tails: the original
+	// "Keep them coming!", and the newer ":tada:" flourish with a
+	// "**Reviewed commit:** `sha`" line.
+	return strings.Contains(text, "keep them coming") ||
+		strings.Contains(text, ":tada:") ||
+		strings.Contains(text, "🎉") ||
+		CodexReviewedCommitSHA(text) != ""
+}
+
+// CodexReviewedCommitSHA extracts the commit hash Codex says it reviewed,
+// or "" when the comment carries no such line.
+func CodexReviewedCommitSHA(text string) string {
+	match := codexReviewedCommitRE.FindStringSubmatch(text)
+	if len(match) == 2 {
+		return strings.ToLower(match[1])
+	}
+	return ""
+}
+
+// SHAPrefixMatch reports whether two commit-hash abbreviations refer to the
+// same commit: both are prefixes of the full SHA, so the shorter must prefix
+// the longer (crq truncates heads to 9 chars; Codex abbreviates to 10).
+func SHAPrefixMatch(a, b string) bool {
+	a, b = strings.ToLower(a), strings.ToLower(b)
+	if a == "" || b == "" {
+		return false
+	}
+	if len(a) <= len(b) {
+		return strings.HasPrefix(b, a)
+	}
+	return strings.HasPrefix(a, b)
+}
+
+func CleanCodexReviewText(text string) string {
+	text = markdownImageRE.ReplaceAllString(text, "")
+	text = subTagRE.ReplaceAllString(text, "")
+	return strings.TrimSpace(text)
+}
+
+func CodexPrioritySeverity(text string) string {
+	lower := strings.ToLower(text)
+	switch {
+	case strings.Contains(lower, "![p0 badge]"):
+		return "critical"
+	case strings.Contains(lower, "![p1 badge]"):
+		return "major"
+	case strings.Contains(lower, "![p2 badge]"), strings.Contains(lower, "![p3 badge]"):
+		return "minor"
+	default:
+		return SeverityOf(text)
+	}
+}
+
+// ParseCodexReviewFindings extracts findings that Codex can only place in the
+// review body when the referenced line is outside GitHub's current diff. Codex
+// anchors each item with a blob URL followed by a bold priority/title line.
+func ParseCodexReviewFindings(body string, review ReviewMeta, bot string) []Finding {
+	if !IsCodexBot(bot) {
+		return nil
+	}
+	matches := codexBlobLinkRE.FindAllStringSubmatchIndex(body, -1)
+	out := make([]Finding, 0, len(matches))
+	for index, match := range matches {
+		blockEnd := len(body)
+		if index+1 < len(matches) {
+			blockEnd = matches[index+1][0]
+		}
+		block := strings.TrimSpace(body[match[1]:blockEnd])
+		if details := strings.Index(strings.ToLower(block), "<details"); details >= 0 {
+			block = strings.TrimSpace(block[:details])
+		}
+		if block == "" {
+			continue
+		}
+
+		path, err := url.PathUnescape(body[match[4]:match[5]])
+		if err != nil {
+			path = body[match[4]:match[5]]
+		}
+		line, _ := strconv.Atoi(body[match[6]:match[7]])
+		title := ""
+		if titleMatch := boldTitleRE.FindStringSubmatch(block); titleMatch != nil {
+			title = CleanCodexReviewText(titleMatch[1])
+		}
+		if title == "" {
+			title = TitleOf(block)
+		}
+		finding := Finding{
+			Bot:       bot,
+			Severity:  CodexPrioritySeverity(block),
+			Path:      path,
+			Line:      line,
+			Title:     title,
+			Body:      CleanCodexReviewText(CompactReviewBody(block)),
+			ReviewID:  review.ID,
+			Commit:    ShortOID(body[match[2]:match[3]]),
+			URL:       review.HTMLURL,
+			Source:    "review_body",
+			CreatedAt: review.SubmittedAt,
+		}
+		if IsActionableFinding(finding) {
+			out = append(out, finding)
+		}
+	}
+	return out
+}

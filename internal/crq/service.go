@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 )
 
 type Logger interface {
@@ -36,13 +38,19 @@ type GitHubAPI interface {
 
 type Service struct {
 	cfg   Config
+	cr    dialect.CodeRabbit
 	gh    GitHubAPI
 	store StateStore
 	log   Logger
 }
 
 func NewService(cfg Config, gh GitHubAPI, store StateStore, log Logger) *Service {
-	return &Service{cfg: cfg, gh: gh, store: store, log: log}
+	cr := dialect.CodeRabbit{
+		CompletionMarker:  cfg.CompletionMarker,
+		RateLimitMarker:   cfg.RateLimitMarker,
+		CalibrationMarker: cfg.CalibrationMarker,
+	}
+	return &Service{cfg: cfg, cr: cr, gh: gh, store: store, log: log}
 }
 
 type EnqueueResult struct {
@@ -1540,126 +1548,9 @@ func randomToken() string {
 	return hex.EncodeToString(buf[:])
 }
 
-// isRateLimited reports whether a CodeRabbit comment is a rate-limit notice. It
-// matches the configured CRQ_RL_MARKER plus CodeRabbit's current phrasings (the
-// "Fair Usage Limits Policy" / "currently rate limited" message), which the old
-// "rate limited by coderabbit.ai" marker alone misses — so a fired review that
-// comes back rate-limited is detected and crq backs off instead of firing on.
-func (s *Service) isRateLimited(body string) bool {
-	l := strings.ToLower(body)
-	if m := strings.ToLower(strings.TrimSpace(s.cfg.RateLimitMarker)); m != "" && strings.Contains(l, m) {
-		return true
-	}
-	return strings.Contains(l, "currently rate limited") ||
-		strings.Contains(l, "rate limited under") ||
-		strings.Contains(l, "fair usage limits policy")
-}
+// The CodeRabbit comment classifiers live in internal/dialect; these
+// forwarders keep call sites and tests stable during the refactor.
+func (s *Service) isRateLimited(body string) bool { return s.cr.IsRateLimited(body) }
 
-// isReviewsPaused reports whether a CodeRabbit comment is the "Reviews paused"
-// auto-pause notice. CodeRabbit posts this when a branch is under active
-// development (an influx of new commits) and auto_pause_after_reviewed_commits
-// kicks in. It acknowledges the branch but is not a review of the fired head, so
-// — like a rate-limit notice — it must not be mistaken for a completed review
-// round: doing so would falsely converge a loop with zero findings. crq keeps
-// triggering reviews explicitly, and "@coderabbitai review" still produces a
-// single review while auto-review is paused, so the round completes on the real
-// review, not this note.
-func (s *Service) isReviewsPaused(body string) bool {
-	l := strings.ToLower(body)
-	return strings.Contains(l, "reviews paused") ||
-		strings.Contains(l, "automatically paused this review") ||
-		strings.Contains(l, "auto_pause_after_reviewed_commits")
-}
-
-// isReviewAlreadyDone identifies CodeRabbit's "does not re-review already
-// reviewed commits" acknowledgement. The text is only a claim, not completion
-// evidence: inflightStatus requires a matching GitHub review before trusting it.
-// The same boilerplate can appear inside a rate-limit notice's help section, so
-// a comment that is itself a rate limit is excluded.
-func (s *Service) isReviewAlreadyDone(body string) bool {
-	l := strings.ToLower(body)
-	if !strings.Contains(l, "does not re-review already reviewed") &&
-		!strings.Contains(l, "already reviewed commit") {
-		return false
-	}
-	return !s.isRateLimited(l)
-}
-
-// parseAvailableIn extracts CodeRabbit's "next review available in <duration>"
-// window from a rate-limit comment and returns base+duration. It tolerates the
-// markdown and punctuation CodeRabbit now wraps the value in — the current
-// phrasing is "**Next review available in:** **40 minutes**", where a colon and
-// bold markers sit between "in" and the number. An unparseable body returns nil;
-// the caller then falls back to a conservative fixed window rather than a short
-// retry (getting this wrong is exactly what let the daemon re-fire every couple
-// of minutes instead of honouring a 40-minute limit).
-func parseAvailableIn(text string, base time.Time) *time.Time {
-	lower := strings.ToLower(text)
-	idx := strings.Index(lower, "available in")
-	if idx < 0 {
-		return nil
-	}
-	frag := lower[idx+len("available in"):]
-	// Normalise markdown/punctuation to spaces so "in:** **40 minutes**" scans as
-	// "40 minutes". Do this before splitting into fields so bold/colon can't fuse
-	// onto the number ("**40") and defeat the numeric parse.
-	frag = strings.Map(func(r rune) rune {
-		switch r {
-		case '*', ':', '`', ',', '_', '(', ')':
-			return ' '
-		}
-		return r
-	}, frag)
-	// Stop at a sentence boundary so a later number in the body isn't read as part
-	// of the window.
-	if dot := strings.IndexByte(frag, '.'); dot >= 0 {
-		frag = frag[:dot]
-	}
-	fields := strings.Fields(frag)
-	var d time.Duration
-	for i := 0; i+1 < len(fields); i++ {
-		n, err := strconv.Atoi(fields[i])
-		if err != nil {
-			continue
-		}
-		switch unit := fields[i+1]; {
-		case strings.HasPrefix(unit, "hour"):
-			d += time.Duration(n) * time.Hour
-		case strings.HasPrefix(unit, "minute"):
-			d += time.Duration(n) * time.Minute
-		case strings.HasPrefix(unit, "second"):
-			d += time.Duration(n) * time.Second
-		}
-	}
-	if d == 0 {
-		return nil
-	}
-	t := base.Add(d)
-	return &t
-}
-
-func parseQuota(text string, base time.Time) (*int, *time.Time) {
-	remaining := parseRemainingReviews(text)
-	reset := parseAvailableIn(text, base)
-	return remaining, reset
-}
-
-func parseRemainingReviews(text string) *int {
-	lower := strings.ToLower(text)
-	words := strings.FieldsFunc(lower, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
-	})
-	for i := 0; i < len(words); i++ {
-		n, err := strconv.Atoi(words[i])
-		if err != nil {
-			continue
-		}
-		if i+2 < len(words) && strings.HasPrefix(words[i+1], "review") && (words[i+2] == "remaining" || words[i+2] == "left") {
-			return &n
-		}
-		if i > 0 && (words[i-1] == "remaining" || words[i-1] == "left") {
-			return &n
-		}
-	}
-	return nil
-}
+func (s *Service) isReviewsPaused(body string) bool     { return s.cr.IsReviewsPaused(body) }
+func (s *Service) isReviewAlreadyDone(body string) bool { return s.cr.IsReviewAlreadyDone(body) }

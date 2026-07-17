@@ -6,30 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"net/url"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
-
-type Finding struct {
-	ID        string    `json:"id"`
-	Bot       string    `json:"bot"`
-	Severity  string    `json:"severity"`
-	Path      string    `json:"path,omitempty"`
-	Line      int       `json:"line,omitempty"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
-	ThreadID  string    `json:"thread_id,omitempty"`
-	CommentID int64     `json:"comment_id,omitempty"`
-	ReviewID  int64     `json:"review_id,omitempty"`
-	Commit    string    `json:"commit,omitempty"`
-	URL       string    `json:"url,omitempty"`
-	Source    string    `json:"source"`
-	CreatedAt time.Time `json:"created_at,omitempty"`
-}
 
 type FeedbackReport struct {
 	Status     string          `json:"status"`
@@ -1023,22 +1004,6 @@ func (s *Service) reviewThreads(ctx context.Context, repo string, pr int) ([]rev
 	return all, nil
 }
 
-var (
-	detailSummaryRE = regexp.MustCompile(`(?i)<summary>\s*([^<]+?)\s+\([0-9]+\)\s*</summary>`)
-	// Line headers come backticked in "Outside diff range comments" (`12-15`:) and
-	// un-backticked in "Comments failed to post" (12-15:) — accept both.
-	detailHeaderRE  = regexp.MustCompile("^`?([0-9]+)(?:\\s*-\\s*([0-9]+))?`?: *(.*)$")
-	promptBlockRE   = regexp.MustCompile("(?is)<summary>[^<]*Prompt for all review comments with AI agents[^<]*</summary>.*?```\\s*(.*?)\\s*```")
-	promptFileRE    = regexp.MustCompile("^In (?:`@([^`]+)`|@([^:]+)):$")
-	promptBulletRE  = regexp.MustCompile("^- (?:Around line|Line)\\s+([0-9]+)(?:\\s*-\\s*([0-9]+))?:\\s*(.*)$")
-	boldTitleRE     = regexp.MustCompile(`(?m)^\*\*([^*\n]+)\*\*`)
-	codexBlobLinkRE = regexp.MustCompile(`(?m)^https://github\.com/[^/\s]+/[^/\s]+/blob/([0-9a-fA-F]{7,64})/(.+?)#L([0-9]+)(?:-L([0-9]+))?\s*$`)
-	markdownImageRE = regexp.MustCompile(`!\[[^]]*\]\([^)]+\)`)
-	subTagRE        = regexp.MustCompile(`(?i)</?sub>`)
-	crCommentRE     = regexp.MustCompile(`<!--\s*cr-comment:v1:([a-f0-9]+)\s*-->`)
-	htmlCommentRE   = regexp.MustCompile(`(?s)<!--.*?-->`)
-)
-
 // reviewNewer reports whether review a supersedes b: later submission wins, and
 // a higher ID breaks ties (equal/zero timestamps) so selection is deterministic.
 func reviewNewer(a, b Review) bool {
@@ -1046,201 +1011,6 @@ func reviewNewer(a, b Review) bool {
 		return a.SubmittedAt.After(b.SubmittedAt)
 	}
 	return a.ID > b.ID
-}
-
-func parseReviewBodyFindings(review Review, bot string) []Finding {
-	body := strings.TrimSpace(review.Body)
-	if body == "" {
-		return nil
-	}
-	clean := stripMarkdownQuote(body)
-	out := parseDetailedReviewFindings(clean, review, bot)
-	out = append(out, parsePromptReviewFindings(clean, review, bot)...)
-	out = append(out, parseCodexReviewFindings(clean, review, bot)...)
-	return out
-}
-
-// parseCodexReviewFindings extracts findings that Codex can only place in the
-// review body when the referenced line is outside GitHub's current diff. Codex
-// anchors each item with a blob URL followed by a bold priority/title line.
-func parseCodexReviewFindings(body string, review Review, bot string) []Finding {
-	if !isCodexBot(bot) {
-		return nil
-	}
-	matches := codexBlobLinkRE.FindAllStringSubmatchIndex(body, -1)
-	out := make([]Finding, 0, len(matches))
-	for index, match := range matches {
-		blockEnd := len(body)
-		if index+1 < len(matches) {
-			blockEnd = matches[index+1][0]
-		}
-		block := strings.TrimSpace(body[match[1]:blockEnd])
-		if details := strings.Index(strings.ToLower(block), "<details"); details >= 0 {
-			block = strings.TrimSpace(block[:details])
-		}
-		if block == "" {
-			continue
-		}
-
-		path, err := url.PathUnescape(body[match[4]:match[5]])
-		if err != nil {
-			path = body[match[4]:match[5]]
-		}
-		line, _ := strconv.Atoi(body[match[6]:match[7]])
-		title := ""
-		if titleMatch := boldTitleRE.FindStringSubmatch(block); titleMatch != nil {
-			title = cleanCodexReviewText(titleMatch[1])
-		}
-		if title == "" {
-			title = titleOf(block)
-		}
-		finding := Finding{
-			Bot:       bot,
-			Severity:  codexPrioritySeverity(block),
-			Path:      path,
-			Line:      line,
-			Title:     title,
-			Body:      cleanCodexReviewText(compactReviewBody(block)),
-			ReviewID:  review.ID,
-			Commit:    shortOID(body[match[2]:match[3]]),
-			URL:       review.HTMLURL,
-			Source:    "review_body",
-			CreatedAt: review.SubmittedAt,
-		}
-		if isActionableFinding(finding) {
-			out = append(out, finding)
-		}
-	}
-	return out
-}
-
-func cleanCodexReviewText(text string) string {
-	text = markdownImageRE.ReplaceAllString(text, "")
-	text = subTagRE.ReplaceAllString(text, "")
-	return strings.TrimSpace(text)
-}
-
-func codexPrioritySeverity(text string) string {
-	lower := strings.ToLower(text)
-	switch {
-	case strings.Contains(lower, "![p0 badge]"):
-		return "critical"
-	case strings.Contains(lower, "![p1 badge]"):
-		return "major"
-	case strings.Contains(lower, "![p2 badge]"), strings.Contains(lower, "![p3 badge]"):
-		return "minor"
-	default:
-		return severityOf(text)
-	}
-}
-
-func parseDetailedReviewFindings(body string, review Review, bot string) []Finding {
-	lines := strings.Split(body, "\n")
-	var out []Finding
-	currentPath := ""
-	for i := 0; i < len(lines); i++ {
-		line := strings.TrimSpace(lines[i])
-		if match := detailSummaryRE.FindStringSubmatch(line); match != nil {
-			summary := strings.TrimSpace(match[1])
-			if looksLikePath(summary) {
-				currentPath = summary
-			}
-			continue
-		}
-		match := detailHeaderRE.FindStringSubmatch(line)
-		if match == nil || currentPath == "" {
-			continue
-		}
-		startLine, _ := strconv.Atoi(match[1])
-		meta := strings.TrimSpace(match[3])
-		if isNonActionableText(meta) {
-			continue
-		}
-		start := i + 1
-		end := len(lines)
-		for j := start; j < len(lines); j++ {
-			next := strings.TrimSpace(lines[j])
-			if detailHeaderRE.MatchString(next) || detailSummaryRE.MatchString(next) {
-				end = j
-				break
-			}
-		}
-		block := strings.TrimSpace(strings.Join(lines[start:end], "\n"))
-		title := titleFromDetailedBlock(block)
-		if title == "" {
-			title = titleOf(block)
-		}
-		bodyText := compactReviewBody(block)
-		finding := Finding{
-			Bot:       bot,
-			Severity:  severityOf(meta + "\n" + block),
-			Path:      strings.TrimPrefix(currentPath, "@"),
-			Line:      startLine,
-			Title:     title,
-			Body:      bodyText,
-			ReviewID:  review.ID,
-			Commit:    shortOID(review.CommitID),
-			URL:       review.HTMLURL,
-			Source:    "review_body",
-			CreatedAt: review.SubmittedAt,
-		}
-		if isActionableFinding(finding) {
-			out = append(out, finding)
-		}
-	}
-	return out
-}
-
-func parsePromptReviewFindings(body string, review Review, bot string) []Finding {
-	var out []Finding
-	for _, blockMatch := range promptBlockRE.FindAllStringSubmatch(body, -1) {
-		block := blockMatch[1]
-		lines := strings.Split(block, "\n")
-		currentPath := ""
-		for i := 0; i < len(lines); i++ {
-			line := strings.TrimSpace(lines[i])
-			if match := promptFileRE.FindStringSubmatch(line); match != nil {
-				currentPath = firstNonEmpty(match[1], match[2])
-				currentPath = strings.TrimPrefix(currentPath, "@")
-				continue
-			}
-			match := promptBulletRE.FindStringSubmatch(line)
-			if match == nil || currentPath == "" {
-				continue
-			}
-			startLine, _ := strconv.Atoi(match[1])
-			parts := []string{strings.TrimSpace(match[3])}
-			for j := i + 1; j < len(lines); j++ {
-				next := strings.TrimSpace(lines[j])
-				if next == "" {
-					continue
-				}
-				if strings.HasPrefix(next, "---") || promptFileRE.MatchString(next) || promptBulletRE.MatchString(next) {
-					break
-				}
-				parts = append(parts, next)
-				i = j
-			}
-			bodyText := strings.TrimSpace(strings.Join(parts, " "))
-			finding := Finding{
-				Bot:       bot,
-				Severity:  severityOf(bodyText),
-				Path:      currentPath,
-				Line:      startLine,
-				Title:     titleOf(bodyText),
-				Body:      bodyText,
-				ReviewID:  review.ID,
-				Commit:    shortOID(review.CommitID),
-				URL:       review.HTMLURL,
-				Source:    "review_prompt",
-				CreatedAt: review.SubmittedAt,
-			}
-			if isActionableFinding(finding) {
-				out = append(out, finding)
-			}
-		}
-	}
-	return out
 }
 
 // threadFindings turns one GitHub review thread into findings. An unresolved,
@@ -1332,68 +1102,7 @@ func dedupeFindings(in []Finding, suppressPromptAt map[string]bool) []Finding {
 	return out
 }
 
-func botSet(bots []string) map[string]struct{} {
-	out := map[string]struct{}{}
-	for _, bot := range bots {
-		bot = strings.TrimSpace(bot)
-		if bot != "" {
-			out[bot] = struct{}{}
-		}
-	}
-	return out
-}
-
-// inBots matches a comment author against the configured bots, tolerating the
-// "[bot]" suffix: GitHub's REST API reports "coderabbitai[bot]" but GraphQL
-// (review threads) reports "coderabbitai", and the config may use either form.
-// Without this, crq missed every review-thread finding and so never surfaced a
-// thread_id to resolve.
-func inBots(bots map[string]struct{}, login string) bool {
-	if _, ok := bots[login]; ok {
-		return true
-	}
-	stripped := strings.TrimSuffix(login, "[bot]")
-	if _, ok := bots[stripped]; ok {
-		return true
-	}
-	_, ok := bots[stripped+"[bot]"]
-	return ok
-}
-
-func normalizeBotName(login string) string {
-	return strings.TrimSuffix(login, "[bot]")
-}
-
-// isCompletionReply reports whether body is the bot's reply to a processed
-// review command (CodeRabbit: "Review finished."). An empty marker disables
-// the completion-reply convergence fallback entirely.
-func (s *Service) isCompletionReply(body string) bool {
-	marker := strings.TrimSpace(s.cfg.CompletionMarker)
-	if marker == "" {
-		return false
-	}
-	return strings.Contains(strings.ToLower(body), strings.ToLower(marker))
-}
-
-// isReviewInProgress reports whether body is CodeRabbit's editable top-summary
-// state for a review that has started but has not finished. CodeRabbit can post
-// a "Review finished" command reply before this summary leaves the processing
-// state, so the reply alone is not a terminal signal.
-func isReviewInProgress(body string) bool {
-	lower := strings.ToLower(body)
-	return strings.Contains(lower, "currently processing new changes in this pr") ||
-		strings.Contains(lower, "review in progress by coderabbit.ai")
-}
-
-// isReviewFailure reports whether body is CodeRabbit's editable top-summary
-// failure state. CodeRabbit can still change the command reply to "Review
-// finished" after this summary reports that the review itself failed, so the
-// reply is not evidence that the current head was reviewed successfully.
-func isReviewFailure(body string) bool {
-	lower := strings.ToLower(body)
-	return strings.Contains(lower, "auto-generated comment: failure by coderabbit.ai") ||
-		strings.Contains(lower, "## review failed")
-}
+func (s *Service) isCompletionReply(body string) bool { return s.cr.IsCompletionReply(body) }
 
 // hasNonterminalReviewState reports whether CodeRabbit currently exposes a
 // post-command state that contradicts a terminal completion reply. The top
@@ -1404,7 +1113,7 @@ func (s *Service) hasNonterminalReviewState(comments []IssueComment, since time.
 		if !s.isConfiguredBot(comment.User.Login) || !notBefore(issueCommentTime(comment), since) {
 			continue
 		}
-		if isReviewInProgress(comment.Body) || s.isRateLimited(comment.Body) || s.isReviewsPaused(comment.Body) {
+		if s.cr.IsReviewInProgress(comment.Body) || s.isRateLimited(comment.Body) || s.isReviewsPaused(comment.Body) {
 			return true
 		}
 	}
@@ -1416,24 +1125,14 @@ func (s *Service) hasFailedReviewState(comments []IssueComment, since time.Time)
 		if !s.isConfiguredBot(comment.User.Login) || !notBefore(issueCommentTime(comment), since) {
 			continue
 		}
-		if isReviewFailure(comment.Body) {
+		if s.cr.IsReviewFailure(comment.Body) {
 			return true
 		}
 	}
 	return false
 }
 
-// isAutoReply reports whether body is one of the bot's auto-generated replies
-// to a command — completion, rate-limit, skip, or progress. The bot posts
-// exactly one per command, which is what lets completions be paired to the
-// command they answer.
-func (s *Service) isAutoReply(body string) bool {
-	marker := strings.TrimSpace(s.cfg.CalibrationMarker)
-	if marker == "" {
-		return false
-	}
-	return strings.Contains(strings.ToLower(body), strings.ToLower(marker))
-}
+func (s *Service) isAutoReply(body string) bool { return s.cr.IsAutoReply(body) }
 
 // applyCompletionReplyFallback marks the configured bot reviewed when a
 // no-findings re-review completed by issue-comment reply rather than a review
@@ -1625,19 +1324,6 @@ func needsConfiguredBotReview(reviewedBy map[string]bool, login string) bool {
 	return false
 }
 
-func isCodexBot(login string) bool {
-	return normalizeBotName(login) == "chatgpt-codex-connector"
-}
-
-func hasCodexBot(bots []string) bool {
-	for _, bot := range bots {
-		if isCodexBot(bot) {
-			return true
-		}
-	}
-	return false
-}
-
 func isCurrentCodexThumbsUp(reaction Reaction, since time.Time) bool {
 	if !isCodexBot(reaction.User.Login) || reaction.Content != "+1" {
 		return false
@@ -1670,220 +1356,11 @@ func reviewedByBot(reviewedBy map[string]bool, login string) bool {
 	return false
 }
 
-func severityOf(text string) string {
-	lower := strings.ToLower(text)
-	switch {
-	case strings.Contains(lower, "critical"), strings.Contains(lower, "🔴"):
-		return "critical"
-	case strings.Contains(lower, "major"), strings.Contains(lower, "high"), strings.Contains(lower, "🟠"):
-		return "major"
-	case strings.Contains(lower, "potential issue"), strings.Contains(lower, "medium"), strings.Contains(lower, "🟡"):
-		return "potential"
-	case strings.Contains(lower, "nitpick"), strings.Contains(lower, "minor"), strings.Contains(lower, "low"), strings.Contains(lower, "🔵"):
-		return "minor"
-	default:
-		return "unknown"
-	}
-}
-
-func rankSeverity(sev string) int {
-	switch sev {
-	case "critical":
-		return 5
-	case "major":
-		return 4
-	case "potential":
-		return 3
-	case "minor":
-		return 2
-	default:
-		return 1
-	}
-}
-
-func titleOf(body string) string {
-	for _, line := range strings.Split(body, "\n") {
-		line = strings.TrimSpace(line)
-		line = strings.Trim(line, "#*_` ")
-		if line != "" && !strings.HasPrefix(line, "<details") && !strings.HasPrefix(line, "</") {
-			if len(line) > 180 {
-				line = line[:180]
-			}
-			return line
-		}
-	}
-	return "Review finding"
-}
-
-func titleFromDetailedBlock(body string) string {
-	if match := boldTitleRE.FindStringSubmatch(body); match != nil {
-		return strings.TrimSpace(match[1])
-	}
-	return ""
-}
-
-func stripMarkdownQuote(body string) string {
-	lines := strings.Split(body, "\n")
-	for i, line := range lines {
-		line = strings.TrimRight(line, " \t")
-		// CodeRabbit nests review-body sections (outside-diff-range,
-		// duplicates, nitpicks) several blockquote levels deep — strip
-		// every leading quote marker, not just the first.
-		for strings.HasPrefix(line, ">") {
-			line = strings.TrimPrefix(line, ">")
-			line = strings.TrimPrefix(line, " ")
-		}
-		lines[i] = line
-	}
-	return strings.Join(lines, "\n")
-}
-
-func compactReviewBody(body string) string {
-	body = crCommentRE.ReplaceAllString(body, "")
-	body = htmlCommentRE.ReplaceAllString(body, "")
-	body = strings.ReplaceAll(body, "\r\n", "\n")
-	lines := strings.Split(body, "\n")
-	var out []string
-	skipFence := false
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "```") {
-			skipFence = !skipFence
-			continue
-		}
-		if skipFence || strings.HasPrefix(trimmed, "<details") || strings.HasPrefix(trimmed, "</details") ||
-			strings.HasPrefix(trimmed, "<summary") || strings.HasPrefix(trimmed, "</summary") ||
-			strings.HasPrefix(trimmed, "<blockquote") || strings.HasPrefix(trimmed, "</blockquote") {
-			continue
-		}
-		isRule := len(trimmed) >= 3 && strings.Trim(trimmed, "-_* ") == ""
-		if trimmed != "" && !isRule {
-			out = append(out, trimmed)
-		}
-	}
-	return strings.Join(out, "\n")
-}
-
-var rootFileRE = regexp.MustCompile(`^[A-Za-z0-9._+-]+$`)
-
-func looksLikePath(summary string) bool {
-	summary = strings.TrimSpace(summary)
-	if summary == "" || strings.Contains(summary, " ") {
-		return false
-	}
-	if strings.Contains(summary, "/") || strings.Contains(summary, ".") {
-		return true
-	}
-	// Root-level files often have neither a slash nor a dot (Dockerfile, Makefile,
-	// LICENSE). In a "<file> (N)" detail summary a single filename-safe token is a
-	// file, so accept it rather than dropping its findings.
-	return rootFileRE.MatchString(summary)
-}
-
-func isActionableFinding(finding Finding) bool {
-	title := compactReviewBody(finding.Title)
-	body := compactReviewBody(finding.Body)
-	if title == "" && body == "" {
-		return false
-	}
-	text := strings.ToLower(title + "\n" + body)
-	return !isNonActionableText(text)
-}
-
-func isNonActionableText(text string) bool {
-	text = normalizeReviewText(text)
-	if isCodexNoActionReviewCompletion(text) {
-		return true
-	}
-	nonActionable := []string{
-		"lgtm",
-		"also applies to:",
-		"no issue here",
-		"incorrect or invalid review comment",
-		"likely an incorrect or invalid review comment",
-		"version claim",
-		"both referenced files exist",
-		"good regression test",
-		"already fixed",
-		"now fixed",
-		"no further action is needed",
-		"confirm intended ux",
-		"worth confirming",
-		"skipped: comment is from another github bot",
-		"you have reached your codex usage limits for code reviews",
-	}
-	for _, phrase := range nonActionable {
-		if strings.Contains(text, phrase) {
-			return true
-		}
-	}
-	return false
-}
-
-func isNoActionReviewCompletion(text string) bool {
-	text = normalizeReviewText(text)
-	return strings.Contains(text, "no actionable comments were generated in the recent review") ||
-		isCodexNoActionReviewCompletion(text)
-}
-
-func isCodexNoActionReviewCompletion(text string) bool {
-	text = normalizeReviewText(text)
-	if !strings.Contains(text, "didn't find any major issues") {
-		return false
-	}
-	// Codex has shipped several clean-summary tails: the original
-	// "Keep them coming!", and the newer ":tada:" flourish with a
-	// "**Reviewed commit:** `sha`" line.
-	return strings.Contains(text, "keep them coming") ||
-		strings.Contains(text, ":tada:") ||
-		strings.Contains(text, "🎉") ||
-		codexReviewedCommitSHA(text) != ""
-}
-
-// codexReviewedCommitRE matches Codex's "**Reviewed commit:** `4d9e8bca82`"
-// line in the newer clean-summary format.
-var codexReviewedCommitRE = regexp.MustCompile("(?i)reviewed commit[:*\\s]*`([0-9a-fA-F]{7,40})`")
-
-// codexReviewedCommitSHA extracts the commit hash Codex says it reviewed,
-// or "" when the comment carries no such line.
-func codexReviewedCommitSHA(text string) string {
-	match := codexReviewedCommitRE.FindStringSubmatch(text)
-	if len(match) == 2 {
-		return strings.ToLower(match[1])
-	}
-	return ""
-}
-
-// shaPrefixMatch reports whether two commit-hash abbreviations refer to the
-// same commit: both are prefixes of the full SHA, so the shorter must prefix
-// the longer (crq truncates heads to 9 chars; Codex abbreviates to 10).
-func shaPrefixMatch(a, b string) bool {
-	a, b = strings.ToLower(a), strings.ToLower(b)
-	if a == "" || b == "" {
-		return false
-	}
-	if len(a) <= len(b) {
-		return strings.HasPrefix(b, a)
-	}
-	return strings.HasPrefix(a, b)
-}
-
-func normalizeReviewText(text string) string {
-	return strings.NewReplacer("’", "'", "‘", "'").Replace(strings.ToLower(text))
-}
-
 func issueCommentTime(comment IssueComment) time.Time {
 	if comment.UpdatedAt.After(comment.CreatedAt) {
 		return comment.UpdatedAt.UTC()
 	}
 	return comment.CreatedAt.UTC()
-}
-
-func shortOID(oid string) string {
-	if len(oid) >= 9 {
-		return oid[:9]
-	}
-	return oid
 }
 
 func firstNonEmpty(values ...string) string {
