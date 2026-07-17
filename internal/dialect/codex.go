@@ -16,8 +16,13 @@ var (
 	codexReviewedCommitRE = regexp.MustCompile("(?i)reviewed commit[:*\\s]*`([0-9a-fA-F]{7,40})`")
 )
 
+// CodexBotLogin is the canonical Codex GitHub app login. It is the one place
+// this literal may appear; engine/state/crq consume this constant rather than
+// repeating the wording.
+const CodexBotLogin = "chatgpt-codex-connector[bot]"
+
 func IsCodexBot(login string) bool {
-	return NormalizeBotName(login) == "chatgpt-codex-connector"
+	return NormalizeBotName(login) == NormalizeBotName(CodexBotLogin)
 }
 
 func HasCodexBot(bots []string) bool {

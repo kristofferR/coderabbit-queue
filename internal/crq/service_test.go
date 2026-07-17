@@ -195,6 +195,14 @@ func (f *fakeGitHub) GraphQL(_ context.Context, query string, vars map[string]an
 	return errors.New("graphql unavailable")
 }
 
+// noForcePush is a GraphQL handler reporting no HEAD_REF_FORCE_PUSHED_EVENT, so
+// headForcePushCutoff succeeds with a zero cutoff and adoption proceeds. Tests
+// exercising successful adoption need it now that a failed force-push lookup
+// skips adoption.
+func noForcePush(_ string, _ map[string]any, out any) error {
+	return json.Unmarshal([]byte(`{"repository":{"pullRequest":{"timelineItems":{"nodes":[]}}}}`), out)
+}
+
 // --- test store fakes (v3) ---
 
 type failNthUpdateStore struct {
@@ -658,6 +666,7 @@ func TestPumpAdoptsExistingReviewCommandWithoutRefiring(t *testing.T) {
 	comment := ghapi.IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: headTime.Add(30 * time.Second), UpdatedAt: headTime.Add(30 * time.Second)}
 	comment.User.Login = "kristofferR"
 	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{comment}
+	gh.graphQL = noForcePush
 	store := NewMemoryStore(cfg)
 	service := NewService(cfg, gh, store, nil)
 
@@ -936,6 +945,7 @@ func TestPumpAdoptsCompletionAnsweredCommandWhileTopSummaryIsProcessing(t *testi
 	}
 	summary.User.Login = cfg.Bot
 	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{summary, command, reply}
+	gh.graphQL = noForcePush
 	store := NewMemoryStore(cfg)
 	service := NewService(cfg, gh, store, nil)
 

@@ -1,9 +1,11 @@
 package crq
 
 import (
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
@@ -12,15 +14,25 @@ import (
 // GitHub, MemoryStore) so every claim is driven through the real
 // Pump/Feedback/observe pipeline.
 
-const codexLogin = "chatgpt-codex-connector[bot]"
+// codexLogin is the canonical Codex app login, owned by internal/dialect.
+const codexLogin = dialect.CodexBotLogin
 
-// codexCleanTada is the Codex clean-summary shape pinned by
-// testdata/codex/clean-summary-tada.md, parameterized on the reviewed SHA.
-func codexClean(sha string) string {
-	return "Codex Review: Didn't find any major issues. :tada:\n\n**Reviewed commit:** `" + sha + "`"
+// codexClean renders the tada clean-summary corpus with a chosen reviewed SHA,
+// so the replay shares one source of truth with the classifier golden corpus. A
+// rewording that breaks classification breaks this too.
+func codexClean(t *testing.T, sha string) string {
+	msg := corpusMessage(t, "codex/clean-summary-tada.md")
+	out := strings.Replace(msg, "4d9e8bca82", sha, 1)
+	if out == msg {
+		t.Fatal("clean-summary corpus no longer carries the 4d9e8bca82 anchor SHA")
+	}
+	return out
 }
 
-const codexUsageLimit = "You have reached your Codex usage limits for code reviews. Limits reset periodically."
+// codexUsageLimit loads the Codex usage-limit exhaustion notice from the corpus.
+func codexUsageLimit(t *testing.T) string {
+	return corpusMessage(t, "codex/usage-limit.md")
+}
 
 func newCodexReplayFixture(t *testing.T, base time.Time, mutate func(*Config)) *replayFixture {
 	t.Helper()
@@ -170,7 +182,7 @@ func TestCodexReplayAutoActiveSuppressesCommand(t *testing.T) {
 	}
 
 	// Codex auto-reviews the head (clean) — round completes.
-	f.codexComment(repo, pr, 700, codexClean(head[:10]), f.clk.now().Add(time.Minute))
+	f.codexComment(repo, pr, 700, codexClean(t, head[:10]), f.clk.now().Add(time.Minute))
 	f.clk.advance(2 * time.Minute)
 	f.pump()
 	if r := f.round(repo, pr); r == nil || r.Phase != PhaseCompleted {
@@ -217,10 +229,61 @@ func TestCodexReplayDynamicGateAndUsageLimitEscape(t *testing.T) {
 
 	// Codex runs out of quota: the dynamic gate disengages and the round
 	// completes on CodeRabbit's review alone.
-	f.codexComment(repo, pr, 701, codexUsageLimit, f.clk.now().Add(time.Minute))
+	f.codexComment(repo, pr, 701, codexUsageLimit(t), f.clk.now().Add(time.Minute))
 	f.clk.advance(2 * time.Minute)
 	f.pump()
 	if r := f.round(repo, pr); r == nil || r.Phase != PhaseCompleted {
 		t.Fatalf("usage limit must release the dynamic gate, got %+v", r)
+	}
+}
+
+// (iv) CodeRabbit already reviewed the head before crq fires, with Codex
+// configured-required: the dedupe must NOT complete the round Codex-less. crq
+// posts exactly one @codex review (and zero @coderabbitai review), and the round
+// completes only once Codex answers.
+func TestCodexReplayDedupeStillCommandsCodex(t *testing.T) {
+	base := time.Date(2026, 7, 17, 9, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = []string{cfg.Bot, codexLogin}
+	})
+	repo, pr, head := "o/r", 11, "aaaabbbbccccdddd"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Hour))
+	// CodeRabbit already reviewed this head before crq gets to fire.
+	f.botReview(repo, pr, 500, head, base.Add(-time.Minute))
+
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected a codex-only fire, got %+v", res)
+	}
+	if got := f.reviewsPosted(repo, pr); got != 0 {
+		t.Fatalf("coderabbit must not be commanded when it already reviewed, got %d", got)
+	}
+	if got := f.codexPosted(repo, pr); got != 1 {
+		t.Fatalf("codex must be commanded exactly once, got %d", got)
+	}
+	if r := f.round(repo, pr); r == nil || r.CodexCommandID == 0 {
+		t.Fatalf("round must record the codex command, got %+v", r)
+	}
+
+	// CodeRabbit is already satisfied; the round waits on Codex alone.
+	f.clk.advance(2 * time.Minute)
+	f.pump()
+	if r := f.round(repo, pr); r == nil || r.Phase != PhaseReviewing {
+		t.Fatalf("round must wait for codex, got %+v", r)
+	}
+	if got := f.codexPosted(repo, pr); got != 1 {
+		t.Fatalf("waiting must not repost the codex command, got %d", got)
+	}
+
+	// Codex answers → the round completes; still no coderabbit command posted.
+	f.codexReview(repo, pr, 502, head, f.clk.now().Add(time.Minute))
+	f.clk.advance(2 * time.Minute)
+	f.pump()
+	if r := f.round(repo, pr); r == nil || r.Phase != PhaseCompleted {
+		t.Fatalf("round must complete after codex answers, got %+v", r)
+	}
+	if got := f.reviewsPosted(repo, pr); got != 0 {
+		t.Fatalf("no coderabbit command may post across the scenario, got %d", got)
 	}
 }

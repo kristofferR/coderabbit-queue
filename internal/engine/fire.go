@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	"github.com/kristofferR/coderabbit-queue/internal/state"
 )
 
@@ -17,6 +18,7 @@ const (
 	FirePost                         // reserve the slot and post the command
 	FireAdopt                        // a command is already on the PR — adopt it
 	FireDedupe                       // bot already reviewed this head — complete without firing
+	FireCodexOnly                    // CodeRabbit reviewed the head but a required Codex still must — post only the Codex command
 	FireSupersede                    // observed head differs — supersede the round first
 	FireDrop                         // PR closed/merged — abandon the round
 )
@@ -70,10 +72,12 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 		return FireDecision{Verdict: FireNo, Reason: "min interval"}
 	}
 	// Belt-and-braces live check: even with a fresh round, never fire at a
-	// head the bot has already reviewed (e.g. state was reinitialized).
+	// head the bot has already reviewed (e.g. state was reinitialized). But a
+	// CodeRabbit review does not finish a round that a required Codex still
+	// gates — command (or wait for) Codex instead of deduping it away.
 	for _, review := range obs.Reviews {
 		if sameBot(review.Bot, p.Bot) && review.Commit != "" && strings.HasPrefix(review.Commit, obs.Head) {
-			return FireDecision{Verdict: FireDedupe, Reason: "bot already reviewed head"}
+			return codexAwareDedupe(r, obs, p)
 		}
 	}
 	// crq posts the Codex command in the same fire step for a configured-required
@@ -97,4 +101,29 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 		return FireDecision{Verdict: FireAdopt, Reason: "review command already posted", AdoptCommandID: newest.ID, AdoptAt: at, PostCodex: postCodex}
 	}
 	return FireDecision{Verdict: FirePost, PostCodex: postCodex}
+}
+
+// codexAwareDedupe resolves what to do when CodeRabbit already reviewed the head.
+// If no gating Codex is still outstanding, the round is genuinely done (FireDedupe).
+// If a required-or-auto-active Codex has no review of this head yet, the round is
+// not done: post only the Codex command when crq may (FireCodexOnly). When crq may
+// not post but Codex will still produce evidence on its own — it auto-reviews, or a
+// command is already on the PR awaiting its answer — keep the round queued and wait
+// (FireNo). Only when Codex gates purely by configuration with no way to obtain its
+// review (no command configured/on the PR and no auto-review) fall back to
+// completing on CodeRabbit's review; the feedback gate then surfaces Codex as still
+// pending rather than the round wedging in an un-timed fire loop. Completion counts
+// the existing CodeRabbit review, so a FireCodexOnly round waits on Codex alone.
+func codexAwareDedupe(r state.Round, obs Observation, p Policy) FireDecision {
+	codexGates := dialect.HasCodexBot(p.RequiredBots) || obs.CodexAutoActive
+	if !codexGates || codexReviewedHead(obs) {
+		return FireDecision{Verdict: FireDedupe, Reason: "bot already reviewed head"}
+	}
+	if DecideCodexPost(r, obs, p, len(obs.CodexCommands) > 0) {
+		return FireDecision{Verdict: FireCodexOnly, Reason: "coderabbit reviewed head; codex still required"}
+	}
+	if obs.CodexAutoActive || len(obs.CodexCommands) > 0 || r.CodexCommandID != 0 {
+		return FireDecision{Verdict: FireNo, Reason: "awaiting codex auto review"}
+	}
+	return FireDecision{Verdict: FireDedupe, Reason: "bot already reviewed head"}
 }

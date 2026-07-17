@@ -8,10 +8,10 @@ import (
 	"github.com/kristofferR/coderabbit-queue/internal/state"
 )
 
-// codexBot is the Codex GitHub app login. The dialect owns the normalization
-// (IsCodexBot/HasCodexBot); this is the canonical key the engine flips in
-// ReviewedBy when Codex gates a round.
-const codexBot = "chatgpt-codex-connector[bot]"
+// codexBot is the Codex GitHub app login the engine flips in ReviewedBy when
+// Codex gates a round. The dialect owns the literal and the normalization
+// (CodexBotLogin/IsCodexBot/HasCodexBot); this consumes the canonical constant.
+const codexBot = dialect.CodexBotLogin
 
 // roundCutoff is the round-window floor: the fire time (UTC), or zero when the
 // round has not fired.
@@ -75,39 +75,56 @@ func CodexActiveThisRound(r state.Round, obs Observation) bool {
 	return codexReviewedRound(r, obs, cutoff) || codexCommentedRound(obs, cutoff) || obs.CodexThumbsUp
 }
 
-// CodexAutoActive reports whether Codex reviews this PR on its own: it has a
-// submitted review or a clean summary that no `@codex review` command preceded.
-// When true, crq must never post the Codex command — Codex reviews unprompted.
+// CodexAutoActive reports whether Codex reviews this PR on its own right now: its
+// most recent evidence — a submitted review or a clean summary — was not preceded
+// by an `@codex review` command. When true, crq must never post the Codex command
+// (Codex reviews unprompted). Only the LATEST evidence decides, so an old
+// unprompted review from an epoch when auto-review was on no longer suppresses
+// posting once a later commanded review lands; conversely a command posted before
+// the latest evidence marks that evidence as commanded, not automatic.
 func CodexAutoActive(obs Observation) bool {
-	firstCmd, ok := firstCodexCommand(obs)
-	notPreceded := func(at time.Time) bool { return !ok || at.Before(firstCmd) }
+	latest, ok := latestCodexEvidence(obs)
+	if !ok {
+		return false
+	}
+	return !codexCommandAtOrBefore(obs, latest)
+}
+
+// latestCodexEvidence returns the timestamp of the most recent Codex review or
+// clean-summary event, and whether any exists.
+func latestCodexEvidence(obs Observation) (time.Time, bool) {
+	var latest time.Time
+	ok := false
+	consider := func(at time.Time) {
+		if at.IsZero() {
+			return
+		}
+		if !ok || at.After(latest) {
+			latest, ok = at, true
+		}
+	}
 	for _, review := range obs.Reviews {
-		if dialect.IsCodexBot(review.Bot) && !review.SubmittedAt.IsZero() && notPreceded(review.SubmittedAt) {
-			return true
+		if dialect.IsCodexBot(review.Bot) {
+			consider(review.SubmittedAt)
 		}
 	}
 	for _, ev := range obs.Events {
-		if ev.Kind == dialect.EvCodexClean && notPreceded(ev.PairTime()) {
+		if ev.Kind == dialect.EvCodexClean {
+			consider(ev.PairTime())
+		}
+	}
+	return latest, ok
+}
+
+// codexCommandAtOrBefore reports whether an `@codex review` command was posted
+// at or before t.
+func codexCommandAtOrBefore(obs Observation, t time.Time) bool {
+	for _, ev := range obs.Events {
+		if ev.Kind == dialect.EvCodexCommand && !ev.PairTime().After(t) {
 			return true
 		}
 	}
 	return false
-}
-
-// firstCodexCommand returns the earliest `@codex review` command time, and
-// whether any exists.
-func firstCodexCommand(obs Observation) (time.Time, bool) {
-	var first time.Time
-	ok := false
-	for _, ev := range obs.Events {
-		if ev.Kind != dialect.EvCodexCommand {
-			continue
-		}
-		if at := ev.PairTime(); !ok || at.Before(first) {
-			first, ok = at, true
-		}
-	}
-	return first, ok
 }
 
 // CodexCommandSince reports whether an `@codex review` command comment exists

@@ -194,8 +194,16 @@ func (s *Service) reviewCommands(ctx context.Context, repo string, pr int, obs e
 	}
 	// A force-push can point the PR at a commit object whose committer date
 	// predates commands made for an earlier head, so any command older than the
-	// last force-push belongs to a previous head and must not be adopted.
-	if fp := s.headForcePushCutoff(ctx, repo, pr); fp.After(cutoff) {
+	// last force-push belongs to a previous head and must not be adopted. Without
+	// this guard an old-head command could be adopted after a force-push, marking
+	// an unreviewed head fired — so if the lookup is unavailable, skip adoption
+	// this pass. The worst case then is posting a command that already exists, the
+	// documented-safe pre-adoption fallback.
+	fp, err := s.headForcePushCutoff(ctx, repo, pr)
+	if err != nil {
+		return nil, nil, nil
+	}
+	if fp.After(cutoff) {
 		cutoff = fp
 	}
 	if hasCR {
@@ -271,13 +279,14 @@ func hasCommentBody(comments []ghapi.IssueComment, body string) bool {
 	return false
 }
 
-// headForcePushCutoff returns when the PR head was last force-pushed, zero if
-// unknown or never. Best-effort: on GraphQL failure adoption falls back to the
-// commit-date cutoff rather than blocking the pump.
-func (s *Service) headForcePushCutoff(ctx context.Context, repo string, pr int) time.Time {
+// headForcePushCutoff returns when the PR head was last force-pushed (zero when
+// never), or an error when the lookup could not run. The caller must not adopt a
+// command without this guard: a lookup error means the force-push protection is
+// unavailable, so adoption is skipped rather than done blind.
+func (s *Service) headForcePushCutoff(ctx context.Context, repo string, pr int) (time.Time, error) {
 	owner, name, found := strings.Cut(repo, "/")
 	if !found {
-		return time.Time{}
+		return time.Time{}, nil
 	}
 	var result struct {
 		Repository struct {
@@ -300,11 +309,11 @@ func (s *Service) headForcePushCutoff(ctx context.Context, repo string, pr int) 
   }
 }`
 	if err := s.gh.GraphQL(ctx, query, map[string]any{"owner": owner, "name": name, "number": pr}, &result); err != nil {
-		return time.Time{}
+		return time.Time{}, err
 	}
 	nodes := result.Repository.PullRequest.TimelineItems.Nodes
 	if len(nodes) == 0 {
-		return time.Time{}
+		return time.Time{}, nil
 	}
-	return nodes[len(nodes)-1].CreatedAt.UTC()
+	return nodes[len(nodes)-1].CreatedAt.UTC(), nil
 }

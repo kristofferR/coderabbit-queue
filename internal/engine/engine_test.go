@@ -335,12 +335,12 @@ func TestCommandHasCompletionReply(t *testing.T) {
 func TestDecideCodexPost(t *testing.T) {
 	codexReq := Policy{
 		Bot:          "coderabbitai[bot]",
-		RequiredBots: []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
+		RequiredBots: []string{"coderabbitai[bot]", dialect.CodexBotLogin},
 		CodexCommand: "@codex review",
 	}
 	head := "abcdef123"
 	base := Observation{Head: head, Open: true}
-	codexReviewHead := ReviewSeen{Bot: "chatgpt-codex-connector[bot]", Commit: "abcdef1234567890", SubmittedAt: t0}
+	codexReviewHead := ReviewSeen{Bot: dialect.CodexBotLogin, Commit: "abcdef1234567890", SubmittedAt: t0}
 
 	cases := []struct {
 		name           string
@@ -367,6 +367,94 @@ func TestDecideCodexPost(t *testing.T) {
 	}
 }
 
+// TestCodexAutoActive covers the "latest evidence decides" rule: only the most
+// recent Codex review/clean-summary determines auto-review, so an old unprompted
+// review no longer suppresses posting once a later commanded review lands.
+func TestCodexAutoActive(t *testing.T) {
+	codexReview := func(at time.Time) ReviewSeen {
+		return ReviewSeen{Bot: dialect.CodexBotLogin, Commit: "abcdef1234567890", SubmittedAt: at}
+	}
+	codexCommand := func(at time.Time) dialect.BotEvent {
+		return dialect.BotEvent{Kind: dialect.EvCodexCommand, Bot: "kristofferR", CommentID: 1, CreatedAt: at, UpdatedAt: at}
+	}
+	codexClean := func(at time.Time) dialect.BotEvent {
+		return dialect.BotEvent{Kind: dialect.EvCodexClean, Bot: dialect.CodexBotLogin, SHA: "abcdef1234", CommentID: 2, CreatedAt: at, UpdatedAt: at}
+	}
+	t1 := t0.Add(time.Hour)
+
+	cases := []struct {
+		name string
+		obs  Observation
+		want bool
+	}{
+		{name: "no evidence", obs: Observation{}, want: false},
+		{name: "unprompted review", obs: Observation{Reviews: []ReviewSeen{codexReview(t0)}}, want: true},
+		{name: "unprompted clean summary", obs: Observation{Events: []dialect.BotEvent{codexClean(t0)}}, want: true},
+		{name: "commanded review", obs: Observation{
+			Reviews: []ReviewSeen{codexReview(t0.Add(time.Minute))},
+			Events:  []dialect.BotEvent{codexCommand(t0)},
+		}, want: false},
+		// Old unprompted review, then a command, then a later commanded review: the
+		// latest evidence was commanded, so the old epoch stops suppressing posting.
+		{name: "old unprompted then commanded", obs: Observation{
+			Reviews: []ReviewSeen{codexReview(t0), codexReview(t1.Add(time.Minute))},
+			Events:  []dialect.BotEvent{codexCommand(t1)},
+		}, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := CodexAutoActive(tc.obs); got != tc.want {
+				t.Fatalf("CodexAutoActive = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDecideFireCodexDedupe covers the dedupe/Codex interaction: a head
+// CodeRabbit already reviewed must still command (or wait for) a gating Codex
+// rather than completing the round Codex-less.
+func TestDecideFireCodexDedupe(t *testing.T) {
+	free := Global{SlotFree: true}
+	now := t0.Add(10 * time.Minute)
+	head := "abcdef123"
+	queued := state.Round{Repo: "owner/repo", PR: 448, Head: head, Phase: state.PhaseQueued, Seq: 1}
+	codexReq := policy
+	codexReq.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
+	codexReq.CodexCommand = "@codex review"
+
+	crReviewed := ReviewSeen{Bot: "coderabbitai", Commit: "abcdef1234567890", SubmittedAt: now}
+	codexReviewed := ReviewSeen{Bot: dialect.CodexBotLogin, Commit: "abcdef1234567890", SubmittedAt: now}
+
+	// CodeRabbit reviewed the head; Codex required with no evidence and crq may
+	// post → command Codex alone.
+	obs := Observation{Head: head, Open: true, Reviews: []ReviewSeen{crReviewed}}
+	if d := DecideFire(free, queued, obs, now, codexReq); d.Verdict != FireCodexOnly {
+		t.Fatalf("coderabbit-reviewed head with a gating codex must command codex, got %+v", d)
+	}
+	// Same, but Codex auto-reviews: crq must not post; wait for its own review.
+	autoObs := Observation{Head: head, Open: true, CodexAutoActive: true, Reviews: []ReviewSeen{crReviewed}}
+	if d := DecideFire(free, queued, autoObs, now, codexReq); d.Verdict != FireNo {
+		t.Fatalf("auto-active codex must wait, not dedupe, got %+v", d)
+	}
+	// Codex already reviewed the head → the round is genuinely done.
+	doneObs := Observation{Head: head, Open: true, Reviews: []ReviewSeen{crReviewed, codexReviewed}}
+	if d := DecideFire(free, queued, doneObs, now, codexReq); d.Verdict != FireDedupe {
+		t.Fatalf("both bots reviewed the head must dedupe, got %+v", d)
+	}
+	// No Codex configured or active → plain dedupe as before.
+	if d := DecideFire(free, queued, obs, now, policy); d.Verdict != FireDedupe {
+		t.Fatalf("without a gating codex a reviewed head must dedupe, got %+v", d)
+	}
+	// Codex required but no command configured and not auto-active: crq cannot
+	// obtain a Codex review, so it must dedupe rather than wedge the round waiting
+	// forever — the feedback gate surfaces Codex as still pending.
+	noCmd := codexReq
+	noCmd.CodexCommand = ""
+	if d := DecideFire(free, queued, obs, now, noCmd); d.Verdict != FireDedupe {
+		t.Fatalf("a required-but-uncommandable codex must dedupe, not wedge, got %+v", d)
+	}
+}
+
 // TestDynamicCodexGate covers the dynamic completion gate: an observed-active
 // Codex gates a round it isn't configured-required for, a usage-limit notice
 // disengages that dynamic gate, and a configured-required Codex is left gating
@@ -375,8 +463,8 @@ func TestDynamicCodexGate(t *testing.T) {
 	r := firedRound(t, "abcdef123")
 	cutoff := r.FiredAt.UTC()
 	crReview := ReviewSeen{Bot: "coderabbitai[bot]", Commit: "abcdef1234567890", SubmittedAt: cutoff.Add(time.Minute)}
-	codexReview := ReviewSeen{Bot: "chatgpt-codex-connector[bot]", Commit: "abcdef1234567890", SubmittedAt: cutoff.Add(time.Minute)}
-	usageLimit := dialect.BotEvent{Kind: dialect.EvCodexUsageLimit, Bot: "chatgpt-codex-connector[bot]", CommentID: 700,
+	codexReview := ReviewSeen{Bot: dialect.CodexBotLogin, Commit: "abcdef1234567890", SubmittedAt: cutoff.Add(time.Minute)}
+	usageLimit := dialect.BotEvent{Kind: dialect.EvCodexUsageLimit, Bot: dialect.CodexBotLogin, CommentID: 700,
 		CreatedAt: cutoff.Add(30 * time.Second), UpdatedAt: cutoff.Add(30 * time.Second)}
 
 	// Codex auto-reviews the PR but hasn't reviewed the head yet: the dynamic gate
@@ -397,7 +485,7 @@ func TestDynamicCodexGate(t *testing.T) {
 	}
 	// The configured-required gate is unchanged by a usage limit: it still waits.
 	gated := policy
-	gated.RequiredBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
+	gated.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
 	if got := Completion(r, limited, gated); got.Done {
 		t.Fatalf("a usage limit must NOT disengage the configured-required Codex gate: %+v", got)
 	}
@@ -416,7 +504,7 @@ func TestCodexGatesCleanSummary(t *testing.T) {
 
 	// Codex active in the round (a real Codex comment) without its review or
 	// thumbs-up: the summary must NOT converge.
-	codexComment := dialect.BotEvent{Kind: dialect.EvOther, Bot: "chatgpt-codex-connector[bot]", CommentID: 2001,
+	codexComment := dialect.BotEvent{Kind: dialect.EvOther, Bot: dialect.CodexBotLogin, CommentID: 2001,
 		CreatedAt: t0.Add(20 * time.Second), UpdatedAt: t0.Add(20 * time.Second)}
 	obs := Observation{Head: "abcdef123", Open: true, Events: []dialect.BotEvent{noAction, codexComment}}
 	if got := Completion(r, obs, policy); got.Done {
@@ -432,8 +520,8 @@ func TestCodexGatesCleanSummary(t *testing.T) {
 	// A Codex clean summary naming the head counts as Codex's review — and if
 	// Codex gates the round, flips its ReviewedBy too.
 	gated := policy
-	gated.RequiredBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
-	codexClean := dialect.BotEvent{Kind: dialect.EvCodexClean, Bot: "chatgpt-codex-connector[bot]", SHA: "abcdef1234",
+	gated.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
+	codexClean := dialect.BotEvent{Kind: dialect.EvCodexClean, Bot: dialect.CodexBotLogin, SHA: "abcdef1234",
 		CommentID: 2002, CreatedAt: t0.Add(40 * time.Second), UpdatedAt: t0.Add(40 * time.Second)}
 	got := Completion(r, Observation{Head: "abcdef123", Open: true, Events: []dialect.BotEvent{noAction, codexClean}}, gated)
 	if !got.Done {

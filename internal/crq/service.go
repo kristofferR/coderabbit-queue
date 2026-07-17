@@ -342,6 +342,15 @@ func releaseSlot(st *State, key string) {
 	}
 }
 
+// sameRound reports whether the stored round r is still the one that was
+// observed — same Seq and Head. Every CAS mutation guards on it so a concurrent
+// supersede (which archives the old round and creates a fresh one with a new Seq)
+// between observe and write reads as a benign lost race rather than a mutation of
+// the wrong round.
+func sameRound(r *Round, want Round) bool {
+	return r != nil && r.Seq == want.Seq && r.Head == want.Head
+}
+
 // applyAccountBlock ports requeueInflight's account-quota bookkeeping. The window
 // (including same-comment reuse) was resolved by the engine, so only the store
 // write happens here.
@@ -436,6 +445,8 @@ func (s *Service) applyFire(ctx context.Context, round Round, obs engine.Observa
 		return s.abandonRound(ctx, round, "pr closed", "skipped")
 	case engine.FireDedupe:
 		return s.dedupeRound(ctx, round, now, d.Reason)
+	case engine.FireCodexOnly:
+		return s.fireCodexOnly(ctx, round, d.Reason, now)
 	case engine.FireSupersede:
 		return s.supersedeRound(ctx, round, obs.Head, now)
 	case engine.FireAdopt:
@@ -463,7 +474,8 @@ func mapFireNo(reason string) string {
 }
 
 // abandonRound ends a round (closed/merged PR) without consuming review
-// readiness. The existence check makes a concurrent cancel a benign lost race.
+// readiness. The identity guard makes a concurrent cancel or supersede between
+// observe and write a benign lost race, never an abandon of a replacement round.
 func (s *Service) abandonRound(ctx context.Context, round Round, reason, action string) (PumpResult, error) {
 	result := PumpResult{Action: action, Repo: round.Repo, PR: round.PR, Reason: reason}
 	if s.cfg.DryRun {
@@ -471,7 +483,7 @@ func (s *Service) abandonRound(ctx context.Context, round Round, reason, action 
 	}
 	ended := false
 	updated, err := s.store.Update(ctx, func(st *State) error {
-		if st.Round(round.Repo, round.PR) == nil {
+		if !sameRound(st.Round(round.Repo, round.PR), round) {
 			return ErrNoChange
 		}
 		st.EndRound(round.Repo, round.PR, reason)
@@ -500,7 +512,7 @@ func (s *Service) dedupeRound(ctx context.Context, round Round, now time.Time, r
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		deduped = false
 		r := st.Round(round.Repo, round.PR)
-		if r == nil || r.Head != round.Head || !r.FireEligible(now) {
+		if !sameRound(r, round) || !r.FireEligible(now) {
 			return ErrNoChange
 		}
 		if err := r.Dedupe(now); err != nil {
@@ -529,8 +541,7 @@ func (s *Service) supersedeRound(ctx context.Context, round Round, head string, 
 		return result, nil
 	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
-		r := st.Round(round.Repo, round.PR)
-		if r == nil || r.Head == head {
+		if !sameRound(st.Round(round.Repo, round.PR), round) {
 			return ErrNoChange
 		}
 		_, err := st.Supersede(round.Repo, round.PR, head, now)
@@ -568,7 +579,7 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 				return ErrNoChange
 			}
 			r := st.Round(round.Repo, round.PR)
-			if r == nil || !r.FireEligible(now) {
+			if !sameRound(r, round) || !r.FireEligible(now) {
 				return ErrNoChange
 			}
 			if err := r.Reserve(token, s.cfg.Host, now); err != nil {
@@ -609,7 +620,7 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 			return ErrNoChange
 		}
 		r := st.Round(round.Repo, round.PR)
-		if r == nil || !r.FireEligible(now) {
+		if !sameRound(r, round) || !r.FireEligible(now) {
 			return ErrNoChange
 		}
 		if err := r.Reserve(token, s.cfg.Host, now); err != nil {
@@ -674,6 +685,81 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 	return PumpResult{Action: "fired", Repo: round.Repo, PR: round.PR, Head: round.Head}, nil
 }
 
+// fireCodexOnly handles a round where CodeRabbit already reviewed the head but a
+// required Codex has not: it reserves the slot, posts ONLY the Codex command, and
+// records the round as fired with that comment as both the CommandID anchor and
+// the CodexCommandID. Completion already counts the existing CodeRabbit review, so
+// the round then waits on Codex alone — no `@coderabbitai review` is ever posted.
+func (s *Service) fireCodexOnly(ctx context.Context, round Round, reason string, now time.Time) (PumpResult, error) {
+	key := QueueKey(round.Repo, round.PR)
+	if s.cfg.DryRun {
+		return PumpResult{Action: "dry_run", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}, nil
+	}
+	token := randomToken()
+
+	reserved, err := s.store.Update(ctx, func(st *State) error {
+		if st.FireSlot != nil {
+			return ErrNoChange
+		}
+		r := st.Round(round.Repo, round.PR)
+		if !sameRound(r, round) || !r.FireEligible(now) {
+			return ErrNoChange
+		}
+		if err := r.Reserve(token, s.cfg.Host, now); err != nil {
+			return err
+		}
+		st.FireSlot = &FireSlot{Key: key, Token: token, Since: now}
+		st.PutRound(*r)
+		return nil
+	})
+	if err != nil {
+		return PumpResult{}, err
+	}
+	if reserved.FireSlot == nil || reserved.FireSlot.Token != token {
+		return PumpResult{Action: "lost_race"}, nil
+	}
+	s.sync(ctx, reserved)
+
+	comment, err := s.gh.PostIssueComment(ctx, round.Repo, round.PR, s.cfg.CodexCommand)
+	if err != nil {
+		updated, uerr := s.store.Update(ctx, func(st *State) error {
+			r := st.Round(round.Repo, round.PR)
+			if r == nil || r.Token != token {
+				return ErrNoChange
+			}
+			if rerr := r.ReleaseToQueue("failed to post codex review command: "+err.Error(), now); rerr != nil {
+				return rerr
+			}
+			releaseSlot(st, key)
+			st.Warn = "failed to post codex review command: " + err.Error()
+			st.PutRound(*r)
+			return nil
+		})
+		if uerr == nil {
+			s.sync(ctx, updated)
+		}
+		return PumpResult{Action: "post_failed", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: err.Error()}, err
+	}
+	firedAt := comment.CreatedAt.UTC()
+	if firedAt.IsZero() {
+		firedAt = now
+	}
+	// The Codex comment anchors the round both as its fired command and as the
+	// recorded Codex command, so self-heal will not re-post it.
+	updated, err := s.recordFire(ctx, round, token, comment.ID, comment.ID, firedAt, now)
+	if err != nil {
+		if errors.Is(err, ErrNoChange) {
+			return PumpResult{Action: "lost_race"}, nil
+		}
+		return PumpResult{}, err
+	}
+	s.sync(ctx, updated)
+	if s.log != nil {
+		s.log.Printf("fire %s@%s (coderabbit already reviewed; posted %s)", key, round.Head, strings.TrimSpace(s.cfg.CodexCommand))
+	}
+	return PumpResult{Action: "fired", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}, nil
+}
+
 // recordFire records the posted command on the reserved round, with a 30s retry
 // on a transient state-write failure so a fired command is never lost. codexID
 // is the Codex command comment posted alongside (0 when none), recorded in the
@@ -684,7 +770,7 @@ func (s *Service) recordFire(ctx context.Context, round Round, token string, com
 		st, err := s.store.Update(c, func(st *State) error {
 			recorded = false
 			r := st.Round(round.Repo, round.PR)
-			if r == nil || st.FireSlot == nil || st.FireSlot.Token != token || r.Token != token {
+			if !sameRound(r, round) || st.FireSlot == nil || st.FireSlot.Token != token || r.Token != token {
 				return ErrNoChange
 			}
 			if err := r.Fire(commandID, firedAt); err != nil {
@@ -813,7 +899,7 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 	if s.cfg.CalibrationPR <= 0 {
 		return state, nil
 	}
-	now := time.Now().UTC()
+	now := s.clock()
 	// Honor the freshness shortcut only when the last reading was conclusive. If a
 	// probe is still pending (CalibAskedAt set, no reply yet), keep re-checking so a
 	// late "account blocked" reply isn't ignored for the full TTL.
@@ -825,7 +911,7 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 		return state, err
 	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
-		if st.Account.CalibAskedAt == nil && st.Account.CheckedAt != nil && time.Since(*st.Account.CheckedAt) < s.cfg.CalibrationTTL {
+		if st.Account.CalibAskedAt == nil && st.Account.CheckedAt != nil && now.Sub(*st.Account.CheckedAt) < s.cfg.CalibrationTTL {
 			return ErrNoChange
 		}
 		// A fresh reading replaces the whole quota; carry the account-quota comment

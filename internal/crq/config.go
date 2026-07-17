@@ -248,7 +248,7 @@ func listEnv(env map[string]string, key, fallback string) []string {
 // Codex — CodeRabbit (or any configured reviewer) already enters the feedback
 // set via RequiredBots, so listing it here too would wrongly surface CodeRabbit
 // findings even when crq is configured for a different reviewer.
-var extraFeedbackBots = []string{"chatgpt-codex-connector[bot]"}
+var extraFeedbackBots = []string{dialect.CodexBotLogin}
 
 // unionBots concatenates bot lists, dropping blanks and case-insensitively
 // de-duplicating on the normalized login (so "coderabbitai" and
