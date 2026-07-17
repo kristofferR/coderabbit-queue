@@ -51,6 +51,14 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 	}
 	o.reviews = reviews
 	for _, review := range reviews {
+		// CodeRabbit submits empty-bodied COMMENTED review objects as carriers
+		// for its inline-comment batches, minutes before the real review (the
+		// one with an "Actionable comments posted" body) lands. A shell is not
+		// review evidence: counting one converged a round with zero findings at
+		// 17:26 while the real review was still posting until 17:32.
+		if strings.TrimSpace(review.Body) == "" && strings.EqualFold(review.State, "COMMENTED") {
+			continue
+		}
 		o.eng.Reviews = append(o.eng.Reviews, engine.ReviewSeen{
 			Bot:         review.User.Login,
 			ReviewID:    review.ID,

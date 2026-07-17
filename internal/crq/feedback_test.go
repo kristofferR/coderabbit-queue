@@ -107,7 +107,7 @@ func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 			// A no-findings re-review presupposes an earlier review of the PR
 			// (on some older commit); without one the completion reply must
 			// not stand in for a review (covered by the dedicated case below).
-			prior := ghapi.Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour)}
+			prior := ghapi.Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour), Body: "**Actionable comments posted: 2**"}
 			prior.User.Login = "coderabbitai[bot]"
 			gh.reviews[fakeKey("o/repo", 3)] = []ghapi.Review{prior}
 		}
@@ -212,7 +212,7 @@ func TestFeedbackRejectsCompletionReplyWhileTopSummaryIsProcessing(t *testing.T)
 	completion := mk(2, cfg.Bot, "<!-- This is an auto-generated reply by CodeRabbit -->\nReview finished.", firedAt.Add(time.Minute), firedAt.Add(time.Minute))
 	summary := mk(3, cfg.Bot, "<!-- review in progress by coderabbit.ai -->\nCurrently processing new changes in this PR. This may take a few minutes, please wait...", firedAt.Add(-time.Hour), firedAt.Add(2*time.Minute))
 	gh.comments[fakeKey("o/repo", 3)] = []ghapi.IssueComment{summary, command, completion}
-	prior := ghapi.Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour)}
+	prior := ghapi.Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour), Body: "**Actionable comments posted: 2**"}
 	prior.User.Login = cfg.Bot
 	gh.reviews[fakeKey("o/repo", 3)] = []ghapi.Review{prior}
 	store := NewMemoryStore(cfg)
@@ -266,7 +266,7 @@ func TestFeedbackRejectsCompletionReplyWhenTopSummaryFailed(t *testing.T) {
 	completion := mk(2, cfg.Bot, "<!-- This is an auto-generated reply by CodeRabbit -->\nReview finished.", firedAt.Add(time.Minute), firedAt.Add(3*time.Minute))
 	failure := mk(3, cfg.Bot, "<!-- This is an auto-generated comment: failure by coderabbit.ai -->\n## Review failed\n\nAn error occurred during the review process.", firedAt.Add(-time.Hour), firedAt.Add(2*time.Minute))
 	gh.comments[fakeKey("o/repo", 3)] = []ghapi.IssueComment{failure, command, completion}
-	prior := ghapi.Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour)}
+	prior := ghapi.Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour), Body: "**Actionable comments posted: 2**"}
 	prior.User.Login = cfg.Bot
 	gh.reviews[fakeKey("o/repo", 3)] = []ghapi.Review{prior}
 	store := NewMemoryStore(cfg)
@@ -317,7 +317,7 @@ func TestFeedbackRejectsCompletionReplyFromEarlierRound(t *testing.T) {
 		gh.comments[fakeKey("o/repo", 3)] = comments
 		// The completion fallback requires a prior review by the bot (the old
 		// round's review of the previous head).
-		prior := ghapi.Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour)}
+		prior := ghapi.Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour), Body: "**Actionable comments posted: 2**"}
 		prior.User.Login = "coderabbitai[bot]"
 		gh.reviews[fakeKey("o/repo", 3)] = []ghapi.Review{prior}
 		store := NewMemoryStore(cfg)

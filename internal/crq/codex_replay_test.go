@@ -52,7 +52,8 @@ func (f *replayFixture) codexComment(repo string, pr int, id int64, body string,
 func (f *replayFixture) codexReview(repo string, pr int, id int64, commitSHA string, at time.Time) {
 	f.gh.mu.Lock()
 	defer f.gh.mu.Unlock()
-	r := ghapi.Review{ID: id, CommitID: commitSHA, State: "COMMENTED", SubmittedAt: at.UTC()}
+	r := ghapi.Review{ID: id, CommitID: commitSHA, State: "COMMENTED", SubmittedAt: at.UTC(),
+		Body: "### \U0001F4A1 Codex Review\n\nReviewed the changes."}
 	r.User.Login = codexLogin
 	key := fakeKey(repo, pr)
 	f.gh.reviews[key] = append(f.gh.reviews[key], r)

@@ -183,7 +183,8 @@ func (f *replayFixture) editComment(repo string, pr int, id int64, body string, 
 func (f *replayFixture) botReview(repo string, pr int, id int64, commitSHA string, at time.Time) {
 	f.gh.mu.Lock()
 	defer f.gh.mu.Unlock()
-	r := ghapi.Review{ID: id, CommitID: commitSHA, State: "COMMENTED", SubmittedAt: at.UTC()}
+	r := ghapi.Review{ID: id, CommitID: commitSHA, State: "COMMENTED", SubmittedAt: at.UTC(),
+		Body: "**Actionable comments posted: 0**"}
 	r.User.Login = f.bot
 	key := fakeKey(repo, pr)
 	f.gh.reviews[key] = append(f.gh.reviews[key], r)
@@ -646,5 +647,59 @@ func TestReplay448DaySequenceFiresThreeTimes(t *testing.T) {
 	}
 	if f.reviewsPosted(repo, pr) != 3 {
 		t.Fatalf("no command may post after convergence, got %d", f.reviewsPosted(repo, pr))
+	}
+}
+
+// shellReview appends an empty-bodied COMMENTED review object — the carrier
+// CodeRabbit submits for an inline-comment batch before its real review.
+func (f *replayFixture) shellReview(repo string, pr int, id int64, commitSHA string, at time.Time) {
+	f.gh.mu.Lock()
+	defer f.gh.mu.Unlock()
+	r := ghapi.Review{ID: id, CommitID: commitSHA, State: "COMMENTED", SubmittedAt: at.UTC()}
+	r.User.Login = f.bot
+	key := fakeKey(repo, pr)
+	f.gh.reviews[key] = append(f.gh.reviews[key], r)
+}
+
+// TestReplayEmptyReviewShellDoesNotConverge pins the 17:26-vs-17:32 incident:
+// CodeRabbit submitted five empty review shells at the head minutes before the
+// real review; a loop polling in that window must NOT converge on them.
+func TestReplayEmptyReviewShellDoesNotConverge(t *testing.T) {
+	base := time.Date(2026, 7, 17, 17, 20, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr, head := "o/r", 30, "aaaabbbbccccdddd"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Hour))
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected fire, got %+v", res)
+	}
+
+	// Comment-batch shells arrive at the fired head.
+	f.shellReview(repo, pr, 601, head, f.clk.now().Add(90*time.Second))
+	f.shellReview(repo, pr, 602, head, f.clk.now().Add(91*time.Second))
+	f.clk.advance(2 * time.Minute)
+	f.pump()
+	report, err := f.svc.Feedback(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Converged {
+		t.Fatalf("empty review shells must not converge the round: %+v", report.ReviewedBy)
+	}
+	if r := f.round(repo, pr); r == nil || r.Phase == PhaseCompleted {
+		t.Fatalf("round must stay open on shells, got %+v", r)
+	}
+
+	// The real review lands six minutes later — now it converges.
+	f.botReview(repo, pr, 603, head, f.clk.now().Add(6*time.Minute))
+	f.clk.advance(7 * time.Minute)
+	f.pump()
+	report, err = f.svc.Feedback(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Converged {
+		t.Fatalf("real review must converge: %+v", report.ReviewedBy)
 	}
 }

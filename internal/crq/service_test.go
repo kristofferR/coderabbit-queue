@@ -1062,7 +1062,7 @@ func TestPumpCompletesRoundOnCompletionReply(t *testing.T) {
 	reply.User.Login = cfg.Bot
 	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{command, reply}
 	// A completion-only round is a re-review: a prior review must exist.
-	prior := ghapi.Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour)}
+	prior := ghapi.Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour), Body: "**Actionable comments posted: 2**"}
 	prior.User.Login = cfg.Bot
 	gh.reviews[fakeKey("owner/repo", 12)] = []ghapi.Review{prior}
 	store := NewMemoryStore(cfg)

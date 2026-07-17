@@ -125,9 +125,15 @@ func IsNonActionableText(text string) bool {
 		return true
 	}
 	text = NormalizeReviewText(text)
+	// CodeRabbit appends an "Also applies to: <lines>" trailer to REAL finding
+	// bodies listing other affected locations — a substring match on it silently
+	// dropped four genuine findings in one review. Only a comment that IS the
+	// trailer (an ack pointing at an already-reported location) is noise.
+	if strings.HasPrefix(strings.TrimSpace(text), "also applies to:") {
+		return true
+	}
 	nonActionable := []string{
 		"lgtm",
-		"also applies to:",
 		"no issue here",
 		"incorrect or invalid review comment",
 		"likely an incorrect or invalid review comment",

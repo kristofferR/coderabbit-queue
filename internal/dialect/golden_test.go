@@ -60,6 +60,10 @@ func TestGoldenClassification(t *testing.T) {
 		{file: "coderabbit/no-actionable-comments.md", noAction: true},
 		{file: "coderabbit/already-reviewed.md", alreadyDone: true, autoReply: true},
 		{file: "coderabbit/completion-reply.md", completionReply: true, autoReply: true},
+		// The standalone trailer is an ack; a real finding CARRYING the trailer
+		// must stay actionable (a substring match dropped four real findings).
+		{file: "coderabbit/thread-ack-also-applies.md", nonActionable: true},
+		{file: "coderabbit/finding-with-also-applies-trailer.md"},
 		{file: "codex/clean-summary-legacy.md", codexClean: true, noAction: true, nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCodexClean},
 		{file: "codex/clean-summary-tada.md", codexClean: true, noAction: true, nonActionable: true, reviewedSHA: "4d9e8bca82", author: "chatgpt-codex-connector[bot]", wantKind: EvCodexClean},
 		{file: "codex/usage-limit.md", codexUsageLimit: true, nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCodexUsageLimit},
