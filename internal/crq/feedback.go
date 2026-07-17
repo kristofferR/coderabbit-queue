@@ -30,7 +30,7 @@ type FeedbackReport struct {
 
 func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackReport, error) {
 	repo = NormalizeRepo(repo)
-	now := time.Now().UTC()
+	now := s.clock()
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
 		return FeedbackReport{}, err
@@ -381,7 +381,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		// REST quota (and re-hit its throttle) every PollInterval.
 		poll := s.cfg.PollInterval
 		var blockedUntil *time.Time
-		now := time.Now().UTC()
+		now := s.clock()
 		if st, _, lerr := s.store.Load(ctx); lerr == nil {
 			if until, ok := accountBlockedUntil(&st, repo, pr, head, now); ok {
 				blockedUntil = &until
@@ -443,7 +443,7 @@ func (s *Service) ensureWaitDeadline(ctx context.Context, repo string, pr int, h
 		if r == nil || r.Head != head || (r.Phase != PhaseFired && r.Phase != PhaseReviewing) || r.WaitDeadline != nil {
 			return ErrNoChange
 		}
-		start := time.Now().UTC()
+		start := s.clock()
 		if r.FiredAt != nil {
 			start = r.FiredAt.UTC()
 		}
@@ -464,7 +464,7 @@ func (s *Service) ensureWaitDeadline(ctx context.Context, repo string, pr int, h
 	}
 	// The round is no longer a wait (completed/none): synthesize a transient
 	// deadline so the loop still bounds its poll.
-	return time.Now().UTC().Add(s.cfg.FeedbackWaitTimeout), nil
+	return s.clock().Add(s.cfg.FeedbackWaitTimeout), nil
 }
 
 // pushWaitDeadline moves the fired/reviewing round's wait deadline later (never

@@ -43,6 +43,12 @@ type Service struct {
 	gh    GitHubAPI
 	store StateStore
 	log   Logger
+	// now overrides the wall clock for the scheduling DECISIONS in the
+	// pump/enqueue/sweep/wait paths (see clock). nil in production; the replay
+	// suite injects a controllable fake so an incident can be re-enacted
+	// deterministically. It intentionally does NOT reach logging/jitter/token or
+	// the fake GitHub timestamps, which stay on real time.
+	now func() time.Time
 }
 
 func NewService(cfg Config, gh GitHubAPI, store StateStore, log Logger) *Service {
@@ -52,6 +58,17 @@ func NewService(cfg Config, gh GitHubAPI, store StateStore, log Logger) *Service
 		CalibrationMarker: cfg.CalibrationMarker,
 	}
 	return &Service{cfg: cfg, cr: cr, gh: gh, store: store, log: log}
+}
+
+// clock is the service's notion of "now" (UTC) for scheduling decisions: retry
+// windows, fire pacing, adoption cutoffs, feedback deadlines. Tests inject s.now
+// to drive these deterministically; production leaves it nil and reads the wall
+// clock.
+func (s *Service) clock() time.Time {
+	if s.now != nil {
+		return s.now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // warnRateLimited is the requeue reason for a fire that came back account
@@ -80,7 +97,7 @@ func (s *Service) Enqueue(ctx context.Context, repo string, pr int) (EnqueueResu
 		return result, err
 	}
 	state, err := s.store.Update(ctx, func(st *State) error {
-		now := time.Now().UTC()
+		now := s.clock()
 		r := st.Round(repo, pr)
 		if r != nil && r.Head == head {
 			switch r.Phase {
@@ -130,7 +147,7 @@ func (s *Service) enqueueBatch(ctx context.Context, items []queueCandidate) erro
 		return nil
 	}
 	state, err := s.store.Update(ctx, func(st *State) error {
-		now := time.Now().UTC()
+		now := s.clock()
 		added := 0
 		for _, it := range items {
 			repo := NormalizeRepo(it.Repo)
@@ -174,7 +191,7 @@ type PumpResult struct {
 // completion, then fires the next eligible round. In DryRun it computes the
 // same decisions but writes and posts nothing.
 func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
-	now := time.Now().UTC()
+	now := s.clock()
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
 		return PumpResult{}, err
@@ -211,7 +228,7 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	} else {
 		return PumpResult{}, err
 	}
-	now = time.Now().UTC()
+	now = s.clock()
 	if st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now) {
 		return PumpResult{Action: "blocked", Reason: st.Account.BlockedUntil.Format(time.RFC3339)}, nil
 	}
@@ -240,7 +257,7 @@ func (s *Service) global(st State, now time.Time) engine.Global {
 
 // progressSlotRound observes and progresses the round holding the fire slot.
 func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult, error) {
-	now := time.Now().UTC()
+	now := s.clock()
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
 		return PumpResult{}, err

@@ -33,6 +33,17 @@ type fakeGitHub struct {
 	postErrs        map[string]error
 	graphQL         func(query string, vars map[string]any, out any) error
 	searchPRs       []ghapi.SearchPR
+	// now, when set, timestamps posted comments off the same injected clock the
+	// service uses, so a fire's recorded FiredAt tracks the fake wall clock the
+	// replay suite advances. nil falls back to real time (all existing tests).
+	now func() time.Time
+}
+
+func (f *fakeGitHub) clock() time.Time {
+	if f.now != nil {
+		return f.now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func newFakeGitHub() *fakeGitHub {
@@ -107,7 +118,8 @@ func (f *fakeGitHub) PostIssueComment(_ context.Context, repo string, pr int, bo
 	}
 	f.commentID++
 	f.posted = append(f.posted, repo+"#"+strconv.Itoa(pr)+":"+body)
-	comment := ghapi.IssueComment{ID: f.commentID, Body: body, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	now := f.clock()
+	comment := ghapi.IssueComment{ID: f.commentID, Body: body, CreatedAt: now, UpdatedAt: now}
 	comment.User.Login = "kristofferR"
 	return comment, nil
 }
