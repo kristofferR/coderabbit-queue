@@ -1554,3 +1554,14 @@ func (s *Service) isRateLimited(body string) bool { return s.cr.IsRateLimited(bo
 
 func (s *Service) isReviewsPaused(body string) bool     { return s.cr.IsReviewsPaused(body) }
 func (s *Service) isReviewAlreadyDone(body string) bool { return s.cr.IsReviewAlreadyDone(body) }
+
+// isCommentCapError reports whether err is GitHub's hard cap of 2500 comments per
+// issue ("Commenting is disabled on issues with more than 2500 comments").
+func isCommentCapError(err error) bool {
+	var api *APIError
+	if !errors.As(err, &api) {
+		return false
+	}
+	b := strings.ToLower(api.Body)
+	return strings.Contains(b, "commenting is disabled") || strings.Contains(b, "more than 2500 comments")
+}

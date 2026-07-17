@@ -262,7 +262,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 				// A rate limit must abort the pass so AutoReview's outer backoff kicks
 				// in, instead of scanning the rest of the candidates under the same
 				// throttle (and skipping them until a later poll).
-				if IsRateLimited(nerr) {
+				if isThrottled(nerr) {
 					return false, nerr
 				}
 				if s.log != nil {

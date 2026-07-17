@@ -116,7 +116,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 				}
 			}
 		}
-	} else if IsRateLimited(err) {
+	} else if isThrottled(err) {
 		// A transient GraphQL rate limit must not silently degrade to the REST
 		// fallback, which loses thread resolution/outdated state and the cross-commit
 		// unresolved findings this command promises. Surface it so Loop rides it out

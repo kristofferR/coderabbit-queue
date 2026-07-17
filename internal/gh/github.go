@@ -1,4 +1,4 @@
-package crq
+package gh
 
 import (
 	"bytes"
@@ -31,6 +31,10 @@ type APIError struct {
 
 func (e *APIError) Error() string {
 	return fmt.Sprintf("github %s %s failed: %d %s", e.Method, e.URL, e.Status, strings.TrimSpace(e.Body))
+}
+
+type Logger interface {
+	Printf(string, ...any)
 }
 
 type GitHub struct {
@@ -341,7 +345,7 @@ func (g *GitHub) GraphQL(ctx context.Context, query string, variables map[string
 						g.log.Printf("github graphql rate limit; backing off %s (attempt %d/%d)", wait.Round(time.Second), attempt+1, g.maxRetries)
 					}
 				}
-				if serr := sleepCtx(ctx, wait); serr != nil {
+				if serr := SleepCtx(ctx, wait); serr != nil {
 					return serr
 				}
 				continue
@@ -355,11 +359,15 @@ func (g *GitHub) GraphQL(ctx context.Context, query string, variables map[string
 	}
 }
 
+// UserAgent identifies crq to the GitHub API; the crq package stamps its
+// version in at init time (gh cannot import crq for it).
+var UserAgent = "crq"
+
 func (g *GitHub) decorate(req *http.Request) {
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("Authorization", "Bearer "+g.authToken())
-	req.Header.Set("User-Agent", "crq/"+Version)
+	req.Header.Set("User-Agent", UserAgent)
 }
 
 func marshalBody(in any) ([]byte, error) {
@@ -391,27 +399,16 @@ func (e *RateLimitError) Error() string {
 	return fmt.Sprintf("github %s rate limit hit (%s %s); resets %s (~%s)", e.Kind, e.Method, shortURL(e.URL), e.Until.UTC().Format(time.RFC3339), wait)
 }
 
-// IsRateLimited reports whether err is (or wraps) a GitHub rate-limit error.
-func IsRateLimited(err error) bool {
+// IsThrottled reports whether err is (or wraps) a GitHub rate-limit error.
+func IsThrottled(err error) bool {
 	var rl *RateLimitError
 	return errors.As(err, &rl)
 }
 
-// isCommentCapError reports whether err is GitHub's hard cap of 2500 comments per
-// issue ("Commenting is disabled on issues with more than 2500 comments").
-func isCommentCapError(err error) bool {
-	var api *APIError
-	if !errors.As(err, &api) {
-		return false
-	}
-	b := strings.ToLower(api.Body)
-	return strings.Contains(b, "commenting is disabled") || strings.Contains(b, "more than 2500 comments")
-}
-
-// rateLimitWait returns how long to wait before retrying a rate-limited error.
+// ThrottleWait returns how long to wait before retrying a rate-limited error.
 // The bool is true when err is a rate limit; the duration is 0 when GitHub gave
 // no reset hint (the caller should apply its own default backoff).
-func rateLimitWait(err error) (time.Duration, bool) {
+func ThrottleWait(err error) (time.Duration, bool) {
 	var rl *RateLimitError
 	if !errors.As(err, &rl) {
 		return 0, false
@@ -524,7 +521,7 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 					}
 					g.log.Printf("github unreachable on %s %s (%v); retrying in %s (offline %s / cap %s)", method, shortURL(fullURL), err, wait.Round(time.Second), down.Round(time.Second), capStr)
 				}
-				if serr := sleepCtx(ctx, wait); serr != nil {
+				if serr := SleepCtx(ctx, wait); serr != nil {
 					return nil, serr
 				}
 				continue
@@ -548,7 +545,7 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 				if g.log != nil {
 					g.log.Printf("github %s %s: HTTP %d; retrying in %s (attempt %d/%d)", method, shortURL(fullURL), resp.StatusCode, wait.Round(time.Second), attempt, g.maxRetries)
 				}
-				if serr := sleepCtx(ctx, wait); serr != nil {
+				if serr := SleepCtx(ctx, wait); serr != nil {
 					return nil, serr
 				}
 				continue
@@ -569,7 +566,7 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 				if g.log != nil {
 					g.log.Printf("github %s %s: HTTP %d with an HTML body (edge error); retrying in %s (attempt %d/%d)", method, shortURL(fullURL), resp.StatusCode, wait.Round(time.Second), attempt, g.maxRetries)
 				}
-				if serr := sleepCtx(ctx, wait); serr != nil {
+				if serr := SleepCtx(ctx, wait); serr != nil {
 					return nil, serr
 				}
 				continue
@@ -591,7 +588,7 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 				if g.log != nil {
 					g.log.Printf("github %s %s: 401 unauthorized; refreshing token and retrying in %s (attempt %d/%d)", method, shortURL(fullURL), wait.Round(time.Second), attempt, g.maxRetries)
 				}
-				if serr := sleepCtx(ctx, wait); serr != nil {
+				if serr := SleepCtx(ctx, wait); serr != nil {
 					return nil, serr
 				}
 				continue
@@ -630,7 +627,7 @@ func (g *GitHub) send(ctx context.Context, method, fullURL string, body []byte) 
 				g.log.Printf("github %s rate limit on %s %s; backing off %s (attempt %d/%d)", rl.Kind, method, shortURL(fullURL), wait.Round(time.Second), attempt, g.maxRetries)
 			}
 		}
-		if err := sleepCtx(ctx, wait); err != nil {
+		if err := SleepCtx(ctx, wait); err != nil {
 			return nil, err
 		}
 	}
@@ -741,7 +738,7 @@ func isRetryableNetErr(err error) bool {
 	return false
 }
 
-func sleepCtx(ctx context.Context, d time.Duration) error {
+func SleepCtx(ctx context.Context, d time.Duration) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -1065,7 +1062,7 @@ type gitRef struct {
 	} `json:"object"`
 }
 
-type gitCommit struct {
+type Commit struct {
 	SHA  string `json:"sha"`
 	Tree struct {
 		SHA string `json:"sha"`
@@ -1075,7 +1072,7 @@ type gitCommit struct {
 	} `json:"committer"`
 }
 
-type gitTree struct {
+type Tree struct {
 	SHA  string `json:"sha"`
 	Tree []struct {
 		Path string `json:"path"`
@@ -1127,13 +1124,13 @@ func (g *GitHub) CreateTree(ctx context.Context, repo, baseTree string, entries 
 	if baseTree != "" {
 		in["base_tree"] = baseTree
 	}
-	var out gitTree
+	var out Tree
 	err := g.request(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/git/trees", repoPath(repo)), in, &out)
 	return out.SHA, err
 }
 
 func (g *GitHub) CreateCommit(ctx context.Context, repo, message, tree string, parents []string) (string, error) {
-	var out gitCommit
+	var out Commit
 	err := g.request(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/git/commits", repoPath(repo)), map[string]any{
 		"message": message,
 		"tree":    tree,
@@ -1142,14 +1139,14 @@ func (g *GitHub) CreateCommit(ctx context.Context, repo, message, tree string, p
 	return out.SHA, err
 }
 
-func (g *GitHub) GetCommit(ctx context.Context, repo, sha string) (gitCommit, error) {
-	var out gitCommit
+func (g *GitHub) GetCommit(ctx context.Context, repo, sha string) (Commit, error) {
+	var out Commit
 	err := g.request(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/git/commits/%s", repoPath(repo), url.PathEscape(sha)), nil, &out)
 	return out, err
 }
 
-func (g *GitHub) GetTree(ctx context.Context, repo, sha string) (gitTree, error) {
-	var out gitTree
+func (g *GitHub) GetTree(ctx context.Context, repo, sha string) (Tree, error) {
+	var out Tree
 	err := g.request(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/git/trees/%s?recursive=1", repoPath(repo), url.PathEscape(sha)), nil, &out)
 	return out, err
 }
