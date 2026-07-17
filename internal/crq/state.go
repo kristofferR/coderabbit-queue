@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 	crqstate "github.com/kristofferR/coderabbit-queue/internal/state"
 )
 
@@ -53,7 +54,7 @@ func (c Config) storeConfig() StoreConfig {
 
 // NewGitStateStore builds the git-ref-backed store. The logger surfaces the
 // loud auto-reinit line when a stale-schema payload is loaded.
-func NewGitStateStore(cfg Config, gh *GitHub, log Logger) *crqstate.GitStateStore {
+func NewGitStateStore(cfg Config, gh *ghapi.GitHub, log Logger) *crqstate.GitStateStore {
 	return crqstate.NewGitStateStore(cfg.storeConfig(), gh, log)
 }
 
@@ -99,48 +100,27 @@ func QueueKey(repo string, pr int) string {
 	return fmt.Sprintf("%s#%d", NormalizeRepo(repo), pr)
 }
 
-// --- v2→v3 compatibility shims (consumed by feedback.go / Wait, rewritten in 4b) ---
+// --- round-native views consumed by Wait/Loop -----------------------------
 
-// FeedbackWait is the v2-shaped view of a fired/reviewing round, retained so
-// the feedback/loop code keeps compiling against round state until stage 4b
-// rewrites it.
-type FeedbackWait struct {
-	Repo           string
-	PR             int
-	Head           string
-	StartedAt      time.Time
-	Deadline       time.Time
-	FiredCommentID int64
-	ByHost         string
-}
-
-// waitView presents a repo#pr's current round as a FeedbackWait when it is
-// fired or reviewing (the v2 "awaiting feedback" states); otherwise the zero
-// value, whose empty Head reads as "no wait" at every call site.
-func waitView(st *State, repo string, pr int) FeedbackWait {
+// waitingHead returns the head a fired/reviewing round is currently waiting on
+// (the wait IS the round), or "" when repo#pr has no active wait. Loop and Wait
+// use it to tell "a review is in flight for this head" from "start a new round".
+func waitingHead(st *State, repo string, pr int) string {
 	r := st.Round(repo, pr)
 	if r == nil || (r.Phase != PhaseFired && r.Phase != PhaseReviewing) {
-		return FeedbackWait{}
+		return ""
 	}
-	w := FeedbackWait{Repo: r.Repo, PR: r.PR, Head: r.Head, FiredCommentID: r.CommandID, ByHost: r.ByHost}
-	if r.FiredAt != nil {
-		w.StartedAt = r.FiredAt.UTC()
-	}
-	if r.WaitDeadline != nil {
-		w.Deadline = r.WaitDeadline.UTC()
-	}
-	return w
+	return r.Head
 }
 
-// roundAnchor returns the fire timestamp and command id for repo#pr's current
-// round when its head matches — the completion cutoff anchor that v2 read from
-// AwaitingFeedback/InFlight/History.
-func roundAnchor(st *State, repo string, pr int, head string) (firedAt time.Time, commandID int64, ok bool) {
+// roundWaitDeadline returns the wait deadline of the fired/reviewing round at
+// head, if one is set. It is the wall-clock bound Loop polls against.
+func roundWaitDeadline(st *State, repo string, pr int, head string) (time.Time, bool) {
 	r := st.Round(repo, pr)
-	if r == nil || r.Head != head || r.FiredAt == nil {
-		return time.Time{}, 0, false
+	if r == nil || r.Head != head || (r.Phase != PhaseFired && r.Phase != PhaseReviewing) || r.WaitDeadline == nil {
+		return time.Time{}, false
 	}
-	return r.FiredAt.UTC(), r.CommandID, true
+	return r.WaitDeadline.UTC(), true
 }
 
 // containsActive reports whether repo#pr has a round still occupying its slot

@@ -13,17 +13,17 @@ import (
 type EventKind int
 
 const (
-	EvOther EventKind = iota
-	EvCommand         // the review trigger command, posted by a human/agent
-	EvCompletion      // "Review finished." auto-reply (and not rate-limited)
-	EvRateLimited     // CodeRabbit account-quota notice
-	EvPaused          // "Reviews paused" auto-pause notice
-	EvInProgress      // editable top summary: review still processing
-	EvFailed          // editable top summary: review failed
-	EvAlreadyReviewed // "does not re-review already reviewed commits" claim
-	EvNoAction        // CodeRabbit clean-review summary (no actionable comments)
-	EvCodexClean      // Codex clean-summary issue comment
-	EvCodexNotice     // non-actionable Codex notice (usage limits, acks)
+	EvOther           EventKind = iota
+	EvCommand                   // the review trigger command, posted by a human/agent
+	EvCompletion                // "Review finished." auto-reply (and not rate-limited)
+	EvRateLimited               // CodeRabbit account-quota notice
+	EvPaused                    // "Reviews paused" auto-pause notice
+	EvInProgress                // editable top summary: review still processing
+	EvFailed                    // editable top summary: review failed
+	EvAlreadyReviewed           // "does not re-review already reviewed commits" claim
+	EvNoAction                  // CodeRabbit clean-review summary (no actionable comments)
+	EvCodexClean                // Codex clean-summary issue comment
+	EvCodexNotice               // non-actionable Codex notice (usage limits, acks)
 )
 
 // BotEvent is one classified issue comment. CreatedAt orders command↔reply

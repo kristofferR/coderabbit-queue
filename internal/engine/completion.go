@@ -165,6 +165,27 @@ func completionReplyForRound(obs Observation, p Policy, firedAt time.Time) bool 
 	return false
 }
 
+// CommandHasCompletionReply reports whether the specific command comment was
+// answered by a completion reply with no in-progress/rate-limited/paused top
+// summary contradicting it since. It ports v2's reviewCommandHasCompletionReply
+// (the adoption guard: a command already answered by a completion reply belongs
+// to a finished round and must not be re-adopted as a fresh fire). Unlike the
+// convergence fallback it does not require a prior submitted review or gate on
+// a failed summary — adoption only asks "was this exact command already spoken
+// for".
+func CommandHasCompletionReply(obs Observation, p Policy, commandID int64) bool {
+	if commandID == 0 {
+		return false
+	}
+	for _, reply := range commandReplies(obs, p) {
+		if reply.commandID == commandID && reply.completion &&
+			!stateSince(obs, p, reply.commandAt, dialect.EvInProgress, dialect.EvRateLimited, dialect.EvPaused) {
+			return true
+		}
+	}
+	return false
+}
+
 func botHasAnyReview(reviews []ReviewSeen, bot string) bool {
 	for _, review := range reviews {
 		if sameBot(review.Bot, bot) {

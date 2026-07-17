@@ -16,12 +16,12 @@ const (
 	KeepWaiting    Outcome = iota
 	OutComplete            // every required bot has evidence → completed
 	OutReviewing           // bot acknowledged; release the slot, keep the round open
-	OutRetry               // park until Transition.RetryAt (rate limit, timeout, failure)
+	OutRetry               // park until Transition.RetryAt (account block, timeout, failure)
 	OutReleaseSlot         // reserved but never posted → back to queued
 	OutAbandon             // PR closed/merged
 )
 
-// AccountBlock is an account-quota update observed from a rate-limit event.
+// AccountBlock is an account-quota update observed from an EvRateLimited event.
 type AccountBlock struct {
 	Until          time.Time
 	CommentID      int64
@@ -32,7 +32,7 @@ type Transition struct {
 	Outcome Outcome
 	Reason  string
 	RetryAt time.Time     // OutRetry: earliest re-fire for this head
-	Blocked *AccountBlock // rate limit: account-wide block to record
+	Blocked *AccountBlock // account-wide CodeRabbit quota block to record
 }
 
 // reserveTimeout mirrors v2: a reservation that never posted its command
@@ -40,7 +40,7 @@ type Transition struct {
 const reserveTimeout = 2 * time.Minute
 
 // Progress decides what happened to a reserved/fired/reviewing round. Ports
-// v2's inflightStatus order — submitted review → rate limit → reaction →
+// v2's inflightStatus order — submitted review → account block → reaction →
 // other bot comment → timeout — with two deliberate fixes: the in-progress
 // and failed top-summary states now gate the daemon path too (v2 applied
 // them only in feedback.go), and every retry carries a RetryAt cooldown
@@ -73,7 +73,8 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 		return Transition{Outcome: OutReviewing, Reason: "review submitted; awaiting remaining bots"}
 	}
 
-	// Rate limit beats every ack: the fired command did not produce a review.
+	// An account-quota block beats every ack: the fired command did not produce
+	// a review.
 	for _, ev := range obs.Events {
 		if ev.Kind != dialect.EvRateLimited || !sameBot(ev.Bot, p.Bot) || ev.UpdatedAt.Before(firedAt) {
 			continue
@@ -81,7 +82,7 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 		until := resolveBlockWindow(ev, q, now, p)
 		return Transition{
 			Outcome: OutRetry,
-			Reason:  "rate limited",
+			Reason:  dialect.ReasonRateLimited,
 			RetryAt: until,
 			Blocked: &AccountBlock{Until: until, CommentID: ev.CommentID, CommentUpdated: ev.UpdatedAt},
 		}
@@ -103,8 +104,8 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 		if obs.Reacted {
 			return Transition{Outcome: OutReviewing, Reason: "bot reacted"}
 		}
-		// Any other bot comment in the round window acknowledges it too — but a
-		// rate-limit/paused/already-reviewed notice is not an ack (v2), and
+		// Any other bot comment in the round window acknowledges it too — but an
+		// account-block/paused/already-reviewed notice is not an ack (v2), and
 		// neither is the in-progress summary of a PREVIOUS round edit... which
 		// it cannot be: UpdatedAt gates the window. An in-progress summary IS
 		// an ack that reviewing started.
@@ -132,7 +133,7 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 }
 
 // resolveBlockWindow ports v2's requeueInflight window logic: reuse the
-// standing block when the SAME edited rate-limit comment is re-observed
+// standing block when the SAME edited account-quota comment is re-observed
 // (CodeRabbit edits one comment in place — a re-observation must not extend
 // the window on every bounce), and fall back to a conservative fixed window
 // when no "available in" duration parsed.

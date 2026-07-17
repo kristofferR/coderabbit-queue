@@ -7,50 +7,66 @@ import (
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
+// observation bundles the pure engine.Observation the decision functions
+// consume with the raw GitHub payloads Feedback's findings extraction needs, so
+// a single fetch serves both the daemon (Pump: DecideFire/Progress) and the
+// loop (Feedback: engine.Completion + finding parsing) without a second path.
+type observation struct {
+	eng      engine.Observation
+	pull     ghapi.Pull
+	reviews  []ghapi.Review
+	comments []ghapi.IssueComment
+}
+
 // observe is the single place that asks GitHub "what happened on this PR" and
-// reduces it to an engine.Observation. The daemon's Pump builds it once for the
-// slot round (Progress) and once for the next-eligible round (DecideFire), so
-// the "is head reviewed?" duplication of v2 collapses to one implementation.
+// reduces it to an engine.Observation (plus the raw reviews/comments Feedback
+// parses into findings). The daemon's Pump builds it for the slot round
+// (Progress) and the next-eligible round (DecideFire); Feedback builds it for
+// the current round — so the "is head reviewed?" duplication of v2 collapses to
+// one implementation.
 //
 // round anchors the round-relative facts: reactions target its fired command,
 // the adoption cutoff is its LastAttemptAt, and reactions/thumbs-up are fetched
 // only for a round that has fired.
-func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round, now time.Time) (engine.Observation, error) {
+func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round, now time.Time) (observation, error) {
 	pull, err := s.gh.GetPull(ctx, repo, pr)
 	if err != nil {
-		return engine.Observation{}, err
+		return observation{}, err
 	}
-	obs := engine.Observation{Open: pull.State == "open" && !pull.Merged}
-	if obs.Open && len(pull.Head.SHA) >= 9 {
-		obs.Head = pull.Head.SHA[:9]
-	}
-	if !obs.Open {
-		// A closed PR needs no further facts; the engine drops/abandons the round.
-		return obs, nil
+	o := observation{pull: pull}
+	o.eng.Open = pull.State == "open" && !pull.Merged
+	if o.eng.Open && len(pull.Head.SHA) >= 9 {
+		o.eng.Head = pull.Head.SHA[:9]
 	}
 
+	// Reviews and issue comments are fetched even for a closed PR: the daemon's
+	// Progress/DecideFire abandon it regardless, but Feedback still surfaces its
+	// findings, and the extra two reads on a to-be-dropped round are negligible.
 	reviews, err := s.gh.ListReviews(ctx, repo, pr)
 	if err != nil {
-		return engine.Observation{}, err
+		return observation{}, err
 	}
+	o.reviews = reviews
 	for _, review := range reviews {
-		obs.Reviews = append(obs.Reviews, engine.ReviewSeen{
+		o.eng.Reviews = append(o.eng.Reviews, engine.ReviewSeen{
 			Bot:         review.User.Login,
 			ReviewID:    review.ID,
-			Commit:      shortOID(review.CommitID),
+			Commit:      dialect.ShortOID(review.CommitID),
 			SubmittedAt: review.SubmittedAt,
 		})
 	}
 
 	comments, err := s.gh.ListIssueComments(ctx, repo, pr)
 	if err != nil {
-		return engine.Observation{}, err
+		return observation{}, err
 	}
+	o.comments = comments
 	classifier := dialect.Classifier{CodeRabbit: s.cr, Bot: s.cfg.Bot, ReviewCommand: s.cfg.ReviewCommand}
 	for _, c := range comments {
-		obs.Events = append(obs.Events, classifier.Classify(c.User.Login, c.Body, c.ID, c.CreatedAt, c.UpdatedAt))
+		o.eng.Events = append(o.eng.Events, classifier.Classify(c.User.Login, c.Body, c.ID, c.CreatedAt, c.UpdatedAt))
 	}
 
 	// Reactions and Codex thumbs-up only matter for a round that has fired.
@@ -59,25 +75,25 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 		if round.CommandID != 0 {
 			reactions, err := s.gh.ListCommentReactions(ctx, repo, round.CommandID)
 			if err != nil {
-				return engine.Observation{}, err
+				return observation{}, err
 			}
 			for _, reaction := range reactions {
 				if s.isConfiguredBot(reaction.User.Login) {
-					obs.Reacted = true
+					o.eng.Reacted = true
 				}
 				if isCurrentCodexThumbsUp(reaction, cutoff) {
-					obs.CodexThumbsUp = true
+					o.eng.CodexThumbsUp = true
 				}
 			}
 		}
-		if !obs.CodexThumbsUp && s.codexRelevant(obs) {
+		if !o.eng.CodexThumbsUp && s.codexRelevant(o.eng) {
 			reactions, err := s.gh.ListIssueReactions(ctx, repo, pr)
 			if err != nil {
-				return engine.Observation{}, err
+				return observation{}, err
 			}
 			for _, reaction := range reactions {
 				if isCurrentCodexThumbsUp(reaction, cutoff) {
-					obs.CodexThumbsUp = true
+					o.eng.CodexThumbsUp = true
 					break
 				}
 			}
@@ -86,13 +102,13 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 
 	// Adoptable commands are only consulted for a fire-eligible round.
 	if round != nil && round.FireEligible(now) {
-		cmds, err := s.adoptableCommands(ctx, repo, pr, obs.Head, adoptCutoff(*round), pull, comments, reviews)
+		cmds, err := s.adoptableCommands(ctx, repo, pr, o.eng, adoptCutoff(*round), pull, comments, reviews)
 		if err != nil {
-			return engine.Observation{}, err
+			return observation{}, err
 		}
-		obs.Commands = cmds
+		o.eng.Commands = cmds
 	}
-	return obs, nil
+	return o, nil
 }
 
 // adoptCutoff is the earliest command timestamp a round may adopt: the most
@@ -128,7 +144,8 @@ func (s *Service) codexRelevant(obs engine.Observation) bool {
 // review-command comment safe to adopt as an already-posted fire, or none. The
 // cutoffs (LastAttemptAt floor, head-commit date, force-push, already-answered)
 // are applied here so the engine only picks the newest survivor.
-func (s *Service) adoptableCommands(ctx context.Context, repo string, pr int, head string, notBeforeCutoff time.Time, pull Pull, comments []IssueComment, reviews []Review) ([]engine.CommandSeen, error) {
+func (s *Service) adoptableCommands(ctx context.Context, repo string, pr int, obs engine.Observation, notBeforeCutoff time.Time, pull ghapi.Pull, comments []ghapi.IssueComment, reviews []ghapi.Review) ([]engine.CommandSeen, error) {
+	head := obs.Head
 	command := strings.TrimSpace(s.cfg.ReviewCommand)
 	if command == "" {
 		return nil, nil
@@ -147,12 +164,12 @@ func (s *Service) adoptableCommands(ctx context.Context, repo string, pr int, he
 	}
 	cutoff := notBeforeCutoff
 	if pull.Head.SHA != "" {
-		if shortOID(pull.Head.SHA) != head {
+		if dialect.ShortOID(pull.Head.SHA) != head {
 			return nil, nil
 		}
 		commit, err := s.gh.GetCommit(ctx, repo, pull.Head.SHA)
 		if err != nil {
-			if _, ok := rateLimitWait(err); ok {
+			if _, ok := ghapi.ThrottleWait(err); ok {
 				return nil, err
 			}
 			// No head-commit cutoff available (unreadable/404 head): skip adoption
@@ -170,7 +187,7 @@ func (s *Service) adoptableCommands(ctx context.Context, repo string, pr int, he
 	if fp := s.headForcePushCutoff(ctx, repo, pr); fp.After(cutoff) {
 		cutoff = fp
 	}
-	var best IssueComment
+	var best ghapi.IssueComment
 	var bestAt time.Time
 	ok := false
 	for _, comment := range comments {
@@ -201,7 +218,7 @@ func (s *Service) adoptableCommands(ctx context.Context, repo string, pr int, he
 			return nil, nil
 		}
 	}
-	if s.reviewCommandHasCompletionReply(comments, reviews, best.ID) {
+	if engine.CommandHasCompletionReply(obs, s.policy(), best.ID) {
 		return nil, nil
 	}
 	return []engine.CommandSeen{{ID: best.ID, CreatedAt: best.CreatedAt, UpdatedAt: best.UpdatedAt}}, nil

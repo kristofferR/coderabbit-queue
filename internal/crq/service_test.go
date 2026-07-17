@@ -9,18 +9,22 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 type fakeGitHub struct {
 	mu              sync.Mutex
-	pulls           map[string]Pull
-	commits         map[string]gitCommit
+	pulls           map[string]ghapi.Pull
+	commits         map[string]ghapi.Commit
 	commitErrs      map[string]error
-	reviews         map[string][]Review
-	comments        map[string][]IssueComment
-	reviewComments  map[string][]ReviewComment
-	issueReactions  map[string][]Reaction
-	reactions       map[int64][]Reaction
+	reviews         map[string][]ghapi.Review
+	comments        map[string][]ghapi.IssueComment
+	reviewComments  map[string][]ghapi.ReviewComment
+	issueReactions  map[string][]ghapi.Reaction
+	reactions       map[int64][]ghapi.Reaction
 	posted          []string
 	deleted         []int64
 	commentID       int64
@@ -28,87 +32,87 @@ type fakeGitHub struct {
 	nextIssueNumber int
 	postErrs        map[string]error
 	graphQL         func(query string, vars map[string]any, out any) error
-	searchPRs       []SearchPR
+	searchPRs       []ghapi.SearchPR
 }
 
 func newFakeGitHub() *fakeGitHub {
 	return &fakeGitHub{
-		pulls:          map[string]Pull{},
-		commits:        map[string]gitCommit{},
+		pulls:          map[string]ghapi.Pull{},
+		commits:        map[string]ghapi.Commit{},
 		commitErrs:     map[string]error{},
-		reviews:        map[string][]Review{},
-		comments:       map[string][]IssueComment{},
-		reviewComments: map[string][]ReviewComment{},
-		issueReactions: map[string][]Reaction{},
-		reactions:      map[int64][]Reaction{},
+		reviews:        map[string][]ghapi.Review{},
+		comments:       map[string][]ghapi.IssueComment{},
+		reviewComments: map[string][]ghapi.ReviewComment{},
+		issueReactions: map[string][]ghapi.Reaction{},
+		reactions:      map[int64][]ghapi.Reaction{},
 	}
 }
 
 func fakeKey(repo string, pr int) string { return QueueKey(repo, pr) }
 
-func (f *fakeGitHub) GetPull(_ context.Context, repo string, pr int) (Pull, error) {
+func (f *fakeGitHub) GetPull(_ context.Context, repo string, pr int) (ghapi.Pull, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	pull, ok := f.pulls[fakeKey(repo, pr)]
 	if !ok {
-		return Pull{}, errors.New("missing pull")
+		return ghapi.Pull{}, errors.New("missing pull")
 	}
 	return pull, nil
 }
 
-func (f *fakeGitHub) GetCommit(_ context.Context, repo, sha string) (gitCommit, error) {
+func (f *fakeGitHub) GetCommit(_ context.Context, repo, sha string) (ghapi.Commit, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.commitErrs[sha]; err != nil {
-		return gitCommit{}, err
+		return ghapi.Commit{}, err
 	}
 	return f.commits[sha], nil
 }
 
-func (f *fakeGitHub) ListReviews(_ context.Context, repo string, pr int) ([]Review, error) {
+func (f *fakeGitHub) ListReviews(_ context.Context, repo string, pr int) ([]ghapi.Review, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]Review(nil), f.reviews[fakeKey(repo, pr)]...), nil
+	return append([]ghapi.Review(nil), f.reviews[fakeKey(repo, pr)]...), nil
 }
 
-func (f *fakeGitHub) ListIssueComments(_ context.Context, repo string, pr int) ([]IssueComment, error) {
+func (f *fakeGitHub) ListIssueComments(_ context.Context, repo string, pr int) ([]ghapi.IssueComment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]IssueComment(nil), f.comments[fakeKey(repo, pr)]...), nil
+	return append([]ghapi.IssueComment(nil), f.comments[fakeKey(repo, pr)]...), nil
 }
 
-func (f *fakeGitHub) ListReviewComments(_ context.Context, repo string, pr int) ([]ReviewComment, error) {
+func (f *fakeGitHub) ListReviewComments(_ context.Context, repo string, pr int) ([]ghapi.ReviewComment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]ReviewComment(nil), f.reviewComments[fakeKey(repo, pr)]...), nil
+	return append([]ghapi.ReviewComment(nil), f.reviewComments[fakeKey(repo, pr)]...), nil
 }
 
-func (f *fakeGitHub) ListIssueReactions(_ context.Context, repo string, pr int) ([]Reaction, error) {
+func (f *fakeGitHub) ListIssueReactions(_ context.Context, repo string, pr int) ([]ghapi.Reaction, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]Reaction(nil), f.issueReactions[fakeKey(repo, pr)]...), nil
+	return append([]ghapi.Reaction(nil), f.issueReactions[fakeKey(repo, pr)]...), nil
 }
 
-func (f *fakeGitHub) ListCommentReactions(_ context.Context, _ string, id int64) ([]Reaction, error) {
+func (f *fakeGitHub) ListCommentReactions(_ context.Context, _ string, id int64) ([]ghapi.Reaction, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]Reaction(nil), f.reactions[id]...), nil
+	return append([]ghapi.Reaction(nil), f.reactions[id]...), nil
 }
 
-func (f *fakeGitHub) PostIssueComment(_ context.Context, repo string, pr int, body string) (IssueComment, error) {
+func (f *fakeGitHub) PostIssueComment(_ context.Context, repo string, pr int, body string) (ghapi.IssueComment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.postErrs[fakeKey(repo, pr)]; err != nil {
-		return IssueComment{}, err
+		return ghapi.IssueComment{}, err
 	}
 	f.commentID++
 	f.posted = append(f.posted, repo+"#"+strconv.Itoa(pr)+":"+body)
-	comment := IssueComment{ID: f.commentID, Body: body, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	comment := ghapi.IssueComment{ID: f.commentID, Body: body, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 	comment.User.Login = "kristofferR"
 	return comment, nil
 }
 
-func (f *fakeGitHub) CreateIssue(_ context.Context, _ string, _ string, _ string) (Issue, error) {
+func (f *fakeGitHub) CreateIssue(_ context.Context, _ string, _ string, _ string) (ghapi.Issue, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.nextIssueNumber == 0 {
@@ -116,10 +120,10 @@ func (f *fakeGitHub) CreateIssue(_ context.Context, _ string, _ string, _ string
 	}
 	f.nextIssueNumber++
 	f.createdIssues = append(f.createdIssues, f.nextIssueNumber)
-	return Issue{Number: f.nextIssueNumber, State: "open"}, nil
+	return ghapi.Issue{Number: f.nextIssueNumber, State: "open"}, nil
 }
 
-func (f *fakeGitHub) ListIssueCommentsPage(_ context.Context, repo string, pr, page, perPage int) ([]IssueComment, error) {
+func (f *fakeGitHub) ListIssueCommentsPage(_ context.Context, repo string, pr, page, perPage int) ([]ghapi.IssueComment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	all := f.comments[fakeKey(repo, pr)]
@@ -131,7 +135,7 @@ func (f *fakeGitHub) ListIssueCommentsPage(_ context.Context, repo string, pr, p
 	if end > len(all) {
 		end = len(all)
 	}
-	return append([]IssueComment(nil), all[start:end]...), nil
+	return append([]ghapi.IssueComment(nil), all[start:end]...), nil
 }
 
 func (f *fakeGitHub) DeleteIssueComment(_ context.Context, repo string, id int64) error {
@@ -149,13 +153,13 @@ func (f *fakeGitHub) DeleteIssueComment(_ context.Context, repo string, id int64
 	return nil
 }
 
-func (f *fakeGitHub) SearchOpenPRs(context.Context, string, bool, int) ([]SearchPR, error) {
+func (f *fakeGitHub) SearchOpenPRs(context.Context, string, bool, int) ([]ghapi.SearchPR, error) {
 	return nil, nil
 }
 
-func (f *fakeGitHub) EachOpenPR(_ context.Context, _ string, _ bool, fn func(SearchPR) (bool, error)) error {
+func (f *fakeGitHub) EachOpenPR(_ context.Context, _ string, _ bool, fn func(ghapi.SearchPR) (bool, error)) error {
 	f.mu.Lock()
-	prs := append([]SearchPR(nil), f.searchPRs...)
+	prs := append([]ghapi.SearchPR(nil), f.searchPRs...)
 	f.mu.Unlock()
 	for _, pr := range prs {
 		stop, err := fn(pr)
@@ -331,13 +335,13 @@ func TestPruneCalibrationDeletesOldNoiseKeepsRecent(t *testing.T) {
 	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
 	now := time.Now().UTC()
 	old := now.Add(-time.Hour)
-	mkc := func(id int64, login, body string, at time.Time) IssueComment {
-		c := IssueComment{ID: id, Body: body, CreatedAt: at, UpdatedAt: at}
+	mkc := func(id int64, login, body string, at time.Time) ghapi.IssueComment {
+		c := ghapi.IssueComment{ID: id, Body: body, CreatedAt: at, UpdatedAt: at}
 		c.User.Login = login
 		return c
 	}
 	key := fakeKey("o/gate", 1)
-	gh.comments[key] = []IssueComment{
+	gh.comments[key] = []ghapi.IssueComment{
 		mkc(1, "kristofferR", "@coderabbitai rate limit", old),
 		mkc(2, "coderabbitai[bot]", "0 reviews remaining. auto-generated reply by CodeRabbit", old),
 		mkc(3, "someone", "unrelated human comment", old),
@@ -391,13 +395,13 @@ func TestAutoReviewScanSkipsConfiguredAuthors(t *testing.T) {
 		SkipAuthors:       authorSet("dependabot[bot]"),
 	}
 	gh := newFakeGitHub()
-	gh.searchPRs = []SearchPR{
+	gh.searchPRs = []ghapi.SearchPR{
 		{Repo: "o/app", Number: 1, Author: "dependabot[bot]"},
 		{Repo: "o/app", Number: 2, Author: "Dependabot"},
 		{Repo: "o/app", Number: 3, Author: "alice"},
 	}
 	for pr := 1; pr <= 3; pr++ {
-		var pull Pull
+		var pull ghapi.Pull
 		pull.State = "open"
 		pull.Head.SHA = "abcdef1234567890"
 		gh.pulls[fakeKey("o/app", pr)] = pull
@@ -433,12 +437,12 @@ func TestAutoReviewScanSkipsMarkedPRs(t *testing.T) {
 		SkipMarker:        "<!-- crq:skip-autoreview -->",
 	}
 	gh := newFakeGitHub()
-	gh.searchPRs = []SearchPR{
+	gh.searchPRs = []ghapi.SearchPR{
 		{Repo: "o/app", Number: 1, Author: "alice", Body: "Tiny maintenance change.\n\n<!-- crq:skip-autoreview -->"},
 		{Repo: "o/app", Number: 2, Author: "alice", Body: "Review this change."},
 	}
 	for pr := 1; pr <= 2; pr++ {
-		var pull Pull
+		var pull ghapi.Pull
 		pull.State = "open"
 		pull.Head.SHA = "abcdef1234567890"
 		gh.pulls[fakeKey("o/app", pr)] = pull
@@ -495,9 +499,9 @@ func TestLatestCalibrationReplyToleratesBotSuffix(t *testing.T) {
 	gh := newFakeGitHub()
 	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
 	now := time.Now().UTC()
-	comment := IssueComment{Body: "0 reviews remaining. auto-generated reply by CodeRabbit", UpdatedAt: now}
+	comment := ghapi.IssueComment{Body: "0 reviews remaining. auto-generated reply by CodeRabbit", UpdatedAt: now}
 	comment.User.Login = "coderabbitai[bot]"
-	gh.comments[fakeKey("o/gate", 1)] = []IssueComment{comment}
+	gh.comments[fakeKey("o/gate", 1)] = []ghapi.IssueComment{comment}
 
 	got, ok, err := svc.latestCalibrationReply(context.Background(), 1, now.Add(-time.Minute))
 	if err != nil {
@@ -545,7 +549,7 @@ func TestEnqueueIsIdempotentAndPumpFiresOnce(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls["owner/repo#12"] = pull
@@ -590,7 +594,7 @@ func TestPumpPersistsPostedReviewAfterTransientStateFailure(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls["owner/repo#12"] = pull
@@ -619,12 +623,11 @@ func TestPumpPersistsPostedReviewAfterTransientStateFailure(t *testing.T) {
 	if firedMarker(&state, "owner/repo", 12) != "abcdef123" {
 		t.Fatalf("fired marker was not persisted after retry")
 	}
-	wait := waitView(&state, "owner/repo", 12)
-	if wait.Head != "abcdef123" || r.FiredAt == nil || !wait.StartedAt.Equal(*r.FiredAt) {
-		t.Fatalf("feedback wait should start at the fired timestamp, wait=%#v round=%#v", wait, r)
+	if r.FiredAt == nil || r.WaitDeadline == nil {
+		t.Fatalf("feedback wait should be set on the fired round: %#v", r)
 	}
-	if wait.Deadline.Sub(wait.StartedAt) != cfg.FeedbackWaitTimeout {
-		t.Fatalf("feedback wait deadline should use CRQ_FEEDBACK_WAIT_TIMEOUT, got %s", wait.Deadline.Sub(wait.StartedAt))
+	if r.WaitDeadline.Sub(*r.FiredAt) != cfg.FeedbackWaitTimeout {
+		t.Fatalf("feedback wait deadline should use CRQ_FEEDBACK_WAIT_TIMEOUT, got %s", r.WaitDeadline.Sub(*r.FiredAt))
 	}
 }
 
@@ -633,16 +636,16 @@ func TestPumpAdoptsExistingReviewCommandWithoutRefiring(t *testing.T) {
 	cfg := firingConfig()
 	gh := newFakeGitHub()
 	headTime := time.Now().UTC().Add(-time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	gc := gitCommit{SHA: pull.Head.SHA}
+	gc := ghapi.Commit{SHA: pull.Head.SHA}
 	gc.Committer.Date = headTime
 	gh.commits[pull.Head.SHA] = gc
-	comment := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: headTime.Add(30 * time.Second), UpdatedAt: headTime.Add(30 * time.Second)}
+	comment := ghapi.IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: headTime.Add(30 * time.Second), UpdatedAt: headTime.Add(30 * time.Second)}
 	comment.User.Login = "kristofferR"
-	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{comment}
 	store := NewMemoryStore(cfg)
 	service := NewService(cfg, gh, store, nil)
 
@@ -670,8 +673,11 @@ func TestPumpAdoptsExistingReviewCommandWithoutRefiring(t *testing.T) {
 	if firedMarker(&state, "owner/repo", 12) != "abcdef123" {
 		t.Fatalf("existing review command should restore fired dedupe state")
 	}
-	if wait := waitView(&state, "owner/repo", 12); wait.Head != "abcdef123" || !wait.StartedAt.Equal(comment.CreatedAt) {
-		t.Fatalf("existing review command should create a feedback wait from the comment timestamp, got %#v", wait)
+	if r.FiredAt == nil || !r.FiredAt.Equal(comment.CreatedAt) {
+		t.Fatalf("adopted review command should set the fired timestamp from the comment, got %#v", r)
+	}
+	if r.WaitDeadline == nil || !r.WaitDeadline.Equal(comment.CreatedAt.Add(cfg.FeedbackWaitTimeout)) {
+		t.Fatalf("adopted review command should set the feedback wait deadline from the comment timestamp, got %#v", r)
 	}
 }
 
@@ -680,21 +686,21 @@ func TestAdoptableCommandsRequiresExpectedHead(t *testing.T) {
 	cfg := Config{GateRepo: "owner/gate", Host: "testhost", Bot: "coderabbitai[bot]", ReviewCommand: "@coderabbitai review"}
 	gh := newFakeGitHub()
 	headTime := time.Now().UTC().Add(-time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef9994567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	gc := gitCommit{SHA: pull.Head.SHA}
+	gc := ghapi.Commit{SHA: pull.Head.SHA}
 	gc.Committer.Date = headTime
 	gh.commits[pull.Head.SHA] = gc
-	comment := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: headTime.Add(30 * time.Second), UpdatedAt: headTime.Add(30 * time.Second)}
+	comment := ghapi.IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: headTime.Add(30 * time.Second), UpdatedAt: headTime.Add(30 * time.Second)}
 	comment.User.Login = "kristofferR"
-	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{comment}
 	service := NewService(cfg, gh, NewMemoryStore(cfg), nil)
 
 	comments, _ := gh.ListIssueComments(ctx, "owner/repo", 12)
 	reviews, _ := gh.ListReviews(ctx, "owner/repo", 12)
-	cmds, err := service.adoptableCommands(ctx, "owner/repo", 12, "abcdef123", time.Time{}, pull, comments, reviews)
+	cmds, err := service.adoptableCommands(ctx, "owner/repo", 12, engine.Observation{Head: "abcdef123", Open: true}, time.Time{}, pull, comments, reviews)
 	if err != nil || len(cmds) != 0 {
 		t.Fatalf("must not adopt a review command after the PR head changed, cmds=%v err=%v", cmds, err)
 	}
@@ -706,16 +712,16 @@ func TestPumpDryRunDoesNotAdoptExistingCommand(t *testing.T) {
 	cfg.DryRun = true
 	gh := newFakeGitHub()
 	headTime := time.Now().UTC().Add(-time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	gc := gitCommit{SHA: pull.Head.SHA}
+	gc := ghapi.Commit{SHA: pull.Head.SHA}
 	gc.Committer.Date = headTime
 	gh.commits[pull.Head.SHA] = gc
-	comment := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: headTime.Add(30 * time.Second), UpdatedAt: headTime.Add(30 * time.Second)}
+	comment := ghapi.IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: headTime.Add(30 * time.Second), UpdatedAt: headTime.Add(30 * time.Second)}
 	comment.User.Login = "kristofferR"
-	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{comment}
 	store := NewMemoryStore(cfg)
 	service := NewService(cfg, gh, store, nil)
 
@@ -739,16 +745,16 @@ func TestPumpIgnoresStaleCommandAfterRequeue(t *testing.T) {
 	cfg := firingConfig()
 	gh := newFakeGitHub()
 	headTime := time.Now().UTC().Add(-time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	gc := gitCommit{SHA: pull.Head.SHA}
+	gc := ghapi.Commit{SHA: pull.Head.SHA}
 	gc.Committer.Date = headTime
 	gh.commits[pull.Head.SHA] = gc
-	stale := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: headTime.Add(10 * time.Second), UpdatedAt: headTime.Add(10 * time.Second)}
+	stale := ghapi.IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: headTime.Add(10 * time.Second), UpdatedAt: headTime.Add(10 * time.Second)}
 	stale.User.Login = "kristofferR"
-	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{stale}
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{stale}
 	store := NewMemoryStore(cfg)
 	service := NewService(cfg, gh, store, nil)
 
@@ -788,16 +794,16 @@ func TestPumpDoesNotAdoptCommandOlderThanForcePush(t *testing.T) {
 	commitTime := time.Now().UTC().Add(-time.Hour)
 	staleAt := commitTime.Add(10 * time.Minute)
 	forcePushAt := commitTime.Add(30 * time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	gc := gitCommit{SHA: pull.Head.SHA}
+	gc := ghapi.Commit{SHA: pull.Head.SHA}
 	gc.Committer.Date = commitTime
 	gh.commits[pull.Head.SHA] = gc
-	stale := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: staleAt, UpdatedAt: staleAt}
+	stale := ghapi.IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: staleAt, UpdatedAt: staleAt}
 	stale.User.Login = "kristofferR"
-	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{stale}
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{stale}
 	gh.graphQL = func(_ string, _ map[string]any, out any) error {
 		payload := `{"repository":{"pullRequest":{"timelineItems":{"nodes":[{"createdAt":"` + forcePushAt.Format(time.RFC3339) + `"}]}}}}`
 		return json.Unmarshal([]byte(payload), out)
@@ -826,19 +832,19 @@ func TestPumpDoesNotAdoptCommandAlreadyAnsweredByReview(t *testing.T) {
 	gh := newFakeGitHub()
 	commitTime := time.Now().UTC().Add(-time.Hour)
 	commandAt := commitTime.Add(10 * time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	gc := gitCommit{SHA: pull.Head.SHA}
+	gc := ghapi.Commit{SHA: pull.Head.SHA}
 	gc.Committer.Date = commitTime
 	gh.commits[pull.Head.SHA] = gc
-	command := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: commandAt, UpdatedAt: commandAt}
+	command := ghapi.IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: commandAt, UpdatedAt: commandAt}
 	command.User.Login = "kristofferR"
-	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{command}
-	answered := Review{SubmittedAt: commandAt.Add(5 * time.Minute), CommitID: "9876543210fedcba"}
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{command}
+	answered := ghapi.Review{SubmittedAt: commandAt.Add(5 * time.Minute), CommitID: "9876543210fedcba"}
 	answered.User.Login = cfg.Bot
-	gh.reviews[fakeKey("owner/repo", 12)] = []Review{answered}
+	gh.reviews[fakeKey("owner/repo", 12)] = []ghapi.Review{answered}
 	store := NewMemoryStore(cfg)
 	service := NewService(cfg, gh, store, nil)
 
@@ -863,18 +869,18 @@ func TestPumpDoesNotAdoptCommandAlreadyAnsweredByCompletionReply(t *testing.T) {
 	gh := newFakeGitHub()
 	commitTime := time.Now().UTC().Add(-time.Hour)
 	commandAt := commitTime.Add(10 * time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	gc := gitCommit{SHA: pull.Head.SHA}
+	gc := ghapi.Commit{SHA: pull.Head.SHA}
 	gc.Committer.Date = commitTime
 	gh.commits[pull.Head.SHA] = gc
-	command := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: commandAt, UpdatedAt: commandAt}
+	command := ghapi.IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: commandAt, UpdatedAt: commandAt}
 	command.User.Login = "kristofferR"
-	reply := IssueComment{ID: 78, Body: "<!-- This is an auto-generated reply by CodeRabbit -->\nReview finished.", CreatedAt: commandAt.Add(time.Minute), UpdatedAt: commandAt.Add(time.Minute)}
+	reply := ghapi.IssueComment{ID: 78, Body: "<!-- This is an auto-generated reply by CodeRabbit -->\nReview finished.", CreatedAt: commandAt.Add(time.Minute), UpdatedAt: commandAt.Add(time.Minute)}
 	reply.User.Login = cfg.Bot
-	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{command, reply}
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{command, reply}
 	store := NewMemoryStore(cfg)
 	service := NewService(cfg, gh, store, nil)
 
@@ -899,25 +905,25 @@ func TestPumpAdoptsCompletionAnsweredCommandWhileTopSummaryIsProcessing(t *testi
 	gh := newFakeGitHub()
 	commitTime := time.Now().UTC().Add(-time.Hour)
 	commandAt := commitTime.Add(10 * time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	gc := gitCommit{SHA: pull.Head.SHA}
+	gc := ghapi.Commit{SHA: pull.Head.SHA}
 	gc.Committer.Date = commitTime
 	gh.commits[pull.Head.SHA] = gc
-	command := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: commandAt, UpdatedAt: commandAt}
+	command := ghapi.IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: commandAt, UpdatedAt: commandAt}
 	command.User.Login = "kristofferR"
-	reply := IssueComment{ID: 78, Body: "<!-- This is an auto-generated reply by CodeRabbit -->\nReview finished.", CreatedAt: commandAt.Add(time.Minute), UpdatedAt: commandAt.Add(time.Minute)}
+	reply := ghapi.IssueComment{ID: 78, Body: "<!-- This is an auto-generated reply by CodeRabbit -->\nReview finished.", CreatedAt: commandAt.Add(time.Minute), UpdatedAt: commandAt.Add(time.Minute)}
 	reply.User.Login = cfg.Bot
-	summary := IssueComment{
+	summary := ghapi.IssueComment{
 		ID:        79,
 		Body:      "<!-- review in progress by coderabbit.ai -->\nCurrently processing new changes in this PR. This may take a few minutes, please wait...",
 		CreatedAt: commandAt.Add(-time.Hour),
 		UpdatedAt: commandAt.Add(2 * time.Minute),
 	}
 	summary.User.Login = cfg.Bot
-	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{summary, command, reply}
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{summary, command, reply}
 	store := NewMemoryStore(cfg)
 	service := NewService(cfg, gh, store, nil)
 
@@ -942,14 +948,14 @@ func TestPumpDryRunDoesNotDedupeMutably(t *testing.T) {
 	cfg.DryRun = true
 	cfg.FeedbackWaitTimeout = time.Hour
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
 	// The bot already reviewed the head, so DecideFire would dedupe.
-	review := Review{CommitID: "abcdef1234567890", SubmittedAt: time.Now().UTC()}
+	review := ghapi.Review{CommitID: "abcdef1234567890", SubmittedAt: time.Now().UTC()}
 	review.User.Login = cfg.Bot
-	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review}
+	gh.reviews[fakeKey("owner/repo", 12)] = []ghapi.Review{review}
 	store := NewMemoryStore(cfg)
 	service := NewService(cfg, gh, store, nil)
 
@@ -970,14 +976,14 @@ func TestPumpSkipsAdoptionWhenCommitLookupFails(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
 	gh.commitErrs[pull.Head.SHA] = errors.New("404 not found")
-	comment := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: time.Now().UTC().Add(-30 * time.Second), UpdatedAt: time.Now().UTC().Add(-30 * time.Second)}
+	comment := ghapi.IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: time.Now().UTC().Add(-30 * time.Second), UpdatedAt: time.Now().UTC().Add(-30 * time.Second)}
 	comment.User.Login = "kristofferR"
-	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{comment}
 	store := NewMemoryStore(cfg)
 	service := NewService(cfg, gh, store, nil)
 
@@ -1003,13 +1009,13 @@ func TestPumpCompletesRoundWhenReviewSubmitted(t *testing.T) {
 	cfg.FeedbackWaitTimeout = time.Hour
 	gh := newFakeGitHub()
 	firedAt := time.Now().UTC().Add(-5 * time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	review := Review{CommitID: "abcdef1234567890", SubmittedAt: firedAt.Add(time.Minute)}
+	review := ghapi.Review{CommitID: "abcdef1234567890", SubmittedAt: firedAt.Add(time.Minute)}
 	review.User.Login = cfg.Bot
-	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review}
+	gh.reviews[fakeKey("owner/repo", 12)] = []ghapi.Review{review}
 	store := NewMemoryStore(cfg)
 	service := NewService(cfg, gh, store, nil)
 	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseFired, firedAt, 5)
@@ -1034,19 +1040,19 @@ func TestPumpCompletesRoundOnCompletionReply(t *testing.T) {
 	cfg.FeedbackWaitTimeout = time.Hour
 	gh := newFakeGitHub()
 	firedAt := time.Now().UTC().Add(-5 * time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	command := IssueComment{ID: 5, Body: cfg.ReviewCommand, CreatedAt: firedAt, UpdatedAt: firedAt}
+	command := ghapi.IssueComment{ID: 5, Body: cfg.ReviewCommand, CreatedAt: firedAt, UpdatedAt: firedAt}
 	command.User.Login = "kristofferR"
-	reply := IssueComment{ID: 6, Body: "<!-- This is an auto-generated reply by CodeRabbit -->\nReview finished.", CreatedAt: firedAt.Add(time.Minute), UpdatedAt: firedAt.Add(time.Minute)}
+	reply := ghapi.IssueComment{ID: 6, Body: "<!-- This is an auto-generated reply by CodeRabbit -->\nReview finished.", CreatedAt: firedAt.Add(time.Minute), UpdatedAt: firedAt.Add(time.Minute)}
 	reply.User.Login = cfg.Bot
-	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{command, reply}
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{command, reply}
 	// A completion-only round is a re-review: a prior review must exist.
-	prior := Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour)}
+	prior := ghapi.Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour)}
 	prior.User.Login = cfg.Bot
-	gh.reviews[fakeKey("owner/repo", 12)] = []Review{prior}
+	gh.reviews[fakeKey("owner/repo", 12)] = []ghapi.Review{prior}
 	store := NewMemoryStore(cfg)
 	service := NewService(cfg, gh, store, nil)
 	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseFired, firedAt, command.ID)
@@ -1075,15 +1081,15 @@ func TestPumpKeepsRoundReviewingOnCompletionReplyForUnreviewedPR(t *testing.T) {
 	cfg.FeedbackWaitTimeout = time.Hour
 	gh := newFakeGitHub()
 	firedAt := time.Now().UTC().Add(-5 * time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	command := IssueComment{ID: 5, Body: cfg.ReviewCommand, CreatedAt: firedAt, UpdatedAt: firedAt}
+	command := ghapi.IssueComment{ID: 5, Body: cfg.ReviewCommand, CreatedAt: firedAt, UpdatedAt: firedAt}
 	command.User.Login = "kristofferR"
-	reply := IssueComment{ID: 6, Body: "<!-- This is an auto-generated reply by CodeRabbit -->\n✅ Action performed\n\nReview finished.", CreatedAt: firedAt.Add(5 * time.Second), UpdatedAt: firedAt.Add(5 * time.Second)}
+	reply := ghapi.IssueComment{ID: 6, Body: "<!-- This is an auto-generated reply by CodeRabbit -->\n✅ Action performed\n\nReview finished.", CreatedAt: firedAt.Add(5 * time.Second), UpdatedAt: firedAt.Add(5 * time.Second)}
 	reply.User.Login = cfg.Bot
-	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{command, reply}
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{command, reply}
 	store := NewMemoryStore(cfg)
 	service := NewService(cfg, gh, store, nil)
 	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseFired, firedAt, command.ID)
@@ -1095,7 +1101,7 @@ func TestPumpKeepsRoundReviewingOnCompletionReplyForUnreviewedPR(t *testing.T) {
 		t.Fatalf("the round must survive a completion reply on a never-reviewed PR (reviewing), got %s", p)
 	}
 	st, _, _ := store.Load(ctx)
-	if waitView(&st, "owner/repo", 12).Head != "abcdef123" {
+	if waitingHead(&st, "owner/repo", 12) != "abcdef123" {
 		t.Fatalf("the feedback wait must survive a completion reply on a never-reviewed PR")
 	}
 }
@@ -1107,13 +1113,13 @@ func TestPumpKeepsRoundReviewingWhenBotOnlyReacted(t *testing.T) {
 	cfg.FeedbackWaitTimeout = time.Hour
 	gh := newFakeGitHub()
 	firedAt := time.Now().UTC().Add(-time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	reaction := Reaction{}
+	reaction := ghapi.Reaction{}
 	reaction.User.Login = cfg.Bot
-	gh.reactions[5] = []Reaction{reaction}
+	gh.reactions[5] = []ghapi.Reaction{reaction}
 	store := NewMemoryStore(cfg)
 	service := NewService(cfg, gh, store, nil)
 	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseFired, firedAt, 5)
@@ -1138,13 +1144,13 @@ func TestPumpKeepsRoundOpenUntilAllRequiredBotsReview(t *testing.T) {
 	cfg.FeedbackWaitTimeout = time.Hour
 	gh := newFakeGitHub()
 	firedAt := time.Now().UTC().Add(-5 * time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	review := Review{SubmittedAt: firedAt.Add(time.Minute), CommitID: "abcdef1234567890"}
+	review := ghapi.Review{SubmittedAt: firedAt.Add(time.Minute), CommitID: "abcdef1234567890"}
 	review.User.Login = cfg.Bot
-	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review}
+	gh.reviews[fakeKey("owner/repo", 12)] = []ghapi.Review{review}
 	store := NewMemoryStore(cfg)
 	service := NewService(cfg, gh, store, nil)
 	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseFired, firedAt, 5)
@@ -1157,9 +1163,9 @@ func TestPumpKeepsRoundOpenUntilAllRequiredBotsReview(t *testing.T) {
 	}
 
 	// A required-bot review for a different commit must not complete it.
-	staleCodex := Review{SubmittedAt: firedAt.Add(2 * time.Minute), CommitID: "0123456789abcdef"}
+	staleCodex := ghapi.Review{SubmittedAt: firedAt.Add(2 * time.Minute), CommitID: "0123456789abcdef"}
 	staleCodex.User.Login = "chatgpt-codex-connector"
-	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review, staleCodex}
+	gh.reviews[fakeKey("owner/repo", 12)] = []ghapi.Review{review, staleCodex}
 	if _, err := service.Pump(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1168,9 +1174,9 @@ func TestPumpKeepsRoundOpenUntilAllRequiredBotsReview(t *testing.T) {
 	}
 
 	// The head review completes it.
-	codex := Review{SubmittedAt: firedAt.Add(3 * time.Minute), CommitID: "abcdef1234567890"}
+	codex := ghapi.Review{SubmittedAt: firedAt.Add(3 * time.Minute), CommitID: "abcdef1234567890"}
 	codex.User.Login = "chatgpt-codex-connector"
-	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review, staleCodex, codex}
+	gh.reviews[fakeKey("owner/repo", 12)] = []ghapi.Review{review, staleCodex, codex}
 	if _, err := service.Pump(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1185,7 +1191,7 @@ func TestPumpSweepsReviewingRoundToCompletion(t *testing.T) {
 	cfg.FeedbackWaitTimeout = time.Hour
 	gh := newFakeGitHub()
 	firedAt := time.Now().UTC().Add(-5 * time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
@@ -1201,9 +1207,9 @@ func TestPumpSweepsReviewingRoundToCompletion(t *testing.T) {
 		t.Fatalf("the round must stay reviewing while the review is still running, got %s", p)
 	}
 
-	review := Review{SubmittedAt: firedAt.Add(2 * time.Minute), CommitID: "abcdef1234567890"}
+	review := ghapi.Review{SubmittedAt: firedAt.Add(2 * time.Minute), CommitID: "abcdef1234567890"}
 	review.User.Login = cfg.Bot
-	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review}
+	gh.reviews[fakeKey("owner/repo", 12)] = []ghapi.Review{review}
 	if _, err := service.Pump(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1218,7 +1224,7 @@ func TestPumpDryRunDoesNotSweepReviewing(t *testing.T) {
 	cfg.DryRun = true
 	cfg.FeedbackWaitTimeout = time.Hour
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
@@ -1239,16 +1245,16 @@ func TestPumpTreatsExistingReviewAdoptionRaceAsLostRace(t *testing.T) {
 	cfg := firingConfig()
 	gh := newFakeGitHub()
 	headTime := time.Now().UTC().Add(-time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	gc := gitCommit{SHA: pull.Head.SHA}
+	gc := ghapi.Commit{SHA: pull.Head.SHA}
 	gc.Committer.Date = headTime
 	gh.commits[pull.Head.SHA] = gc
-	comment := IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: headTime.Add(30 * time.Second), UpdatedAt: headTime.Add(30 * time.Second)}
+	comment := ghapi.IssueComment{ID: 77, Body: cfg.ReviewCommand, CreatedAt: headTime.Add(30 * time.Second), UpdatedAt: headTime.Add(30 * time.Second)}
 	comment.User.Login = "kristofferR"
-	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{comment}
 	loadState := DefaultState(cfg)
 	r, _ := loadState.NewRound("owner/repo", 12, "abcdef123", headTime)
 	loadState.PutRound(*r)
@@ -1283,13 +1289,13 @@ func TestWaitReenqueuesAfterClearingStaleRound(t *testing.T) {
 	cfg.InflightTimeout = time.Hour
 	cfg.WaitTimeout = time.Second
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef9994567890"
 	gh.pulls["owner/repo#12"] = pull
-	review := Review{CommitID: "abcdef1234567890", SubmittedAt: now.Add(time.Second)}
+	review := ghapi.Review{CommitID: "abcdef1234567890", SubmittedAt: now.Add(time.Second)}
 	review.User.Login = "coderabbitai[bot]"
-	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review}
+	gh.reviews[fakeKey("owner/repo", 12)] = []ghapi.Review{review}
 	store := NewMemoryStore(cfg)
 	// A stale fired round for a head that has since moved (abcdef123 → abcdef999).
 	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseFired, now, 7)
@@ -1315,11 +1321,11 @@ func TestWaitFiresRealReviewWhenOnlyCarriedThreadVisible(t *testing.T) {
 	cfg.WaitTimeout = time.Second
 	gh := newFakeGitHub()
 	headTime := time.Now().UTC().Add(-time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	gc := gitCommit{SHA: pull.Head.SHA}
+	gc := ghapi.Commit{SHA: pull.Head.SHA}
 	gc.Committer.Date = headTime
 	gh.commits[pull.Head.SHA] = gc
 	threadCreated := headTime.Add(-time.Hour).Format(time.RFC3339)
@@ -1356,16 +1362,16 @@ func TestWaitReturnsCurrentHeadFeedbackBeforeReviewSlot(t *testing.T) {
 	cfg.WaitTimeout = time.Second
 	gh := newFakeGitHub()
 	headTime := time.Now().UTC().Add(-time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	gc := gitCommit{SHA: pull.Head.SHA}
+	gc := ghapi.Commit{SHA: pull.Head.SHA}
 	gc.Committer.Date = headTime
 	gh.commits[pull.Head.SHA] = gc
-	comment := IssueComment{ID: 91, Body: "Actionable Codex finding on the queued head", CreatedAt: headTime.Add(time.Second), UpdatedAt: headTime.Add(time.Second)}
+	comment := ghapi.IssueComment{ID: 91, Body: "Actionable Codex finding on the queued head", CreatedAt: headTime.Add(time.Second), UpdatedAt: headTime.Add(time.Second)}
 	comment.User.Login = "chatgpt-codex-connector[bot]"
-	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{comment}
 	service := NewService(cfg, gh, NewMemoryStore(cfg), nil)
 
 	result, code, err := service.Wait(ctx, "owner/repo", 12)
@@ -1389,21 +1395,21 @@ func TestWaitFiresRealReviewWhenOnlyCarriedReviewPromptVisible(t *testing.T) {
 	cfg.WaitTimeout = time.Second
 	gh := newFakeGitHub()
 	headTime := time.Now().UTC().Add(-time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	gc := gitCommit{SHA: pull.Head.SHA}
+	gc := ghapi.Commit{SHA: pull.Head.SHA}
 	gc.Committer.Date = headTime
 	gh.commits[pull.Head.SHA] = gc
-	stale := Review{
+	stale := ghapi.Review{
 		ID:          7,
 		Body:        "<details><summary>Prompt for AI agents</summary>\n\n```\nIn `@a.go`:\n- Around line 1: Carried-over finding.\n```\n</details>",
 		CommitID:    "fedcba9876543210",
 		SubmittedAt: headTime.Add(-time.Hour),
 	}
 	stale.User.Login = "coderabbitai[bot]"
-	gh.reviews[fakeKey("owner/repo", 12)] = []Review{stale}
+	gh.reviews[fakeKey("owner/repo", 12)] = []ghapi.Review{stale}
 	store := NewMemoryStore(cfg)
 	service := NewService(cfg, gh, store, nil)
 
@@ -1428,21 +1434,21 @@ func TestWaitRepairsPoisonedCompletedRoundWithOnlyCarriedReviewPrompt(t *testing
 	cfg.WaitTimeout = time.Second
 	gh := newFakeGitHub()
 	headTime := time.Now().UTC().Add(-time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	gc := gitCommit{SHA: pull.Head.SHA}
+	gc := ghapi.Commit{SHA: pull.Head.SHA}
 	gc.Committer.Date = headTime
 	gh.commits[pull.Head.SHA] = gc
-	stale := Review{
+	stale := ghapi.Review{
 		ID:          7,
 		Body:        "<details><summary>Prompt for AI agents</summary>\n\n```\nIn `@a.go`:\n- Around line 1: Carried-over finding.\n```\n</details>",
 		CommitID:    "fedcba9876543210",
 		SubmittedAt: headTime.Add(-time.Hour),
 	}
 	stale.User.Login = "coderabbitai[bot]"
-	gh.reviews[fakeKey("owner/repo", 12)] = []Review{stale}
+	gh.reviews[fakeKey("owner/repo", 12)] = []ghapi.Review{stale}
 	store := NewMemoryStore(cfg)
 	// A poisoned completed round at the head with no real head review.
 	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseCompleted, headTime, 0)
@@ -1463,13 +1469,13 @@ func TestWaitRepairsPoisonedCompletedRoundWithOnlyCarriedReviewPrompt(t *testing
 func TestNeedsReviewToleratesBotSuffix(t *testing.T) {
 	cfg := Config{Bot: "coderabbitai", GateRepo: "o/gate", Scope: []string{"o"}, ReviewDoneMarker: "summarize by coderabbit.ai"}
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("o/repo", 5)] = pull
-	review := Review{CommitID: "abcdef1234567890"}
+	review := ghapi.Review{CommitID: "abcdef1234567890"}
 	review.User.Login = "coderabbitai[bot]"
-	gh.reviews[fakeKey("o/repo", 5)] = []Review{review}
+	gh.reviews[fakeKey("o/repo", 5)] = []ghapi.Review{review}
 	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
 
 	need, _, err := svc.needsReview(context.Background(), DefaultState(cfg), "o/repo", 5, true)
@@ -1481,9 +1487,9 @@ func TestNeedsReviewToleratesBotSuffix(t *testing.T) {
 	}
 
 	gh.reviews[fakeKey("o/repo", 5)] = nil
-	comment := IssueComment{Body: "finished; summarize by coderabbit.ai"}
+	comment := ghapi.IssueComment{Body: "finished; summarize by coderabbit.ai"}
 	comment.User.Login = "coderabbitai[bot]"
-	gh.comments[fakeKey("o/repo", 5)] = []IssueComment{comment}
+	gh.comments[fakeKey("o/repo", 5)] = []ghapi.IssueComment{comment}
 	need, _, err = svc.needsReview(context.Background(), DefaultState(cfg), "o/repo", 5, false)
 	if err != nil {
 		t.Fatal(err)
@@ -1498,7 +1504,7 @@ func TestNeedsReviewSkipsTrackedHeadButNotNewHead(t *testing.T) {
 	cfg := Config{Bot: "coderabbitai", Host: "h"}
 	gh := newFakeGitHub()
 	head := "a0646f010"
-	pull := Pull{State: "open"}
+	pull := ghapi.Pull{State: "open"}
 	pull.Head.SHA = head + "aaaaaa0"
 	gh.pulls[fakeKey("o/carrier", 82)] = pull
 	store := NewMemoryStore(cfg)
@@ -1543,7 +1549,7 @@ func TestPumpDropsClosedPRWithoutFiring(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "closed"
 	pull.Merged = true
 	pull.Head.SHA = "abcdef1234567890"
@@ -1573,7 +1579,7 @@ func TestPumpDropsClosedPRWhileReviewQuotaIsBlocked(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "closed"
 	pull.Merged = true
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
@@ -1619,7 +1625,7 @@ func TestEnqueueDedupesAlreadyReviewedHead(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls["owner/repo#7"] = pull
@@ -1643,7 +1649,7 @@ func TestRateLimitedRoundParksAndBlocksAccount(t *testing.T) {
 	cfg.InflightTimeout = time.Hour
 	gh := newFakeGitHub()
 	head := "a0646f010"
-	pull := Pull{State: "open"}
+	pull := ghapi.Pull{State: "open"}
 	pull.Head.SHA = head + "abcdef0"
 	gh.pulls[fakeKey("o/carrier", 82)] = pull
 	store := NewMemoryStore(cfg)
@@ -1663,11 +1669,11 @@ func TestRateLimitedRoundParksAndBlocksAccount(t *testing.T) {
 	// CodeRabbit answers with a rate-limit comment and an already-reviewed claim,
 	// but no review object. The round must park (retry later), not complete.
 	answer := time.Now().UTC().Add(time.Minute)
-	rl := IssueComment{ID: 501, Body: "<!-- rate limited by coderabbit.ai -->\n> ## Review limit reached\n> **Next review available in:** **40 minutes**", CreatedAt: answer, UpdatedAt: answer}
+	rl := ghapi.IssueComment{ID: 501, Body: "<!-- rate limited by coderabbit.ai -->\n> ## Review limit reached\n> **Next review available in:** **40 minutes**", CreatedAt: answer, UpdatedAt: answer}
 	rl.User.Login = "coderabbitai[bot]"
-	ack := IssueComment{ID: 502, Body: "<details><summary>✅ Action performed</summary>\n\nReview finished.\n\n> Note: CodeRabbit is an incremental review system and does not re-review already reviewed commits.</details>", CreatedAt: answer, UpdatedAt: answer}
+	ack := ghapi.IssueComment{ID: 502, Body: "<details><summary>✅ Action performed</summary>\n\nReview finished.\n\n> Note: CodeRabbit is an incremental review system and does not re-review already reviewed commits.</details>", CreatedAt: answer, UpdatedAt: answer}
 	ack.User.Login = "coderabbitai[bot]"
-	gh.comments[fakeKey("o/carrier", 82)] = []IssueComment{rl, ack}
+	gh.comments[fakeKey("o/carrier", 82)] = []ghapi.IssueComment{rl, ack}
 
 	res, err = svc.Pump(ctx)
 	if err != nil {
@@ -1761,7 +1767,7 @@ func TestMemoryStoreConcurrentUpdatesDoNotLoseMutations(t *testing.T) {
 func TestParseAvailableInHandlesMarkdownAndColon(t *testing.T) {
 	base := time.Date(2026, 7, 11, 18, 24, 0, 0, time.UTC)
 	body := "## Review limit reached\n\nYou have reached your review limit.\n\n**Next review available in:** **40 minutes**"
-	got := parseAvailableIn(body, base)
+	got := dialect.ParseAvailableIn(body, base)
 	if got == nil {
 		t.Fatal("expected a parsed reset for the verbatim rate-limit body, got nil")
 	}
@@ -1772,11 +1778,11 @@ func TestParseAvailableInHandlesMarkdownAndColon(t *testing.T) {
 
 func TestParseAvailableInPlainFormatStillWorks(t *testing.T) {
 	base := time.Date(2026, 7, 11, 18, 0, 0, 0, time.UTC)
-	got := parseAvailableIn("You are rate limited. Reviews available in 3 minutes.", base)
+	got := dialect.ParseAvailableIn("You are rate limited. Reviews available in 3 minutes.", base)
 	if got == nil || !got.Equal(base.Add(3*time.Minute)) {
 		t.Fatalf("expected base+3m for the plain format, got %v", got)
 	}
-	got = parseAvailableIn("available in 1 hour and 30 minutes", base)
+	got = dialect.ParseAvailableIn("available in 1 hour and 30 minutes", base)
 	if got == nil || !got.Equal(base.Add(90*time.Minute)) {
 		t.Fatalf("expected base+90m for compound duration, got %v", got)
 	}

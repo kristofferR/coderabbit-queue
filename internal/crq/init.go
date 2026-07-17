@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 type InitResult struct {
@@ -14,7 +16,7 @@ type InitResult struct {
 	StateRef       string `json:"state_ref"`
 }
 
-func Init(ctx context.Context, cfg Config, gh *GitHub, store StateStore) (InitResult, error) {
+func Init(ctx context.Context, cfg Config, gh *ghapi.GitHub, store StateStore) (InitResult, error) {
 	if cfg.GateRepo == "" {
 		return InitResult{}, errors.New("CRQ_REPO is required for init")
 	}
@@ -57,7 +59,7 @@ func Init(ctx context.Context, cfg Config, gh *GitHub, store StateStore) (InitRe
 	}, nil
 }
 
-func ensureCalibrationPR(ctx context.Context, cfg Config, gh *GitHub) (int, error) {
+func ensureCalibrationPR(ctx context.Context, cfg Config, gh *ghapi.GitHub) (int, error) {
 	owner := ownerOf(cfg.GateRepo)
 	branch := "crq/calibration"
 	query := url.Values{}

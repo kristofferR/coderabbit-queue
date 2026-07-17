@@ -10,26 +10,43 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 type FeedbackReport struct {
-	Status     string          `json:"status"`
-	Repo       string          `json:"repo"`
-	PR         int             `json:"pr"`
-	Head       string          `json:"head"`
-	Reason     string          `json:"reason,omitempty"`
-	Converged  bool            `json:"converged"`
-	ReviewedBy map[string]bool `json:"reviewed_by"`
-	Findings   []Finding       `json:"findings"`
-	CheckedAt  time.Time       `json:"checked_at"`
+	Status     string            `json:"status"`
+	Repo       string            `json:"repo"`
+	PR         int               `json:"pr"`
+	Head       string            `json:"head"`
+	Reason     string            `json:"reason,omitempty"`
+	Converged  bool              `json:"converged"`
+	ReviewedBy map[string]bool   `json:"reviewed_by"`
+	Findings   []dialect.Finding `json:"findings"`
+	CheckedAt  time.Time         `json:"checked_at"`
 }
 
 func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackReport, error) {
 	repo = NormalizeRepo(repo)
-	pull, err := s.gh.GetPull(ctx, repo, pr)
+	now := time.Now().UTC()
+	st, _, err := s.store.Load(ctx)
 	if err != nil {
 		return FeedbackReport{}, err
 	}
+	round := st.Round(repo, pr)
+
+	// One fetch drives both halves: observe() reads the pull, reviews and issue
+	// comments (plus reactions when the round has fired). Feedback parses its
+	// findings from the raw reviews/comments and derives convergence from
+	// engine.Completion over the same snapshot — no second fetch path, and the
+	// "is head reviewed?" rules live only in the engine.
+	obs, err := s.observe(ctx, repo, pr, round, now)
+	if err != nil {
+		return FeedbackReport{}, err
+	}
+	pull := obs.pull
 	head := ""
 	if len(pull.Head.SHA) >= 9 {
 		head = pull.Head.SHA[:9]
@@ -40,27 +57,33 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		PR:         pr,
 		Head:       head,
 		ReviewedBy: map[string]bool{},
-		Findings:   []Finding{},
-		CheckedAt:  time.Now().UTC(),
+		Findings:   []dialect.Finding{},
+		CheckedAt:  now,
 	}
-	// Two bot sets with different jobs. requiredBots gates convergence: crq isn't
-	// "done" until every one has reviewed the head, so only these seed ReviewedBy.
-	// extractBots is the broader set whose findings we surface — a superset that
-	// includes Codex — so a bot that reviews without being required (and would hang
-	// convergence if it were) still has its findings reported instead of dropped.
-	requiredBots := botSet(s.cfg.RequiredBots)
-	// Always extract from the required bots too: a bot crq waits for whose findings
-	// it didn't surface would hang the loop forever. FeedbackBots only widens this.
-	extractBots := botSet(unionBots(s.cfg.FeedbackBots, s.cfg.RequiredBots))
-	for bot := range requiredBots {
-		report.ReviewedBy[bot] = false
-	}
-	completion := s.feedbackCompletionContext(ctx, repo, pr, head)
 
-	reviews, err := s.gh.ListReviews(ctx, repo, pr)
-	if err != nil {
-		return report, err
+	// The completion anchor is the current round only when it still tracks this
+	// head. A stale or missing round yields a headless anchor (FiredAt nil), so
+	// only head-matching reviews and SHA-bound Codex summaries can count — the
+	// engine's rule set reproduces v2's "no wait context" behavior.
+	completionRound := Round{Repo: repo, PR: pr, Head: head}
+	if round != nil && round.Head == head {
+		completionRound = *round
 	}
+	anchorOK := completionRound.FiredAt != nil
+	anchorCutoff := time.Time{}
+	if anchorOK {
+		anchorCutoff = completionRound.FiredAt.UTC()
+	}
+	completion := engine.Completion(completionRound, obs.eng, s.policy())
+	report.ReviewedBy = completion.ReviewedBy
+
+	// extractBots is the broader set whose findings we surface — a superset that
+	// includes Codex — so a bot that reviews without being required (and would
+	// hang convergence if it were) still has its findings reported instead of
+	// dropped. It always includes the required bots: a bot crq waits for whose
+	// findings it didn't surface would hang the loop forever.
+	extractBots := dialect.BotSet(unionBots(s.cfg.FeedbackBots, s.cfg.RequiredBots))
+
 	// Review-body findings — CodeRabbit's detailed and "Prompt for AI agents"
 	// blocks — carry no per-finding resolution state, only the review's commit.
 	// When inline comments fail to post (GitHub 5xx / code-review limits) that
@@ -69,33 +92,28 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// (a rebase, a squash-merge). Extract instead from each bot's LATEST review
 	// regardless of its commit: a newer review from the same bot supersedes it,
 	// and resolved/outdated inline threads still suppress individual prompt
-	// duplicates below. Convergence (markReviewed) stays gated to a review whose
-	// commit matches the head, so the loop still waits for a real head review.
-	latestReview := map[string]Review{}
-	for _, review := range reviews {
+	// duplicates below. Convergence (engine.Completion) stays gated to a review
+	// whose commit matches the head, so the loop still waits for a real review.
+	latestReview := map[string]ghapi.Review{}
+	for _, review := range obs.reviews {
 		login := review.User.Login
-		if !inBots(extractBots, login) {
+		if !dialect.InBots(extractBots, login) {
 			continue
 		}
 		// Once a fresh review round has started for this head, a body submitted
 		// before that round belongs to the previous head. Unresolved threads are
 		// still surfaced below across commits, while thread-less body findings
 		// must be re-reported by the current round instead of trapping the loop.
-		if completion.OK && s.isConfiguredBot(login) &&
+		if anchorOK && s.isConfiguredBot(login) &&
 			(head == "" || !strings.HasPrefix(review.CommitID, head)) &&
-			!notBefore(review.SubmittedAt, completion.Cutoff) {
+			!notBefore(review.SubmittedAt, anchorCutoff) {
 			continue
-		}
-		if head != "" && strings.HasPrefix(review.CommitID, head) {
-			// markReviewed only flips existing ReviewedBy keys (required bots), so a
-			// non-required extract bot reviewing here is a harmless no-op.
-			markReviewed(report.ReviewedBy, login)
 		}
 		if cur, ok := latestReview[login]; !ok || reviewNewer(review, cur) {
 			latestReview[login] = review
 		}
 	}
-	for _, review := range reviews {
+	for _, review := range obs.reviews {
 		if lr, ok := latestReview[review.User.Login]; !ok || lr.ID != review.ID {
 			continue
 		}
@@ -116,8 +134,8 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 				}
 			}
 		}
-	} else if isThrottled(err) {
-		// A transient GraphQL rate limit must not silently degrade to the REST
+	} else if ghapi.IsThrottled(err) {
+		// A transient GraphQL throttle must not silently degrade to the REST
 		// fallback, which loses thread resolution/outdated state and the cross-commit
 		// unresolved findings this command promises. Surface it so Loop rides it out
 		// instead of reporting converged from incomplete data.
@@ -128,19 +146,19 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 			return report, cerr
 		}
 		for _, comment := range comments {
-			if !inBots(extractBots, comment.User.Login) {
+			if !dialect.InBots(extractBots, comment.User.Login) {
 				continue
 			}
-			commit := shortOID(firstNonEmpty(comment.CommitID, comment.OriginalCommitID))
+			commit := dialect.ShortOID(firstNonEmpty(comment.CommitID, comment.OriginalCommitID))
 			if head != "" && commit != "" && commit != head {
 				continue
 			}
-			report.Findings = append(report.Findings, Finding{
+			report.Findings = append(report.Findings, dialect.Finding{
 				Bot:       comment.User.Login,
-				Severity:  severityOf(comment.Body),
+				Severity:  dialect.SeverityOf(comment.Body),
 				Path:      comment.Path,
 				Line:      firstPositive(comment.Line, comment.OriginalLine),
-				Title:     titleOf(comment.Body),
+				Title:     dialect.TitleOf(comment.Body),
 				Body:      strings.TrimSpace(comment.Body),
 				CommentID: comment.ID,
 				ReviewID:  comment.PullRequestReviewID,
@@ -152,13 +170,6 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		}
 	}
 
-	issueComments, err := s.gh.ListIssueComments(ctx, repo, pr)
-	if err != nil {
-		// Don't silently drop the issue-comment source: a rate limit or API error
-		// here would otherwise let crq report clean/converged while Codex issue
-		// comments (or completion signals) were simply never fetched.
-		return report, err
-	}
 	// Top-level issue comments carry no commit SHA, so bound them to the current
 	// head: a bot finding posted before this head was committed belongs to an earlier
 	// round and must not trap crq loop on stale, already-addressed feedback. The
@@ -176,61 +187,32 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		}
 		return headCutoff
 	}
-	for _, comment := range issueComments {
-		if !inBots(extractBots, comment.User.Login) {
+	for _, comment := range obs.comments {
+		if !dialect.InBots(extractBots, comment.User.Login) {
 			continue
 		}
-		if s.isRateLimited(comment.Body) {
+		if s.cr.IsRateLimited(comment.Body) {
+			continue // an account-quota notice is never a finding
+		}
+		// Codex clean-review summaries and every configured-bot issue comment are
+		// completion signals, not actionable findings: engine.Completion already
+		// folded them into ReviewedBy, so they are never surfaced here.
+		if dialect.IsCodexBot(comment.User.Login) && dialect.IsCodexNoActionReviewCompletion(comment.Body) {
 			continue
 		}
-		// Codex reports a clean review as a top-level issue comment rather than a
-		// submitted GitHub review. Treat that message as a completion signal when
-		// Codex gates this round, and never surface it as an actionable finding when
-		// Codex is extraction-only. The persisted wait is the only safe way to bind
-		// an issue comment (which has no commit SHA) to the current head.
-		if isCodexBot(comment.User.Login) && isCodexNoActionReviewCompletion(comment.Body) {
-			// The newer summary format names the reviewed commit — bind on
-			// that SHA directly. A summary for another commit never counts,
-			// and a matching one counts even when the persisted wait was
-			// lost (e.g. after a crash or an interrupted loop).
-			if sha := codexReviewedCommitSHA(comment.Body); sha != "" {
-				if head != "" && shaPrefixMatch(sha, head) {
-					markReviewed(report.ReviewedBy, comment.User.Login)
-				}
-				continue
-			}
-			if completion.OK && notBefore(issueCommentTime(comment), completion.Cutoff) {
-				markReviewed(report.ReviewedBy, comment.User.Login)
-			}
-			continue
-		}
-		// Issue comments carry no commit SHA, so a stale completion summary from an
-		// earlier commit must not be treated as a review of the current head — rely on
-		// the persisted current-round feedback wait before treating a configured-bot
-		// no-action summary as the review completion signal.
 		if s.isConfiguredBot(comment.User.Login) {
-			if completion.OK && isNoActionReviewCompletion(comment.Body) && notBefore(issueCommentTime(comment), completion.Cutoff) {
-				codexOK, err := s.codexInactiveOrThumbed(ctx, repo, pr, head, completion, issueComments, reviews, report.ReviewedBy)
-				if err != nil {
-					return report, err
-				}
-				if !codexOK {
-					continue
-				}
-				markReviewed(report.ReviewedBy, comment.User.Login)
-			}
 			continue
 		}
-		if isNonActionableText(comment.Body) {
+		if dialect.IsNonActionableText(comment.Body) {
 			continue // notices/acks (e.g. usage-limit messages) aren't findings
 		}
 		if cutoff := headCutoffOf(); !cutoff.IsZero() && comment.CreatedAt.Before(cutoff) {
 			continue // posted before the current head was committed — a stale round
 		}
-		report.Findings = append(report.Findings, Finding{
+		report.Findings = append(report.Findings, dialect.Finding{
 			Bot:       comment.User.Login,
-			Severity:  severityOf(comment.Body),
-			Title:     titleOf(comment.Body),
+			Severity:  dialect.SeverityOf(comment.Body),
+			Title:     dialect.TitleOf(comment.Body),
 			Body:      strings.TrimSpace(comment.Body),
 			CommentID: comment.ID,
 			URL:       comment.URL,
@@ -239,140 +221,23 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		})
 	}
 
-	s.applyCompletionReplyFallback(ctx, repo, pr, head, &report, issueComments, reviews)
-
 	report.Findings = dedupeFindings(report.Findings, suppressPromptAt)
 	sort.Slice(report.Findings, func(i, j int) bool {
-		if rankSeverity(report.Findings[i].Severity) != rankSeverity(report.Findings[j].Severity) {
-			return rankSeverity(report.Findings[i].Severity) > rankSeverity(report.Findings[j].Severity)
+		if dialect.RankSeverity(report.Findings[i].Severity) != dialect.RankSeverity(report.Findings[j].Severity) {
+			return dialect.RankSeverity(report.Findings[i].Severity) > dialect.RankSeverity(report.Findings[j].Severity)
 		}
 		if report.Findings[i].Path != report.Findings[j].Path {
 			return report.Findings[i].Path < report.Findings[j].Path
 		}
 		return report.Findings[i].Line < report.Findings[j].Line
 	})
-	report.Converged = len(report.Findings) == 0
-	for _, reviewed := range report.ReviewedBy {
-		report.Converged = report.Converged && reviewed
-	}
+	report.Converged = engine.Converged(report.Findings, completion)
 	if report.Converged {
 		report.Status = "converged"
 	} else if len(report.Findings) == 0 {
 		report.Status = "waiting"
 	}
 	return report, nil
-}
-
-type feedbackCompletionContext struct {
-	Cutoff         time.Time
-	FiredCommentID int64
-	OK             bool
-}
-
-func (s *Service) feedbackCompletionContext(ctx context.Context, repo string, pr int, head string) feedbackCompletionContext {
-	state, _, err := s.store.Load(ctx)
-	if err != nil {
-		return feedbackCompletionContext{}
-	}
-	if firedAt, commandID, ok := roundAnchor(&state, repo, pr, head); ok {
-		return feedbackCompletionContext{Cutoff: firedAt, FiredCommentID: commandID, OK: true}
-	}
-	return feedbackCompletionContext{}
-}
-
-func (s *Service) codexInactiveOrThumbed(ctx context.Context, repo string, pr int, head string, completion feedbackCompletionContext, issueComments []IssueComment, reviews []Review, reviewedBy map[string]bool) (bool, error) {
-	codexActive := hasCodexBot(s.cfg.RequiredBots)
-	codexReviewed := reviewedByBot(reviewedBy, "chatgpt-codex-connector[bot]")
-	for _, review := range reviews {
-		if !isCodexBot(review.User.Login) {
-			continue
-		}
-		if head != "" && review.CommitID != "" && strings.HasPrefix(review.CommitID, head) {
-			codexActive = true
-			codexReviewed = true
-			break
-		}
-		if review.CommitID == "" && !review.SubmittedAt.IsZero() && notBefore(review.SubmittedAt, completion.Cutoff) {
-			codexActive = true
-			codexReviewed = true
-			break
-		}
-	}
-	if codexReviewed {
-		return true, nil
-	}
-	if !codexActive {
-		for _, comment := range issueComments {
-			if isCodexBot(comment.User.Login) && !isNonActionableText(comment.Body) && notBefore(issueCommentTime(comment), completion.Cutoff) {
-				codexActive = true
-				break
-			}
-		}
-	}
-	if !codexActive {
-		return true, nil
-	}
-	if ok, err := s.codexThumbedUp(ctx, repo, pr, completion); err != nil {
-		return false, err
-	} else if ok {
-		markReviewed(reviewedBy, "chatgpt-codex-connector[bot]")
-		return true, nil
-	}
-	return false, nil
-}
-
-func (s *Service) codexThumbedUp(ctx context.Context, repo string, pr int, completion feedbackCompletionContext) (bool, error) {
-	reactions, err := s.gh.ListIssueReactions(ctx, repo, pr)
-	if err != nil {
-		return false, err
-	}
-	for _, reaction := range reactions {
-		if isCurrentCodexThumbsUp(reaction, completion.Cutoff) {
-			return true, nil
-		}
-	}
-	if completion.FiredCommentID == 0 {
-		return false, nil
-	}
-	reactions, err = s.gh.ListCommentReactions(ctx, repo, completion.FiredCommentID)
-	if err != nil {
-		return false, err
-	}
-	for _, reaction := range reactions {
-		if isCurrentCodexThumbsUp(reaction, completion.Cutoff) {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// findingsBlockingFreshReview identifies feedback that can still be acted on or
-// resolved before requesting a review of head. Unresolved threads remain
-// actionable across commits, while thread-less review-body/prompt findings from
-// an older commit cannot be resolved on GitHub. Those older summaries are
-// superseded by the next current-head review and must not deadlock the loop after
-// the caller has pushed its fixes.
-func findingsBlockingFreshReview(findings []Finding, head string) []Finding {
-	blocking := make([]Finding, 0, len(findings))
-	for _, finding := range findings {
-		if finding.ThreadID != "" || finding.Commit == "" || head == "" || strings.HasPrefix(finding.Commit, head) {
-			blocking = append(blocking, finding)
-		}
-	}
-	return blocking
-}
-
-// findingsReportedOnHead excludes carried review artifacts from older commits.
-// Wait uses this narrower filter because its job is still to request a review
-// when the only visible feedback predates the queued head.
-func findingsReportedOnHead(findings []Finding, head string) []Finding {
-	current := make([]Finding, 0, len(findings))
-	for _, finding := range findings {
-		if finding.Commit == "" || head == "" || strings.HasPrefix(finding.Commit, head) {
-			current = append(current, finding)
-		}
-	}
-	return current
 }
 
 func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport, int, error) {
@@ -394,22 +259,22 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		if loadErr != nil {
 			return FeedbackReport{}, 1, loadErr
 		}
-		if waitView(&state, repo, pr).Head != head {
+		if waitingHead(&state, repo, pr) != head {
 			for {
 				report, feedbackErr := s.Feedback(ctx, repo, pr)
 				if feedbackErr != nil {
-					if wait, ok := rateLimitWait(feedbackErr); ok {
+					if wait, ok := ghapi.ThrottleWait(feedbackErr); ok {
 						if wait <= 0 {
 							wait = s.cfg.PollInterval
 						}
-						if serr := sleepCtx(ctx, wait); serr != nil {
+						if serr := ghapi.SleepCtx(ctx, wait); serr != nil {
 							return report, 1, serr
 						}
 						continue
 					}
 					return report, 1, feedbackErr
 				}
-				blocking := findingsBlockingFreshReview(report.Findings, head)
+				blocking := engine.BlockingFindings(report.Findings, head)
 				if len(blocking) > 0 {
 					report.Findings = blocking
 					report.Status = "feedback"
@@ -437,9 +302,9 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		// timeout so the caller retries later instead. A skipped wait result is
 		// terminal, not retryable, so preserve it as a skipped report.
 		if waitResult.Action == "skipped" {
-			s.clearFeedbackWait(ctx, repo, pr, "")
+			s.completeWaitRound(ctx, repo, pr, "")
 		}
-		return FeedbackReport{Status: status, Repo: NormalizeRepo(repo), PR: pr, Head: waitResult.Head, Reason: waitResult.Reason, ReviewedBy: map[string]bool{}, Findings: []Finding{}}, code, nil
+		return FeedbackReport{Status: status, Repo: NormalizeRepo(repo), PR: pr, Head: waitResult.Head, Reason: waitResult.Reason, ReviewedBy: map[string]bool{}, Findings: []dialect.Finding{}}, code, nil
 	}
 	head = waitResult.Head
 	if head == "" {
@@ -449,11 +314,10 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			return FeedbackReport{}, 1, herr
 		}
 	}
-	wait, err := s.ensureFeedbackWait(ctx, repo, pr, head)
+	deadline, err := s.ensureWaitDeadline(ctx, repo, pr, head)
 	if err != nil {
 		return FeedbackReport{}, 1, err
 	}
-	deadline := wait.Deadline
 	var lastLog time.Time
 	// Pump keeps the queue moving while we wait, but once a minute is plenty (the
 	// autoreview daemon pumps too); pumping on every tick just burns REST quota.
@@ -462,20 +326,20 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 	for {
 		report, err := s.Feedback(ctx, repo, pr)
 		if err != nil {
-			// A GitHub REST rate limit (the shared 5000/hr quota) is transient — ride
+			// A GitHub REST throttle (the shared 5000/hr quota) is transient — ride
 			// it out like a network outage rather than failing the agent. Wait for the
 			// reset and push the review deadline past it: GitHub throttling isn't the
 			// bot taking long to review.
-			if wait, ok := rateLimitWait(err); ok {
+			if wait, ok := ghapi.ThrottleWait(err); ok {
 				if wait <= 0 {
 					wait = s.cfg.PollInterval
 				}
 				deadline = deadline.Add(wait)
 				if s.log != nil {
-					s.log.Printf("%s#%d GitHub API rate-limited; waiting %s for the reset, then resuming", repo, pr, wait.Round(time.Second))
+					s.log.Printf("%s#%d GitHub API throttled; waiting %s for the reset, then resuming", repo, pr, wait.Round(time.Second))
 				}
-				s.extendFeedbackWaitDeadline(ctx, repo, pr, head, deadline)
-				if serr := sleepCtx(ctx, wait); serr != nil {
+				s.pushWaitDeadline(ctx, repo, pr, head, deadline)
+				if serr := ghapi.SleepCtx(ctx, wait); serr != nil {
 					return report, 1, serr
 				}
 				continue
@@ -493,14 +357,14 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			} else {
 				report.Reason = "hold current head: fix locally, but do not commit or push until every required reviewer finishes"
 			}
-			s.clearFeedbackWait(ctx, repo, pr, head)
+			s.completeWaitRound(ctx, repo, pr, head)
 			return report, 10, nil
 		}
 		if report.Converged {
-			s.clearFeedbackWait(ctx, repo, pr, head)
+			s.completeWaitRound(ctx, repo, pr, head)
 			return report, 0, nil
 		}
-		// Keep the queue moving (re-fire once a rate-limit window clears) and pick up
+		// Keep the queue moving (re-fire once an account-block window clears) and pick up
 		// the Blocked state it leaves behind. Pumping every poll tick is redundant —
 		// with several loops waiting concurrently it multiplies into real REST-quota
 		// cost — so each waiter pumps at most once per pumpEvery.
@@ -510,16 +374,16 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			}
 			lastPump = time.Now()
 		}
-		// While the account is rate-limited the PR can't be reviewed yet — it just
+		// While the account is blocked the PR can't be reviewed yet — it just
 		// stays queued — so that wait must not count against the feedback timeout, and
 		// there's nothing to fetch until the window clears. Push the deadline past the
 		// block and poll slowly, so a long queue wait doesn't drain the shared GitHub
-		// REST quota (and re-hit its rate limit) every PollInterval.
+		// REST quota (and re-hit its throttle) every PollInterval.
 		poll := s.cfg.PollInterval
 		var blockedUntil *time.Time
 		now := time.Now().UTC()
 		if st, _, lerr := s.store.Load(ctx); lerr == nil {
-			if until, ok := feedbackBlockedUntil(st, repo, pr, head, now); ok {
+			if until, ok := accountBlockedUntil(&st, repo, pr, head, now); ok {
 				blockedUntil = &until
 			}
 		}
@@ -527,12 +391,12 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			extended := extendDeadlineForBlock(deadline, blockedUntil, now, s.cfg.FeedbackWaitTimeout)
 			if extended.After(deadline) {
 				deadline = extended
-				s.extendFeedbackWaitDeadline(ctx, repo, pr, head, deadline)
+				s.pushWaitDeadline(ctx, repo, pr, head, deadline)
 			}
 			poll = blockedPollInterval(*blockedUntil, now, s.cfg.PollInterval)
 		}
 		if now.After(deadline) {
-			s.clearFeedbackWait(ctx, repo, pr, head)
+			s.completeWaitRound(ctx, repo, pr, head)
 			if len(report.Findings) > 0 {
 				report.Status = "feedback"
 				report.Reason = "review wait timed out; actionable findings must be addressed before retrying"
@@ -544,7 +408,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		if s.log != nil && time.Since(lastLog) >= 30*time.Second {
 			activeElapsed := feedbackWaitElapsed(deadline, s.cfg.FeedbackWaitTimeout, now)
 			if blockedUntil != nil {
-				s.log.Printf("%s#%d queued — account rate-limited until %s; waiting, not counting it against the %s review wait (%s active)", repo, pr, blockedUntil.UTC().Format(time.RFC3339), s.cfg.FeedbackWaitTimeout, activeElapsed.Round(time.Second))
+				s.log.Printf("%s#%d queued — account blocked until %s; waiting, not counting it against the %s review wait (%s active)", repo, pr, blockedUntil.UTC().Format(time.RFC3339), s.cfg.FeedbackWaitTimeout, activeElapsed.Round(time.Second))
 			} else {
 				s.log.Printf("%s#%d waiting for review feedback on %s — reviewed %s (%s / %s)", repo, pr, report.Head, reviewedSummary(report.ReviewedBy), activeElapsed.Round(time.Second), s.cfg.FeedbackWaitTimeout)
 			}
@@ -558,17 +422,20 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 	}
 }
 
-func (s *Service) ensureFeedbackWait(ctx context.Context, repo string, pr int, head string) (FeedbackWait, error) {
+// ensureWaitDeadline returns the wall-clock deadline the loop bounds its poll
+// by. The wait IS the round: when the fired/reviewing round has no WaitDeadline
+// yet (Pump normally sets it at fire time), this sets one budget past the fire.
+// If the round is no longer waiting (completed/none), it returns a transient
+// deadline so the loop still terminates.
+func (s *Service) ensureWaitDeadline(ctx context.Context, repo string, pr int, head string) (time.Time, error) {
 	repo = NormalizeRepo(repo)
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
-		return FeedbackWait{}, err
+		return time.Time{}, err
 	}
-	if w := waitView(&st, repo, pr); w.Head == head && !w.Deadline.IsZero() {
-		return w, nil
+	if dl, ok := roundWaitDeadline(&st, repo, pr, head); ok {
+		return dl, nil
 	}
-	// Set the wait deadline on the fired/reviewing round if the fire path hasn't
-	// yet (Pump normally sets it at fire time).
 	changed := false
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		changed = false
@@ -587,21 +454,22 @@ func (s *Service) ensureFeedbackWait(ctx context.Context, repo string, pr int, h
 		return nil
 	})
 	if err != nil {
-		return FeedbackWait{}, err
+		return time.Time{}, err
 	}
 	if changed {
 		s.sync(ctx, updated)
 	}
-	if w := waitView(&updated, repo, pr); w.Head == head && !w.Deadline.IsZero() {
-		return w, nil
+	if dl, ok := roundWaitDeadline(&updated, repo, pr, head); ok {
+		return dl, nil
 	}
 	// The round is no longer a wait (completed/none): synthesize a transient
 	// deadline so the loop still bounds its poll.
-	now := time.Now().UTC()
-	return FeedbackWait{Repo: repo, PR: pr, Head: head, StartedAt: now, Deadline: now.Add(s.cfg.FeedbackWaitTimeout), ByHost: s.cfg.Host}, nil
+	return time.Now().UTC().Add(s.cfg.FeedbackWaitTimeout), nil
 }
 
-func (s *Service) extendFeedbackWaitDeadline(ctx context.Context, repo string, pr int, head string, deadline time.Time) {
+// pushWaitDeadline moves the fired/reviewing round's wait deadline later (never
+// earlier), persisting the extension an account block or GitHub throttle bought.
+func (s *Service) pushWaitDeadline(ctx context.Context, repo string, pr int, head string, deadline time.Time) {
 	repo = NormalizeRepo(repo)
 	changed := false
 	state, err := s.store.Update(ctx, func(st *State) error {
@@ -630,10 +498,10 @@ func (s *Service) extendFeedbackWaitDeadline(ctx context.Context, repo string, p
 	}
 }
 
-// clearFeedbackWait ends the wait by completing the fired/reviewing round. The
-// completed round remains as the dedup marker (v2 kept Fired[key] while deleting
-// the wait), so a subsequent enqueue/needsReview at the same head is deduped.
-func (s *Service) clearFeedbackWait(ctx context.Context, repo string, pr int, head string) {
+// completeWaitRound ends the wait by completing the fired/reviewing round. The
+// completed round remains as the "this head was reviewed" dedup marker, so a
+// subsequent enqueue/needsReview at the same head is deduped rather than re-fired.
+func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, head string) {
 	repo = NormalizeRepo(repo)
 	changed := false
 	state, err := s.store.Update(ctx, func(st *State) error {
@@ -674,7 +542,7 @@ func (s *Service) waitToFire(ctx context.Context, repo string, pr int) (PumpResu
 		if err == nil {
 			return result, code, nil
 		}
-		wait, ok := rateLimitWait(err)
+		wait, ok := ghapi.ThrottleWait(err)
 		if !ok {
 			return result, code, err
 		}
@@ -682,15 +550,15 @@ func (s *Service) waitToFire(ctx context.Context, repo string, pr int) (PumpResu
 			wait = s.cfg.PollInterval
 		}
 		if s.log != nil {
-			s.log.Printf("%s#%d GitHub API rate-limited before firing; waiting %s for the reset, then retrying", repo, pr, wait.Round(time.Second))
+			s.log.Printf("%s#%d GitHub API throttled before firing; waiting %s for the reset, then retrying", repo, pr, wait.Round(time.Second))
 		}
-		if serr := sleepCtx(ctx, wait); serr != nil {
+		if serr := ghapi.SleepCtx(ctx, wait); serr != nil {
 			return result, code, serr
 		}
 	}
 }
 
-// blockedPollInterval slows the feedback poll while the account is rate-limited:
+// blockedPollInterval slows the feedback poll while the account is blocked:
 // nothing can be fetched until the window clears, so wait until just past the
 // reset instead of every PollInterval — capped so the loop still re-checks
 // periodically. Keeps a long queue wait from draining the shared GitHub REST quota.
@@ -718,7 +586,7 @@ func blockedPollInterval(blockedUntil, now time.Time, base time.Duration) time.D
 }
 
 // extendDeadlineForBlock keeps the feedback-wait deadline from elapsing while the
-// CodeRabbit account is rate-limited. A blocked PR can't be reviewed — it just
+// CodeRabbit account is blocked. A blocked PR can't be reviewed — it just
 // stays queued until the window clears and crq re-fires — so that time shouldn't
 // burn the review-wait budget. When blocked, the deadline is pushed to a full
 // budget past the block; it is never moved earlier.
@@ -732,15 +600,7 @@ func extendDeadlineForBlock(deadline time.Time, blockedUntil *time.Time, now tim
 	return deadline
 }
 
-// feedbackBlockedUntil returns the latest active block that prevents this exact
-// PR head from firing: the account-wide quota block, or this round's own
-// awaiting_retry window. Feedback waiters must honor both or they can claim to
-// be waiting on a review that crq is still forbidden to request.
-func feedbackBlockedUntil(st State, repo string, pr int, head string, now time.Time) (time.Time, bool) {
-	return accountBlockedUntil(&st, repo, pr, head, now)
-}
-
-// feedbackWaitElapsed reports only reviewable time. A rate-limit block extends
+// feedbackWaitElapsed reports only reviewable time. An account block extends
 // deadline, so deriving progress from the remaining budget excludes the blocked
 // interval and can never produce impossible output such as "35m / 20m".
 func feedbackWaitElapsed(deadline time.Time, budget time.Duration, now time.Time) time.Duration {
@@ -943,9 +803,20 @@ func (s *Service) reviewThreads(ctx context.Context, repo string, pr int) ([]rev
 	return all, nil
 }
 
+// parseReviewBodyFindings adapts a GitHub review to the dialect parsers, which
+// take only the metadata they attach to findings.
+func parseReviewBodyFindings(review ghapi.Review, bot string) []dialect.Finding {
+	return dialect.ParseReviewBodyFindings(review.Body, dialect.ReviewMeta{
+		ID:          review.ID,
+		CommitID:    review.CommitID,
+		HTMLURL:     review.HTMLURL,
+		SubmittedAt: review.SubmittedAt,
+	}, bot)
+}
+
 // reviewNewer reports whether review a supersedes b: later submission wins, and
 // a higher ID breaks ties (equal/zero timestamps) so selection is deterministic.
-func reviewNewer(a, b Review) bool {
+func reviewNewer(a, b ghapi.Review) bool {
 	if !a.SubmittedAt.Equal(b.SubmittedAt) {
 		return a.SubmittedAt.After(b.SubmittedAt)
 	}
@@ -958,25 +829,25 @@ func reviewNewer(a, b Review) bool {
 // so a real finding from an earlier commit is surfaced instead of silently
 // dropped when HEAD moves. (This is why callers do not need a manual
 // cross-review audit.) Resolved or outdated threads are skipped.
-func threadFindings(thread reviewThread, bots map[string]struct{}) []Finding {
+func threadFindings(thread reviewThread, bots map[string]struct{}) []dialect.Finding {
 	if thread.IsResolved || thread.IsOutdated {
 		return nil
 	}
-	var out []Finding
+	var out []dialect.Finding
 	for _, comment := range thread.Comments.Nodes {
-		if !inBots(bots, comment.Author.Login) {
+		if !dialect.InBots(bots, comment.Author.Login) {
 			continue
 		}
-		commit := shortOID(comment.Commit.OID)
+		commit := dialect.ShortOID(comment.Commit.OID)
 		if commit == "" {
-			commit = shortOID(comment.OriginalCommit.OID)
+			commit = dialect.ShortOID(comment.OriginalCommit.OID)
 		}
-		out = append(out, Finding{
+		out = append(out, dialect.Finding{
 			Bot:       comment.Author.Login,
-			Severity:  severityOf(comment.Body),
+			Severity:  dialect.SeverityOf(comment.Body),
 			Path:      firstNonEmpty(thread.Path, comment.Path),
 			Line:      firstPositive(thread.Line, comment.Line, comment.OriginalLine),
-			Title:     titleOf(comment.Body),
+			Title:     dialect.TitleOf(comment.Body),
 			Body:      strings.TrimSpace(comment.Body),
 			ThreadID:  thread.ID,
 			CommentID: comment.DatabaseID,
@@ -995,7 +866,7 @@ func threadFindings(thread reviewThread, bots map[string]struct{}) []Finding {
 func promptSuppressKeys(thread reviewThread, bots map[string]struct{}) []string {
 	var keys []string
 	for _, comment := range thread.Comments.Nodes {
-		if !inBots(bots, comment.Author.Login) {
+		if !dialect.InBots(bots, comment.Author.Login) {
 			continue
 		}
 		path := firstNonEmpty(thread.Path, comment.Path)
@@ -1003,33 +874,33 @@ func promptSuppressKeys(thread reviewThread, bots map[string]struct{}) []string 
 		if path == "" || line <= 0 {
 			continue
 		}
-		keys = append(keys, normalizeBotName(comment.Author.Login)+"|"+path+"|"+strconv.Itoa(line))
+		keys = append(keys, dialect.NormalizeBotName(comment.Author.Login)+"|"+path+"|"+strconv.Itoa(line))
 	}
 	return keys
 }
 
-func dedupeFindings(in []Finding, suppressPromptAt map[string]bool) []Finding {
+func dedupeFindings(in []dialect.Finding, suppressPromptAt map[string]bool) []dialect.Finding {
 	seen := map[string]bool{}
 	structuredAtLocation := map[string]bool{}
 	for _, finding := range in {
 		if finding.Source != "review_prompt" && finding.Path != "" && finding.Line > 0 {
-			structuredAtLocation[normalizeBotName(finding.Bot)+"|"+finding.Path+"|"+strconv.Itoa(finding.Line)] = true
+			structuredAtLocation[dialect.NormalizeBotName(finding.Bot)+"|"+finding.Path+"|"+strconv.Itoa(finding.Line)] = true
 		}
 	}
-	out := []Finding{}
+	out := []dialect.Finding{}
 	for _, finding := range in {
 		finding.Body = strings.TrimSpace(finding.Body)
 		finding.Title = strings.TrimSpace(finding.Title)
-		if !isActionableFinding(finding) {
+		if !dialect.IsActionableFinding(finding) {
 			continue
 		}
 		if finding.Source == "review_prompt" {
-			key := normalizeBotName(finding.Bot) + "|" + finding.Path + "|" + strconv.Itoa(finding.Line)
+			key := dialect.NormalizeBotName(finding.Bot) + "|" + finding.Path + "|" + strconv.Itoa(finding.Line)
 			if structuredAtLocation[key] || suppressPromptAt[key] {
 				continue
 			}
 		}
-		key := normalizeBotName(finding.Bot) + "|" + finding.Path + "|" + strconv.Itoa(finding.Line) + "|" + finding.Title + "|" + finding.Body + "|" + finding.ThreadID
+		key := dialect.NormalizeBotName(finding.Bot) + "|" + finding.Path + "|" + strconv.Itoa(finding.Line) + "|" + finding.Title + "|" + finding.Body + "|" + finding.ThreadID
 		sum := sha256.Sum256([]byte(key))
 		finding.ID = hex.EncodeToString(sum[:])
 		if seen[finding.ID] {
@@ -1041,260 +912,11 @@ func dedupeFindings(in []Finding, suppressPromptAt map[string]bool) []Finding {
 	return out
 }
 
-func (s *Service) isCompletionReply(body string) bool { return s.cr.IsCompletionReply(body) }
-
-// hasNonterminalReviewState reports whether CodeRabbit currently exposes a
-// post-command state that contradicts a terminal completion reply. The top
-// summary is edited in place, so its UpdatedAt, not its original CreatedAt,
-// determines which command round the current body belongs to.
-func (s *Service) hasNonterminalReviewState(comments []IssueComment, since time.Time) bool {
-	for _, comment := range comments {
-		if !s.isConfiguredBot(comment.User.Login) || !notBefore(issueCommentTime(comment), since) {
-			continue
-		}
-		if s.cr.IsReviewInProgress(comment.Body) || s.isRateLimited(comment.Body) || s.isReviewsPaused(comment.Body) {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Service) hasFailedReviewState(comments []IssueComment, since time.Time) bool {
-	for _, comment := range comments {
-		if !s.isConfiguredBot(comment.User.Login) || !notBefore(issueCommentTime(comment), since) {
-			continue
-		}
-		if s.cr.IsReviewFailure(comment.Body) {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Service) isAutoReply(body string) bool { return s.cr.IsAutoReply(body) }
-
-// applyCompletionReplyFallback marks the configured bot reviewed when a
-// no-findings re-review completed by issue-comment reply rather than a review
-// object. The state anchor is mandatory because issue comments carry no commit,
-// and a prior submitted review by the bot is mandatory because only a
-// re-review can complete without posting a review object (see
-// completionReplyForFiredCommand).
-func (s *Service) applyCompletionReplyFallback(ctx context.Context, repo string, pr int, head string, report *FeedbackReport, issueComments []IssueComment, reviews []Review) {
-	if !needsConfiguredBotReview(report.ReviewedBy, s.cfg.Bot) {
-		return
-	}
-	firedAt, ok := s.completionFallbackFiredAt(ctx, repo, pr, head)
-	if !ok {
-		return
-	}
-	if s.completionReplyForFiredCommand(issueComments, reviews, firedAt) {
-		markReviewed(report.ReviewedBy, s.cfg.Bot)
-	}
-}
-
-func (s *Service) completionFallbackFiredAt(ctx context.Context, repo string, pr int, head string) (time.Time, bool) {
-	st, _, err := s.store.Load(ctx)
-	if err != nil {
-		return time.Time{}, false
-	}
-	firedAt, _, ok := roundAnchor(&st, repo, pr, head)
-	if !ok {
-		return time.Time{}, false
-	}
-	return firedAt, true
-}
-
-type reviewCommandReply struct {
-	commandID  int64
-	commandAt  time.Time
-	completion bool
-}
-
-// completionReplyForFiredCommand reports whether the command fired at/after
-// firedAt received a completion reply. A raw timestamp check is not enough: an
-// earlier round still finishing can post its "Review finished" after the new
-// head's command was fired, which would converge the new round before its
-// review ran. Replies are paired chronologically with the earliest unanswered
-// command, while submitted reviews consume the command they answered, so older
-// completed commands cannot steal a later completion reply.
-//
-// The completion reply only stands in for a review when the bot has already
-// submitted at least one review on the PR: it models a no-findings re-review
-// ("nothing new since my last review"), which presupposes a prior review.
-// CodeRabbit can answer the first-ever command on a PR with an instant
-// "Review finished" while the real review is still queued on its side
-// (observed: ack 5s after the trigger, review with 11 findings landing
-// minutes later) — counting that ack converged the round with zero findings
-// and cleared the feedback wait, which also let autoreview fire a duplicate
-// command for the same head.
-func (s *Service) completionReplyForFiredCommand(comments []IssueComment, reviews []Review, firedAt time.Time) bool {
-	if !botHasAnyReview(reviews, s.cfg.Bot) {
-		return false
-	}
-	for _, reply := range s.reviewCommandReplies(comments, reviews) {
-		if reply.completion && notBefore(reply.commandAt, firedAt) &&
-			!s.hasNonterminalReviewState(comments, reply.commandAt) &&
-			!s.hasFailedReviewState(comments, reply.commandAt) {
-			return true
-		}
-	}
-	return false
-}
-
-// botHasAnyReview reports whether login has a submitted review on the PR, on
-// any commit. A CodeRabbit review that actually ran always submits a review
-// object ("Actionable comments posted: N"), so its absence means the PR was
-// never reviewed and a completion reply cannot mean "nothing new to re-review".
-func botHasAnyReview(reviews []Review, login string) bool {
-	bots := botSet([]string{login})
-	for _, review := range reviews {
-		if inBots(bots, review.User.Login) {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Service) reviewCommandHasCompletionReply(comments []IssueComment, reviews []Review, commandID int64) bool {
-	if commandID == 0 {
-		return false
-	}
-	for _, reply := range s.reviewCommandReplies(comments, reviews) {
-		if reply.commandID == commandID && reply.completion && !s.hasNonterminalReviewState(comments, reply.commandAt) {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Service) reviewCommandReplies(comments []IssueComment, reviews []Review) []reviewCommandReply {
-	command := strings.TrimSpace(s.cfg.ReviewCommand)
-	if command == "" {
-		return nil
-	}
-
-	type eventKind int
-	const (
-		eventCommand eventKind = iota
-		eventAutoReply
-		eventReview
-	)
-	type event struct {
-		kind    eventKind
-		at      time.Time
-		id      int64
-		comment IssueComment
-	}
-
-	var events []event
-	for _, c := range comments {
-		body := strings.TrimSpace(c.Body)
-		switch {
-		case body == command && !s.isConfiguredBot(c.User.Login):
-			events = append(events, event{kind: eventCommand, at: commentTime(c), id: c.ID, comment: c})
-		case s.isConfiguredBot(c.User.Login) && s.isAutoReply(c.Body):
-			events = append(events, event{kind: eventAutoReply, at: commentTime(c), id: c.ID, comment: c})
-		}
-	}
-	for _, review := range reviews {
-		if !s.isConfiguredBot(review.User.Login) || review.SubmittedAt.IsZero() {
-			continue
-		}
-		events = append(events, event{kind: eventReview, at: review.SubmittedAt, id: review.ID})
-	}
-	sort.SliceStable(events, func(i, j int) bool {
-		if !events[i].at.Equal(events[j].at) {
-			return events[i].at.Before(events[j].at)
-		}
-		if events[i].kind != events[j].kind {
-			return events[i].kind < events[j].kind
-		}
-		return events[i].id < events[j].id
-	})
-
-	var out []reviewCommandReply
-	var pending []IssueComment
-	for _, ev := range events {
-		switch ev.kind {
-		case eventCommand:
-			pending = append(pending, ev.comment)
-		case eventReview:
-			if len(pending) > 0 {
-				pending = pending[1:]
-			}
-		case eventAutoReply:
-			if len(pending) == 0 {
-				continue
-			}
-			cmd := pending[0]
-			pending = pending[1:]
-			out = append(out, reviewCommandReply{
-				commandID:  cmd.ID,
-				commandAt:  commentTime(cmd),
-				completion: s.isCompletionReply(ev.comment.Body) && !s.isRateLimited(ev.comment.Body),
-			})
-		}
-	}
-	return out
-}
-
-func commentTime(c IssueComment) time.Time {
-	if !c.CreatedAt.IsZero() {
-		return c.CreatedAt
-	}
-	return c.UpdatedAt
-}
-
-// needsConfiguredBotReview reports whether login gates convergence (has a
-// ReviewedBy key) and its review for the head hasn't been seen yet — the only
-// case where the completion-reply fallback needs to run.
-func needsConfiguredBotReview(reviewedBy map[string]bool, login string) bool {
-	norm := normalizeBotName(login)
-	for bot, reviewed := range reviewedBy {
-		if bot == login || normalizeBotName(bot) == norm {
-			return !reviewed
-		}
-	}
-	return false
-}
-
-func isCurrentCodexThumbsUp(reaction Reaction, since time.Time) bool {
-	if !isCodexBot(reaction.User.Login) || reaction.Content != "+1" {
+func isCurrentCodexThumbsUp(reaction ghapi.Reaction, since time.Time) bool {
+	if !dialect.IsCodexBot(reaction.User.Login) || reaction.Content != "+1" {
 		return false
 	}
 	return reaction.CreatedAt.IsZero() || notBefore(reaction.CreatedAt, since)
-}
-
-// markReviewed flips the configured required-bot key that login matches to true,
-// tolerating the "[bot]" suffix difference between REST ("coderabbitai[bot]") and
-// GraphQL ("coderabbitai") logins. It updates the existing key rather than
-// inserting the raw login, so convergence (which ANDs every key) can't be broken
-// by a duplicate key that never flips true.
-func markReviewed(reviewedBy map[string]bool, login string) {
-	norm := normalizeBotName(login)
-	for bot := range reviewedBy {
-		if bot == login || normalizeBotName(bot) == norm {
-			reviewedBy[bot] = true
-			return
-		}
-	}
-}
-
-func reviewedByBot(reviewedBy map[string]bool, login string) bool {
-	norm := normalizeBotName(login)
-	for bot, reviewed := range reviewedBy {
-		if reviewed && (bot == login || normalizeBotName(bot) == norm) {
-			return true
-		}
-	}
-	return false
-}
-
-func issueCommentTime(comment IssueComment) time.Time {
-	if comment.UpdatedAt.After(comment.CreatedAt) {
-		return comment.UpdatedAt.UTC()
-	}
-	return comment.CreatedAt.UTC()
 }
 
 func firstNonEmpty(values ...string) string {

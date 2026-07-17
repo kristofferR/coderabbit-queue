@@ -8,9 +8,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 const Version = "2.0.0-dev"
+
+// The GitHub transport tags its User-Agent with the crq version. Version lives
+// in this package, so the wiring stays here now that the gh alias layer is gone.
+func init() { ghapi.UserAgent = "crq/" + Version }
 
 type Config struct {
 	GateRepo       string
@@ -98,8 +105,8 @@ func LoadConfig() (Config, error) {
 		RequiredBots:        requiredBots,
 		FeedbackBots:        listEnv(env, "CRQ_FEEDBACK_BOTS", strings.Join(unionBots(requiredBots, extraFeedbackBots), ",")),
 		ReviewCommand:       stringEnv(env, "CRQ_REVIEW_CMD", "@coderabbitai review"),
-		RateLimitCommand:    stringEnv(env, "CRQ_RATELIMIT_CMD", "@coderabbitai rate limit"),
-		RateLimitMarker:     stringEnv(env, "CRQ_RL_MARKER", "rate limited by coderabbit.ai"),
+		RateLimitCommand:    stringEnv(env, "CRQ_RATELIMIT_CMD", dialect.DefaultRateLimitCommand),
+		RateLimitMarker:     stringEnv(env, "CRQ_RL_MARKER", dialect.DefaultRateLimitMarker),
 		CalibrationMarker:   stringEnv(env, "CRQ_CAL_REPLY_MARKER", "auto-generated reply by CodeRabbit"),
 		ReviewDoneMarker:    stringEnv(env, "CRQ_REVIEW_DONE_MARKER", "summarize by coderabbit.ai"),
 		CompletionMarker:    stringEnvAllowEmpty(env, "CRQ_COMPLETION_MARKER", "Review finished"),
@@ -251,7 +258,7 @@ func unionBots(lists ...[]string) []string {
 			if item == "" {
 				continue
 			}
-			key := normalizeBotName(item)
+			key := dialect.NormalizeBotName(item)
 			if seen[key] {
 				continue
 			}
@@ -279,7 +286,7 @@ func repoSet(value string) map[string]bool {
 func authorSet(value string) map[string]bool {
 	set := map[string]bool{}
 	for _, item := range strings.Split(value, ",") {
-		item = normalizeBotName(strings.ToLower(strings.TrimSpace(item)))
+		item = dialect.NormalizeBotName(strings.ToLower(strings.TrimSpace(item)))
 		if item != "" {
 			set[item] = true
 		}

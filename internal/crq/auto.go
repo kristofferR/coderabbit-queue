@@ -7,6 +7,9 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 type AutoOptions struct {
@@ -23,8 +26,8 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 	for {
 		held, err := s.acquireLeader(ctx, owner, token)
 		if err != nil {
-			if _, ok := rateLimitWait(err); ok {
-				if cont, serr := s.sleepRateLimit(ctx, opts, "leader", err); serr != nil || !cont {
+			if _, ok := ghapi.ThrottleWait(err); ok {
+				if cont, serr := s.sleepThrottle(ctx, opts, "leader", err); serr != nil || !cont {
 					return serr
 				}
 				continue
@@ -49,11 +52,11 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 				s.log.Printf("autoreview: lost leadership mid-pass; standing by")
 			}
 		} else {
-			// A rate-limited pass means the following API calls will keep failing —
+			// A throttled pass means the following API calls will keep failing —
 			// sleep out the window instead of immediately pumping and re-scanning,
 			// which would just hammer the quota. Skip Pump entirely in that case.
-			if _, ok := rateLimitWait(passErr); ok {
-				if cont, serr := s.sleepRateLimit(ctx, opts, "pass", passErr); serr != nil || !cont {
+			if _, ok := ghapi.ThrottleWait(passErr); ok {
+				if cont, serr := s.sleepThrottle(ctx, opts, "pass", passErr); serr != nil || !cont {
 					if opts.Once {
 						return s.finishAutoReviewOnce(ctx, token, serr)
 					}
@@ -66,8 +69,8 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			}
 			passFailure = passErr
 			if _, err := s.Pump(ctx); err != nil {
-				if _, ok := rateLimitWait(err); ok {
-					if cont, serr := s.sleepRateLimit(ctx, opts, "pump", err); serr != nil || !cont {
+				if _, ok := ghapi.ThrottleWait(err); ok {
+					if cont, serr := s.sleepThrottle(ctx, opts, "pump", err); serr != nil || !cont {
 						if opts.Once {
 							return s.finishAutoReviewOnce(ctx, token, serr)
 						}
@@ -84,7 +87,7 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			}
 		}
 		if opts.Once {
-			// A one-shot run must surface a real (non-rate-limit) scan/pump failure —
+			// A one-shot run must surface a real (non-throttle) scan/pump failure —
 			// e.g. a permission or owner-lookup error — so cron/CI doesn't see success
 			// when nothing was scanned or enqueued. The daemon keeps going (logged).
 			return s.finishAutoReviewOnce(ctx, token, passFailure)
@@ -106,10 +109,10 @@ func (s *Service) finishAutoReviewOnce(ctx context.Context, token string, err er
 	return err
 }
 
-// rateLimitBackoff bounds how long the autoreview daemon sleeps when GitHub
-// rate-limits it: at least one poll interval, plus a small buffer past the
+// throttleBackoff bounds how long the autoreview daemon sleeps when GitHub
+// throttles it: at least one poll interval, plus a small buffer past the
 // reset, capped at an hour so a bogus reset header can't wedge the daemon.
-func (s *Service) rateLimitBackoff(wait time.Duration) time.Duration {
+func (s *Service) throttleBackoff(wait time.Duration) time.Duration {
 	if wait <= 0 {
 		wait = s.cfg.AutoReviewPoll
 	}
@@ -123,17 +126,17 @@ func (s *Service) rateLimitBackoff(wait time.Duration) time.Duration {
 	return wait
 }
 
-// sleepRateLimit waits out a GitHub rate-limit window that an autoreview
+// sleepThrottle waits out a GitHub throttle window that an autoreview
 // leader/pass/pump step hit, using the same bounded backoff as the leader path so
 // a throttle pauses the daemon instead of spinning failing API calls. cause must
-// be a rate-limit error (the caller checks rateLimitWait first). It returns
+// be a throttle error (the caller checks ghapi.ThrottleWait first). It returns
 // cont=false (nil error) when opts.Once means we should stop after the wait, and a
 // non-nil error only when the context is cancelled mid-wait.
-func (s *Service) sleepRateLimit(ctx context.Context, opts AutoOptions, stage string, cause error) (cont bool, err error) {
-	wait, _ := rateLimitWait(cause)
-	wait = s.rateLimitBackoff(wait)
+func (s *Service) sleepThrottle(ctx context.Context, opts AutoOptions, stage string, cause error) (cont bool, err error) {
+	wait, _ := ghapi.ThrottleWait(cause)
+	wait = s.throttleBackoff(wait)
 	if s.log != nil {
-		s.log.Printf("autoreview: %s rate-limited (%v); sleeping %s before next pass", stage, cause, wait.Round(time.Second))
+		s.log.Printf("autoreview: %s throttled (%v); sleeping %s before next pass", stage, cause, wait.Round(time.Second))
 	}
 	select {
 	case <-ctx.Done():
@@ -226,7 +229,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 		// Stream results and stop once the post-filter scan budget is spent, so
 		// excluded/gate-repo results can't crowd out in-scope PRs (a fixed pre-filter
 		// limit would never reach them) while we still don't over-fetch pages.
-		err := s.gh.EachOpenPR(ctx, target, byRepo, func(pr SearchPR) (bool, error) {
+		err := s.gh.EachOpenPR(ctx, target, byRepo, func(pr ghapi.SearchPR) (bool, error) {
 			if scanned >= s.cfg.AutoReviewMaxScan {
 				return true, nil
 			}
@@ -237,7 +240,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			if len(s.cfg.AllowRepos) > 0 && !s.cfg.AllowRepos[repo] {
 				return false, nil
 			}
-			if s.cfg.SkipAuthors[normalizeBotName(strings.ToLower(pr.Author))] {
+			if s.cfg.SkipAuthors[dialect.NormalizeBotName(strings.ToLower(pr.Author))] {
 				return false, nil
 			}
 			if s.cfg.SkipMarker != "" && strings.Contains(pr.Body, s.cfg.SkipMarker) {
@@ -259,10 +262,10 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			}
 			need, head, nerr := s.needsReview(ctx, state, repo, pr.Number, opts.Incremental)
 			if nerr != nil {
-				// A rate limit must abort the pass so AutoReview's outer backoff kicks
+				// A throttle must abort the pass so AutoReview's outer backoff kicks
 				// in, instead of scanning the rest of the candidates under the same
 				// throttle (and skipping them until a later poll).
-				if isThrottled(nerr) {
+				if ghapi.IsThrottled(nerr) {
 					return false, nerr
 				}
 				if s.log != nil {
@@ -302,11 +305,11 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 	if err != nil {
 		return false, "", err
 	}
-	bot := normalizeBotName(s.cfg.Bot)
+	bot := dialect.NormalizeBotName(s.cfg.Bot)
 	lastBotReview := ""
 	for _, review := range reviews {
-		if normalizeBotName(review.User.Login) == bot && review.CommitID != "" {
-			lastBotReview = shortOID(review.CommitID)
+		if dialect.NormalizeBotName(review.User.Login) == bot && review.CommitID != "" {
+			lastBotReview = dialect.ShortOID(review.CommitID)
 		}
 	}
 	if incremental {
@@ -324,7 +327,7 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 		return false, "", err
 	}
 	for _, comment := range comments {
-		if normalizeBotName(comment.User.Login) == bot && strings.Contains(comment.Body, s.cfg.ReviewDoneMarker) {
+		if dialect.NormalizeBotName(comment.User.Login) == bot && strings.Contains(comment.Body, s.cfg.ReviewDoneMarker) {
 			return false, head, nil
 		}
 	}

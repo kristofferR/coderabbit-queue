@@ -284,6 +284,51 @@ func TestPreFireReviewOfHeadCompletes(t *testing.T) {
 	}
 }
 
+// TestCompletionFlipsRequiredBotAcrossSuffix ports crq's markReviewed suffix
+// test: a review whose login differs from the configured required bot only by
+// the "[bot]" suffix (REST "coderabbitai[bot]" vs GraphQL "coderabbitai") must
+// still flip the required key, or convergence (which ANDs every key) stays
+// permanently false.
+func TestCompletionFlipsRequiredBotAcrossSuffix(t *testing.T) {
+	r := firedRound(t, "abcdef123")
+	// Required key carries the suffix; the review login does not.
+	obs := Observation{Head: "abcdef123", Open: true, Reviews: []ReviewSeen{
+		{Bot: "coderabbitai", ReviewID: 9, Commit: "abcdef1234567890", SubmittedAt: t0.Add(time.Minute)},
+	}}
+	if got := Completion(r, obs, policy); !got.Done {
+		t.Fatalf("a suffix-less review login must flip the suffixed required key: %+v", got)
+	}
+	// Inverse: required key without suffix, review login with it.
+	noSuffix := policy
+	noSuffix.RequiredBots = []string{"coderabbitai"}
+	obs.Reviews[0].Bot = "coderabbitai[bot]"
+	if got := Completion(r, obs, noSuffix); !got.Done {
+		t.Fatalf("a suffixed review login must flip the suffix-less required key: %+v", got)
+	}
+}
+
+// TestCommandHasCompletionReply covers the adoption guard: a command already
+// answered by a completion reply is spoken for and must not be re-adopted,
+// unless an in-progress/rate-limited/paused summary since the reply reopens it.
+func TestCommandHasCompletionReply(t *testing.T) {
+	base := []dialect.BotEvent{
+		{Kind: dialect.EvCommand, Bot: "kristofferR", CommentID: 1001, CreatedAt: t0, UpdatedAt: t0},
+		{Kind: dialect.EvCompletion, Bot: "coderabbitai[bot]", CommentID: 1002, AutoReply: true, CreatedAt: t0.Add(5 * time.Second), UpdatedAt: t0.Add(5 * time.Second)},
+	}
+	if !CommandHasCompletionReply(Observation{Events: base}, policy, 1001) {
+		t.Fatal("a command answered by a completion reply must read as spoken for")
+	}
+	if CommandHasCompletionReply(Observation{Events: base}, policy, 999) {
+		t.Fatal("an unrelated command id must not match")
+	}
+	// A processing summary edited in place after the reply reopens the round.
+	withProcessing := append(append([]dialect.BotEvent(nil), base...),
+		dialect.BotEvent{Kind: dialect.EvInProgress, Bot: "coderabbitai[bot]", CommentID: 900, CreatedAt: t0.Add(-time.Hour), UpdatedAt: t0.Add(9 * time.Second)})
+	if CommandHasCompletionReply(Observation{Events: withProcessing}, policy, 1001) {
+		t.Fatal("an in-progress summary after the reply must reopen the command")
+	}
+}
+
 // TestCodexGatesCleanSummary ports the codexInactiveOrThumbed rules.
 func TestCodexGatesCleanSummary(t *testing.T) {
 	r := firedRound(t, "abcdef123")

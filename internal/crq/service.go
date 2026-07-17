@@ -13,6 +13,7 @@ import (
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 type Logger interface {
@@ -20,19 +21,19 @@ type Logger interface {
 }
 
 type GitHubAPI interface {
-	GetPull(context.Context, string, int) (Pull, error)
-	GetCommit(context.Context, string, string) (gitCommit, error)
-	ListReviews(context.Context, string, int) ([]Review, error)
-	ListIssueComments(context.Context, string, int) ([]IssueComment, error)
-	ListIssueCommentsPage(context.Context, string, int, int, int) ([]IssueComment, error)
-	ListReviewComments(context.Context, string, int) ([]ReviewComment, error)
-	ListIssueReactions(context.Context, string, int) ([]Reaction, error)
-	ListCommentReactions(context.Context, string, int64) ([]Reaction, error)
-	PostIssueComment(context.Context, string, int, string) (IssueComment, error)
+	GetPull(context.Context, string, int) (ghapi.Pull, error)
+	GetCommit(context.Context, string, string) (ghapi.Commit, error)
+	ListReviews(context.Context, string, int) ([]ghapi.Review, error)
+	ListIssueComments(context.Context, string, int) ([]ghapi.IssueComment, error)
+	ListIssueCommentsPage(context.Context, string, int, int, int) ([]ghapi.IssueComment, error)
+	ListReviewComments(context.Context, string, int) ([]ghapi.ReviewComment, error)
+	ListIssueReactions(context.Context, string, int) ([]ghapi.Reaction, error)
+	ListCommentReactions(context.Context, string, int64) ([]ghapi.Reaction, error)
+	PostIssueComment(context.Context, string, int, string) (ghapi.IssueComment, error)
 	DeleteIssueComment(context.Context, string, int64) error
-	CreateIssue(context.Context, string, string, string) (Issue, error)
-	SearchOpenPRs(context.Context, string, bool, int) ([]SearchPR, error)
-	EachOpenPR(context.Context, string, bool, func(SearchPR) (bool, error)) error
+	CreateIssue(context.Context, string, string, string) (ghapi.Issue, error)
+	SearchOpenPRs(context.Context, string, bool, int) ([]ghapi.SearchPR, error)
+	EachOpenPR(context.Context, string, bool, func(ghapi.SearchPR) (bool, error)) error
 	GraphQL(context.Context, string, map[string]any, any) error
 }
 
@@ -53,10 +54,10 @@ func NewService(cfg Config, gh GitHubAPI, store StateStore, log Logger) *Service
 	return &Service{cfg: cfg, cr: cr, gh: gh, store: store, log: log}
 }
 
-// warnRateLimited is the requeue reason for a rate-limited fire. It matches the
-// engine's rate-limit Transition.Reason and is surfaced via AccountQuota, not
-// the sticky Warn field.
-const warnRateLimited = "rate limited"
+// warnRateLimited is the requeue reason for a fire that came back account
+// blocked. It matches the engine's Transition.Reason (both reference the one
+// dialect constant) and is surfaced via AccountQuota, not the sticky Warn field.
+const warnRateLimited = dialect.ReasonRateLimited
 
 type EnqueueResult struct {
 	Repo          string `json:"repo"`
@@ -225,8 +226,8 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if err != nil {
 		return PumpResult{}, err
 	}
-	decision := engine.DecideFire(s.global(st, now), *next, obs, now, s.policy())
-	return s.applyFire(ctx, *next, obs, decision, now)
+	decision := engine.DecideFire(s.global(st, now), *next, obs.eng, now, s.policy())
+	return s.applyFire(ctx, *next, obs.eng, decision, now)
 }
 
 func (s *Service) global(st State, now time.Time) engine.Global {
@@ -248,7 +249,7 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 	if err != nil {
 		return PumpResult{}, err
 	}
-	tr := engine.Progress(slot, st.Account, obs, now, s.policy())
+	tr := engine.Progress(slot, st.Account, obs.eng, now, s.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return PumpResult{Action: "waiting", Repo: slot.Repo, PR: slot.PR, Reason: tr.Reason}, nil
 	}
@@ -319,7 +320,7 @@ func releaseSlot(st *State, key string) {
 	}
 }
 
-// applyAccountBlock ports requeueInflight's rate-limit bookkeeping. The window
+// applyAccountBlock ports requeueInflight's account-quota bookkeeping. The window
 // (including same-comment reuse) was resolved by the engine, so only the store
 // write happens here.
 func applyAccountBlock(st *State, blk *engine.AccountBlock, now time.Time) {
@@ -380,7 +381,7 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 		}
 		return st, nil
 	}
-	tr := engine.Progress(*target, st.Account, obs, now, s.policy())
+	tr := engine.Progress(*target, st.Account, obs.eng, now, s.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return st, nil
 	}
@@ -715,7 +716,7 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 	now := time.Now().UTC()
 	// Honor the freshness shortcut only when the last reading was conclusive. If a
 	// probe is still pending (CalibAskedAt set, no reply yet), keep re-checking so a
-	// late "rate-limited" reply isn't ignored for the full TTL.
+	// late "account blocked" reply isn't ignored for the full TTL.
 	if state.Account.CalibAskedAt == nil && state.Account.CheckedAt != nil && now.Sub(*state.Account.CheckedAt) < s.cfg.CalibrationTTL {
 		return state, nil
 	}
@@ -727,7 +728,7 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 		if st.Account.CalibAskedAt == nil && st.Account.CheckedAt != nil && time.Since(*st.Account.CheckedAt) < s.cfg.CalibrationTTL {
 			return ErrNoChange
 		}
-		// A fresh reading replaces the whole quota; carry the rate-limit comment
+		// A fresh reading replaces the whole quota; carry the account-quota comment
 		// identity over so the engine can still recognise an edited comment it
 		// already accounted for.
 		rlID, rlUpdated := st.Account.RLCommentID, st.Account.RLCommentUpdated
@@ -757,13 +758,13 @@ func (s *Service) calibrationIssue(state State) int {
 	return s.cfg.CalibrationPR
 }
 
-const calibrationIssueBody = "crq probes CodeRabbit's account-wide rate-limit state here with `@coderabbitai rate limit` so it never spends a real review to calibrate. Auto-created after a prior calibration thread hit GitHub's 2500-comment cap. Managed by crq — safe to leave alone."
+const calibrationIssueBody = "crq probes CodeRabbit's account-wide review quota here with `" + dialect.DefaultRateLimitCommand + "` so it never spends a real review to calibrate. Auto-created after a prior calibration thread hit GitHub's 2500-comment cap. Managed by crq — safe to leave alone."
 
 // rotateCalibration creates a fresh calibration issue and records its number in
 // the shared state so the whole fleet abandons a thread that hit GitHub's hard
 // 2500-comment cap.
 func (s *Service) rotateCalibration(ctx context.Context, oldIssue int) (int, error) {
-	issue, err := s.gh.CreateIssue(ctx, s.cfg.GateRepo, "crq rate-limit calibration", calibrationIssueBody)
+	issue, err := s.gh.CreateIssue(ctx, s.cfg.GateRepo, "crq account-quota calibration", calibrationIssueBody)
 	if err != nil {
 		return 0, err
 	}
@@ -792,7 +793,7 @@ func (s *Service) readQuota(ctx context.Context, issue int, now time.Time, pendi
 	if reply, ok, err := s.latestCalibrationReply(ctx, issue, cutoff); err != nil {
 		return quota, err
 	} else if ok {
-		remaining, reset := parseQuota(reply.Body, reply.UpdatedAt)
+		remaining, reset := dialect.ParseQuota(reply.Body, reply.UpdatedAt)
 		quota.Remaining = remaining
 		quota.BlockedUntil = reset
 		s.pruneCalibration(ctx, issue, keepAfter, 80)
@@ -842,7 +843,7 @@ func (s *Service) readQuota(ctx context.Context, issue int, now time.Time, pendi
 			return quota, err
 		}
 		if ok {
-			remaining, reset := parseQuota(reply.Body, reply.UpdatedAt)
+			remaining, reset := dialect.ParseQuota(reply.Body, reply.UpdatedAt)
 			quota.Remaining = remaining
 			quota.BlockedUntil = reset
 			quota.CalibAskedAt = nil
@@ -892,20 +893,20 @@ func (s *Service) pruneCalibration(ctx context.Context, issue int, keepAfter tim
 }
 
 // isCalibrationNoise reports whether a comment is a spent calibration artifact:
-// one of crq's "@coderabbitai rate limit" probes or a CodeRabbit auto-reply.
-func (s *Service) isCalibrationNoise(c IssueComment) bool {
+// one of crq's account-quota probes or a CodeRabbit auto-reply.
+func (s *Service) isCalibrationNoise(c ghapi.IssueComment) bool {
 	if strings.TrimSpace(c.Body) == strings.TrimSpace(s.cfg.RateLimitCommand) {
 		return true
 	}
 	return s.isConfiguredBot(c.User.Login) && strings.Contains(c.Body, s.cfg.CalibrationMarker)
 }
 
-func (s *Service) latestCalibrationReply(ctx context.Context, issue int, after time.Time) (IssueComment, bool, error) {
+func (s *Service) latestCalibrationReply(ctx context.Context, issue int, after time.Time) (ghapi.IssueComment, bool, error) {
 	comments, err := s.gh.ListIssueComments(ctx, s.cfg.GateRepo, issue)
 	if err != nil {
-		return IssueComment{}, false, err
+		return ghapi.IssueComment{}, false, err
 	}
-	var best IssueComment
+	var best ghapi.IssueComment
 	ok := false
 	for _, comment := range comments {
 		if !s.isConfiguredBot(comment.User.Login) || !comment.UpdatedAt.After(after) {
@@ -923,7 +924,7 @@ func (s *Service) latestCalibrationReply(ctx context.Context, issue int, after t
 }
 
 func (s *Service) isConfiguredBot(login string) bool {
-	return normalizeBotName(login) == normalizeBotName(s.cfg.Bot)
+	return dialect.NormalizeBotName(login) == dialect.NormalizeBotName(s.cfg.Bot)
 }
 
 // notBefore reports whether t is at or after baseline. GitHub timestamps are
@@ -986,16 +987,10 @@ func randomToken() string {
 	return hex.EncodeToString(buf[:])
 }
 
-// The CodeRabbit comment classifiers live in internal/dialect; these forwarders
-// keep call sites and tests stable during the refactor.
-func (s *Service) isRateLimited(body string) bool       { return s.cr.IsRateLimited(body) }
-func (s *Service) isReviewsPaused(body string) bool     { return s.cr.IsReviewsPaused(body) }
-func (s *Service) isReviewAlreadyDone(body string) bool { return s.cr.IsReviewAlreadyDone(body) }
-
 // isCommentCapError reports whether err is GitHub's hard cap of 2500 comments per
 // issue ("Commenting is disabled on issues with more than 2500 comments").
 func isCommentCapError(err error) bool {
-	var api *APIError
+	var api *ghapi.APIError
 	if !errors.As(err, &api) {
 		return false
 	}
@@ -1005,8 +1000,10 @@ func isCommentCapError(err error) bool {
 
 // Wait enqueues repo#pr and pumps until a review fires for its head (code 0),
 // current-head feedback is already available (code 3), the wait times out (code
-// 2), or the PR is closed (code 2). It is kept compiling on round state via the
-// v2→v3 shims; stage 4b rewrites it.
+// 2), or the PR is closed (code 2). The wait IS the round: a fired/reviewing
+// round for the head is the in-flight wait, a completed round is the "already
+// reviewed" dedup marker, and firedMarker/waitingHead read those states off the
+// round rather than a separate wait record.
 func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, int, error) {
 	repo = NormalizeRepo(repo)
 	start := time.Now()
@@ -1029,14 +1026,14 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 				if err != nil {
 					return PumpResult{}, 1, err
 				}
-				if waitView(&state, repo, pr).Head == result.Head {
+				if waitingHead(&state, repo, pr) == result.Head {
 					return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
 				}
 				report, err := s.Feedback(ctx, repo, pr)
 				if err != nil {
 					return PumpResult{}, 1, err
 				}
-				if len(findingsReportedOnHead(report.Findings, report.Head)) > 0 || allReviewed(report.ReviewedBy) {
+				if len(engine.FindingsOnHead(report.Findings, report.Head)) > 0 || allReviewed(report.ReviewedBy) {
 					return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
 				}
 				// A completed round at this head with no real head review is a poisoned
@@ -1067,7 +1064,7 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 			// Return current-head findings immediately so the caller can fix locally.
 			// The round stays active: policy holds this head until the slot and every
 			// required reviewer finish.
-			if len(findingsReportedOnHead(report.Findings, report.Head)) > 0 {
+			if len(engine.FindingsOnHead(report.Findings, report.Head)) > 0 {
 				if s.log != nil {
 					s.log.Printf("%s#%d feedback already available on %s; leaving review slot wait", repo, pr, report.Head)
 				}

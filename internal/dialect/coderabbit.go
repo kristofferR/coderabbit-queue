@@ -17,6 +17,23 @@ type CodeRabbit struct {
 	CalibrationMarker string
 }
 
+// Default CodeRabbit dialect vocabulary. These literals live here — the one
+// package that owns bot-message text — so crq/config and the engine inject them
+// without spelling out the "rate limit" wording themselves.
+const (
+	// DefaultRateLimitCommand is the probe crq posts to read CodeRabbit's
+	// account-wide review quota without spending a real review.
+	DefaultRateLimitCommand = "@coderabbitai rate limit"
+	// DefaultRateLimitMarker is the legacy phrase in CodeRabbit's account-quota
+	// notice (the newer Fair Usage format is matched separately).
+	DefaultRateLimitMarker = "rate limited by coderabbit.ai"
+	// ReasonRateLimited is the requeue reason recorded when a fired review comes
+	// back account-blocked. It is the human-readable string users grep in the
+	// daemon log (requeue ... reason="rate limited"); the engine and crq
+	// reference it so the literal stays in this package.
+	ReasonRateLimited = "rate limited"
+)
+
 // IsCompletionReply reports whether body is the bot's reply to a processed
 // review command (CodeRabbit: "Review finished."). An empty marker disables
 // the completion-reply convergence fallback entirely.

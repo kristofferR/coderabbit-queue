@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/crq"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 type stderrLogger struct{}
@@ -62,7 +63,7 @@ func run(ctx context.Context, args []string) int {
 		fatal(err)
 		return 1
 	}
-	gh, err := crq.NewGitHub(ctx)
+	gh, err := ghapi.NewGitHub(ctx)
 	if err != nil {
 		fatal(err)
 		return 1

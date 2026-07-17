@@ -120,16 +120,16 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	}
 	remaining := "available now"
 	if blocked {
-		remaining = "0 — rate-limited"
+		remaining = "0 — account blocked"
 	}
 
 	fmt.Fprintf(&b, "|   |   |\n|---|---|\n")
 	fmt.Fprintf(&b, "| **Scope** | `%s` |\n", st.Account.Scope)
 	fmt.Fprintf(&b, "| **Reviews remaining** | %s%s |\n", remaining, via)
 	if blocked {
-		fmt.Fprintf(&b, "| **Rate limit** | ⚠️ rate limited |\n")
+		fmt.Fprintf(&b, "| **CodeRabbit quota** | ⚠️ account blocked |\n")
 	} else {
-		fmt.Fprintf(&b, "| **Rate limit** | ✅ not currently limited |\n")
+		fmt.Fprintf(&b, "| **CodeRabbit quota** | ✅ not currently blocked |\n")
 	}
 	fmt.Fprintf(&b, "| **Last review fired** | %s |\n", fmtStamp(st.LastFired, loc))
 	if slot != nil {

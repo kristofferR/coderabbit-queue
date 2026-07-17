@@ -5,23 +5,26 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 func TestLooksLikePathAcceptsRootFiles(t *testing.T) {
 	for _, p := range []string{"Dockerfile", "Makefile", "LICENSE", "go.mod", "src/app.go", "a/b/c"} {
-		if !looksLikePath(p) {
+		if !dialect.LooksLikePath(p) {
 			t.Fatalf("expected %q to be treated as a path", p)
 		}
 	}
 	for _, p := range []string{"", "Additional comments", "🧹 Nitpick comments", "two words"} {
-		if looksLikePath(p) {
+		if dialect.LooksLikePath(p) {
 			t.Fatalf("expected %q NOT to be a path", p)
 		}
 	}
 }
 
 func TestDedupeSuppressesResolvedThreadPromptDuplicate(t *testing.T) {
-	findings := []Finding{
+	findings := []dialect.Finding{
 		{Bot: "coderabbitai", Path: "internal/x.go", Line: 10, Title: "dup", Body: "do x", Source: "review_prompt"},
 	}
 	suppress := map[string]bool{"coderabbitai|internal/x.go|10": true}
@@ -42,19 +45,19 @@ func TestFeedbackBoundsIssueCommentsToHead(t *testing.T) {
 	gh := newFakeGitHub()
 	headTime := time.Now().UTC()
 	sha := "abcdef1234567890"
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = sha
 	gh.pulls[fakeKey("o/repo", 3)] = pull
-	gc := gitCommit{SHA: sha}
+	gc := ghapi.Commit{SHA: sha}
 	gc.Committer.Date = headTime
 	gh.commits[sha] = gc
-	mkc := func(id int64, body string, at time.Time) IssueComment {
-		ic := IssueComment{ID: id, Body: body, CreatedAt: at, UpdatedAt: at}
+	mkc := func(id int64, body string, at time.Time) ghapi.IssueComment {
+		ic := ghapi.IssueComment{ID: id, Body: body, CreatedAt: at, UpdatedAt: at}
 		ic.User.Login = "chatgpt-codex-connector[bot]"
 		return ic
 	}
-	gh.comments[fakeKey("o/repo", 3)] = []IssueComment{
+	gh.comments[fakeKey("o/repo", 3)] = []ghapi.IssueComment{
 		mkc(1, "Stale finding from the previous head", headTime.Add(-time.Hour)),
 		mkc(2, "Current finding for this head", headTime.Add(time.Minute)),
 	}
@@ -91,22 +94,22 @@ func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 	completion := "<!-- This is an auto-generated reply by CodeRabbit -->\n✅ Action performed\n\nReview finished."
 	setup := func(replyAt time.Time, replyBody string, seedHistory, priorReview bool) *Service {
 		gh := newFakeGitHub()
-		var pull Pull
+		var pull ghapi.Pull
 		pull.State = "open"
 		pull.Head.SHA = sha
 		gh.pulls[fakeKey("o/repo", 3)] = pull
-		trigger := IssueComment{ID: 1, Body: "@coderabbitai review", CreatedAt: firedAt, UpdatedAt: firedAt}
+		trigger := ghapi.IssueComment{ID: 1, Body: "@coderabbitai review", CreatedAt: firedAt, UpdatedAt: firedAt}
 		trigger.User.Login = "kristofferR"
-		reply := IssueComment{ID: 2, Body: replyBody, CreatedAt: replyAt, UpdatedAt: replyAt}
+		reply := ghapi.IssueComment{ID: 2, Body: replyBody, CreatedAt: replyAt, UpdatedAt: replyAt}
 		reply.User.Login = "coderabbitai[bot]"
-		gh.comments[fakeKey("o/repo", 3)] = []IssueComment{trigger, reply}
+		gh.comments[fakeKey("o/repo", 3)] = []ghapi.IssueComment{trigger, reply}
 		if priorReview {
 			// A no-findings re-review presupposes an earlier review of the PR
 			// (on some older commit); without one the completion reply must
 			// not stand in for a review (covered by the dedicated case below).
-			prior := Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour)}
+			prior := ghapi.Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour)}
 			prior.User.Login = "coderabbitai[bot]"
-			gh.reviews[fakeKey("o/repo", 3)] = []Review{prior}
+			gh.reviews[fakeKey("o/repo", 3)] = []ghapi.Review{prior}
 		}
 		store := NewMemoryStore(cfg)
 		if seedHistory {
@@ -194,24 +197,24 @@ func TestFeedbackRejectsCompletionReplyWhileTopSummaryIsProcessing(t *testing.T)
 	sha := "abcdef1234567890"
 	head := sha[:9]
 	firedAt := time.Now().UTC().Add(-10 * time.Minute)
-	mk := func(id int64, login, body string, createdAt, updatedAt time.Time) IssueComment {
-		comment := IssueComment{ID: id, Body: body, CreatedAt: createdAt, UpdatedAt: updatedAt}
+	mk := func(id int64, login, body string, createdAt, updatedAt time.Time) ghapi.IssueComment {
+		comment := ghapi.IssueComment{ID: id, Body: body, CreatedAt: createdAt, UpdatedAt: updatedAt}
 		comment.User.Login = login
 		return comment
 	}
 
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = sha
 	gh.pulls[fakeKey("o/repo", 3)] = pull
 	command := mk(1, "kristofferR", cfg.ReviewCommand, firedAt, firedAt)
 	completion := mk(2, cfg.Bot, "<!-- This is an auto-generated reply by CodeRabbit -->\nReview finished.", firedAt.Add(time.Minute), firedAt.Add(time.Minute))
 	summary := mk(3, cfg.Bot, "<!-- review in progress by coderabbit.ai -->\nCurrently processing new changes in this PR. This may take a few minutes, please wait...", firedAt.Add(-time.Hour), firedAt.Add(2*time.Minute))
-	gh.comments[fakeKey("o/repo", 3)] = []IssueComment{summary, command, completion}
-	prior := Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour)}
+	gh.comments[fakeKey("o/repo", 3)] = []ghapi.IssueComment{summary, command, completion}
+	prior := ghapi.Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour)}
 	prior.User.Login = cfg.Bot
-	gh.reviews[fakeKey("o/repo", 3)] = []Review{prior}
+	gh.reviews[fakeKey("o/repo", 3)] = []ghapi.Review{prior}
 	store := NewMemoryStore(cfg)
 	seedRound(t, store, cfg, "o/repo", 3, head, PhaseReviewing, firedAt, 1)
 	service := NewService(cfg, gh, store, nil)
@@ -226,7 +229,7 @@ func TestFeedbackRejectsCompletionReplyWhileTopSummaryIsProcessing(t *testing.T)
 
 	summary.Body = "No actionable comments were generated in the recent review."
 	summary.UpdatedAt = firedAt.Add(3 * time.Minute)
-	gh.comments[fakeKey("o/repo", 3)] = []IssueComment{summary, command, completion}
+	gh.comments[fakeKey("o/repo", 3)] = []ghapi.IssueComment{summary, command, completion}
 	report, err = service.Feedback(context.Background(), "o/repo", 3)
 	if err != nil {
 		t.Fatal(err)
@@ -248,24 +251,24 @@ func TestFeedbackRejectsCompletionReplyWhenTopSummaryFailed(t *testing.T) {
 	sha := "abcdef1234567890"
 	head := sha[:9]
 	firedAt := time.Now().UTC().Add(-10 * time.Minute)
-	mk := func(id int64, login, body string, createdAt, updatedAt time.Time) IssueComment {
-		comment := IssueComment{ID: id, Body: body, CreatedAt: createdAt, UpdatedAt: updatedAt}
+	mk := func(id int64, login, body string, createdAt, updatedAt time.Time) ghapi.IssueComment {
+		comment := ghapi.IssueComment{ID: id, Body: body, CreatedAt: createdAt, UpdatedAt: updatedAt}
 		comment.User.Login = login
 		return comment
 	}
 
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = sha
 	gh.pulls[fakeKey("o/repo", 3)] = pull
 	command := mk(1, "kristofferR", cfg.ReviewCommand, firedAt, firedAt)
 	completion := mk(2, cfg.Bot, "<!-- This is an auto-generated reply by CodeRabbit -->\nReview finished.", firedAt.Add(time.Minute), firedAt.Add(3*time.Minute))
 	failure := mk(3, cfg.Bot, "<!-- This is an auto-generated comment: failure by coderabbit.ai -->\n## Review failed\n\nAn error occurred during the review process.", firedAt.Add(-time.Hour), firedAt.Add(2*time.Minute))
-	gh.comments[fakeKey("o/repo", 3)] = []IssueComment{failure, command, completion}
-	prior := Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour)}
+	gh.comments[fakeKey("o/repo", 3)] = []ghapi.IssueComment{failure, command, completion}
+	prior := ghapi.Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour)}
 	prior.User.Login = cfg.Bot
-	gh.reviews[fakeKey("o/repo", 3)] = []Review{prior}
+	gh.reviews[fakeKey("o/repo", 3)] = []ghapi.Review{prior}
 	store := NewMemoryStore(cfg)
 	seedRound(t, store, cfg, "o/repo", 3, head, PhaseReviewing, firedAt, 1)
 	service := NewService(cfg, gh, store, nil)
@@ -300,23 +303,23 @@ func TestFeedbackRejectsCompletionReplyFromEarlierRound(t *testing.T) {
 	head := sha[:9]
 	firedAt := time.Now().UTC().Add(-10 * time.Minute)
 	completion := "<!-- This is an auto-generated reply by CodeRabbit -->\n✅ Action performed\n\nReview finished."
-	mk := func(id int64, login, body string, at time.Time) IssueComment {
-		ic := IssueComment{ID: id, Body: body, CreatedAt: at, UpdatedAt: at}
+	mk := func(id int64, login, body string, at time.Time) ghapi.IssueComment {
+		ic := ghapi.IssueComment{ID: id, Body: body, CreatedAt: at, UpdatedAt: at}
 		ic.User.Login = login
 		return ic
 	}
-	setup := func(comments []IssueComment) *Service {
+	setup := func(comments []ghapi.IssueComment) *Service {
 		gh := newFakeGitHub()
-		var pull Pull
+		var pull ghapi.Pull
 		pull.State = "open"
 		pull.Head.SHA = sha
 		gh.pulls[fakeKey("o/repo", 3)] = pull
 		gh.comments[fakeKey("o/repo", 3)] = comments
 		// The completion fallback requires a prior review by the bot (the old
 		// round's review of the previous head).
-		prior := Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour)}
+		prior := ghapi.Review{ID: 9, CommitID: "0123456fedcba", State: "COMMENTED", SubmittedAt: firedAt.Add(-time.Hour)}
 		prior.User.Login = "coderabbitai[bot]"
-		gh.reviews[fakeKey("o/repo", 3)] = []Review{prior}
+		gh.reviews[fakeKey("o/repo", 3)] = []ghapi.Review{prior}
 		store := NewMemoryStore(cfg)
 		seedRound(t, store, cfg, "o/repo", 3, head, PhaseReviewing, firedAt, 1)
 		return NewService(cfg, gh, store, nil)
@@ -326,7 +329,7 @@ func TestFeedbackRejectsCompletionReplyFromEarlierRound(t *testing.T) {
 	newCmd := mk(2, "kristofferR", "@coderabbitai review", firedAt)
 	oldDone := mk(3, "coderabbitai[bot]", completion, firedAt.Add(30*time.Second))
 
-	rep, err := setup([]IssueComment{oldCmd, newCmd, oldDone}).Feedback(context.Background(), "o/repo", 3)
+	rep, err := setup([]ghapi.IssueComment{oldCmd, newCmd, oldDone}).Feedback(context.Background(), "o/repo", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +338,7 @@ func TestFeedbackRejectsCompletionReplyFromEarlierRound(t *testing.T) {
 	}
 
 	newDone := mk(4, "coderabbitai[bot]", completion, firedAt.Add(2*time.Minute))
-	rep, err = setup([]IssueComment{oldCmd, newCmd, oldDone, newDone}).Feedback(context.Background(), "o/repo", 3)
+	rep, err = setup([]ghapi.IssueComment{oldCmd, newCmd, oldDone, newDone}).Feedback(context.Background(), "o/repo", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,24 +360,24 @@ func TestFeedbackSkipsReviewAnsweredCommandsWhenPairingCompletionReplies(t *test
 	head := sha[:9]
 	firedAt := time.Now().UTC().Add(-10 * time.Minute)
 	completion := "<!-- This is an auto-generated reply by CodeRabbit -->\n✅ Action performed\n\nReview finished."
-	mk := func(id int64, login, body string, at time.Time) IssueComment {
-		ic := IssueComment{ID: id, Body: body, CreatedAt: at, UpdatedAt: at}
+	mk := func(id int64, login, body string, at time.Time) ghapi.IssueComment {
+		ic := ghapi.IssueComment{ID: id, Body: body, CreatedAt: at, UpdatedAt: at}
 		ic.User.Login = login
 		return ic
 	}
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = sha
 	gh.pulls[fakeKey("o/repo", 3)] = pull
-	gh.comments[fakeKey("o/repo", 3)] = []IssueComment{
+	gh.comments[fakeKey("o/repo", 3)] = []ghapi.IssueComment{
 		mk(1, "kristofferR", "@coderabbitai review", firedAt.Add(-5*time.Minute)),
 		mk(2, "kristofferR", "@coderabbitai review", firedAt),
 		mk(3, "coderabbitai[bot]", completion, firedAt.Add(30*time.Second)),
 	}
-	oldReview := Review{ID: 44, CommitID: "1111111111111111", SubmittedAt: firedAt.Add(-4 * time.Minute)}
+	oldReview := ghapi.Review{ID: 44, CommitID: "1111111111111111", SubmittedAt: firedAt.Add(-4 * time.Minute)}
 	oldReview.User.Login = cfg.Bot
-	gh.reviews[fakeKey("o/repo", 3)] = []Review{oldReview}
+	gh.reviews[fakeKey("o/repo", 3)] = []ghapi.Review{oldReview}
 	store := NewMemoryStore(cfg)
 	seedRound(t, store, cfg, "o/repo", 3, head, PhaseReviewing, firedAt, 1)
 	svc := NewService(cfg, gh, store, nil)
@@ -400,21 +403,21 @@ func TestFeedbackSurfacesCodexEvenWhenNotRequired(t *testing.T) {
 	}
 	gh := newFakeGitHub()
 	sha := "abcdef1234567890"
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = sha
 	gh.pulls[fakeKey("o/repo", 7)] = pull
 
 	// CodeRabbit reviewed this head and found nothing (empty body → no findings).
-	crReview := Review{ID: 1, Body: "", CommitID: sha, SubmittedAt: time.Now().UTC()}
+	crReview := ghapi.Review{ID: 1, Body: "", CommitID: sha, SubmittedAt: time.Now().UTC()}
 	crReview.User.Login = "coderabbitai[bot]"
-	gh.reviews[fakeKey("o/repo", 7)] = []Review{crReview}
+	gh.reviews[fakeKey("o/repo", 7)] = []ghapi.Review{crReview}
 
 	// Codex left an inline finding on the same head (REST review-comment path, since
 	// the fake GraphQL is unavailable and Feedback falls back to it).
-	cx := ReviewComment{ID: 22, Body: "**Fix the off-by-one.** This clips the last row.", Path: "app/x.go", Line: 10, CommitID: sha}
+	cx := ghapi.ReviewComment{ID: 22, Body: "**Fix the off-by-one.** This clips the last row.", Path: "app/x.go", Line: 10, CommitID: sha}
 	cx.User.Login = "chatgpt-codex-connector[bot]"
-	gh.reviewComments[fakeKey("o/repo", 7)] = []ReviewComment{cx}
+	gh.reviewComments[fakeKey("o/repo", 7)] = []ghapi.ReviewComment{cx}
 
 	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
 	rep, err := svc.Feedback(context.Background(), "o/repo", 7)
@@ -424,7 +427,7 @@ func TestFeedbackSurfacesCodexEvenWhenNotRequired(t *testing.T) {
 	if len(rep.Findings) != 1 || !strings.Contains(rep.Findings[0].Body, "off-by-one") {
 		t.Fatalf("expected the Codex finding to be surfaced, got %#v", rep.Findings)
 	}
-	if normalizeBotName(rep.Findings[0].Bot) != "chatgpt-codex-connector" {
+	if dialect.NormalizeBotName(rep.Findings[0].Bot) != "chatgpt-codex-connector" {
 		t.Fatalf("expected the finding attributed to Codex, got %q", rep.Findings[0].Bot)
 	}
 	if rep.Converged {
@@ -441,7 +444,7 @@ func TestFeedbackSurfacesCodexEvenWhenNotRequired(t *testing.T) {
 }
 
 func TestParseReviewBodyFindingsExtractsOutsideDiffItems(t *testing.T) {
-	review := Review{
+	review := ghapi.Review{
 		ID: 99,
 		Body: `> [!CAUTION]
 > Some comments are outside the diff and can't be posted inline.
@@ -482,7 +485,7 @@ func TestParseReviewBodyFindingsExtractsNestedQuoteSections(t *testing.T) {
 	// two-plus blockquote levels deep. A single-level quote strip leaves
 	// "> " prefixes that break the anchored line-range header match, so
 	// every finding in those sections used to be silently dropped.
-	review := Review{
+	review := ghapi.Review{
 		ID: 100,
 		Body: "> [!WARNING]\n" +
 			"> Review had issues posting inline.\n" +
@@ -529,7 +532,7 @@ func TestParseReviewBodyFindingsExtractsNestedQuoteSections(t *testing.T) {
 func TestParseReviewBodyFindingsExtractsCommentsFailedToPost(t *testing.T) {
 	// CodeRabbit's "Comments failed to post" section uses un-backticked line
 	// headers (561-573:) unlike the backticked "Outside diff range" form.
-	review := Review{
+	review := ghapi.Review{
 		ID: 7,
 		Body: "<details>\n<summary>🛑 Comments failed to post (1)</summary><blockquote>\n\n" +
 			"<details>\n<summary>src-tauri/inject/messenger.js (1)</summary><blockquote>\n\n" +
@@ -554,7 +557,7 @@ func TestParseReviewBodyFindingsExtractsCommentsFailedToPost(t *testing.T) {
 }
 
 func TestParseReviewBodyFindingsExtractsPromptBlock(t *testing.T) {
-	review := Review{
+	review := ghapi.Review{
 		ID: 100,
 		Body: `<details>
 <summary>🤖 Prompt for all review comments with AI agents</summary>
@@ -588,7 +591,7 @@ In @README.md:
 }
 
 func TestParseReviewBodyFindingsExtractsCodexOutsideDiffItem(t *testing.T) {
-	review := Review{
+	review := ghapi.Review{
 		ID: 101,
 		Body: `
 ### 💡 Codex Review
@@ -638,12 +641,12 @@ func TestFeedbackSurfacesBodyFindingsFromSupersededCommit(t *testing.T) {
 	}
 	gh := newFakeGitHub()
 	head := "9999999999999999"
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = head
 	gh.pulls[fakeKey("o/repo", 5)] = pull
 
-	review := Review{
+	review := ghapi.Review{
 		ID: 7,
 		Body: `**Actionable comments posted: 2**
 <details>
@@ -663,7 +666,7 @@ In ` + "`@src/app.ts`" + `:
 		SubmittedAt: time.Now().UTC().Add(-time.Hour),
 	}
 	review.User.Login = "coderabbitai[bot]"
-	gh.reviews[fakeKey("o/repo", 5)] = []Review{review}
+	gh.reviews[fakeKey("o/repo", 5)] = []ghapi.Review{review}
 
 	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
 	rep, err := svc.Feedback(context.Background(), "o/repo", 5)
@@ -693,12 +696,12 @@ func TestFeedbackNewerHeadReviewSupersedesOldBodyFindings(t *testing.T) {
 	}
 	gh := newFakeGitHub()
 	head := "9999999999999999"
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = head
 	gh.pulls[fakeKey("o/repo", 5)] = pull
 
-	old := Review{
+	old := ghapi.Review{
 		ID: 7,
 		Body: "**Actionable comments posted: 1**\n<details>\n<summary>🤖 Prompt for all review comments with AI agents</summary>\n\n" +
 			"```\nIn `@src/app.ts`:\n- Around line 12-14: Stale state.\n```\n</details>",
@@ -706,9 +709,9 @@ func TestFeedbackNewerHeadReviewSupersedesOldBodyFindings(t *testing.T) {
 		SubmittedAt: time.Now().UTC().Add(-time.Hour),
 	}
 	old.User.Login = "coderabbitai[bot]"
-	fresh := Review{ID: 9, Body: "", CommitID: head, SubmittedAt: time.Now().UTC()}
+	fresh := ghapi.Review{ID: 9, Body: "", CommitID: head, SubmittedAt: time.Now().UTC()}
 	fresh.User.Login = "coderabbitai[bot]"
-	gh.reviews[fakeKey("o/repo", 5)] = []Review{old, fresh}
+	gh.reviews[fakeKey("o/repo", 5)] = []ghapi.Review{old, fresh}
 
 	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
 	rep, err := svc.Feedback(context.Background(), "o/repo", 5)
@@ -733,12 +736,12 @@ func TestFeedbackCurrentRoundDoesNotResurfacePreRoundBodyFindings(t *testing.T) 
 	}
 	gh := newFakeGitHub()
 	head := "9999999999999999"
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = head
 	gh.pulls[fakeKey("o/repo", 5)] = pull
 
-	old := Review{
+	old := ghapi.Review{
 		ID: 7,
 		Body: "**Actionable comments posted: 1**\n<details>\n<summary>🤖 Prompt for all review comments with AI agents</summary>\n\n" +
 			"```\nIn `@src/app.ts`:\n- Around line 12-14: Stale state.\n```\n</details>",
@@ -746,15 +749,15 @@ func TestFeedbackCurrentRoundDoesNotResurfacePreRoundBodyFindings(t *testing.T) 
 		SubmittedAt: started.Add(-time.Hour),
 	}
 	old.User.Login = "coderabbitai[bot]"
-	gh.reviews[fakeKey("o/repo", 5)] = []Review{old}
-	completion := IssueComment{
+	gh.reviews[fakeKey("o/repo", 5)] = []ghapi.Review{old}
+	completion := ghapi.IssueComment{
 		ID:        10,
 		Body:      "No actionable comments were generated in the recent review. 🎉",
 		CreatedAt: started.Add(time.Minute),
 		UpdatedAt: started.Add(time.Minute),
 	}
 	completion.User.Login = "coderabbitai[bot]"
-	gh.comments[fakeKey("o/repo", 5)] = []IssueComment{completion}
+	gh.comments[fakeKey("o/repo", 5)] = []ghapi.IssueComment{completion}
 
 	store := NewMemoryStore(cfg)
 	seedRound(t, store, cfg, "o/repo", 5, head[:9], PhaseReviewing, started, 0)
@@ -781,14 +784,14 @@ func TestFeedbackCurrentCodeRabbitRoundKeepsLatestCodexBodyFinding(t *testing.T)
 	}
 	gh := newFakeGitHub()
 	head := "850772b68de27efabc7ec5eeda30bb5ea138eb29"
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = head
 	gh.pulls[fakeKey("o/repo", 5)] = pull
 
-	codeRabbit := Review{ID: 8, CommitID: head, SubmittedAt: started.Add(time.Minute)}
+	codeRabbit := ghapi.Review{ID: 8, CommitID: head, SubmittedAt: started.Add(time.Minute)}
 	codeRabbit.User.Login = "coderabbitai[bot]"
-	codex := Review{
+	codex := ghapi.Review{
 		ID: 7,
 		Body: `https://github.com/o/repo/blob/347388ffda8ae3eb7060a6b960ea437a78780045/convex/sections/aiCommands.ts#L2170-L2174
 **<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub> Query learning history by topic before taking**
@@ -798,7 +801,7 @@ Fetch by topic before applying the result limit.`,
 		SubmittedAt: started.Add(-30 * time.Minute),
 	}
 	codex.User.Login = "chatgpt-codex-connector[bot]"
-	gh.reviews[fakeKey("o/repo", 5)] = []Review{codex, codeRabbit}
+	gh.reviews[fakeKey("o/repo", 5)] = []ghapi.Review{codex, codeRabbit}
 
 	store := NewMemoryStore(cfg)
 	seedRound(t, store, cfg, "o/repo", 5, head[:9], PhaseReviewing, started, 0)
@@ -813,7 +816,7 @@ Fetch by topic before applying the result limit.`,
 }
 
 func TestThreadFindingsSurfacesUnresolvedAcrossCommits(t *testing.T) {
-	bots := botSet([]string{"coderabbitai[bot]"})
+	bots := dialect.BotSet([]string{"coderabbitai[bot]"})
 	mk := func(resolved, outdated bool, oid string) reviewThread {
 		var th reviewThread
 		th.ID = "PRRT_x"
@@ -864,55 +867,28 @@ func TestThreadFindingsSurfacesUnresolvedAcrossCommits(t *testing.T) {
 }
 
 func TestInBotsToleratesBotSuffix(t *testing.T) {
-	bots := botSet([]string{"coderabbitai[bot]", "chatgpt-codex"})
+	bots := dialect.BotSet([]string{"coderabbitai[bot]", "chatgpt-codex"})
 	// REST reports "coderabbitai[bot]"; GraphQL review threads report "coderabbitai".
 	for _, login := range []string{"coderabbitai[bot]", "coderabbitai", "chatgpt-codex", "chatgpt-codex[bot]"} {
-		if !inBots(bots, login) {
+		if !dialect.InBots(bots, login) {
 			t.Fatalf("expected %q to match a configured bot", login)
 		}
 	}
-	if inBots(bots, "some-human") {
+	if dialect.InBots(bots, "some-human") {
 		t.Fatal("unexpected match for a non-bot login")
-	}
-}
-
-func TestMarkReviewedFlipsConfiguredKeyAcrossSuffix(t *testing.T) {
-	// A GraphQL login without the [bot] suffix must flip the configured suffixed
-	// key in place, not insert a divergent key that would leave convergence (which
-	// ANDs every key) permanently false.
-	reviewedBy := map[string]bool{"coderabbitai[bot]": false, "chatgpt-codex": false}
-	markReviewed(reviewedBy, "coderabbitai")
-	if !reviewedBy["coderabbitai[bot]"] || len(reviewedBy) != 2 {
-		t.Fatalf("expected the configured key flipped without inserting a new one: %#v", reviewedBy)
-	}
-	markReviewed(reviewedBy, "chatgpt-codex") // exact match
-	if !reviewedBy["chatgpt-codex"] {
-		t.Fatalf("exact match failed: %#v", reviewedBy)
-	}
-	// Configured key without suffix, REST login with suffix — the inverse case.
-	rb := map[string]bool{"coderabbitai": false}
-	markReviewed(rb, "coderabbitai[bot]")
-	if !rb["coderabbitai"] || len(rb) != 1 {
-		t.Fatalf("a suffixed REST login should flip the suffix-less key: %#v", rb)
-	}
-	// An unknown login is a no-op: no panic, no spurious insert.
-	rb2 := map[string]bool{"coderabbitai[bot]": false}
-	markReviewed(rb2, "some-human")
-	if rb2["coderabbitai[bot]"] || len(rb2) != 1 {
-		t.Fatalf("unknown login must be a no-op: %#v", rb2)
 	}
 }
 
 func TestFeedbackSkipsConfiguredBotIssueCommentsAcrossSuffix(t *testing.T) {
 	cfg := Config{Bot: "coderabbitai", RequiredBots: []string{"coderabbitai"}}
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("o/repo", 1)] = pull
-	comment := IssueComment{Body: "CodeRabbit summary text", UpdatedAt: time.Now().UTC()}
+	comment := ghapi.IssueComment{Body: "CodeRabbit summary text", UpdatedAt: time.Now().UTC()}
 	comment.User.Login = "coderabbitai[bot]"
-	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
+	gh.comments[fakeKey("o/repo", 1)] = []ghapi.IssueComment{comment}
 	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
 
 	report, err := svc.Feedback(context.Background(), "o/repo", 1)
@@ -932,18 +908,18 @@ func TestFeedbackMarksCurrentNoActionCompletionCommentReviewed(t *testing.T) {
 		RequiredBots: []string{"coderabbitai[bot]"},
 	}
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("o/repo", 1)] = pull
-	comment := IssueComment{
+	comment := ghapi.IssueComment{
 		ID:        1,
 		Body:      "No actionable comments were generated in the recent review. 🎉",
 		CreatedAt: started.Add(time.Minute),
 		UpdatedAt: started.Add(time.Minute),
 	}
 	comment.User.Login = "coderabbitai[bot]"
-	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
+	gh.comments[fakeKey("o/repo", 1)] = []ghapi.IssueComment{comment}
 	store := NewMemoryStore(cfg)
 	seedRound(t, store, cfg, "o/repo", 1, "abcdef123", PhaseReviewing, started, 0)
 	svc := NewService(cfg, gh, store, nil)
@@ -971,18 +947,18 @@ func TestFeedbackIgnoresStaleNoActionCompletionComment(t *testing.T) {
 		RequiredBots: []string{"coderabbitai[bot]"},
 	}
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("o/repo", 1)] = pull
-	comment := IssueComment{
+	comment := ghapi.IssueComment{
 		ID:        1,
 		Body:      "No actionable comments were generated in the recent review. 🎉",
 		CreatedAt: started.Add(-time.Minute),
 		UpdatedAt: started.Add(-time.Minute),
 	}
 	comment.User.Login = "coderabbitai[bot]"
-	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
+	gh.comments[fakeKey("o/repo", 1)] = []ghapi.IssueComment{comment}
 	store := NewMemoryStore(cfg)
 	seedRound(t, store, cfg, "o/repo", 1, "abcdef123", PhaseReviewing, started, 0)
 	svc := NewService(cfg, gh, store, nil)
@@ -1004,18 +980,18 @@ func TestFeedbackDoesNotUseNoActionCompletionWhileCodexRequiredWithoutThumbsUp(t
 		RequiredBots: []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
 	}
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("o/repo", 1)] = pull
-	comment := IssueComment{
+	comment := ghapi.IssueComment{
 		ID:        1,
 		Body:      "No actionable comments were generated in the recent review. 🎉",
 		CreatedAt: started.Add(time.Minute),
 		UpdatedAt: started.Add(time.Minute),
 	}
 	comment.User.Login = "coderabbitai[bot]"
-	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
+	gh.comments[fakeKey("o/repo", 1)] = []ghapi.IssueComment{comment}
 	store := NewMemoryStore(cfg)
 	seedRound(t, store, cfg, "o/repo", 1, "abcdef123", PhaseReviewing, started, 0)
 	svc := NewService(cfg, gh, store, nil)
@@ -1040,21 +1016,21 @@ func TestFeedbackUsesNoActionCompletionAfterCodexThumbsUp(t *testing.T) {
 		RequiredBots: []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
 	}
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("o/repo", 1)] = pull
-	comment := IssueComment{
+	comment := ghapi.IssueComment{
 		ID:        1,
 		Body:      "No actionable comments were generated in the recent review. 🎉",
 		CreatedAt: started.Add(time.Minute),
 		UpdatedAt: started.Add(time.Minute),
 	}
 	comment.User.Login = "coderabbitai[bot]"
-	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
-	thumb := Reaction{Content: "+1", CreatedAt: started.Add(2 * time.Minute)}
+	gh.comments[fakeKey("o/repo", 1)] = []ghapi.IssueComment{comment}
+	thumb := ghapi.Reaction{Content: "+1", CreatedAt: started.Add(2 * time.Minute)}
 	thumb.User.Login = "chatgpt-codex-connector[bot]"
-	gh.reactions[99] = []Reaction{thumb}
+	gh.reactions[99] = []ghapi.Reaction{thumb}
 	store := NewMemoryStore(cfg)
 	seedRound(t, store, cfg, "o/repo", 1, "abcdef123", PhaseReviewing, started, 99)
 	svc := NewService(cfg, gh, store, nil)
@@ -1078,21 +1054,21 @@ func TestFeedbackIgnoresOptionalCodexCleanReviewSummary(t *testing.T) {
 		FeedbackBots: []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
 	}
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("o/repo", 1)] = pull
-	review := Review{ID: 9, CommitID: pull.Head.SHA, SubmittedAt: time.Now().UTC()}
+	review := ghapi.Review{ID: 9, CommitID: pull.Head.SHA, SubmittedAt: time.Now().UTC()}
 	review.User.Login = "coderabbitai[bot]"
-	gh.reviews[fakeKey("o/repo", 1)] = []Review{review}
-	comment := IssueComment{
+	gh.reviews[fakeKey("o/repo", 1)] = []ghapi.Review{review}
+	comment := ghapi.IssueComment{
 		ID:        10,
 		Body:      "## Codex Review\n\nDidn't find any major issues. Keep them coming!",
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
 	}
 	comment.User.Login = "chatgpt-codex-connector[bot]"
-	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
+	gh.comments[fakeKey("o/repo", 1)] = []ghapi.IssueComment{comment}
 	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
 
 	report, err := svc.Feedback(context.Background(), "o/repo", 1)
@@ -1118,21 +1094,21 @@ func TestFeedbackMarksRequiredCodexCleanReviewSummaryReviewed(t *testing.T) {
 		RequiredBots: []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
 	}
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("o/repo", 1)] = pull
-	review := Review{ID: 9, CommitID: pull.Head.SHA, SubmittedAt: started.Add(time.Minute)}
+	review := ghapi.Review{ID: 9, CommitID: pull.Head.SHA, SubmittedAt: started.Add(time.Minute)}
 	review.User.Login = "coderabbitai[bot]"
-	gh.reviews[fakeKey("o/repo", 1)] = []Review{review}
-	comment := IssueComment{
+	gh.reviews[fakeKey("o/repo", 1)] = []ghapi.Review{review}
+	comment := ghapi.IssueComment{
 		ID:        10,
 		Body:      "## Codex Review\n\nDidn't find any major issues. Keep them coming!",
 		CreatedAt: started.Add(2 * time.Minute),
 		UpdatedAt: started.Add(2 * time.Minute),
 	}
 	comment.User.Login = "chatgpt-codex-connector[bot]"
-	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
+	gh.comments[fakeKey("o/repo", 1)] = []ghapi.IssueComment{comment}
 	store := NewMemoryStore(cfg)
 	seedRound(t, store, cfg, "o/repo", 1, "abcdef123", PhaseReviewing, started, 0)
 	svc := NewService(cfg, gh, store, nil)
@@ -1160,21 +1136,21 @@ func TestFeedbackDoesNotUseStaleCodexCleanReviewSummary(t *testing.T) {
 		RequiredBots: []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
 	}
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("o/repo", 1)] = pull
-	review := Review{ID: 9, CommitID: pull.Head.SHA, SubmittedAt: started.Add(time.Minute)}
+	review := ghapi.Review{ID: 9, CommitID: pull.Head.SHA, SubmittedAt: started.Add(time.Minute)}
 	review.User.Login = "coderabbitai[bot]"
-	gh.reviews[fakeKey("o/repo", 1)] = []Review{review}
-	comment := IssueComment{
+	gh.reviews[fakeKey("o/repo", 1)] = []ghapi.Review{review}
+	comment := ghapi.IssueComment{
 		ID:        10,
 		Body:      "Codex Review: Didn’t find any major issues. Keep them coming!",
 		CreatedAt: started.Add(-time.Minute),
 		UpdatedAt: started.Add(-time.Minute),
 	}
 	comment.User.Login = "chatgpt-codex-connector[bot]"
-	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
+	gh.comments[fakeKey("o/repo", 1)] = []ghapi.IssueComment{comment}
 	store := NewMemoryStore(cfg)
 	seedRound(t, store, cfg, "o/repo", 1, "abcdef123", PhaseReviewing, started, 0)
 	svc := NewService(cfg, gh, store, nil)
@@ -1208,18 +1184,18 @@ func TestLoopConvergesOnCurrentNoActionCompletionComment(t *testing.T) {
 		FiredMax:            500,
 	}
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	comment := IssueComment{
+	comment := ghapi.IssueComment{
 		ID:        1,
 		Body:      "No actionable comments were generated in the recent review. 🎉",
 		CreatedAt: started.Add(500 * time.Microsecond),
 		UpdatedAt: started.Add(500 * time.Microsecond),
 	}
 	comment.User.Login = "coderabbitai[bot]"
-	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{comment}
 	store := NewMemoryStore(cfg)
 	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseReviewing, started, 0)
 	svc := NewService(cfg, gh, store, nil)
@@ -1234,7 +1210,7 @@ func TestLoopConvergesOnCurrentNoActionCompletionComment(t *testing.T) {
 }
 
 func TestDedupeFindingsDropsNonActionableBotArtifacts(t *testing.T) {
-	findings := []Finding{
+	findings := []dialect.Finding{
 		{Bot: "coderabbitai", Title: "> Skipped: comment is from another GitHub bot.", Body: "> Skipped: comment is from another GitHub bot.", Source: "review_thread"},
 		{Bot: "chatgpt-codex-connector[bot]", Title: "You have reached your Codex usage limits for code reviews.", Body: "You have reached your Codex usage limits for code reviews.", Source: "issue_comment"},
 		{Bot: "coderabbitai", Title: "<!-- cr-comment:v1:abcdef -->", Body: "---\n<!-- cr-indicator-types:nitpick -->", Source: "review_body"},
@@ -1247,7 +1223,7 @@ func TestDedupeFindingsDropsNonActionableBotArtifacts(t *testing.T) {
 }
 
 func TestThreadFindingsMatchesGraphQLBotLogin(t *testing.T) {
-	bots := botSet([]string{"coderabbitai[bot]"})
+	bots := dialect.BotSet([]string{"coderabbitai[bot]"})
 	var th reviewThread
 	th.ID = "PRRT_z"
 	th.Path = "internal/crq/foo.go"
@@ -1290,25 +1266,25 @@ func TestRateLimitDetectionCoversFairUsageFormat(t *testing.T) {
 		"Your next review will be available in 48 minutes."
 	oldMsg := "You are rate limited by coderabbit.ai. Reviews available in 3 minutes."
 
-	if !svc.isRateLimited(newMsg) {
+	if !svc.cr.IsRateLimited(newMsg) {
 		t.Fatal("must detect CodeRabbit's Fair Usage rate-limit message")
 	}
-	if !svc.isRateLimited(oldMsg) {
+	if !svc.cr.IsRateLimited(oldMsg) {
 		t.Fatal("must still detect the legacy marker")
 	}
-	if svc.isRateLimited("LGTM — nice fix, nothing about limits here") {
+	if svc.cr.IsRateLimited("LGTM — nice fix, nothing about limits here") {
 		t.Fatal("must not flag a normal review comment")
 	}
 
 	base := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
-	if reset := parseAvailableIn(newMsg, base); reset == nil || !reset.Equal(base.Add(48*time.Minute)) {
+	if reset := dialect.ParseAvailableIn(newMsg, base); reset == nil || !reset.Equal(base.Add(48*time.Minute)) {
 		t.Fatalf("expected reset base+48m from the new message, got %v", reset)
 	}
 }
 
 func TestParseAvailableIn(t *testing.T) {
 	base := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
-	reset := parseAvailableIn("Review limit reached. Reviews available in 1 hour 2 minutes 3 seconds.", base)
+	reset := dialect.ParseAvailableIn("Review limit reached. Reviews available in 1 hour 2 minutes 3 seconds.", base)
 	if reset == nil {
 		t.Fatal("expected reset")
 	}
@@ -1320,7 +1296,7 @@ func TestParseAvailableIn(t *testing.T) {
 
 func TestParseQuota(t *testing.T) {
 	base := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
-	remaining, reset := parseQuota("0 reviews remaining. Reviews available in 3 minutes.", base)
+	remaining, reset := dialect.ParseQuota("0 reviews remaining. Reviews available in 3 minutes.", base)
 	if remaining == nil || *remaining != 0 {
 		t.Fatalf("remaining mismatch: %#v", remaining)
 	}
@@ -1379,28 +1355,28 @@ func parkedRound(t *testing.T, repo string, pr int, head string, retryAt, now ti
 	return st
 }
 
-func TestFeedbackBlockedUntilHonorsPerHeadCooldownAfterGlobalBlockClears(t *testing.T) {
+func TestAccountBlockedUntilHonorsPerHeadCooldownAfterGlobalBlockClears(t *testing.T) {
 	now := time.Date(2026, 7, 13, 14, 4, 0, 0, time.UTC)
 	cooldownUntil := now.Add(15 * time.Minute)
 	st := parkedRound(t, "owner/repo", 947, "168df6ae6", cooldownUntil, now)
 
-	got, ok := feedbackBlockedUntil(st, "owner/repo", 947, "168df6ae6", now)
+	got, ok := accountBlockedUntil(&st, "owner/repo", 947, "168df6ae6", now)
 	if !ok || !got.Equal(cooldownUntil) {
-		t.Fatalf("matching head retry window must keep feedback wait blocked: got %v, ok=%v", got, ok)
+		t.Fatalf("matching head retry window must keep the feedback wait blocked: got %v, ok=%v", got, ok)
 	}
-	if _, ok := feedbackBlockedUntil(st, "owner/repo", 947, "different", now); ok {
+	if _, ok := accountBlockedUntil(&st, "owner/repo", 947, "different", now); ok {
 		t.Fatal("a retry window for an older head must not block the current head")
 	}
 }
 
-func TestFeedbackBlockedUntilUsesLatestAccountOrHeadWindow(t *testing.T) {
+func TestAccountBlockedUntilUsesLatestAccountOrHeadWindow(t *testing.T) {
 	now := time.Date(2026, 7, 13, 14, 4, 0, 0, time.UTC)
 	accountUntil := now.Add(20 * time.Minute)
 	cooldownUntil := now.Add(15 * time.Minute)
 	st := parkedRound(t, "owner/repo", 947, "168df6ae6", cooldownUntil, now)
 	st.Account.BlockedUntil = &accountUntil
 
-	got, ok := feedbackBlockedUntil(st, "owner/repo", 947, "168df6ae6", now)
+	got, ok := accountBlockedUntil(&st, "owner/repo", 947, "168df6ae6", now)
 	if !ok || !got.Equal(accountUntil) {
 		t.Fatalf("latest blocking window must win: got %v, ok=%v", got, ok)
 	}
@@ -1454,7 +1430,7 @@ func TestLoopReportsClosedPRSkip(t *testing.T) {
 		FiredMax:            500,
 	}
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "closed"
 	pull.Merged = true
 	pull.Head.SHA = "abcdef1234567890"
@@ -1483,13 +1459,13 @@ func TestLoopRequiresAllRequiredBotsAfterDedupe(t *testing.T) {
 		FiredMax:            500,
 	}
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	review := Review{CommitID: "abcdef1234567890"}
+	review := ghapi.Review{CommitID: "abcdef1234567890"}
 	review.User.Login = "coderabbitai[bot]"
-	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review}
+	gh.reviews[fakeKey("owner/repo", 12)] = []ghapi.Review{review}
 	store := NewMemoryStore(cfg)
 	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseCompleted, time.Now().UTC(), 1)
 	svc := NewService(cfg, gh, store, nil)
@@ -1521,16 +1497,16 @@ func TestLoopResumesAwaitingFeedbackWithoutRefiring(t *testing.T) {
 		FiredMax:            500,
 	}
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	comment := IssueComment{ID: 91, Body: "Actionable finding on the current head", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	comment := ghapi.IssueComment{ID: 91, Body: "Actionable finding on the current head", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 	comment.User.Login = "chatgpt-codex-connector[bot]"
-	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
-	review := Review{ID: 9, CommitID: pull.Head.SHA, SubmittedAt: time.Now().UTC()}
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{comment}
+	review := ghapi.Review{ID: 9, CommitID: pull.Head.SHA, SubmittedAt: time.Now().UTC()}
 	review.User.Login = "coderabbitai[bot]"
-	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review}
+	gh.reviews[fakeKey("owner/repo", 12)] = []ghapi.Review{review}
 	store := NewMemoryStore(cfg)
 	started := time.Now().UTC().Add(-time.Minute)
 	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseReviewing, started, 0)
@@ -1550,7 +1526,7 @@ func TestLoopResumesAwaitingFeedbackWithoutRefiring(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if waitView(&state, "owner/repo", 12).Head != "" {
+	if waitingHead(&state, "owner/repo", 12) != "" {
 		t.Fatalf("feedback wait should clear after findings are collected")
 	}
 	if firedMarker(&state, "owner/repo", 12) != "abcdef123" {
@@ -1573,25 +1549,25 @@ func TestLoopWaitsForReplacementReviewInsteadOfReturningCarriedPrompt(t *testing
 		FiredMax:            500,
 	}
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	stale := Review{
+	stale := ghapi.Review{
 		ID:          7,
 		Body:        "<details><summary>Prompt for AI agents</summary>\n\n```\nIn `@a.go`:\n- Around line 1: Carried-over finding.\n```\n</details>",
 		CommitID:    "fedcba9876543210",
 		SubmittedAt: time.Now().UTC().Add(-time.Hour),
 	}
 	stale.User.Login = "coderabbitai[bot]"
-	gh.reviews[fakeKey("owner/repo", 12)] = []Review{stale}
+	gh.reviews[fakeKey("owner/repo", 12)] = []ghapi.Review{stale}
 	store := NewMemoryStore(cfg)
 	started := time.Now().UTC()
 	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseReviewing, started, 0)
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
-		fresh := Review{ID: 9, CommitID: pull.Head.SHA, SubmittedAt: time.Now().UTC()}
+		fresh := ghapi.Review{ID: 9, CommitID: pull.Head.SHA, SubmittedAt: time.Now().UTC()}
 		fresh.User.Login = "coderabbitai[bot]"
 		gh.mu.Lock()
 		gh.reviews[fakeKey("owner/repo", 12)] = append(gh.reviews[fakeKey("owner/repo", 12)], fresh)
@@ -1628,21 +1604,21 @@ func TestLoopReturnsExistingCodexFeedbackBeforeWaitingForReviewSlot(t *testing.T
 	}
 	gh := newFakeGitHub()
 	headTime := time.Now().UTC().Add(-time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	gc := gitCommit{SHA: pull.Head.SHA}
+	gc := ghapi.Commit{SHA: pull.Head.SHA}
 	gc.Committer.Date = headTime
 	gh.commits[pull.Head.SHA] = gc
-	comment := IssueComment{
+	comment := ghapi.IssueComment{
 		ID:        91,
 		Body:      "Actionable finding on the current head",
 		CreatedAt: headTime.Add(time.Second),
 		UpdatedAt: headTime.Add(time.Second),
 	}
 	comment.User.Login = "chatgpt-codex-connector[bot]"
-	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{comment}
 	store := NewMemoryStore(cfg)
 	blockedUntil := time.Now().UTC().Add(time.Hour)
 	if _, err := store.Update(ctx, func(st *State) error {
@@ -1687,27 +1663,27 @@ func TestLoopDoesNotBlockOnThreadlessReviewBodyFromPreviousHead(t *testing.T) {
 	}
 	gh := newFakeGitHub()
 	headTime := time.Now().UTC().Add(-time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	gc := gitCommit{SHA: pull.Head.SHA}
+	gc := ghapi.Commit{SHA: pull.Head.SHA}
 	gc.Committer.Date = headTime
 	gh.commits[pull.Head.SHA] = gc
-	stale := Review{
+	stale := ghapi.Review{
 		ID:          7,
 		Body:        "**Actionable comments posted: 1**\n<details><summary>Prompt for AI agents</summary>\n\n```\nIn `@a.go`:\n- Around line 1: Already fixed on the new head.\n```\n</details>",
 		CommitID:    "fedcba9876543210",
 		SubmittedAt: headTime.Add(-time.Hour),
 	}
 	stale.User.Login = "coderabbitai[bot]"
-	gh.reviews[fakeKey("owner/repo", 12)] = []Review{stale}
+	gh.reviews[fakeKey("owner/repo", 12)] = []ghapi.Review{stale}
 	store := NewMemoryStore(cfg)
 	svc := NewService(cfg, gh, store, nil)
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
-		fresh := Review{ID: 8, CommitID: pull.Head.SHA, SubmittedAt: time.Now().UTC()}
+		fresh := ghapi.Review{ID: 8, CommitID: pull.Head.SHA, SubmittedAt: time.Now().UTC()}
 		fresh.User.Login = "coderabbitai[bot]"
 		gh.mu.Lock()
 		gh.reviews[fakeKey("owner/repo", 12)] = append(gh.reviews[fakeKey("owner/repo", 12)], fresh)
@@ -1742,18 +1718,18 @@ func TestLoopReturnsFindingsBeforeRequiredReviewerTimeout(t *testing.T) {
 		FiredMax:            500,
 	}
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	comment := IssueComment{
+	comment := ghapi.IssueComment{
 		ID:        91,
 		Body:      "Actionable finding on the current head",
 		CreatedAt: started.Add(time.Second),
 		UpdatedAt: started.Add(time.Second),
 	}
 	comment.User.Login = "chatgpt-codex-connector[bot]"
-	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{comment}
 	store := NewMemoryStore(cfg)
 	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseReviewing, started, 0)
 	svc := NewService(cfg, gh, store, nil)
@@ -1786,21 +1762,21 @@ func TestLoopReturnsFasterCodexFeedbackBeforeCodeRabbitReviews(t *testing.T) {
 	}
 	gh := newFakeGitHub()
 	headTime := time.Now().UTC().Add(-time.Minute)
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
-	gc := gitCommit{SHA: pull.Head.SHA}
+	gc := ghapi.Commit{SHA: pull.Head.SHA}
 	gc.Committer.Date = headTime
 	gh.commits[pull.Head.SHA] = gc
-	codexFinding := IssueComment{
+	codexFinding := ghapi.IssueComment{
 		ID:        91,
 		Body:      "Actionable Codex finding on the current head",
 		CreatedAt: headTime.Add(time.Second),
 		UpdatedAt: headTime.Add(time.Second),
 	}
 	codexFinding.User.Login = "chatgpt-codex-connector[bot]"
-	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{codexFinding}
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{codexFinding}
 	store := NewMemoryStore(cfg)
 	started := time.Now().UTC()
 	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseReviewing, started, 0)
@@ -1832,7 +1808,7 @@ func TestLoopUsesPersistedFeedbackDeadline(t *testing.T) {
 		FiredMax:            500,
 	}
 	gh := newFakeGitHub()
-	var pull Pull
+	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
@@ -1859,7 +1835,7 @@ func TestLoopUsesPersistedFeedbackDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if waitView(&state, "owner/repo", 12).Head != "" {
+	if waitingHead(&state, "owner/repo", 12) != "" {
 		t.Fatalf("expired feedback wait should clear after timeout")
 	}
 }
@@ -1877,27 +1853,27 @@ func TestCodexCleanSummaryFormats(t *testing.T) {
 	legacy := "Codex Review: Didn't find any major issues. Keep them coming!"
 	tada := "Codex Review: Didn't find any major issues. :tada:\n\n**Reviewed commit:** `4d9e8bca82`"
 
-	if !isCodexNoActionReviewCompletion(legacy) {
+	if !dialect.IsCodexNoActionReviewCompletion(legacy) {
 		t.Fatal("legacy clean summary must count as a completion")
 	}
-	if !isCodexNoActionReviewCompletion(tada) {
+	if !dialect.IsCodexNoActionReviewCompletion(tada) {
 		t.Fatal("reviewed-commit clean summary must count as a completion")
 	}
-	if isCodexNoActionReviewCompletion("Codex Review: 2 issues need attention") {
+	if dialect.IsCodexNoActionReviewCompletion("Codex Review: 2 issues need attention") {
 		t.Fatal("a summary with findings must not count as a completion")
 	}
-	if got := codexReviewedCommitSHA(tada); got != "4d9e8bca82" {
+	if got := dialect.CodexReviewedCommitSHA(tada); got != "4d9e8bca82" {
 		t.Fatalf("expected the reviewed-commit sha, got %q", got)
 	}
-	if got := codexReviewedCommitSHA(legacy); got != "" {
+	if got := dialect.CodexReviewedCommitSHA(legacy); got != "" {
 		t.Fatalf("legacy summary has no sha, got %q", got)
 	}
 	// crq truncates heads to 9 chars while Codex abbreviates to 10 — the
 	// prefix match must work in both directions.
-	if !shaPrefixMatch("4d9e8bca82", "4d9e8bca8") || !shaPrefixMatch("4d9e8bca8", "4d9e8bca82") {
+	if !dialect.SHAPrefixMatch("4d9e8bca82", "4d9e8bca8") || !dialect.SHAPrefixMatch("4d9e8bca8", "4d9e8bca82") {
 		t.Fatal("mutual sha prefixes must match")
 	}
-	if shaPrefixMatch("4d9e8bca82", "deadbeef1") {
+	if dialect.SHAPrefixMatch("4d9e8bca82", "deadbeef1") {
 		t.Fatal("different shas must not match")
 	}
 }
