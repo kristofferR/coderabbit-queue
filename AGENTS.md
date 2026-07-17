@@ -35,7 +35,7 @@ engine, crq). "rate limit" as literal text lives only in `gh` and `dialect`.
 
 ## State: one Round per PR, never deleted
 
-```
+```text
 queued → reserved → fired → reviewing → completed
    ↑         │         │         │
    └─────────┘         ├─────────┴→ awaiting_retry ─→ (fire-eligible once RetryAt passes)

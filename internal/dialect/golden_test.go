@@ -52,6 +52,8 @@ func TestGoldenClassification(t *testing.T) {
 		// must still classify as a rate limit, NOT as an already-reviewed ack.
 		{file: "coderabbit/rate-limit-bold-window.md", rateLimited: true, autoReply: true, availableIn: 40 * time.Minute},
 		{file: "coderabbit/rate-limit-legacy.md", rateLimited: true, availableIn: 3 * time.Minute},
+		// No parseable window: the engine must fall back to its conservative fixed block.
+		{file: "coderabbit/rate-limit-no-window.md", rateLimited: true, autoReply: true},
 		{file: "coderabbit/review-in-progress.md", inProgress: true},
 		{file: "coderabbit/review-failed.md", failed: true},
 		{file: "coderabbit/reviews-paused.md", paused: true},

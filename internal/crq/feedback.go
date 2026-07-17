@@ -259,7 +259,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		if loadErr != nil {
 			return FeedbackReport{}, 1, loadErr
 		}
-		if waitingHead(&state, repo, pr) != head {
+		if state.WaitingHead(repo, pr) != head {
 			for {
 				report, feedbackErr := s.Feedback(ctx, repo, pr)
 				if feedbackErr != nil {
@@ -383,7 +383,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		var blockedUntil *time.Time
 		now := s.clock()
 		if st, _, lerr := s.store.Load(ctx); lerr == nil {
-			if until, ok := accountBlockedUntil(&st, repo, pr, head, now); ok {
+			if until, ok := st.AccountBlockedUntil(repo, pr, head, now); ok {
 				blockedUntil = &until
 			}
 		}
@@ -433,7 +433,7 @@ func (s *Service) ensureWaitDeadline(ctx context.Context, repo string, pr int, h
 	if err != nil {
 		return time.Time{}, err
 	}
-	if dl, ok := roundWaitDeadline(&st, repo, pr, head); ok {
+	if dl, ok := st.RoundWaitDeadline(repo, pr, head); ok {
 		return dl, nil
 	}
 	changed := false
@@ -459,7 +459,7 @@ func (s *Service) ensureWaitDeadline(ctx context.Context, repo string, pr int, h
 	if changed {
 		s.sync(ctx, updated)
 	}
-	if dl, ok := roundWaitDeadline(&updated, repo, pr, head); ok {
+	if dl, ok := updated.RoundWaitDeadline(repo, pr, head); ok {
 		return dl, nil
 	}
 	// The round is no longer a wait (completed/none): synthesize a transient

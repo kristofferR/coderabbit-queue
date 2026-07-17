@@ -101,7 +101,7 @@ func TestCodexReplayRequiredFiresOnceAndGatesCompletion(t *testing.T) {
 
 	// CodeRabbit answers rate-limited; the round parks. After the window one
 	// retry fires — but the Codex command is NOT reposted (CodexCommandID set).
-	f.botComment(repo, pr, 9001, replayFairUsage(10), f.clk.now().Add(5*time.Second))
+	f.botComment(repo, pr, 9001, replayFairUsage(t, 10), f.clk.now().Add(5*time.Second))
 	if res := f.pump(); res.Action != "requeued" {
 		t.Fatalf("expected requeue, got %+v", res)
 	}

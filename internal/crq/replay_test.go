@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -64,24 +66,27 @@ func replayConfig() Config {
 	return cfg
 }
 
-// CodeRabbit message shapes, pinned to the golden corpus in
-// internal/dialect/testdata/coderabbit. Kept verbatim so a bot rewording that
-// breaks classification breaks these replays too.
-const (
-	replayCompletionReply = "<!-- This is an auto-generated reply by CodeRabbit -->\nReview finished."
-	replayInProgress      = "<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\n\nCurrently processing new changes in this PR. This may take a few minutes, please wait...\n\n<details>\n<summary>Commits</summary>\nReviewing files that changed from the base of the PR and between abc1234 and def5678.\n</details>"
-	// replayUnparseableRateLimit is a rate-limit notice with no "available in"
-	// window, so ParseAvailableIn returns nil and the engine falls back to the
-	// fixed RateLimitFallback (getting THIS wrong is what let #448 re-fire every
-	// couple of minutes instead of honouring the window).
-	replayUnparseableRateLimit = "<!-- This is an auto-generated reply by CodeRabbit -->\nYou are rate limited by coderabbit.ai. Please wait before requesting another review."
-)
+// corpusMessage loads a bot message from the dialect golden corpus, so the
+// replays and the classifiers share ONE source of truth for bot wording — a
+// rewording that breaks classification breaks these replays too.
+func corpusMessage(t *testing.T, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "dialect", "testdata", filepath.FromSlash(name)))
+	if err != nil {
+		t.Fatalf("corpus message: %v", err)
+	}
+	return strings.TrimRight(string(data), "\n")
+}
 
-// replayFairUsage renders the Fair Usage rate-limit reply carrying a parseable
-// "available in N minutes" window (real message shape from
-// testdata/coderabbit/rate-limit-fair-usage.md).
-func replayFairUsage(minutes int) string {
-	return fmt.Sprintf("<!-- This is an auto-generated reply by CodeRabbit -->\nYou're currently rate limited under our Fair Usage Limits Policy. Your next review will be available in %d minutes.", minutes)
+// replayFairUsage renders the Fair Usage rate-limit reply with a chosen
+// "available in N minutes" window, templated from the corpus message.
+func replayFairUsage(t *testing.T, minutes int) string {
+	msg := corpusMessage(t, "coderabbit/rate-limit-fair-usage.md")
+	out := strings.Replace(msg, "48 minutes", fmt.Sprintf("%d minutes", minutes), 1)
+	if out == msg {
+		t.Fatal("fair-usage corpus message no longer carries the 48-minute window")
+	}
+	return out
 }
 
 // replayFixture bundles the harness for one scenario.
@@ -298,7 +303,7 @@ func TestReplayRateLimitBounceFiresOncePerWindow(t *testing.T) {
 
 	// CodeRabbit answers with the Fair Usage rate limit, window 40 minutes.
 	const rlID = 9001
-	f.botComment(repo, pr, rlID, replayFairUsage(40), base)
+	f.botComment(repo, pr, rlID, replayFairUsage(t, 40), base)
 	expectedRetry := base.Add(40 * time.Minute) // parsed from the comment's UpdatedAt (base)
 
 	// Simulate the daemon for the full window: advance 60s each step, editing the
@@ -371,7 +376,7 @@ func TestReplayInstantAckDoesNotConvergeOrDoubleFire(t *testing.T) {
 
 	// The auto-reply completion ack lands 5s later, no review object with it.
 	f.clk.advance(5 * time.Second)
-	f.botComment(repo, pr, 100, replayCompletionReply, f.clk.now())
+	f.botComment(repo, pr, 100, corpusMessage(t, "coderabbit/completion-reply.md"), f.clk.now())
 
 	f.pump()
 	if r := f.round(repo, pr); r == nil || r.Phase != PhaseReviewing {
@@ -439,7 +444,7 @@ func TestReplayInProgressSummaryReleasesSlotButKeepsRound(t *testing.T) {
 
 	// CodeRabbit posts the in-progress top summary for PR1 (edited to now).
 	f.clk.advance(time.Minute)
-	f.botComment(repo, pr1, 300, replayInProgress, f.clk.now())
+	f.botComment(repo, pr1, 300, corpusMessage(t, "coderabbit/review-in-progress.md"), f.clk.now())
 
 	f.pump()
 	if r := f.round(repo, pr1); r == nil || r.Phase != PhaseReviewing {
@@ -573,7 +578,7 @@ func TestReplay448DaySequenceFiresThreeTimes(t *testing.T) {
 
 	// 2. Rate-limited with an unparseable window → fixed 15m fallback.
 	const rlID = 7001
-	f.botComment(repo, pr, rlID, replayUnparseableRateLimit, base)
+	f.botComment(repo, pr, rlID, corpusMessage(t, "coderabbit/rate-limit-no-window.md"), base)
 	f.clk.advance(time.Minute) // base+1m
 	f.pump()
 	if r := f.round(repo, pr); r == nil || r.Phase != PhaseAwaitingRetry ||
@@ -596,7 +601,7 @@ func TestReplay448DaySequenceFiresThreeTimes(t *testing.T) {
 	// 4. Rate-limited again — CodeRabbit edits the SAME comment in place, now with
 	//    a parseable 40-minute window.
 	f.clk.set(base.Add(17 * time.Minute))
-	f.editComment(repo, pr, rlID, replayFairUsage(40), f.clk.now())
+	f.editComment(repo, pr, rlID, replayFairUsage(t, 40), f.clk.now())
 	f.pump()
 	if r := f.round(repo, pr); r == nil || r.Phase != PhaseAwaitingRetry ||
 		r.RetryAt == nil || !r.RetryAt.Equal(base.Add(57*time.Minute)) {

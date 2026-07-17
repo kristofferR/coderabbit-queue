@@ -223,10 +223,14 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	} else if !open {
 		return s.abandonRound(ctx, *next, "pr closed", "skipped")
 	}
-	if refreshed, err := s.RefreshQuota(ctx); err == nil {
-		st = refreshed
-	} else {
-		return PumpResult{}, err
+	// A dry-run pump reports decisions and writes nothing — that includes the
+	// calibration probe RefreshQuota may post; decide from the loaded snapshot.
+	if !s.cfg.DryRun {
+		if refreshed, err := s.RefreshQuota(ctx); err == nil {
+			st = refreshed
+		} else {
+			return PumpResult{}, err
+		}
 	}
 	now = s.clock()
 	if st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now) {
@@ -702,7 +706,7 @@ func (s *Service) recordFire(ctx context.Context, round Round, token string, com
 	}
 	st, recorded, err := record(ctx)
 	if err != nil {
-		retryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		retryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
 		st, recorded, err = record(retryCtx)
 	}
@@ -1122,7 +1126,7 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 				if err != nil {
 					return PumpResult{}, 1, err
 				}
-				if waitingHead(&state, repo, pr) == result.Head {
+				if state.WaitingHead(repo, pr) == result.Head {
 					return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
 				}
 				report, err := s.Feedback(ctx, repo, pr)
@@ -1178,13 +1182,13 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 		if r := state.Round(repo, pr); r != nil && r.Phase == PhaseFired {
 			return PumpResult{Action: "fired", Repo: repo, PR: pr, Head: r.Head}, 0, nil
 		}
-		if !containsActive(&state, repo, pr) {
+		if !state.ContainsActive(repo, pr) {
 			head, open, herr := s.pullHead(ctx, repo, pr)
 			if herr == nil && !open {
 				// PR closed/merged and dropped — nothing to review; stop the loop.
 				return PumpResult{Action: "skipped", Repo: repo, PR: pr, Reason: "pr closed"}, 2, nil
 			}
-			if herr == nil && head != "" && firedMarker(&state, repo, pr) == head {
+			if herr == nil && head != "" && state.FiredMarker(repo, pr) == head {
 				return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: head}, 3, nil
 			}
 			if result.Action == "fired" && result.Repo == repo && result.PR == pr {

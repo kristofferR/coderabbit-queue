@@ -428,7 +428,7 @@ func TestAutoReviewScanSkipsConfiguredAuthors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if firedMarker(&st, "o/app", 3) == "" {
+	if st.FiredMarker("o/app", 3) == "" {
 		t.Fatalf("only the human-authored PR should be enqueued and fired, got rounds=%#v", st.Rounds)
 	}
 	if st.Round("o/app", 1) != nil || st.Round("o/app", 2) != nil {
@@ -469,7 +469,7 @@ func TestAutoReviewScanSkipsMarkedPRs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if firedMarker(&st, "o/app", 2) == "" {
+	if st.FiredMarker("o/app", 2) == "" {
 		t.Fatalf("only the unmarked PR should be reviewed, got rounds=%#v", st.Rounds)
 	}
 	if st.Round("o/app", 1) != nil {
@@ -632,7 +632,7 @@ func TestPumpPersistsPostedReviewAfterTransientStateFailure(t *testing.T) {
 	if r == nil || r.Phase != PhaseFired || r.CommandID == 0 {
 		t.Fatalf("posted review metadata was not persisted after retry: %#v", r)
 	}
-	if firedMarker(&state, "owner/repo", 12) != "abcdef123" {
+	if state.FiredMarker("owner/repo", 12) != "abcdef123" {
 		t.Fatalf("fired marker was not persisted after retry")
 	}
 	if r.FiredAt == nil || r.WaitDeadline == nil {
@@ -682,7 +682,7 @@ func TestPumpAdoptsExistingReviewCommandWithoutRefiring(t *testing.T) {
 	if r == nil || r.Phase != PhaseFired || r.CommandID != comment.ID || r.Head != "abcdef123" {
 		t.Fatalf("existing review command should be persisted as a fired round, got %#v", r)
 	}
-	if firedMarker(&state, "owner/repo", 12) != "abcdef123" {
+	if state.FiredMarker("owner/repo", 12) != "abcdef123" {
 		t.Fatalf("existing review command should restore fired dedupe state")
 	}
 	if r.FiredAt == nil || !r.FiredAt.Equal(comment.CreatedAt) {
@@ -1113,7 +1113,7 @@ func TestPumpKeepsRoundReviewingOnCompletionReplyForUnreviewedPR(t *testing.T) {
 		t.Fatalf("the round must survive a completion reply on a never-reviewed PR (reviewing), got %s", p)
 	}
 	st, _, _ := store.Load(ctx)
-	if waitingHead(&st, "owner/repo", 12) != "abcdef123" {
+	if st.WaitingHead("owner/repo", 12) != "abcdef123" {
 		t.Fatalf("the feedback wait must survive a completion reply on a never-reviewed PR")
 	}
 }
@@ -1630,7 +1630,7 @@ func containsActiveRound(store StateStore, t *testing.T, repo string, pr int) bo
 	if err != nil {
 		t.Fatal(err)
 	}
-	return containsActive(&st, repo, pr)
+	return st.ContainsActive(repo, pr)
 }
 
 func TestEnqueueDedupesAlreadyReviewedHead(t *testing.T) {
@@ -1698,13 +1698,13 @@ func TestRateLimitedRoundParksAndBlocksAccount(t *testing.T) {
 	if r := st.Round("o/carrier", 82); r == nil || r.Phase != PhaseAwaitingRetry {
 		t.Fatalf("a rate-limited round must park awaiting retry, got %#v", r)
 	}
-	if firedMarker(&st, "o/carrier", 82) != "" {
+	if st.FiredMarker("o/carrier", 82) != "" {
 		t.Fatalf("a parked round must not be a dedup marker")
 	}
 	if st.Account.BlockedUntil == nil {
 		t.Fatal("the real rate-limit response must block the next attempt")
 	}
-	if !containsActive(&st, "o/carrier", 82) {
+	if !st.ContainsActive("o/carrier", 82) {
 		t.Fatal("the unreviewed PR must remain active")
 	}
 

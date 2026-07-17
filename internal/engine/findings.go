@@ -1,8 +1,6 @@
 package engine
 
 import (
-	"strings"
-
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 )
 
@@ -14,7 +12,7 @@ import (
 func BlockingFindings(findings []dialect.Finding, head string) []dialect.Finding {
 	blocking := make([]dialect.Finding, 0, len(findings))
 	for _, finding := range findings {
-		if finding.ThreadID != "" || finding.Commit == "" || head == "" || strings.HasPrefix(finding.Commit, head) {
+		if finding.ThreadID != "" || finding.Commit == "" || head == "" || dialect.SHAPrefixMatch(finding.Commit, head) {
 			blocking = append(blocking, finding)
 		}
 	}
@@ -27,7 +25,7 @@ func BlockingFindings(findings []dialect.Finding, head string) []dialect.Finding
 func FindingsOnHead(findings []dialect.Finding, head string) []dialect.Finding {
 	current := make([]dialect.Finding, 0, len(findings))
 	for _, finding := range findings {
-		if finding.Commit == "" || head == "" || strings.HasPrefix(finding.Commit, head) {
+		if finding.Commit == "" || head == "" || dialect.SHAPrefixMatch(finding.Commit, head) {
 			current = append(current, finding)
 		}
 	}

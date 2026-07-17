@@ -1,7 +1,7 @@
 package state
 
 import (
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -119,6 +119,9 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 		via = fmt.Sprintf("  _(via %s)_", st.Account.Source)
 	}
 	remaining := "available now"
+	if st.Account.Remaining != nil {
+		remaining = fmt.Sprintf("%d", *st.Account.Remaining)
+	}
 	if blocked {
 		remaining = "0 — account blocked"
 	}
@@ -204,6 +207,6 @@ func IssueBody(st State, cfg StoreConfig) (string, error) {
 }
 
 func hashString(value string) string {
-	sum := sha1.Sum([]byte(value))
+	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
 }

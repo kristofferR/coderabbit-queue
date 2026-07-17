@@ -433,3 +433,63 @@ func (s *State) Normalize(now time.Time) {
 		s.Archive = s.Archive[len(s.Archive)-ArchiveMax:]
 	}
 }
+
+// --- round-native views consumed by crq's Wait/Loop ------------------------
+
+// waitingHead returns the head a fired/reviewing round is currently waiting on
+// (the wait IS the round), or "" when repo#pr has no active wait. Loop and Wait
+// use it to tell "a review is in flight for this head" from "start a new round".
+func (st *State) WaitingHead(repo string, pr int) string {
+	r := st.Round(repo, pr)
+	if r == nil || (r.Phase != PhaseFired && r.Phase != PhaseReviewing) {
+		return ""
+	}
+	return r.Head
+}
+
+// roundWaitDeadline returns the wait deadline of the fired/reviewing round at
+// head, if one is set. It is the wall-clock bound Loop polls against.
+func (st *State) RoundWaitDeadline(repo string, pr int, head string) (time.Time, bool) {
+	r := st.Round(repo, pr)
+	if r == nil || r.Head != head || (r.Phase != PhaseFired && r.Phase != PhaseReviewing) || r.WaitDeadline == nil {
+		return time.Time{}, false
+	}
+	return r.WaitDeadline.UTC(), true
+}
+
+// containsActive reports whether repo#pr has a round still occupying its slot
+// (queued through awaiting_retry) — the v2 State.Contains for the queue/inflight.
+func (st *State) ContainsActive(repo string, pr int) bool {
+	r := st.Round(repo, pr)
+	return r != nil && r.Active()
+}
+
+// firedMarker returns the head for which repo#pr has already been requested and
+// must not be re-fired without a new head — the v2 Fired[key] dedupe. A
+// completed round, or one still fired/reviewing, is such a marker; a parked
+// awaiting_retry round is not (Pump re-fires it once RetryAt passes).
+func (st *State) FiredMarker(repo string, pr int) string {
+	r := st.Round(repo, pr)
+	if r == nil {
+		return ""
+	}
+	switch r.Phase {
+	case PhaseFired, PhaseReviewing, PhaseCompleted:
+		return r.Head
+	}
+	return ""
+}
+
+// accountBlockedUntil returns the latest active block preventing repo#pr@head
+// from firing: the account-wide quota block or this round's own retry window
+// (the v2 feedbackBlockedUntil over Blocked + per-head Cooldown).
+func (st *State) AccountBlockedUntil(repo string, pr int, head string, now time.Time) (time.Time, bool) {
+	var until time.Time
+	if st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now) {
+		until = st.Account.BlockedUntil.UTC()
+	}
+	if r := st.Round(repo, pr); r != nil && r.Phase == PhaseAwaitingRetry && r.Head == head && r.RetryAt != nil && r.RetryAt.After(now) && r.RetryAt.After(until) {
+		until = r.RetryAt.UTC()
+	}
+	return until, !until.IsZero()
+}

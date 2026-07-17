@@ -1360,11 +1360,11 @@ func TestAccountBlockedUntilHonorsPerHeadCooldownAfterGlobalBlockClears(t *testi
 	cooldownUntil := now.Add(15 * time.Minute)
 	st := parkedRound(t, "owner/repo", 947, "168df6ae6", cooldownUntil, now)
 
-	got, ok := accountBlockedUntil(&st, "owner/repo", 947, "168df6ae6", now)
+	got, ok := st.AccountBlockedUntil("owner/repo", 947, "168df6ae6", now)
 	if !ok || !got.Equal(cooldownUntil) {
 		t.Fatalf("matching head retry window must keep the feedback wait blocked: got %v, ok=%v", got, ok)
 	}
-	if _, ok := accountBlockedUntil(&st, "owner/repo", 947, "different", now); ok {
+	if _, ok := st.AccountBlockedUntil("owner/repo", 947, "different", now); ok {
 		t.Fatal("a retry window for an older head must not block the current head")
 	}
 }
@@ -1376,7 +1376,7 @@ func TestAccountBlockedUntilUsesLatestAccountOrHeadWindow(t *testing.T) {
 	st := parkedRound(t, "owner/repo", 947, "168df6ae6", cooldownUntil, now)
 	st.Account.BlockedUntil = &accountUntil
 
-	got, ok := accountBlockedUntil(&st, "owner/repo", 947, "168df6ae6", now)
+	got, ok := st.AccountBlockedUntil("owner/repo", 947, "168df6ae6", now)
 	if !ok || !got.Equal(accountUntil) {
 		t.Fatalf("latest blocking window must win: got %v, ok=%v", got, ok)
 	}
@@ -1526,10 +1526,10 @@ func TestLoopResumesAwaitingFeedbackWithoutRefiring(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if waitingHead(&state, "owner/repo", 12) != "" {
+	if state.WaitingHead("owner/repo", 12) != "" {
 		t.Fatalf("feedback wait should clear after findings are collected")
 	}
-	if firedMarker(&state, "owner/repo", 12) != "abcdef123" {
+	if state.FiredMarker("owner/repo", 12) != "abcdef123" {
 		t.Fatalf("fired marker should remain for dedupe after collection")
 	}
 }
@@ -1835,7 +1835,7 @@ func TestLoopUsesPersistedFeedbackDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if waitingHead(&state, "owner/repo", 12) != "" {
+	if state.WaitingHead("owner/repo", 12) != "" {
 		t.Fatalf("expired feedback wait should clear after timeout")
 	}
 }

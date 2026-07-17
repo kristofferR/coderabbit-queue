@@ -198,6 +198,21 @@ func NormalizeBotName(login string) string {
 	return strings.TrimSuffix(login, "[bot]")
 }
 
+// ParseReviewBodyFindings extracts every finding representable only in a
+// review's body text: CodeRabbit's failed-to-post/outside-diff detail blocks,
+// its "Prompt for AI agents" block, and Codex's blob-link items.
+func ParseReviewBodyFindings(body string, review ReviewMeta, bot string) []Finding {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return nil
+	}
+	clean := StripMarkdownQuote(body)
+	out := ParseDetailedReviewFindings(clean, review, bot)
+	out = append(out, ParsePromptReviewFindings(clean, review, bot)...)
+	out = append(out, ParseCodexReviewFindings(clean, review, bot)...)
+	return out
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if value != "" {
