@@ -209,8 +209,10 @@ func TestReviewingRoundDeadlineBoundsCoReviewWait(t *testing.T) {
 	if tr := Progress(reviewing(), state.AccountQuota{}, noReview, past, codexReq); tr.Outcome != KeepWaiting {
 		t.Fatalf("no primary review past the deadline must keep waiting, not re-fire, got %+v", tr)
 	}
-	// Before the deadline the bound must not fire: keep waiting on the co-bot.
-	if tr := Progress(reviewing(), state.AccountQuota{}, crAtHead, t0.Add(30*time.Minute), codexReq); tr.Outcome != OutReviewing {
+	// Before the deadline the bound must not fire: keep waiting on the co-bot —
+	// KeepWaiting, not a re-emitted OutReviewing, so the sweep doesn't write the
+	// same state and re-sync the dashboard on every pump.
+	if tr := Progress(reviewing(), state.AccountQuota{}, crAtHead, t0.Add(30*time.Minute), codexReq); tr.Outcome != KeepWaiting {
 		t.Fatalf("before the deadline a co-review wait must keep waiting, got %+v", tr)
 	}
 }
@@ -580,5 +582,36 @@ func TestCodexGatesCleanSummary(t *testing.T) {
 	got := Completion(r, Observation{Head: "abcdef123", Open: true, Events: []dialect.BotEvent{noAction, codexClean}}, gated)
 	if !got.Done {
 		t.Fatalf("codex clean summary at head must complete the gated round: %+v", got)
+	}
+}
+
+// TestCodexResolutionBypassesAccountBlock pins the quota-bypass reorder: a head
+// CodeRabbit already reviewed resolves through codexAwareDedupe even during an
+// account block or inside MinInterval — none of those verdicts spend CodeRabbit
+// quota, so a block from another PR must not delay them.
+func TestCodexResolutionBypassesAccountBlock(t *testing.T) {
+	gated := policy
+	gated.RequiredBots = []string{policy.Bot, dialect.CodexBotLogin}
+	gated.CodexCommand = "@codex review"
+	now := t0.Add(10 * time.Minute)
+	blocked := now.Add(30 * time.Minute)
+	last := now.Add(-time.Second)
+	g := Global{SlotFree: true, BlockedUntil: &blocked, LastFired: &last}
+
+	queued := state.Round{Repo: "owner/repo", PR: 448, Head: "abcdef123", Phase: state.PhaseQueued, Seq: 1}
+	obs := Observation{Head: "abcdef123", Open: true,
+		Reviews: []ReviewSeen{{Bot: policy.Bot, ReviewID: 1, Commit: "abcdef1234567890", SubmittedAt: now}}}
+
+	if d := DecideFire(g, queued, obs, now, gated); d.Verdict != FireCodexOnly {
+		t.Fatalf("blocked account must not delay a codex-only fire, got %+v", d)
+	}
+	// Codex satisfied → plain dedupe, also unblocked.
+	obs.Reviews = append(obs.Reviews, ReviewSeen{Bot: dialect.CodexBotLogin, ReviewID: 2, Commit: "abcdef1234567890", SubmittedAt: now})
+	if d := DecideFire(g, queued, obs, now, gated); d.Verdict != FireDedupe {
+		t.Fatalf("blocked account must not delay a dedupe, got %+v", d)
+	}
+	// A round needing a REAL CodeRabbit fire still respects the block.
+	if d := DecideFire(g, queued, Observation{Head: "abcdef123", Open: true}, now, gated); d.Verdict != FireNo {
+		t.Fatalf("a real fire must still respect the account block, got %+v", d)
 	}
 }

@@ -67,6 +67,9 @@ func TestGoldenClassification(t *testing.T) {
 		{file: "codex/clean-summary-legacy.md", codexClean: true, noAction: true, nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCodexClean},
 		{file: "codex/clean-summary-tada.md", codexClean: true, noAction: true, nonActionable: true, reviewedSHA: "4d9e8bca82", author: "chatgpt-codex-connector[bot]", wantKind: EvCodexClean},
 		{file: "codex/usage-limit.md", codexUsageLimit: true, nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCodexUsageLimit},
+		// Codex's "create an environment" platform ad, posted as a thread reply —
+		// never a finding, never a rebuttal.
+		{file: "codex/environment-notice.md", nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCodexNotice},
 		{file: "codex/review-command.md", author: "kristofferR", wantKind: EvCodexCommand},
 	}
 	base := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)

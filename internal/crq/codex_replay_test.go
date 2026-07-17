@@ -431,3 +431,139 @@ func TestFireCodexOnlyPostFailureParks(t *testing.T) {
 		t.Fatal("the round must become eligible once the cooldown passes")
 	}
 }
+
+// TestSelfHealCodexClaimPreventsDoublePost pins claim-before-post: two sweepers
+// observing the same round with CodexCommandID==0 must produce exactly one
+// `@codex review` — the second claim fails under CAS.
+func TestSelfHealCodexClaimPreventsDoublePost(t *testing.T) {
+	base := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = []string{cfg.Bot, codexLogin}
+	})
+	repo, pr, head := "o/r", 21, "aaaabbbbccccdddd"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Hour))
+
+	// A fired round whose initial Codex post never happened (CodexCommandID 0).
+	f.enqueue(repo, pr)
+	f.gh.mu.Lock()
+	if f.gh.postErrs == nil {
+		f.gh.postErrs = map[string]error{}
+	}
+	f.gh.postErrs[fakeKey(repo, pr)] = errors.New("boom")
+	f.gh.mu.Unlock()
+	res, _ := f.svc.Pump(f.ctx)
+	if res.Action != "post_failed" {
+		t.Fatalf("setup expected post_failed, got %+v", res)
+	}
+	f.gh.mu.Lock()
+	delete(f.gh.postErrs, fakeKey(repo, pr))
+	f.gh.mu.Unlock()
+	f.clk.advance(3 * time.Minute) // past the post-failure cooldown
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected retry fire, got %+v", res)
+	}
+	if got := f.codexPosted(repo, pr); got != 1 {
+		t.Fatalf("fire should post codex once, got %d", got)
+	}
+
+	// Simulate the race: strip the recorded command id and claim, as if the
+	// sweeper's observation predates the record, then run two sweeps in a row
+	// within one claim TTL. Only the claimed one may post.
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		r := st.Round(repo, pr)
+		r.CodexCommandID = 0
+		r.CodexClaimedAt = nil
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ := f.store.Load(f.ctx)
+	round := st.Round(repo, pr)
+	obs, err := f.svc.observe(f.ctx, repo, pr, round, f.clk.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Erase the live command from the observation so DecideCodexPost wants to
+	// post (models the failed-initial-post world the finding describes).
+	obs.eng.CodexCommands = nil
+	events := obs.eng.Events[:0]
+	for _, ev := range obs.eng.Events {
+		if ev.Kind != dialect.EvCodexCommand {
+			events = append(events, ev)
+		}
+	}
+	obs.eng.Events = events
+	before := f.codexPosted(repo, pr)
+	f.svc.selfHealCodex(f.ctx, *round, obs.eng, f.clk.now())
+	// Second sweeper with the SAME stale observation (still CodexCommandID==0).
+	f.svc.selfHealCodex(f.ctx, *round, obs.eng, f.clk.now())
+	if got := f.codexPosted(repo, pr) - before; got != 1 {
+		t.Fatalf("concurrent self-heals must post exactly once, got %d extra posts", got)
+	}
+}
+
+// TestPumpAbandonsParkedClosedPR pins the parked-closed sweep: a PR closed
+// while its round cools down in awaiting_retry is abandoned on the next pump,
+// not after the retry window.
+func TestPumpAbandonsParkedClosedPR(t *testing.T) {
+	base := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, nil)
+	repo, pr, head := "o/r", 22, "aaaabbbbccccdddd"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Hour))
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected fire, got %+v", res)
+	}
+	// Account block parks the round for 40 minutes.
+	f.botComment(repo, pr, 9001, replayFairUsage(t, 40), f.clk.now().Add(5*time.Second))
+	if res := f.pump(); res.Action != "requeued" {
+		t.Fatalf("expected requeue, got %+v", res)
+	}
+	// The PR is closed mid-cooldown.
+	f.gh.mu.Lock()
+	p := f.gh.pulls[fakeKey(repo, pr)]
+	p.State = "closed"
+	f.gh.pulls[fakeKey(repo, pr)] = p
+	f.gh.mu.Unlock()
+	f.clk.advance(2 * time.Minute) // well inside the 40m window
+	if res := f.pump(); res.Action != "skipped" || res.Reason != "pr closed" {
+		t.Fatalf("a parked closed PR must be abandoned promptly, got %+v", res)
+	}
+	if r := f.round(repo, pr); r != nil {
+		t.Fatalf("round must be archived, got %+v", r)
+	}
+}
+
+// TestCoReviewWaitCountsPrePumpLegacySummary pins the wait anchor: with an
+// adopted `@codex review` command already on the PR, a SHA-less legacy clean
+// summary posted BEFORE the pump observes the round must still count — the wait
+// anchors at the command time, not the observation time.
+func TestCoReviewWaitCountsPrePumpLegacySummary(t *testing.T) {
+	base := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = []string{cfg.Bot, codexLogin}
+	})
+	repo, pr, head := "o/r", 23, "aaaabbbbccccdddd"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Hour))
+	f.gh.graphQL = noForcePush // the force-push guard must resolve for the command to be adoptable
+	// CodeRabbit reviewed the head; a human posted @codex review 5 minutes ago;
+	// Codex answered with the LEGACY (SHA-less) clean summary 2 minutes ago.
+	f.botReview(repo, pr, 500, head, base.Add(-10*time.Minute))
+	f.humanComment(repo, pr, 600, f.cfg.CodexCommand, base.Add(-5*time.Minute))
+	f.codexComment(repo, pr, 601, corpusMessage(t, "codex/clean-summary-legacy.md"), base.Add(-2*time.Minute))
+
+	f.enqueue(repo, pr)
+	f.pump() // FireCoReviewWait: anchors at the command time (-5m), not now
+	f.clk.advance(time.Minute)
+	f.pump() // sweep: Completion must count the -2m summary (≥ the -5m anchor)
+	if r := f.round(repo, pr); r == nil || r.Phase != PhaseCompleted {
+		t.Fatalf("a pre-pump legacy clean summary after the adopted command must complete the round, got %+v", r)
+	}
+	if got := f.codexPosted(repo, pr); got != 0 {
+		t.Fatalf("adopting the human's command must not post another, got %d", got)
+	}
+}

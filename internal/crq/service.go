@@ -211,6 +211,15 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		st = updated
 	}
 
+	// 2b. A PR closed during a cooldown parks invisibly (NextEligible skips
+	//    awaiting_retry until RetryAt): sweep the oldest parked round's PR state
+	//    so closure abandons it now instead of after the window.
+	if res, handled, err := s.sweepParkedClosed(ctx, st); err != nil {
+		return PumpResult{}, err
+	} else if handled {
+		return res, nil
+	}
+
 	// 3. Fire the next eligible round.
 	next := st.NextEligible(now)
 	if next == nil {
@@ -791,6 +800,12 @@ func (s *Service) fireCoReviewWait(ctx context.Context, round Round, obs engine.
 		return result, nil
 	}
 	codexID := newestCommandID(obs.CodexCommands)
+	anchor := now
+	for _, c := range obs.CodexCommands {
+		if c.ID == codexID && !c.CreatedAt.IsZero() {
+			anchor = c.CreatedAt
+		}
+	}
 	changed := false
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		changed = false
@@ -799,7 +814,7 @@ func (s *Service) fireCoReviewWait(ctx context.Context, round Round, obs engine.
 			return ErrNoChange
 		}
 		deadline := now.Add(s.cfg.FeedbackWaitTimeout)
-		if err := r.AwaitCoReview(deadline, now); err != nil {
+		if err := r.AwaitCoReview(deadline, anchor); err != nil {
 			return err
 		}
 		if r.CodexCommandID == 0 && codexID != 0 {
@@ -888,15 +903,17 @@ func (s *Service) postCodexReviewComment(ctx context.Context, round Round) int64
 // guard (same head, CodexCommandID still unset) makes a concurrent post benign.
 func (s *Service) fireCodexReview(ctx context.Context, round Round) {
 	codexID := s.postCodexReviewComment(ctx, round)
-	if codexID == 0 {
-		return
-	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		r := st.Round(round.Repo, round.PR)
-		if r == nil || r.Head != round.Head || r.CodexCommandID != 0 {
+		if r == nil || r.Head != round.Head {
 			return ErrNoChange
 		}
-		r.CodexCommandID = codexID
+		// Always release the claim; record the id only on success (a failed post
+		// retries after the claim TTL).
+		r.CodexClaimedAt = nil
+		if codexID != 0 && r.CodexCommandID == 0 {
+			r.CodexCommandID = codexID
+		}
 		st.PutRound(*r)
 		return nil
 	})
@@ -922,8 +939,35 @@ func (s *Service) selfHealCodex(ctx context.Context, round Round, obs engine.Obs
 	if !engine.DecideCodexPost(round, obs, s.policy(), commandPresent) {
 		return
 	}
+	// Claim the post under CAS BEFORE the network call: this sweep path is not
+	// serialized by the fire slot, so two concurrent pumps observing
+	// CodexCommandID == 0 would otherwise both post. A claim older than
+	// codexClaimTTL is stale (the poster died mid-flight) and may be re-claimed.
+	claimed := false
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		r := st.Round(round.Repo, round.PR)
+		if !sameRound(r, round) || r.CodexCommandID != 0 {
+			return ErrNoChange
+		}
+		if r.CodexClaimedAt != nil && now.Sub(r.CodexClaimedAt.UTC()) < codexClaimTTL {
+			return ErrNoChange
+		}
+		t := now.UTC()
+		r.CodexClaimedAt = &t
+		st.PutRound(*r)
+		claimed = true
+		return nil
+	})
+	if err != nil || !claimed {
+		return
+	}
+	s.sync(ctx, updated)
 	s.fireCodexReview(ctx, round)
 }
+
+// codexClaimTTL bounds a Codex self-heal claim: past it, a claim whose poster
+// never recorded a command id is stale and the post may be retried.
+const codexClaimTTL = 2 * time.Minute
 
 func (s *Service) Cancel(ctx context.Context, repo string, pr int) error {
 	repo = NormalizeRepo(repo)
@@ -1388,4 +1432,38 @@ func queuedFeedbackCheckEvery(poll time.Duration) time.Duration {
 		return poll
 	}
 	return 30 * time.Second
+}
+
+// sweepParkedClosed abandons the oldest awaiting_retry round whose PR has been
+// closed or merged. Parked rounds are invisible to NextEligible until RetryAt,
+// so without this a PR closed during an account-block cooldown stays active and
+// a waiting loop times out instead of returning skipped. One pull read per
+// pump, ETag-cached.
+func (s *Service) sweepParkedClosed(ctx context.Context, st State) (PumpResult, bool, error) {
+	if s.cfg.DryRun {
+		return PumpResult{}, false, nil
+	}
+	var target *Round
+	for key := range st.Rounds {
+		r := st.Rounds[key]
+		if r.Phase != PhaseAwaitingRetry {
+			continue
+		}
+		if target == nil || firedOrEnqueuedAt(r).Before(firedOrEnqueuedAt(*target)) {
+			c := r
+			target = &c
+		}
+	}
+	if target == nil {
+		return PumpResult{}, false, nil
+	}
+	_, open, err := s.pullHead(ctx, target.Repo, target.PR)
+	if err != nil {
+		return PumpResult{}, false, err
+	}
+	if open {
+		return PumpResult{}, false, nil
+	}
+	res, err := s.abandonRound(ctx, *target, "pr closed", "skipped")
+	return res, true, err
 }

@@ -66,20 +66,24 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 	if !g.SlotFree {
 		return FireDecision{Verdict: FireNo, Reason: "fire slot busy"}
 	}
+	// Belt-and-braces live check: even with a fresh round, never fire at a
+	// head the bot has already reviewed (e.g. state was reinitialized). But a
+	// CodeRabbit review does not finish a round that a required Codex still
+	// gates — command (or wait for) Codex instead of deduping it away. This
+	// resolution runs BEFORE the account-block and pacing gates: none of its
+	// verdicts spend CodeRabbit quota (dedupe completes, FireCodexOnly posts
+	// only the Codex command, a co-review wait posts nothing), so an account
+	// block from another PR must not delay them.
+	for _, review := range obs.Reviews {
+		if sameBot(review.Bot, p.Bot) && review.Commit != "" && strings.HasPrefix(review.Commit, obs.Head) {
+			return codexAwareDedupe(r, obs, p)
+		}
+	}
 	if g.BlockedUntil != nil && g.BlockedUntil.After(now) {
 		return FireDecision{Verdict: FireNo, Reason: "account blocked until " + g.BlockedUntil.UTC().Format(time.RFC3339)}
 	}
 	if g.LastFired != nil && now.Sub(*g.LastFired) < p.MinInterval {
 		return FireDecision{Verdict: FireNo, Reason: "min interval"}
-	}
-	// Belt-and-braces live check: even with a fresh round, never fire at a
-	// head the bot has already reviewed (e.g. state was reinitialized). But a
-	// CodeRabbit review does not finish a round that a required Codex still
-	// gates — command (or wait for) Codex instead of deduping it away.
-	for _, review := range obs.Reviews {
-		if sameBot(review.Bot, p.Bot) && review.Commit != "" && strings.HasPrefix(review.Commit, obs.Head) {
-			return codexAwareDedupe(r, obs, p)
-		}
 	}
 	// crq posts the Codex command in the same fire step for a configured-required
 	// Codex with no auto-review and no existing command for this head.

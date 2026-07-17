@@ -48,6 +48,13 @@ func IsCodexNoActionReviewCompletion(text string) bool {
 		CodexReviewedCommitSHA(text) != ""
 }
 
+// IsCodexEnvironmentNotice reports whether a Codex comment is its platform
+// boilerplate asking the repo owner to create a Codex cloud environment. It is
+// posted as a thread reply and must never read as a finding or a rebuttal.
+func IsCodexEnvironmentNotice(text string) bool {
+	return strings.Contains(NormalizeReviewText(text), "create an environment for this repo")
+}
+
 // IsCodexUsageLimit reports whether a Codex comment is its usage-limit
 // exhaustion notice ("You have reached your Codex usage limits for code
 // reviews"). It is non-actionable like Codex's other acks, but distinct: it

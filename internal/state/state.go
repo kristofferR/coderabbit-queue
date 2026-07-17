@@ -62,6 +62,12 @@ type Round struct {
 	// RetryAt is the earliest time this head may fire again (awaiting_retry).
 	RetryAt *time.Time `json:"retry_at,omitempty"`
 
+	// CodexClaimedAt reserves the self-heal Codex post: it is CAS-set before the
+	// network post so two unserialized sweepers cannot both post `@codex review`
+	// for the same round. A stale claim (the poster died mid-flight) expires and
+	// may be re-claimed.
+	CodexClaimedAt *time.Time `json:"codex_claimed_at,omitempty"`
+
 	// LastAttemptAt is the adoption cutoff: command comments older than the
 	// most recent failed/abandoned attempt must not be adopted as this round's
 	// fire.
@@ -256,7 +262,7 @@ func (r *Round) AwaitRetry(retryAt time.Time, reason string, now time.Time) erro
 // anchor: the primary review already stands in as the fire, so it is set to now
 // only when no fire was recorded. Token/ReservedAt are cleared (no slot is held);
 // CodexCommandID is left as-is so an existing Codex command is not re-posted.
-func (r *Round) AwaitCoReview(deadline, now time.Time) error {
+func (r *Round) AwaitCoReview(deadline, anchor time.Time) error {
 	switch r.Phase {
 	case PhaseQueued, PhaseAwaitingRetry, PhaseFired, PhaseReviewing:
 	default:
@@ -266,7 +272,11 @@ func (r *Round) AwaitCoReview(deadline, now time.Time) error {
 	dl := deadline.UTC()
 	r.WaitDeadline = &dl
 	if r.FiredAt == nil {
-		t := now.UTC()
+		// The anchor is the wait's evidence floor (Completion ignores SHA-less
+		// co-bot summaries before FiredAt). Callers pass the adopted co-bot
+		// command's time when one exists — anchoring at observation time would
+		// hide an answer posted between that command and this pump.
+		t := anchor.UTC()
 		r.FiredAt = &t
 	}
 	r.Token = ""

@@ -82,6 +82,11 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 		if completion.Done {
 			return Transition{Outcome: OutComplete, Reason: "review submitted"}
 		}
+		if r.Phase == state.PhaseReviewing {
+			// Already acknowledged: re-emitting OutReviewing would write the same
+			// state and re-sync the dashboard on every sweep of a silent co-bot wait.
+			return Transition{Outcome: KeepWaiting, Reason: "reviewing; awaiting remaining bots"}
+		}
 		return Transition{Outcome: OutReviewing, Reason: "review submitted; awaiting remaining bots"}
 	}
 

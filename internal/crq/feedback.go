@@ -738,7 +738,8 @@ type reviewThread struct {
 	Path       string `json:"path"`
 	Line       int    `json:"line"`
 	Comments   struct {
-		Nodes []struct {
+		TotalCount int `json:"totalCount"`
+		Nodes      []struct {
 			DatabaseID   int64     `json:"databaseId"`
 			Body         string    `json:"body"`
 			URL          string    `json:"url"`
@@ -789,6 +790,7 @@ func (s *Service) reviewThreads(ctx context.Context, repo string, pr int) ([]rev
         nodes {
           id isResolved isOutdated path line
           comments(first:50) {
+            totalCount
             nodes {
               databaseId body url path line originalLine createdAt
               author { login }
@@ -853,6 +855,12 @@ func threadRebuttal(thread reviewThread, bots map[string]struct{}) *dialect.Find
 	if len(nodes) < 2 {
 		return nil
 	}
+	// Only judge complete threads: comments(first:50) truncates long
+	// discussions, and the "last word" below would be a stale mid-thread reply.
+	// Skipping is safe — a thread that long has had human attention.
+	if thread.Comments.TotalCount > len(nodes) {
+		return nil
+	}
 	last := nodes[len(nodes)-1]
 	if !dialect.InBots(bots, last.Author.Login) {
 		return nil // the agent, not the bot, had the last word
@@ -869,6 +877,10 @@ func threadRebuttal(thread reviewThread, bots map[string]struct{}) *dialect.Find
 	}
 	if dialect.IsReviewFindingWithdrawn(last.Body) {
 		return nil // conceded — the decline stands
+	}
+	if dialect.IsNonActionableText(last.Body) {
+		return nil // a platform notice or ack, not a rebuttal (e.g. Codex's
+		// "create an environment" boilerplate posted as a thread reply)
 	}
 	// A contested decline deserves attention even when the finding's own severity
 	// is a nitpick, so floor an unknown severity at major.
