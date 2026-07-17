@@ -16,6 +16,7 @@ import (
 type Policy struct {
 	Bot          string   // configured CodeRabbit login
 	RequiredBots []string // bots that gate round completion
+	CodexCommand string   // Codex review trigger crq posts ("" disables Codex firing)
 
 	MinInterval       time.Duration // global pacing between fires
 	InflightTimeout   time.Duration // fired round with no bot response at all
@@ -63,11 +64,23 @@ type Observation struct {
 	Events  []dialect.BotEvent
 	// Commands are adoptable trigger comments (cutoff-filtered by observe).
 	Commands []CommandSeen
+	// CodexCommands are adoptable Codex trigger comments present for the head
+	// (cutoff-filtered by observe like Commands). A non-empty list means a live
+	// `@codex review` already exists, so crq must not post a duplicate.
+	CodexCommands []CommandSeen
 	// Reacted reports a configured-bot reaction on the round's fired command.
 	Reacted bool
 	// CodexThumbsUp reports a current Codex +1 on the PR or the fired command
 	// (pre-fetched only when a Codex-gated completion needs it).
 	CodexThumbsUp bool
+	// CodexAutoActive reports that Codex reviews this PR on its own: it has a
+	// review or clean summary that no `@codex review` command preceded. When
+	// true, crq never posts the Codex command — Codex will review unprompted.
+	CodexAutoActive bool
+	// CodexActiveThisRound reports Codex activity bound to the current round (a
+	// head review, a round-window comment/clean summary, or a thumbs-up). It
+	// drives the dynamic completion gate when Codex is not configured-required.
+	CodexActiveThisRound bool
 }
 
 // notBefore mirrors v2: GitHub timestamps are second-granular, so a bot

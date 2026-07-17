@@ -84,6 +84,7 @@ func (s *Service) policy() engine.Policy {
 	return engine.Policy{
 		Bot:               s.cfg.Bot,
 		RequiredBots:      s.cfg.RequiredBots,
+		CodexCommand:      s.cfg.CodexCommand,
 		MinInterval:       s.cfg.MinInterval,
 		InflightTimeout:   s.cfg.InflightTimeout,
 		RateLimitFallback: s.cfg.RateLimitFallback,

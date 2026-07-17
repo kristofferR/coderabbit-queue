@@ -43,6 +43,15 @@ func IsCodexNoActionReviewCompletion(text string) bool {
 		CodexReviewedCommitSHA(text) != ""
 }
 
+// IsCodexUsageLimit reports whether a Codex comment is its usage-limit
+// exhaustion notice ("You have reached your Codex usage limits for code
+// reviews"). It is non-actionable like Codex's other acks, but distinct: it
+// means Codex cannot produce a review this round, which the dynamic completion
+// gate uses to avoid waiting on a Codex that will never finish.
+func IsCodexUsageLimit(text string) bool {
+	return strings.Contains(NormalizeReviewText(text), "usage limits for code reviews")
+}
+
 // CodexReviewedCommitSHA extracts the commit hash Codex says it reviewed,
 // or "" when the comment carries no such line.
 func CodexReviewedCommitSHA(text string) string {

@@ -54,6 +54,11 @@ type Round struct {
 	// adopted). It anchors completion-reply pairing to this round.
 	CommandID int64 `json:"command_id,omitempty"`
 
+	// CodexCommandID is the `@codex review` comment crq posted/adopted for this
+	// round (0 when Codex was not fired). It suppresses re-posting the Codex
+	// command on a retry of the same head.
+	CodexCommandID int64 `json:"codex_command_id,omitempty"`
+
 	// RetryAt is the earliest time this head may fire again (awaiting_retry).
 	RetryAt *time.Time `json:"retry_at,omitempty"`
 

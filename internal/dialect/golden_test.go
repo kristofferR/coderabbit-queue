@@ -38,9 +38,14 @@ func TestGoldenClassification(t *testing.T) {
 		autoReply       bool
 		noAction        bool
 		codexClean      bool
+		codexUsageLimit bool
 		nonActionable   bool
 		availableIn     time.Duration // 0 = no window must parse
 		reviewedSHA     string
+		// author + wantKind pin Classifier.Classify's dominant kind for the file;
+		// wantKind == EvOther (the zero value) skips the Classify assertion.
+		author   string
+		wantKind EventKind
 	}{
 		{file: "coderabbit/rate-limit-fair-usage.md", rateLimited: true, autoReply: true, availableIn: 48 * time.Minute},
 		// Contains the "does not re-review" boilerplate in its help section —
@@ -53,11 +58,13 @@ func TestGoldenClassification(t *testing.T) {
 		{file: "coderabbit/no-actionable-comments.md", noAction: true},
 		{file: "coderabbit/already-reviewed.md", alreadyDone: true, autoReply: true},
 		{file: "coderabbit/completion-reply.md", completionReply: true, autoReply: true},
-		{file: "codex/clean-summary-legacy.md", codexClean: true, noAction: true, nonActionable: true},
-		{file: "codex/clean-summary-tada.md", codexClean: true, noAction: true, nonActionable: true, reviewedSHA: "4d9e8bca82"},
-		{file: "codex/usage-limit.md", nonActionable: true},
+		{file: "codex/clean-summary-legacy.md", codexClean: true, noAction: true, nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCodexClean},
+		{file: "codex/clean-summary-tada.md", codexClean: true, noAction: true, nonActionable: true, reviewedSHA: "4d9e8bca82", author: "chatgpt-codex-connector[bot]", wantKind: EvCodexClean},
+		{file: "codex/usage-limit.md", codexUsageLimit: true, nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCodexUsageLimit},
+		{file: "codex/review-command.md", author: "kristofferR", wantKind: EvCodexCommand},
 	}
 	base := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	classifier := Classifier{CodeRabbit: goldenCR, Bot: "coderabbitai[bot]", ReviewCommand: "@coderabbitai review", CodexCommand: "@codex review"}
 	for _, tc := range cases {
 		t.Run(tc.file, func(t *testing.T) {
 			body := readGolden(t, tc.file)
@@ -75,6 +82,7 @@ func TestGoldenClassification(t *testing.T) {
 				{"IsAutoReply", goldenCR.IsAutoReply(body), tc.autoReply},
 				{"IsNoActionReviewCompletion", IsNoActionReviewCompletion(body), tc.noAction},
 				{"IsCodexNoActionReviewCompletion", IsCodexNoActionReviewCompletion(body), tc.codexClean},
+				{"IsCodexUsageLimit", IsCodexUsageLimit(body), tc.codexUsageLimit},
 				{"IsNonActionableText", IsNonActionableText(body), tc.nonActionable},
 			}
 			for _, c := range checks {
@@ -92,6 +100,11 @@ func TestGoldenClassification(t *testing.T) {
 			}
 			if got := CodexReviewedCommitSHA(body); got != tc.reviewedSHA {
 				t.Errorf("CodexReviewedCommitSHA = %q, want %q", got, tc.reviewedSHA)
+			}
+			if tc.wantKind != EvOther {
+				if got := classifier.Classify(tc.author, body, 1, base, base).Kind; got != tc.wantKind {
+					t.Errorf("Classify kind = %v, want %v", got, tc.wantKind)
+				}
 			}
 		})
 	}

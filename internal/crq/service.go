@@ -266,6 +266,7 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 	if err != nil {
 		return PumpResult{}, err
 	}
+	s.selfHealCodex(ctx, slot, obs.eng, now)
 	tr := engine.Progress(slot, st.Account, obs.eng, now, s.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return PumpResult{Action: "waiting", Repo: slot.Repo, PR: slot.PR, Reason: tr.Reason}, nil
@@ -398,6 +399,7 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 		}
 		return st, nil
 	}
+	s.selfHealCodex(ctx, *target, obs.eng, now)
 	tr := engine.Progress(*target, st.Account, obs.eng, now, s.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return st, nil
@@ -433,9 +435,9 @@ func (s *Service) applyFire(ctx context.Context, round Round, obs engine.Observa
 	case engine.FireSupersede:
 		return s.supersedeRound(ctx, round, obs.Head, now)
 	case engine.FireAdopt:
-		return s.fireRound(ctx, round, obs, false, d.AdoptCommandID, d.AdoptAt, d.Reason, now)
+		return s.fireRound(ctx, round, obs, false, d.AdoptCommandID, d.AdoptAt, d.Reason, d.PostCodex, now)
 	case engine.FirePost:
-		return s.fireRound(ctx, round, obs, true, 0, time.Time{}, "", now)
+		return s.fireRound(ctx, round, obs, true, 0, time.Time{}, "", d.PostCodex, now)
 	default: // FireNo
 		return PumpResult{Action: mapFireNo(d.Reason), Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: d.Reason}, nil
 	}
@@ -538,8 +540,10 @@ func (s *Service) supersedeRound(ctx context.Context, round Round, head string, 
 }
 
 // fireRound posts (or adopts) the review command and records the fire on the
-// round, reserving the global slot under compare-and-swap.
-func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observation, post bool, adoptID int64, adoptAt time.Time, reason string, now time.Time) (PumpResult, error) {
+// round, reserving the global slot under compare-and-swap. When postCodex, it
+// also posts the Codex review command alongside (non-fatal on failure — the
+// self-heal path retries).
+func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observation, post bool, adoptID int64, adoptAt time.Time, reason string, postCodex bool, now time.Time) (PumpResult, error) {
 	key := QueueKey(round.Repo, round.PR)
 	if s.cfg.DryRun {
 		return PumpResult{Action: "dry_run", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}, nil
@@ -588,6 +592,9 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 		s.sync(ctx, updated)
 		if s.log != nil {
 			s.log.Printf("fire %s@%s (adopted existing review command)", key, round.Head)
+		}
+		if postCodex {
+			s.fireCodexReview(ctx, round)
 		}
 		return PumpResult{Action: "fired", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}, nil
 	}
@@ -643,7 +650,13 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 	if firedAt.IsZero() {
 		firedAt = now
 	}
-	updated, err := s.recordFire(ctx, round, token, comment.ID, firedAt, now)
+	// Post the Codex command before recording so its id lands in the same fire
+	// write. A failed post returns 0 (logged) and the self-heal path retries.
+	var codexID int64
+	if postCodex {
+		codexID = s.postCodexReviewComment(ctx, round)
+	}
+	updated, err := s.recordFire(ctx, round, token, comment.ID, codexID, firedAt, now)
 	if err != nil {
 		if errors.Is(err, ErrNoChange) {
 			return PumpResult{Action: "lost_race"}, nil
@@ -658,8 +671,10 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 }
 
 // recordFire records the posted command on the reserved round, with a 30s retry
-// on a transient state-write failure so a fired command is never lost.
-func (s *Service) recordFire(ctx context.Context, round Round, token string, commandID int64, firedAt, now time.Time) (State, error) {
+// on a transient state-write failure so a fired command is never lost. codexID
+// is the Codex command comment posted alongside (0 when none), recorded in the
+// same write.
+func (s *Service) recordFire(ctx context.Context, round Round, token string, commandID, codexID int64, firedAt, now time.Time) (State, error) {
 	record := func(c context.Context) (State, bool, error) {
 		recorded := false
 		st, err := s.store.Update(c, func(st *State) error {
@@ -670,6 +685,9 @@ func (s *Service) recordFire(ctx context.Context, round Round, token string, com
 			}
 			if err := r.Fire(commandID, firedAt); err != nil {
 				return err
+			}
+			if codexID != 0 {
+				r.CodexCommandID = codexID
 			}
 			lf := firedAt
 			st.LastFired = &lf
@@ -695,6 +713,67 @@ func (s *Service) recordFire(ctx context.Context, round Round, token string, com
 		return st, ErrNoChange
 	}
 	return st, nil
+}
+
+// postCodexReviewComment posts the Codex review command and returns its comment
+// id, or 0 on failure. A failed post is non-fatal: it logs and leaves
+// CodexCommandID unset so a later pump's self-heal retries. The fresh-fire path
+// folds the returned id into recordFire's write.
+func (s *Service) postCodexReviewComment(ctx context.Context, round Round) int64 {
+	comment, err := s.gh.PostIssueComment(ctx, round.Repo, round.PR, s.cfg.CodexCommand)
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("warning: Codex review command post failed for %s@%s: %v (will retry on a later pump)", QueueKey(round.Repo, round.PR), round.Head, err)
+		}
+		return 0
+	}
+	if s.log != nil {
+		s.log.Printf("fire %s@%s (posted %s)", QueueKey(round.Repo, round.PR), round.Head, strings.TrimSpace(s.cfg.CodexCommand))
+	}
+	return comment.ID
+}
+
+// fireCodexReview posts the Codex review command for an already-fired round and
+// records its id under CAS. It is used by the adopt fire path and the self-heal
+// retry (the fresh-post path records the id inside recordFire instead). The CAS
+// guard (same head, CodexCommandID still unset) makes a concurrent post benign.
+func (s *Service) fireCodexReview(ctx context.Context, round Round) {
+	codexID := s.postCodexReviewComment(ctx, round)
+	if codexID == 0 {
+		return
+	}
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		r := st.Round(round.Repo, round.PR)
+		if r == nil || r.Head != round.Head || r.CodexCommandID != 0 {
+			return ErrNoChange
+		}
+		r.CodexCommandID = codexID
+		st.PutRound(*r)
+		return nil
+	})
+	if err != nil {
+		if s.log != nil && !errors.Is(err, ErrNoChange) {
+			s.log.Printf("warning: failed to record Codex command %d for %s: %v", codexID, QueueKey(round.Repo, round.PR), err)
+		}
+		return
+	}
+	s.sync(ctx, updated)
+}
+
+// selfHealCodex re-posts the Codex review command for a fired/reviewing round
+// whose initial Codex post failed (CodexCommandID still 0). It runs on the
+// daemon's progress/sweep paths; idempotence comes from the observation — Codex
+// evidence, a live `@codex review` command, or an account that reviews on its
+// own all suppress it — not a retry counter.
+func (s *Service) selfHealCodex(ctx context.Context, round Round, obs engine.Observation, now time.Time) {
+	if s.cfg.DryRun || round.CodexCommandID != 0 || round.FiredAt == nil || obs.Head != round.Head {
+		return
+	}
+	commandPresent := engine.CodexCommandSince(obs, round.FiredAt.UTC())
+	if !engine.DecideCodexPost(round, obs, s.policy(), commandPresent) {
+		return
+	}
+	s.fireCodexReview(ctx, round)
 }
 
 func (s *Service) Cancel(ctx context.Context, repo string, pr int) error {

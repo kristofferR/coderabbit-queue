@@ -32,12 +32,15 @@ type Config struct {
 	SkipAuthors map[string]bool
 	// SkipMarker suppresses fleet auto-review when present in a PR body.
 	// Manual `crq loop` remains unaffected so an explicit review can override it.
-	SkipMarker        string
-	StateRef          string
-	Bot               string
-	RequiredBots      []string
-	FeedbackBots      []string
-	ReviewCommand     string
+	SkipMarker    string
+	StateRef      string
+	Bot           string
+	RequiredBots  []string
+	FeedbackBots  []string
+	ReviewCommand string
+	// CodexCommand is the Codex review trigger crq posts when Codex gates a round
+	// and does not auto-review (CRQ_CODEX_CMD). Empty disables all Codex firing.
+	CodexCommand      string
 	RateLimitCommand  string
 	RateLimitMarker   string
 	CalibrationMarker string
@@ -105,6 +108,7 @@ func LoadConfig() (Config, error) {
 		RequiredBots:        requiredBots,
 		FeedbackBots:        listEnv(env, "CRQ_FEEDBACK_BOTS", strings.Join(unionBots(requiredBots, extraFeedbackBots), ",")),
 		ReviewCommand:       stringEnv(env, "CRQ_REVIEW_CMD", "@coderabbitai review"),
+		CodexCommand:        stringEnvAllowEmpty(env, "CRQ_CODEX_CMD", "@codex review"),
 		RateLimitCommand:    stringEnv(env, "CRQ_RATELIMIT_CMD", dialect.DefaultRateLimitCommand),
 		RateLimitMarker:     stringEnv(env, "CRQ_RL_MARKER", dialect.DefaultRateLimitMarker),
 		CalibrationMarker:   stringEnv(env, "CRQ_CAL_REPLY_MARKER", "auto-generated reply by CodeRabbit"),

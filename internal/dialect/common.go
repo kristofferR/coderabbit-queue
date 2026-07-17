@@ -121,10 +121,10 @@ func LooksLikePath(summary string) bool {
 }
 
 func IsNonActionableText(text string) bool {
-	text = NormalizeReviewText(text)
-	if IsCodexNoActionReviewCompletion(text) {
+	if IsCodexNoActionReviewCompletion(text) || IsCodexUsageLimit(text) {
 		return true
 	}
+	text = NormalizeReviewText(text)
 	nonActionable := []string{
 		"lgtm",
 		"also applies to:",
@@ -140,7 +140,6 @@ func IsNonActionableText(text string) bool {
 		"confirm intended ux",
 		"worth confirming",
 		"skipped: comment is from another github bot",
-		"you have reached your codex usage limits for code reviews",
 	}
 	for _, phrase := range nonActionable {
 		if strings.Contains(text, phrase) {

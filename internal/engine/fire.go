@@ -27,6 +27,9 @@ type FireDecision struct {
 	// Adopt fields identify the existing command comment (FireAdopt).
 	AdoptCommandID int64
 	AdoptAt        time.Time
+	// PostCodex asks the apply layer to post the Codex review command alongside
+	// the CodeRabbit one (FirePost/FireAdopt). See DecideCodexPost.
+	PostCodex bool
 }
 
 // Global is the cross-PR state a fire decision needs.
@@ -73,6 +76,9 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 			return FireDecision{Verdict: FireDedupe, Reason: "bot already reviewed head"}
 		}
 	}
+	// crq posts the Codex command in the same fire step for a configured-required
+	// Codex with no auto-review and no existing command for this head.
+	postCodex := DecideCodexPost(r, obs, p, len(obs.CodexCommands) > 0)
 	// Adopt the newest already-posted command instead of posting a duplicate.
 	// observe() has already applied the adoption cutoffs (LastAttemptAt,
 	// force-push, already-answered).
@@ -88,7 +94,7 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 		if at.IsZero() {
 			at = newest.UpdatedAt
 		}
-		return FireDecision{Verdict: FireAdopt, Reason: "review command already posted", AdoptCommandID: newest.ID, AdoptAt: at}
+		return FireDecision{Verdict: FireAdopt, Reason: "review command already posted", AdoptCommandID: newest.ID, AdoptAt: at, PostCodex: postCodex}
 	}
-	return FireDecision{Verdict: FirePost}
+	return FireDecision{Verdict: FirePost, PostCodex: postCodex}
 }

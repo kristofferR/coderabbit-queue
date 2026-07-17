@@ -61,7 +61,10 @@ crq loop OWNER/REPO PR_NUMBER > crq-feedback.json
 rc=$?
 ```
 
-`crq loop` queues the PR and triggers CodeRabbit when the account can spend a review. If a bot reports
+`crq loop` queues the PR and triggers CodeRabbit when the account can spend a review. If Codex is in
+`CRQ_REQUIRED_BOTS`, crq also posts `CRQ_CODEX_CMD` (default `@codex review`) in the same fire step —
+never when Codex auto-reviews the PR on its own. A Codex that joins a round uninvited gates that
+round's convergence dynamically (its usage-limit notice releases the dynamic gate). If a bot reports
 actionable findings first, it emits them immediately while leaving the queued round alive. Fix and
 validate locally and resolve or decline each addressed thread immediately. While any required bot's
 `.reviewed_by` value is false, do not commit or push. Only after every `CRQ_REQUIRED_BOTS` entry is true

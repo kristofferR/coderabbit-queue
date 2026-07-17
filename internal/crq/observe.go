@@ -64,7 +64,7 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 		return observation{}, err
 	}
 	o.comments = comments
-	classifier := dialect.Classifier{CodeRabbit: s.cr, Bot: s.cfg.Bot, ReviewCommand: s.cfg.ReviewCommand}
+	classifier := dialect.Classifier{CodeRabbit: s.cr, Bot: s.cfg.Bot, ReviewCommand: s.cfg.ReviewCommand, CodexCommand: s.cfg.CodexCommand}
 	for _, c := range comments {
 		o.eng.Events = append(o.eng.Events, classifier.Classify(c.User.Login, c.Body, c.ID, c.CreatedAt, c.UpdatedAt))
 	}
@@ -100,13 +100,22 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 		}
 	}
 
+	// Codex activity is derived from the same snapshot: whether Codex reviews the
+	// PR unprompted (drives the fire decision) and whether it participates in the
+	// current round (drives the dynamic completion gate).
+	o.eng.CodexAutoActive = engine.CodexAutoActive(o.eng)
+	if round != nil {
+		o.eng.CodexActiveThisRound = engine.CodexActiveThisRound(*round, o.eng)
+	}
+
 	// Adoptable commands are only consulted for a fire-eligible round.
 	if round != nil && round.FireEligible(now) {
-		cmds, err := s.adoptableCommands(ctx, repo, pr, o.eng, adoptCutoff(*round), pull, comments, reviews)
+		cr, codex, err := s.reviewCommands(ctx, repo, pr, o.eng, adoptCutoff(*round), pull, comments, reviews)
 		if err != nil {
 			return observation{}, err
 		}
-		o.eng.Commands = cmds
+		o.eng.Commands = cr
+		o.eng.CodexCommands = codex
 	}
 	return o, nil
 }
@@ -140,42 +149,36 @@ func (s *Service) codexRelevant(obs engine.Observation) bool {
 	return false
 }
 
-// adoptableCommands ports v2's existingReviewCommand: it returns the newest
-// review-command comment safe to adopt as an already-posted fire, or none. The
-// cutoffs (LastAttemptAt floor, head-commit date, force-push, already-answered)
-// are applied here so the engine only picks the newest survivor.
-func (s *Service) adoptableCommands(ctx context.Context, repo string, pr int, obs engine.Observation, notBeforeCutoff time.Time, pull ghapi.Pull, comments []ghapi.IssueComment, reviews []ghapi.Review) ([]engine.CommandSeen, error) {
-	head := obs.Head
+// reviewCommands ports v2's existingReviewCommand and extends it to Codex. It
+// returns the newest CodeRabbit command safe to adopt as an already-posted fire
+// (cr) and the live `@codex review` commands present for the head (codex). Both
+// share ONE cutoff computation (LastAttemptAt floor, head-commit date,
+// force-push) so a stale command from a previous head is excluded from both, and
+// the head-guard/cutoff lookups are skipped entirely when neither command is on
+// the PR. The Codex list is only gathered when Codex gates the round, since only
+// a configured-required Codex is ever fired.
+func (s *Service) reviewCommands(ctx context.Context, repo string, pr int, obs engine.Observation, notBeforeCutoff time.Time, pull ghapi.Pull, comments []ghapi.IssueComment, reviews []ghapi.Review) (cr, codex []engine.CommandSeen, err error) {
 	command := strings.TrimSpace(s.cfg.ReviewCommand)
-	if command == "" {
-		return nil, nil
-	}
-	// The head-guard and cutoff lookups cost REST/GraphQL calls; skip them
-	// entirely in the common case of no command comment on the PR at all.
-	hasCandidate := false
-	for _, comment := range comments {
-		if strings.TrimSpace(comment.Body) == command {
-			hasCandidate = true
-			break
-		}
-	}
-	if !hasCandidate {
-		return nil, nil
+	codexCommand := strings.TrimSpace(s.cfg.CodexCommand)
+	hasCR := command != "" && hasCommentBody(comments, command)
+	hasCodex := codexCommand != "" && dialect.HasCodexBot(s.cfg.RequiredBots) && hasCommentBody(comments, codexCommand)
+	if !hasCR && !hasCodex {
+		return nil, nil, nil
 	}
 	cutoff := notBeforeCutoff
 	if pull.Head.SHA != "" {
-		if dialect.ShortOID(pull.Head.SHA) != head {
-			return nil, nil
+		if dialect.ShortOID(pull.Head.SHA) != obs.Head {
+			return nil, nil, nil
 		}
-		commit, err := s.gh.GetCommit(ctx, repo, pull.Head.SHA)
-		if err != nil {
-			if _, ok := ghapi.ThrottleWait(err); ok {
-				return nil, err
+		commit, gerr := s.gh.GetCommit(ctx, repo, pull.Head.SHA)
+		if gerr != nil {
+			if _, ok := ghapi.ThrottleWait(gerr); ok {
+				return nil, nil, gerr
 			}
 			// No head-commit cutoff available (unreadable/404 head): skip adoption
 			// rather than wedge the queue — the worst case is posting a command that
 			// already exists, the pre-adoption behavior.
-			return nil, nil
+			return nil, nil, nil
 		}
 		if commit.Committer.Date.After(cutoff) {
 			cutoff = commit.Committer.Date
@@ -187,6 +190,43 @@ func (s *Service) adoptableCommands(ctx context.Context, repo string, pr int, ob
 	if fp := s.headForcePushCutoff(ctx, repo, pr); fp.After(cutoff) {
 		cutoff = fp
 	}
+	if hasCR {
+		cr = s.adoptableCR(obs, cutoff, command, comments, reviews)
+	}
+	if hasCodex {
+		codex = newestCommandSince(codexCommand, cutoff, comments)
+	}
+	return cr, codex, nil
+}
+
+// adoptableCR returns the newest CodeRabbit command comment safe to adopt as an
+// already-posted fire, or none. A command the bot already answered with a review
+// or a completion reply belongs to a finished round for an earlier head and is
+// never adopted (adopting it would mark the new head fired without reviewing it).
+func (s *Service) adoptableCR(obs engine.Observation, cutoff time.Time, command string, comments []ghapi.IssueComment, reviews []ghapi.Review) []engine.CommandSeen {
+	best := newestCommandSince(command, cutoff, comments)
+	if len(best) == 0 {
+		return nil
+	}
+	bestAt := best[0].CreatedAt
+	if bestAt.IsZero() {
+		bestAt = best[0].UpdatedAt
+	}
+	for _, review := range reviews {
+		if s.isConfiguredBot(review.User.Login) && !review.SubmittedAt.Before(bestAt) {
+			return nil
+		}
+	}
+	if engine.CommandHasCompletionReply(obs, s.policy(), best[0].ID) {
+		return nil
+	}
+	return best
+}
+
+// newestCommandSince returns the newest comment whose trimmed body is command
+// and which is not older than cutoff, as a single-element CommandSeen slice
+// (empty when none).
+func newestCommandSince(command string, cutoff time.Time, comments []ghapi.IssueComment) []engine.CommandSeen {
 	var best ghapi.IssueComment
 	var bestAt time.Time
 	ok := false
@@ -208,20 +248,19 @@ func (s *Service) adoptableCommands(ctx context.Context, repo string, pr int, ob
 		}
 	}
 	if !ok {
-		return nil, nil
+		return nil
 	}
-	// A command the bot has already answered with a review belongs to a completed
-	// round for an earlier head; adopting it would mark the new head fired without
-	// reviewing it. Skip adoption — the worst case is a duplicate command.
-	for _, review := range reviews {
-		if s.isConfiguredBot(review.User.Login) && !review.SubmittedAt.Before(bestAt) {
-			return nil, nil
+	return []engine.CommandSeen{{ID: best.ID, CreatedAt: best.CreatedAt, UpdatedAt: best.UpdatedAt}}
+}
+
+// hasCommentBody reports whether any comment's trimmed body equals body.
+func hasCommentBody(comments []ghapi.IssueComment, body string) bool {
+	for _, comment := range comments {
+		if strings.TrimSpace(comment.Body) == body {
+			return true
 		}
 	}
-	if engine.CommandHasCompletionReply(obs, s.policy(), best.ID) {
-		return nil, nil
-	}
-	return []engine.CommandSeen{{ID: best.ID, CreatedAt: best.CreatedAt, UpdatedAt: best.UpdatedAt}}, nil
+	return false
 }
 
 // headForcePushCutoff returns when the PR head was last force-pushed, zero if

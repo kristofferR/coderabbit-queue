@@ -329,6 +329,80 @@ func TestCommandHasCompletionReply(t *testing.T) {
 	}
 }
 
+// TestDecideCodexPost is the PostCodex decision matrix: crq posts its Codex
+// command only for a configured-required Codex that does not auto-review and has
+// not already been asked (evidence, an existing command, or a recorded id).
+func TestDecideCodexPost(t *testing.T) {
+	codexReq := Policy{
+		Bot:          "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
+		CodexCommand: "@codex review",
+	}
+	head := "abcdef123"
+	base := Observation{Head: head, Open: true}
+	codexReviewHead := ReviewSeen{Bot: "chatgpt-codex-connector[bot]", Commit: "abcdef1234567890", SubmittedAt: t0}
+
+	cases := []struct {
+		name           string
+		round          state.Round
+		obs            Observation
+		policy         Policy
+		commandPresent bool
+		want           bool
+	}{
+		{name: "required, no auto, first fire", round: state.Round{Head: head}, obs: base, policy: codexReq, want: true},
+		{name: "auto-active never posts", round: state.Round{Head: head}, obs: Observation{Head: head, Open: true, CodexAutoActive: true}, policy: codexReq, want: false},
+		{name: "already reviewed head", round: state.Round{Head: head}, obs: Observation{Head: head, Open: true, Reviews: []ReviewSeen{codexReviewHead}}, policy: codexReq, want: false},
+		{name: "command already present", round: state.Round{Head: head}, obs: base, policy: codexReq, commandPresent: true, want: false},
+		{name: "not required", round: state.Round{Head: head}, obs: base, policy: policy, want: false},
+		{name: "codex command empty", round: state.Round{Head: head}, obs: base, policy: Policy{RequiredBots: codexReq.RequiredBots}, want: false},
+		{name: "already asked this round", round: state.Round{Head: head, CodexCommandID: 42}, obs: base, policy: codexReq, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := DecideCodexPost(tc.round, tc.obs, tc.policy, tc.commandPresent); got != tc.want {
+				t.Fatalf("DecideCodexPost = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDynamicCodexGate covers the dynamic completion gate: an observed-active
+// Codex gates a round it isn't configured-required for, a usage-limit notice
+// disengages that dynamic gate, and a configured-required Codex is left gating
+// regardless of the usage limit.
+func TestDynamicCodexGate(t *testing.T) {
+	r := firedRound(t, "abcdef123")
+	cutoff := r.FiredAt.UTC()
+	crReview := ReviewSeen{Bot: "coderabbitai[bot]", Commit: "abcdef1234567890", SubmittedAt: cutoff.Add(time.Minute)}
+	codexReview := ReviewSeen{Bot: "chatgpt-codex-connector[bot]", Commit: "abcdef1234567890", SubmittedAt: cutoff.Add(time.Minute)}
+	usageLimit := dialect.BotEvent{Kind: dialect.EvCodexUsageLimit, Bot: "chatgpt-codex-connector[bot]", CommentID: 700,
+		CreatedAt: cutoff.Add(30 * time.Second), UpdatedAt: cutoff.Add(30 * time.Second)}
+
+	// Codex auto-reviews the PR but hasn't reviewed the head yet: the dynamic gate
+	// holds even though only CodeRabbit is configured-required.
+	held := Observation{Head: "abcdef123", Open: true, CodexAutoActive: true, Reviews: []ReviewSeen{crReview}}
+	if got := Completion(r, held, policy); got.Done {
+		t.Fatalf("an active Codex must gate the round until it reviews the head: %+v", got)
+	}
+	// Once Codex reviews the head, it converges.
+	held.Reviews = append(held.Reviews, codexReview)
+	if got := Completion(r, held, policy); !got.Done {
+		t.Fatalf("the dynamic gate must converge once Codex reviews the head: %+v", got)
+	}
+	// A usage-limit notice disengages the DYNAMIC gate: CodeRabbit alone converges.
+	limited := Observation{Head: "abcdef123", Open: true, CodexAutoActive: true, Reviews: []ReviewSeen{crReview}, Events: []dialect.BotEvent{usageLimit}}
+	if got := Completion(r, limited, policy); !got.Done {
+		t.Fatalf("a Codex usage limit must disengage the dynamic gate: %+v", got)
+	}
+	// The configured-required gate is unchanged by a usage limit: it still waits.
+	gated := policy
+	gated.RequiredBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
+	if got := Completion(r, limited, gated); got.Done {
+		t.Fatalf("a usage limit must NOT disengage the configured-required Codex gate: %+v", got)
+	}
+}
+
 // TestCodexGatesCleanSummary ports the codexInactiveOrThumbed rules.
 func TestCodexGatesCleanSummary(t *testing.T) {
 	r := firedRound(t, "abcdef123")

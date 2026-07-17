@@ -420,6 +420,7 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_AUTOREVIEW_SKIP_AUTHORS` | `dependabot[bot]` | PR authors `autoreview` never enqueues (comma-separated; case and `[bot]` suffix don't matter) — set to empty to auto-review bot PRs too; manual `crq review` is unaffected |
 | `CRQ_AUTOREVIEW_SKIP_MARKER` | `<!-- crq:skip-autoreview -->` | exact PR-body marker that suppresses fleet auto-review; set empty to disable; manual `crq loop` is unaffected |
 | `CRQ_REQUIRED_BOTS` | `coderabbitai[bot]` | bots that must review the head for convergence (crq waits for all of them) |
+| `CRQ_CODEX_CMD` | `@codex review` | Codex trigger crq posts alongside the CodeRabbit command when Codex is in `CRQ_REQUIRED_BOTS` and does not auto-review the PR; empty disables Codex firing |
 | `CRQ_FEEDBACK_BOTS` | required bots + `chatgpt-codex-connector[bot]` | bots whose findings are surfaced — a superset of required bots, so Codex reviews show up without gating convergence on repos where Codex isn't installed |
 | `CRQ_TZ` | `UTC` | dashboard display timezone (IANA name, e.g. `Europe/Oslo`) |
 | `CRQ_MIN_INTERVAL` | `90s` | minimum time between fired reviews |
@@ -441,6 +442,15 @@ them coming!`. crq recognizes that text as a successful, non-actionable review. 
 `CRQ_REQUIRED_BOTS`, the current-head wait must be active and the comment must be newer than that wait
 before it satisfies the Codex gate; otherwise the clean summary is simply ignored rather than emitted
 as a false finding.
+
+**Codex firing and auto-detection:** when Codex is in `CRQ_REQUIRED_BOTS`, crq posts `CRQ_CODEX_CMD`
+in the same fire step as the CodeRabbit command — unless it detects Codex auto-review on the PR (any
+Codex review that no `@codex review` command preceded), in which case it never posts and simply waits
+for Codex's own review. Conversely, when Codex is *not* required but joins a round on its own (an
+actionable comment or review mid-round), the round gates on Codex dynamically: convergence waits for
+its review too. A Codex usage-limit notice releases that dynamic gate so an exhausted Codex can't
+stall rounds it volunteered for; an explicitly required Codex is still bounded only by the normal
+feedback deadline.
 
 **Multiple orgs:** CodeRabbit's quota is per-org, so PRs in different orgs draw from *different*
 buckets. Run a separate gate (its own `CRQ_REPO`) per org rather than mixing them — otherwise you'd

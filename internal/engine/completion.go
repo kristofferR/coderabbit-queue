@@ -46,6 +46,17 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 		cutoff = r.FiredAt.UTC()
 	}
 
+	// Dynamic Codex gate: a fired round that Codex participates in — reviewing the
+	// PR on its own (CodexAutoActive) or acting this round (CodexActiveThisRound) —
+	// waits for Codex too, even when Codex is not configured-required, so its
+	// findings are not skipped. A usage-limit exhaustion notice disengages this
+	// gate (Codex cannot finish this round); configured-required Codex is left to
+	// the wait deadline as before.
+	if r.FiredAt != nil && !dialect.HasCodexBot(p.RequiredBots) &&
+		(obs.CodexAutoActive || obs.CodexActiveThisRound) && !codexUsageLimitedSince(obs, cutoff) {
+		reviewedBy[codexBot] = false
+	}
+
 	// 1. Submitted reviews.
 	for _, review := range obs.Reviews {
 		if r.Head != "" {
@@ -78,6 +89,15 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 		}
 	}
 
+	// A Codex thumbs-up stands in for its review whenever Codex gates the round.
+	// codexInactiveOrThumbed also consumes it on the CodeRabbit clean-summary path;
+	// marking it here covers the case where CodeRabbit submitted a real review, so
+	// step 3 never runs — otherwise a thumbs-up would engage the dynamic gate
+	// without being able to satisfy it.
+	if obs.CodexThumbsUp && needsBotReview(reviewedBy, codexBot) {
+		markReviewed(reviewedBy, codexBot)
+	}
+
 	// 3. CodeRabbit clean-review summary, Codex-gated.
 	if r.FiredAt != nil {
 		for _, ev := range obs.Events {
@@ -104,43 +124,16 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 // on this round, or has thumbed the round up. A thumbs-up also counts as
 // Codex's review.
 func codexInactiveOrThumbed(r state.Round, obs Observation, p Policy, cutoff time.Time, reviewedBy map[string]bool) bool {
-	codexActive := dialect.HasCodexBot(p.RequiredBots)
-	codexReviewed := reviewedByBot(reviewedBy, "chatgpt-codex-connector[bot]")
-	for _, review := range obs.Reviews {
-		if !dialect.IsCodexBot(review.Bot) {
-			continue
-		}
-		if r.Head != "" && review.Commit != "" && strings.HasPrefix(review.Commit, r.Head) {
-			codexActive, codexReviewed = true, true
-			break
-		}
-		if review.Commit == "" && !review.SubmittedAt.IsZero() && notBefore(review.SubmittedAt, cutoff) {
-			codexActive, codexReviewed = true, true
-			break
-		}
-	}
-	if codexReviewed {
+	if reviewedByBot(reviewedBy, codexBot) || codexReviewedRound(r, obs, cutoff) {
 		return true
 	}
-	if !codexActive {
-		for _, ev := range obs.Events {
-			// Any potentially-actionable Codex comment in this round means Codex
-			// is participating (its notices — usage limits, acks — do not).
-			if dialect.IsCodexBot(ev.Bot) && ev.Kind == dialect.EvOther && notBefore(ev.ObservedTime(), cutoff) {
-				codexActive = true
-				break
-			}
-			if ev.Kind == dialect.EvCodexClean && notBefore(ev.ObservedTime(), cutoff) {
-				codexActive = true
-				break
-			}
-		}
-	}
-	if !codexActive {
+	// Codex either gates by configuration, or participates via a round-window
+	// comment/clean summary; its notices (usage limits, acks) do not count.
+	if !dialect.HasCodexBot(p.RequiredBots) && !codexCommentedRound(obs, cutoff) {
 		return true
 	}
 	if obs.CodexThumbsUp {
-		markReviewed(reviewedBy, "chatgpt-codex-connector[bot]")
+		markReviewed(reviewedBy, codexBot)
 		return true
 	}
 	return false

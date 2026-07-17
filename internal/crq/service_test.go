@@ -712,7 +712,7 @@ func TestAdoptableCommandsRequiresExpectedHead(t *testing.T) {
 
 	comments, _ := gh.ListIssueComments(ctx, "owner/repo", 12)
 	reviews, _ := gh.ListReviews(ctx, "owner/repo", 12)
-	cmds, err := service.adoptableCommands(ctx, "owner/repo", 12, engine.Observation{Head: "abcdef123", Open: true}, time.Time{}, pull, comments, reviews)
+	cmds, _, err := service.reviewCommands(ctx, "owner/repo", 12, engine.Observation{Head: "abcdef123", Open: true}, time.Time{}, pull, comments, reviews)
 	if err != nil || len(cmds) != 0 {
 		t.Fatalf("must not adopt a review command after the PR head changed, cmds=%v err=%v", cmds, err)
 	}
@@ -1288,7 +1288,7 @@ func TestRecordFireResetsRecordedAcrossRetry(t *testing.T) {
 	cfg := firingConfig()
 	svc := NewService(cfg, newFakeGitHub(), retryNoChangeStore{cfg: cfg}, nil)
 	round := Round{Repo: "owner/repo", PR: 12, Head: "abcdef123"}
-	_, err := svc.recordFire(context.Background(), round, "token", 1, time.Now().UTC(), time.Now().UTC())
+	_, err := svc.recordFire(context.Background(), round, "token", 1, 0, time.Now().UTC(), time.Now().UTC())
 	if !errors.Is(err, ErrNoChange) {
 		t.Fatalf("expected no-change after retry lost the fire slot, got %v", err)
 	}

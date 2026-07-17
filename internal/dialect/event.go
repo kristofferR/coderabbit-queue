@@ -15,6 +15,7 @@ type EventKind int
 const (
 	EvOther           EventKind = iota
 	EvCommand                   // the review trigger command, posted by a human/agent
+	EvCodexCommand              // the Codex review trigger command, posted by a human/agent
 	EvCompletion                // "Review finished." auto-reply (and not rate-limited)
 	EvRateLimited               // CodeRabbit account-quota notice
 	EvPaused                    // "Reviews paused" auto-pause notice
@@ -23,7 +24,8 @@ const (
 	EvAlreadyReviewed           // "does not re-review already reviewed commits" claim
 	EvNoAction                  // CodeRabbit clean-review summary (no actionable comments)
 	EvCodexClean                // Codex clean-summary issue comment
-	EvCodexNotice               // non-actionable Codex notice (usage limits, acks)
+	EvCodexUsageLimit           // Codex "usage limits for code reviews" exhaustion notice
+	EvCodexNotice               // other non-actionable Codex notice (acks, lgtm)
 )
 
 // BotEvent is one classified issue comment. CreatedAt orders command↔reply
@@ -61,11 +63,13 @@ func (e BotEvent) ObservedTime() time.Time {
 }
 
 // Classifier classifies issue comments into BotEvents. Bot is the configured
-// CodeRabbit login; ReviewCommand is the exact trigger comment body.
+// CodeRabbit login; ReviewCommand is the exact trigger comment body; CodexCommand
+// is the exact Codex trigger comment body ("" disables Codex-command matching).
 type Classifier struct {
 	CodeRabbit    CodeRabbit
 	Bot           string
 	ReviewCommand string
+	CodexCommand  string
 }
 
 // Classify maps one issue comment to its BotEvent. Unrecognized comments
@@ -79,11 +83,21 @@ func (c Classifier) Classify(author, body string, id int64, createdAt, updatedAt
 		ev.Kind = EvCommand
 		return ev
 	}
+	if codexCmd := strings.TrimSpace(c.CodexCommand); codexCmd != "" && trimmed == codexCmd && !IsCodexBot(author) {
+		ev.Kind = EvCodexCommand
+		return ev
+	}
 	if IsCodexBot(author) {
-		if IsCodexNoActionReviewCompletion(body) {
+		switch {
+		case IsCodexNoActionReviewCompletion(body):
 			ev.Kind = EvCodexClean
 			ev.SHA = CodexReviewedCommitSHA(body)
-		} else if IsNonActionableText(body) {
+		case IsCodexUsageLimit(body):
+			// The usage-limit exhaustion notice is distinct from other Codex acks:
+			// the dynamic completion gate reads it to stop waiting on a Codex that
+			// cannot finish this round.
+			ev.Kind = EvCodexUsageLimit
+		case IsNonActionableText(body):
 			ev.Kind = EvCodexNotice
 		}
 		return ev
