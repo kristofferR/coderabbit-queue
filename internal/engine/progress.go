@@ -1,0 +1,160 @@
+package engine
+
+import (
+	"strings"
+	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/state"
+)
+
+// Outcome is how a fired/reviewing round moves. It replaces v2's
+// inflightStatus (slot release) AND the wait sweep — one implementation.
+type Outcome int
+
+const (
+	KeepWaiting    Outcome = iota
+	OutComplete            // every required bot has evidence → completed
+	OutReviewing           // bot acknowledged; release the slot, keep the round open
+	OutRetry               // park until Transition.RetryAt (rate limit, timeout, failure)
+	OutReleaseSlot         // reserved but never posted → back to queued
+	OutAbandon             // PR closed/merged
+)
+
+// AccountBlock is an account-quota update observed from a rate-limit event.
+type AccountBlock struct {
+	Until          time.Time
+	CommentID      int64
+	CommentUpdated time.Time
+}
+
+type Transition struct {
+	Outcome Outcome
+	Reason  string
+	RetryAt time.Time     // OutRetry: earliest re-fire for this head
+	Blocked *AccountBlock // rate limit: account-wide block to record
+}
+
+// reserveTimeout mirrors v2: a reservation that never posted its command
+// releases after 2 minutes.
+const reserveTimeout = 2 * time.Minute
+
+// Progress decides what happened to a reserved/fired/reviewing round. Ports
+// v2's inflightStatus order — submitted review → rate limit → reaction →
+// other bot comment → timeout — with two deliberate fixes: the in-progress
+// and failed top-summary states now gate the daemon path too (v2 applied
+// them only in feedback.go), and every retry carries a RetryAt cooldown
+// (v2's timeout requeue carried none — the second #448 re-fire vector).
+func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Time, p Policy) Transition {
+	if !obs.Open {
+		return Transition{Outcome: OutAbandon, Reason: "pr closed"}
+	}
+	if r.Phase == state.PhaseReserved {
+		if r.ReservedAt != nil && now.Sub(*r.ReservedAt) > reserveTimeout {
+			return Transition{Outcome: OutReleaseSlot, Reason: "reserved review was never posted"}
+		}
+		return Transition{Outcome: KeepWaiting, Reason: "reserving"}
+	}
+	if r.FiredAt == nil {
+		return Transition{Outcome: KeepWaiting, Reason: "no fire recorded"}
+	}
+	firedAt := r.FiredAt.UTC()
+	completion := Completion(r, obs, p)
+
+	// An "already reviewed" ack is only trusted alongside real review
+	// evidence; a review matching the round completes or hands off the wait.
+	for _, review := range obs.Reviews {
+		if !sameBot(review.Bot, p.Bot) || !reviewMatchesRound(review, r.Head, firedAt) {
+			continue
+		}
+		if completion.Done {
+			return Transition{Outcome: OutComplete, Reason: "review submitted"}
+		}
+		return Transition{Outcome: OutReviewing, Reason: "review submitted; awaiting remaining bots"}
+	}
+
+	// Rate limit beats every ack: the fired command did not produce a review.
+	for _, ev := range obs.Events {
+		if ev.Kind != dialect.EvRateLimited || !sameBot(ev.Bot, p.Bot) || ev.UpdatedAt.Before(firedAt) {
+			continue
+		}
+		until := resolveBlockWindow(ev, q, now, p)
+		return Transition{
+			Outcome: OutRetry,
+			Reason:  "rate limited",
+			RetryAt: until,
+			Blocked: &AccountBlock{Until: until, CommentID: ev.CommentID, CommentUpdated: ev.UpdatedAt},
+		}
+	}
+
+	// The failed top-summary state: the review itself failed. v2's daemon path
+	// treated this as a normal bot comment and released the slot with the wait
+	// still pending; parking with a bounded cooldown retries it instead.
+	if r.Phase == state.PhaseFired && stateSince(obs, p, firedAt, dialect.EvFailed) {
+		return Transition{Outcome: OutRetry, Reason: "review failed", RetryAt: now.Add(p.retryBackoff())}
+	}
+
+	if completion.Done {
+		return Transition{Outcome: OutComplete, Reason: "feedback complete"}
+	}
+
+	if r.Phase == state.PhaseFired {
+		// A bare reaction acknowledges the command; the review is still running.
+		if obs.Reacted {
+			return Transition{Outcome: OutReviewing, Reason: "bot reacted"}
+		}
+		// Any other bot comment in the round window acknowledges it too — but a
+		// rate-limit/paused/already-reviewed notice is not an ack (v2), and
+		// neither is the in-progress summary of a PREVIOUS round edit... which
+		// it cannot be: UpdatedAt gates the window. An in-progress summary IS
+		// an ack that reviewing started.
+		for _, ev := range obs.Events {
+			if !sameBot(ev.Bot, p.Bot) || ev.CommentID == r.CommandID || ev.UpdatedAt.Before(firedAt) {
+				continue
+			}
+			switch ev.Kind {
+			case dialect.EvRateLimited, dialect.EvPaused, dialect.EvAlreadyReviewed:
+				continue
+			}
+			return Transition{Outcome: OutReviewing, Reason: "bot responded"}
+		}
+		if now.Sub(firedAt) > p.InflightTimeout {
+			return Transition{Outcome: OutRetry, Reason: "in-flight timeout", RetryAt: now.Add(p.retryBackoff())}
+		}
+		return Transition{Outcome: KeepWaiting, Reason: "review in flight"}
+	}
+
+	// Reviewing: the slot is long released; the wait deadline bounds the round.
+	if r.WaitDeadline != nil && now.After(*r.WaitDeadline) {
+		return Transition{Outcome: OutRetry, Reason: "wait deadline expired", RetryAt: now}
+	}
+	return Transition{Outcome: KeepWaiting, Reason: "reviewing"}
+}
+
+// resolveBlockWindow ports v2's requeueInflight window logic: reuse the
+// standing block when the SAME edited rate-limit comment is re-observed
+// (CodeRabbit edits one comment in place — a re-observation must not extend
+// the window on every bounce), and fall back to a conservative fixed window
+// when no "available in" duration parsed.
+func resolveBlockWindow(ev dialect.BotEvent, q state.AccountQuota, now time.Time, p Policy) time.Time {
+	until := ev.Window
+	sameComment := ev.CommentID != 0 && ev.CommentID == q.RLCommentID
+	if sameComment && q.BlockedUntil != nil && q.BlockedUntil.After(now) {
+		until = q.BlockedUntil
+	}
+	if until == nil || !until.After(now) {
+		t := now.Add(p.rateLimitFallback())
+		return t
+	}
+	return until.UTC()
+}
+
+// reviewMatchesRound mirrors v2: a known head must match the review commit;
+// submission time alone could otherwise let a delayed review of an older
+// head complete the new one.
+func reviewMatchesRound(review ReviewSeen, head string, firedAt time.Time) bool {
+	if head != "" {
+		return strings.HasPrefix(review.Commit, head)
+	}
+	return notBefore(review.SubmittedAt, firedAt)
+}
