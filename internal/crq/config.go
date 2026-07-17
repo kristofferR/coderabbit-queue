@@ -93,7 +93,7 @@ func LoadConfig() (Config, error) {
 		ExcludeRepos:        repoSet(env["CRQ_EXCLUDE"]),
 		SkipAuthors:         authorSet(stringEnvAllowEmpty(env, "CRQ_AUTOREVIEW_SKIP_AUTHORS", "dependabot[bot]")),
 		SkipMarker:          stringEnvAllowEmpty(env, "CRQ_AUTOREVIEW_SKIP_MARKER", "<!-- crq:skip-autoreview -->"),
-		StateRef:            stringEnv(env, "CRQ_STATE_REF", "crq-state"),
+		StateRef:            stringEnv(env, "CRQ_STATE_REF", "crq-state-v3"),
 		Bot:                 bot,
 		RequiredBots:        requiredBots,
 		FeedbackBots:        listEnv(env, "CRQ_FEEDBACK_BOTS", strings.Join(unionBots(requiredBots, extraFeedbackBots), ",")),

@@ -231,6 +231,59 @@ func TestDecideFireGuards(t *testing.T) {
 	}
 }
 
+// TestBareReactionReleasesSlotButKeepsRoundOpen ports v2's doneBotReacted: a
+// reaction on the fired command acknowledges it, releasing the slot while the
+// review keeps running.
+func TestBareReactionReleasesSlotButKeepsRoundOpen(t *testing.T) {
+	r := firedRound(t, "abcdef123")
+	obs := Observation{Head: "abcdef123", Open: true, Reacted: true}
+	tr := Progress(r, state.AccountQuota{}, obs, t0.Add(time.Minute), policy)
+	if tr.Outcome != OutReviewing {
+		t.Fatalf("a bare reaction must release the slot and keep the round open, got %+v", tr)
+	}
+}
+
+// TestReviewsPausedNoteIsNotAck ports v2: the auto-pause note is a bot comment
+// but not an acknowledgement of the fired command, so the round keeps waiting.
+func TestReviewsPausedNoteIsNotAck(t *testing.T) {
+	r := firedRound(t, "abcdef123")
+	paused := dialect.BotEvent{Kind: dialect.EvPaused, Bot: "coderabbitai[bot]", CommentID: 900,
+		CreatedAt: t0.Add(10 * time.Second), UpdatedAt: t0.Add(10 * time.Second)}
+	obs := Observation{Head: "abcdef123", Open: true, Events: []dialect.BotEvent{paused}}
+	tr := Progress(r, state.AccountQuota{}, obs, t0.Add(time.Minute), policy)
+	if tr.Outcome != KeepWaiting {
+		t.Fatalf("a reviews-paused note must not acknowledge or complete the round, got %+v", tr)
+	}
+}
+
+// TestRateLimitBeatsAlreadyReviewedAck encodes the carrier#82 incident: a
+// rate-limit notice plus an "already reviewed" claim, with no review object,
+// must park the round (retry later), never complete it.
+func TestRateLimitBeatsAlreadyReviewedAck(t *testing.T) {
+	r := firedRound(t, "a0646f010")
+	window := t0.Add(40 * time.Minute)
+	obs := Observation{Head: "a0646f010", Open: true, Events: []dialect.BotEvent{
+		rateLimitEvent(501, t0.Add(10*time.Second), &window),
+		{Kind: dialect.EvAlreadyReviewed, Bot: "coderabbitai[bot]", CommentID: 502, CreatedAt: t0.Add(10 * time.Second), UpdatedAt: t0.Add(10 * time.Second)},
+	}}
+	tr := Progress(r, state.AccountQuota{}, obs, t0.Add(time.Minute), policy)
+	if tr.Outcome != OutRetry || tr.Blocked == nil {
+		t.Fatalf("an unproven already-reviewed ack must yield to the rate limit, got %+v", tr)
+	}
+}
+
+// TestPreFireReviewOfHeadCompletes ports botsReviewedHead: a required bot's
+// review of the head counts even when it landed before the round was fired.
+func TestPreFireReviewOfHeadCompletes(t *testing.T) {
+	r := firedRound(t, "abcdef123")
+	obs := Observation{Head: "abcdef123", Open: true, Reviews: []ReviewSeen{
+		{Bot: "coderabbitai[bot]", ReviewID: 9, Commit: "abcdef1234567890", SubmittedAt: t0.Add(-10 * time.Minute)},
+	}}
+	if got := Completion(r, obs, policy); !got.Done {
+		t.Fatalf("a required bot's pre-fire review of the head must complete the round: %+v", got)
+	}
+}
+
 // TestCodexGatesCleanSummary ports the codexInactiveOrThumbed rules.
 func TestCodexGatesCleanSummary(t *testing.T) {
 	r := firedRound(t, "abcdef123")

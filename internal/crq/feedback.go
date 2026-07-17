@@ -274,21 +274,8 @@ func (s *Service) feedbackCompletionContext(ctx context.Context, repo string, pr
 	if err != nil {
 		return feedbackCompletionContext{}
 	}
-	key := QueueKey(repo, pr)
-	if wait := state.AwaitingFeedback[key]; wait.Head == head && !wait.StartedAt.IsZero() {
-		firedCommentID := wait.FiredCommentID
-		if firedCommentID == 0 {
-			firedCommentID = feedbackWaitFiredCommentID(state, repo, pr, head)
-		}
-		return feedbackCompletionContext{Cutoff: wait.StartedAt.UTC(), FiredCommentID: firedCommentID, OK: true}
-	}
-	if state.InFlight != nil && state.InFlight.Repo == repo && state.InFlight.PR == pr && state.InFlight.Head == head && state.InFlight.FiredAt != nil {
-		return feedbackCompletionContext{Cutoff: state.InFlight.FiredAt.UTC(), FiredCommentID: state.InFlight.FiredCommentID, OK: true}
-	}
-	for _, item := range state.History {
-		if NormalizeRepo(item.Repo) == repo && item.PR == pr && item.Commit == head && !item.At.IsZero() {
-			return feedbackCompletionContext{Cutoff: item.At.UTC(), OK: true}
-		}
+	if firedAt, commandID, ok := roundAnchor(&state, repo, pr, head); ok {
+		return feedbackCompletionContext{Cutoff: firedAt, FiredCommentID: commandID, OK: true}
 	}
 	return feedbackCompletionContext{}
 }
@@ -407,7 +394,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		if loadErr != nil {
 			return FeedbackReport{}, 1, loadErr
 		}
-		if state.AwaitingFeedback[QueueKey(repo, pr)].Head != head {
+		if waitView(&state, repo, pr).Head != head {
 			for {
 				report, feedbackErr := s.Feedback(ctx, repo, pr)
 				if feedbackErr != nil {
@@ -571,64 +558,31 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 	}
 }
 
-func (s *Service) newFeedbackWait(repo string, pr int, head string, started time.Time, firedCommentID int64) FeedbackWait {
-	started = started.UTC()
-	if started.IsZero() {
-		started = time.Now().UTC()
-	}
-	return FeedbackWait{
-		Repo:           NormalizeRepo(repo),
-		PR:             pr,
-		Head:           head,
-		StartedAt:      started,
-		Deadline:       started.Add(s.cfg.FeedbackWaitTimeout),
-		FiredCommentID: firedCommentID,
-		ByHost:         s.cfg.Host,
-	}
-}
-
 func (s *Service) ensureFeedbackWait(ctx context.Context, repo string, pr int, head string) (FeedbackWait, error) {
 	repo = NormalizeRepo(repo)
-	key := QueueKey(repo, pr)
-	var wait FeedbackWait
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return FeedbackWait{}, err
+	}
+	if w := waitView(&st, repo, pr); w.Head == head && !w.Deadline.IsZero() {
+		return w, nil
+	}
+	// Set the wait deadline on the fired/reviewing round if the fire path hasn't
+	// yet (Pump normally sets it at fire time).
 	changed := false
-	state, err := s.store.Update(ctx, func(st *State) error {
+	updated, err := s.store.Update(ctx, func(st *State) error {
 		changed = false
-		if st.AwaitingFeedback == nil {
-			st.AwaitingFeedback = map[string]FeedbackWait{}
-		}
-		firedCommentID := feedbackWaitFiredCommentID(*st, repo, pr, head)
-		if existing := st.AwaitingFeedback[key]; existing.Head == head {
-			wait = existing
-			if wait.StartedAt.IsZero() {
-				wait.StartedAt = feedbackWaitStart(*st, repo, pr, head, time.Now().UTC())
-				changed = true
-			}
-			if wait.Deadline.IsZero() {
-				wait.Deadline = wait.StartedAt.Add(s.cfg.FeedbackWaitTimeout)
-				changed = true
-			}
-			wait.Repo = repo
-			wait.PR = pr
-			if wait.ByHost == "" {
-				wait.ByHost = s.cfg.Host
-				changed = true
-			}
-			if wait.FiredCommentID == 0 && firedCommentID != 0 {
-				wait.FiredCommentID = firedCommentID
-				changed = true
-			}
-			if changed {
-				st.AwaitingFeedback[key] = wait
-				st.Fired[key] = head
-				return nil
-			}
+		r := st.Round(repo, pr)
+		if r == nil || r.Head != head || (r.Phase != PhaseFired && r.Phase != PhaseReviewing) || r.WaitDeadline != nil {
 			return ErrNoChange
 		}
-		started := feedbackWaitStart(*st, repo, pr, head, time.Now().UTC())
-		wait = s.newFeedbackWait(repo, pr, head, started, firedCommentID)
-		st.AwaitingFeedback[key] = wait
-		st.Fired[key] = head
+		start := time.Now().UTC()
+		if r.FiredAt != nil {
+			start = r.FiredAt.UTC()
+		}
+		dl := start.Add(s.cfg.FeedbackWaitTimeout)
+		r.WaitDeadline = &dl
+		st.PutRound(*r)
 		changed = true
 		return nil
 	})
@@ -636,45 +590,32 @@ func (s *Service) ensureFeedbackWait(ctx context.Context, repo string, pr int, h
 		return FeedbackWait{}, err
 	}
 	if changed {
-		s.sync(ctx, state)
+		s.sync(ctx, updated)
 	}
-	return wait, nil
-}
-
-func feedbackWaitFiredCommentID(st State, repo string, pr int, head string) int64 {
-	if st.InFlight != nil && st.InFlight.Repo == repo && st.InFlight.PR == pr && st.InFlight.Head == head {
-		return st.InFlight.FiredCommentID
+	if w := waitView(&updated, repo, pr); w.Head == head && !w.Deadline.IsZero() {
+		return w, nil
 	}
-	return 0
-}
-
-func feedbackWaitStart(st State, repo string, pr int, head string, fallback time.Time) time.Time {
-	if st.InFlight != nil && st.InFlight.Repo == repo && st.InFlight.PR == pr && st.InFlight.Head == head && st.InFlight.FiredAt != nil {
-		return st.InFlight.FiredAt.UTC()
-	}
-	for _, item := range st.History {
-		if NormalizeRepo(item.Repo) == repo && item.PR == pr && item.Commit == head {
-			return item.At.UTC()
-		}
-	}
-	return fallback.UTC()
+	// The round is no longer a wait (completed/none): synthesize a transient
+	// deadline so the loop still bounds its poll.
+	now := time.Now().UTC()
+	return FeedbackWait{Repo: repo, PR: pr, Head: head, StartedAt: now, Deadline: now.Add(s.cfg.FeedbackWaitTimeout), ByHost: s.cfg.Host}, nil
 }
 
 func (s *Service) extendFeedbackWaitDeadline(ctx context.Context, repo string, pr int, head string, deadline time.Time) {
 	repo = NormalizeRepo(repo)
-	key := QueueKey(repo, pr)
 	changed := false
 	state, err := s.store.Update(ctx, func(st *State) error {
 		changed = false
-		wait := st.AwaitingFeedback[key]
-		if wait.Head != head {
+		r := st.Round(repo, pr)
+		if r == nil || r.Head != head || (r.Phase != PhaseFired && r.Phase != PhaseReviewing) {
 			return ErrNoChange
 		}
-		if !deadline.After(wait.Deadline) {
+		if r.WaitDeadline != nil && !deadline.After(*r.WaitDeadline) {
 			return ErrNoChange
 		}
-		wait.Deadline = deadline.UTC()
-		st.AwaitingFeedback[key] = wait
+		dl := deadline.UTC()
+		r.WaitDeadline = &dl
+		st.PutRound(*r)
 		changed = true
 		return nil
 	})
@@ -689,20 +630,26 @@ func (s *Service) extendFeedbackWaitDeadline(ctx context.Context, repo string, p
 	}
 }
 
+// clearFeedbackWait ends the wait by completing the fired/reviewing round. The
+// completed round remains as the dedup marker (v2 kept Fired[key] while deleting
+// the wait), so a subsequent enqueue/needsReview at the same head is deduped.
 func (s *Service) clearFeedbackWait(ctx context.Context, repo string, pr int, head string) {
 	repo = NormalizeRepo(repo)
-	key := QueueKey(repo, pr)
 	changed := false
 	state, err := s.store.Update(ctx, func(st *State) error {
 		changed = false
-		wait := st.AwaitingFeedback[key]
-		if wait.Head == "" {
+		r := st.Round(repo, pr)
+		if r == nil || (r.Phase != PhaseFired && r.Phase != PhaseReviewing) {
 			return ErrNoChange
 		}
-		if head != "" && wait.Head != head {
+		if head != "" && r.Head != head {
 			return ErrNoChange
 		}
-		delete(st.AwaitingFeedback, key)
+		if err := r.Complete(); err != nil {
+			return err
+		}
+		releaseSlot(st, QueueKey(repo, pr))
+		st.PutRound(*r)
 		changed = true
 		return nil
 	})
@@ -786,19 +733,11 @@ func extendDeadlineForBlock(deadline time.Time, blockedUntil *time.Time, now tim
 }
 
 // feedbackBlockedUntil returns the latest active block that prevents this exact
-// PR head from firing. The account-wide Blocked value can be cleared or replaced
-// by a later calibration pass, while the per-head cooldown intentionally
-// survives a rate-limited requeue. Feedback waiters must honor both or they can
-// claim to be waiting on a review that crq is still forbidden to request.
+// PR head from firing: the account-wide quota block, or this round's own
+// awaiting_retry window. Feedback waiters must honor both or they can claim to
+// be waiting on a review that crq is still forbidden to request.
 func feedbackBlockedUntil(st State, repo string, pr int, head string, now time.Time) (time.Time, bool) {
-	var until time.Time
-	if st.Blocked.BlockedUntil != nil && st.Blocked.BlockedUntil.After(now) {
-		until = st.Blocked.BlockedUntil.UTC()
-	}
-	if cooldown, ok := st.Cooldown[QueueKey(repo, pr)]; ok && cooldown.Head == head && cooldown.Until.After(now) && cooldown.Until.After(until) {
-		until = cooldown.Until.UTC()
-	}
-	return until, !until.IsZero()
+	return accountBlockedUntil(&st, repo, pr, head, now)
 }
 
 // feedbackWaitElapsed reports only reviewable time. A rate-limit block extends
@@ -1158,13 +1097,8 @@ func (s *Service) completionFallbackFiredAt(ctx context.Context, repo string, pr
 	if err != nil {
 		return time.Time{}, false
 	}
-	firedAt := feedbackWaitStart(st, repo, pr, head, time.Time{})
-	if wait := st.AwaitingFeedback[QueueKey(repo, pr)]; firedAt.IsZero() && wait.Head == head && !wait.StartedAt.IsZero() {
-		// History is bounded and shared across the fleet, so the entry can be
-		// evicted during a long wait; the live wait carries the same fire anchor.
-		firedAt = wait.StartedAt
-	}
-	if firedAt.IsZero() {
+	firedAt, _, ok := roundAnchor(&st, repo, pr, head)
+	if !ok {
 		return time.Time{}, false
 	}
 	return firedAt, true

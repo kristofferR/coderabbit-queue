@@ -256,6 +256,22 @@ func (r *Round) Complete() error {
 	return nil
 }
 
+// Dedupe completes a not-yet-fired round because the configured bot already
+// reviewed its head independently (an adopted review, not a fire crq made): a
+// queued (or retry-eligible) round → completed. The completed round stays as
+// the "this head was reviewed" dedup marker without recording a fictitious
+// fire (FiredAt stays nil).
+func (r *Round) Dedupe(now time.Time) error {
+	if r.Phase != PhaseQueued && r.Phase != PhaseReserved && !r.retryEligible(now) {
+		return r.illegal(PhaseCompleted)
+	}
+	r.Phase = PhaseCompleted
+	r.Token = ""
+	r.ReservedAt = nil
+	r.Note = "bot already reviewed head"
+	return nil
+}
+
 // Abandon ends the round from any phase (PR closed/merged, cancelled, or
 // superseded by a new head). The caller archives it via State.EndRound.
 func (r *Round) Abandon(reason string) {

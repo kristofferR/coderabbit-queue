@@ -89,6 +89,29 @@ func TestFiredHeadCannotRefire(t *testing.T) {
 	}
 }
 
+// TestDedupeCompletesFromQueued covers the "bot already reviewed the head"
+// path: a queued round is marked complete without recording a fictitious fire,
+// leaving it as the dedup marker.
+func TestDedupeCompletesFromQueued(t *testing.T) {
+	s := New()
+	r, err := s.NewRound("owner/repo", 10, "abcdef123", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Dedupe(t0); err != nil {
+		t.Fatal(err)
+	}
+	if r.Phase != PhaseCompleted || r.FiredAt != nil || r.Attempts != 0 {
+		t.Fatalf("dedupe must complete without a fire: %+v", r)
+	}
+	// A fired round cannot be deduped — it goes through Complete.
+	fired := newFired(t, &s)
+	var te *TransitionError
+	if err := fired.Dedupe(t0); !errors.As(err, &te) {
+		t.Fatalf("dedupe of a fired round must be illegal, got %v", err)
+	}
+}
+
 func TestIllegalCompletions(t *testing.T) {
 	s := New()
 	r, err := s.NewRound("owner/repo", 8, "cafebabe1", t0)

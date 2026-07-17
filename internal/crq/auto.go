@@ -217,7 +217,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 	if err != nil {
 		return err
 	}
-	var candidates []SearchPR
+	var candidates []queueCandidate
 	lastBeat := time.Now()
 	for _, target := range targets {
 		// Per-target scan budget so one large scope can't consume the whole budget
@@ -257,7 +257,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 				state = st // reuse the freshly written snapshot for later candidates
 				lastBeat = time.Now()
 			}
-			need, nerr := s.needsReview(ctx, state, repo, pr.Number, opts.Incremental)
+			need, head, nerr := s.needsReview(ctx, state, repo, pr.Number, opts.Incremental)
 			if nerr != nil {
 				// A rate limit must abort the pass so AutoReview's outer backoff kicks
 				// in, instead of scanning the rest of the candidates under the same
@@ -271,7 +271,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 				return false, nil
 			}
 			if need {
-				candidates = append(candidates, SearchPR{Repo: repo, Number: pr.Number})
+				candidates = append(candidates, queueCandidate{Repo: repo, PR: pr.Number, Head: head})
 			}
 			return false, nil
 		})
@@ -283,34 +283,24 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 	return s.enqueueBatch(ctx, candidates)
 }
 
-// needsReview reports whether an open PR should be enqueued for review: not
-// already queued/fired for its current head, and (incremental) the bot hasn't
-// reviewed that head yet, or (first-review) it has never been reviewed. It uses
-// the caller's preloaded queue snapshot for the queued/fired checks so a pass
-// doesn't reload git-backed state once per candidate.
-func (s *Service) needsReview(ctx context.Context, state State, repo string, pr int, incremental bool) (bool, error) {
-	if state.Contains(repo, pr) {
-		return false, nil
-	}
+// needsReview reports whether an open PR should be enqueued for review, and its
+// current head. A round already tracking that exact head (any phase — Pump owns
+// re-firing an awaiting_retry round once its window passes) means "no". Only a
+// PR with no round at the current head runs the live checks: (incremental) the
+// bot's last review commit differs from the head, or (first-review) the bot has
+// never reviewed and no review-done marker is present. It reads the caller's
+// preloaded state snapshot so a pass doesn't reload git-backed state per candidate.
+func (s *Service) needsReview(ctx context.Context, state State, repo string, pr int, incremental bool) (bool, string, error) {
 	head, err := s.headShort(ctx, repo, pr)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
-	if state.AwaitingFeedback[QueueKey(repo, pr)].Head == head {
-		return false, nil
-	}
-	if state.Fired[QueueKey(repo, pr)] == head {
-		return false, nil
-	}
-	// A rate-limited requeue clears Fired[key] so the PR can retry once the window
-	// clears, but the head is under a cooldown until then. Honour it here so a
-	// bouncing rate limit can't be re-enqueued (and re-fired) every pass.
-	if state.CooledDown(repo, pr, head, time.Now().UTC()) {
-		return false, nil
+	if r := state.Round(repo, pr); r != nil && r.Head == head {
+		return false, head, nil
 	}
 	reviews, err := s.gh.ListReviews(ctx, repo, pr)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	bot := normalizeBotName(s.cfg.Bot)
 	lastBotReview := ""
@@ -324,29 +314,29 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 		if need {
 			s.logEnqueue(repo, pr, head, "no bot review at head")
 		}
-		return need, nil
+		return need, head, nil
 	}
 	if lastBotReview != "" {
-		return false, nil
+		return false, head, nil
 	}
 	comments, err := s.gh.ListIssueComments(ctx, repo, pr)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	for _, comment := range comments {
 		if normalizeBotName(comment.User.Login) == bot && strings.Contains(comment.Body, s.cfg.ReviewDoneMarker) {
-			return false, nil
+			return false, head, nil
 		}
 	}
 	pull, err := s.gh.GetPull(ctx, repo, pr)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	if strings.Contains(pull.Body, s.cfg.ReviewDoneMarker) {
-		return false, nil
+		return false, head, nil
 	}
 	s.logEnqueue(repo, pr, head, "never reviewed")
-	return true, nil
+	return true, head, nil
 }
 
 // logEnqueue records one line per autoreview enqueue decision so a runaway is

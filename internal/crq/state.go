@@ -1,297 +1,92 @@
 package crq
 
 import (
-	"crypto/sha1"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
+	crqstate "github.com/kristofferR/coderabbit-queue/internal/state"
+)
+
+// The persisted schema and its store live in internal/state (v3). These
+// aliases keep the crq orchestration code referring to State/Round/… without
+// the package qualifier, and without colliding with the many `state`/`st`
+// variable names in this package.
+type (
+	State        = crqstate.State
+	Round        = crqstate.Round
+	Phase        = crqstate.Phase
+	FireSlot     = crqstate.FireSlot
+	AccountQuota = crqstate.AccountQuota
+	LeaderLease  = crqstate.LeaderLease
+	Revision     = crqstate.Revision
+	StateStore   = crqstate.StateStore
+	StoreConfig  = crqstate.StoreConfig
 )
 
 const (
-	statePath     = "state.json"
-	dashboardPath = "dashboard.md"
-	stateBegin    = "<!-- crq:state"
-	stateEnd      = "-->"
+	PhaseQueued        = crqstate.PhaseQueued
+	PhaseReserved      = crqstate.PhaseReserved
+	PhaseFired         = crqstate.PhaseFired
+	PhaseReviewing     = crqstate.PhaseReviewing
+	PhaseAwaitingRetry = crqstate.PhaseAwaitingRetry
+	PhaseCompleted     = crqstate.PhaseCompleted
+	PhaseAbandoned     = crqstate.PhaseAbandoned
 )
 
-type State struct {
-	Version          int                     `json:"v"`
-	Rev              int64                   `json:"rev"`
-	NextSeq          int64                   `json:"next_seq"`
-	Queue            []QueueItem             `json:"queue"`
-	InFlight         *InFlight               `json:"in_flight"`
-	LastFired        *time.Time              `json:"last_fired"`
-	Warn             string                  `json:"warn,omitempty"`
-	Fired            map[string]string       `json:"fired"`
-	Cooldown         map[string]FireCooldown `json:"cooldown,omitempty"`
-	AwaitingFeedback map[string]FeedbackWait `json:"awaiting_feedback,omitempty"`
-	History          []HistoryItem           `json:"history"`
-	Blocked          Blocked                 `json:"blocked"`
-	Leader           *LeaderLease            `json:"leader,omitempty"`
-	// CalibrationIssue overrides the configured calibration PR/issue when the
-	// original hit GitHub's hard 2500-comment cap and crq rotated to a fresh one.
-	// Persisted in the shared state so the whole fleet uses the new issue.
-	CalibrationIssue int        `json:"calibration_issue,omitempty"`
-	GCAt             *time.Time `json:"gc_at,omitempty"`
-	UpdatedAt        *time.Time `json:"wrote_at,omitempty"`
-	DashboardSHA     string     `json:"dashboard_sha,omitempty"`
-}
+var (
+	ErrCASConflict = crqstate.ErrCASConflict
+	ErrNoChange    = crqstate.ErrNoChange
+	cloneState     = crqstate.Clone
+)
 
-// FireCooldown records the head last fired for a queue key and the earliest time
-// that head may be fired again. Unlike Fired (which is cleared on a rate-limited
-// requeue so a genuinely throttled PR can retry once the window clears), a
-// cooldown survives the requeue, so needsReview refuses to re-enqueue the same
-// repo#pr@head until the block window passes — the guard that stops a bouncing
-// rate limit from re-firing the same head over and over. Cooldowns are pruned
-// once expired (see Normalize), so the map stays bounded.
-type FireCooldown struct {
-	Head  string    `json:"head"`
-	Until time.Time `json:"until"`
-}
-
-type QueueItem struct {
-	Seq        int64     `json:"seq"`
-	Owner      string    `json:"owner"`
-	Repo       string    `json:"repo"`
-	PR         int       `json:"pr"`
-	Host       string    `json:"host"`
-	EnqueuedAt time.Time `json:"enqueued_at"`
-	// RequeuedAt is set when the item re-enters the queue after an abandoned
-	// fire (rate limit, in-flight timeout). Command comments older than it must
-	// not be adopted as an already-posted review.
-	RequeuedAt *time.Time `json:"requeued_at,omitempty"`
-}
-
-// adoptCutoff returns the earliest comment timestamp Pump may adopt as an
-// existing review command for this item; zero means no lower bound.
-func (q QueueItem) adoptCutoff() time.Time {
-	if q.RequeuedAt != nil {
-		return q.RequeuedAt.UTC()
+func (c Config) storeConfig() StoreConfig {
+	return StoreConfig{
+		GateRepo:       c.GateRepo,
+		StateRef:       c.StateRef,
+		DashboardIssue: c.DashboardIssue,
+		Timezone:       c.Timezone,
+		Scope:          c.Scope,
 	}
-	return time.Time{}
 }
 
-type InFlight struct {
-	Seq            int64      `json:"seq"`
-	Repo           string     `json:"repo"`
-	PR             int        `json:"pr"`
-	Head           string     `json:"head,omitempty"`
-	Token          string     `json:"token"`
-	Phase          string     `json:"phase"`
-	ReservedAt     time.Time  `json:"reserved_at"`
-	FiredAt        *time.Time `json:"fired_at,omitempty"`
-	FiredCommentID int64      `json:"fired_comment_id,omitempty"`
-	ByHost         string     `json:"by_host"`
+// NewGitStateStore builds the git-ref-backed store. The logger surfaces the
+// loud auto-reinit line when a stale-schema payload is loaded.
+func NewGitStateStore(cfg Config, gh *GitHub, log Logger) *crqstate.GitStateStore {
+	return crqstate.NewGitStateStore(cfg.storeConfig(), gh, log)
 }
 
-type FeedbackWait struct {
-	Repo           string    `json:"repo"`
-	PR             int       `json:"pr"`
-	Head           string    `json:"head"`
-	StartedAt      time.Time `json:"started_at"`
-	Deadline       time.Time `json:"deadline"`
-	FiredCommentID int64     `json:"fired_comment_id,omitempty"`
-	ByHost         string    `json:"by_host,omitempty"`
+func NewMemoryStore(cfg Config) *crqstate.MemoryStore {
+	return crqstate.NewMemoryStore(cfg.storeConfig())
 }
 
-type HistoryItem struct {
-	Repo   string    `json:"repo"`
-	PR     int       `json:"pr"`
-	Commit string    `json:"commit,omitempty"`
-	At     time.Time `json:"at"`
-	Host   string    `json:"host"`
-}
-
-type Blocked struct {
-	Scope        string     `json:"scope"`
-	BlockedUntil *time.Time `json:"blocked_until"`
-	Remaining    *int       `json:"remaining"`
-	Source       string     `json:"source"`
-	CheckedAt    *time.Time `json:"checked_at"`
-	CalibAskedAt *time.Time `json:"calib_asked_at"`
-	// RLCommentID/RLCommentUpdated identify the rate-limit comment whose "next
-	// review available in" window produced the current block. CodeRabbit edits a
-	// single rate-limit comment in place instead of posting a new one, so its
-	// UpdatedAt advances past every later fire; tracking it lets a re-observed
-	// edit reuse the standing block instead of being counted as a fresh event
-	// that extends the window on every bounce.
-	RLCommentID      int64      `json:"rl_comment_id,omitempty"`
-	RLCommentUpdated *time.Time `json:"rl_comment_updated,omitempty"`
-}
-
-type LeaderLease struct {
-	Owner     string    `json:"owner"`
-	Token     string    `json:"token"`
-	ExpiresAt time.Time `json:"expires_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-}
-
+// DefaultState returns a fresh v3 state seeded with the configured scope, used
+// by tests and init.
 func DefaultState(cfg Config) State {
-	return State{
-		Version:          1,
-		Rev:              0,
-		Fired:            map[string]string{},
-		Cooldown:         map[string]FireCooldown{},
-		AwaitingFeedback: map[string]FeedbackWait{},
-		Blocked:          Blocked{Scope: strings.Join(cfg.Scope, ","), Source: "init"},
-	}
+	st := crqstate.New()
+	st.Account.Scope = strings.Join(cfg.Scope, ",")
+	st.Account.Source = "init"
+	return st
 }
 
-func (s *State) Normalize(cfg Config) {
-	if s.Version == 0 {
-		s.Version = 1
-	}
-	if s.Fired == nil {
-		s.Fired = map[string]string{}
-	}
-	if s.Cooldown == nil {
-		s.Cooldown = map[string]FireCooldown{}
-	}
-	if s.AwaitingFeedback == nil {
-		s.AwaitingFeedback = map[string]FeedbackWait{}
-	}
-	for i := range s.Queue {
-		s.Queue[i].Repo = NormalizeRepo(s.Queue[i].Repo)
-		s.Queue[i].Owner = ownerOf(s.Queue[i].Repo)
-	}
-	if s.InFlight != nil {
-		s.InFlight.Repo = NormalizeRepo(s.InFlight.Repo)
-	}
-	for i := range s.History {
-		s.History[i].Repo = NormalizeRepo(s.History[i].Repo)
-	}
-	if s.Blocked.Scope == "" {
-		s.Blocked.Scope = strings.Join(cfg.Scope, ",")
-	}
-	if s.Blocked.Source == "" {
-		s.Blocked.Source = "init"
-	}
-	folded := map[string]string{}
-	for k, v := range s.Fired {
-		folded[strings.ToLower(k)] = v
-	}
-	s.Fired = folded
-	// Fold cooldown keys the same way and drop entries whose window has passed,
-	// so a bounded map of live per-head cooldowns is all that persists.
-	now := time.Now().UTC()
-	cooldown := map[string]FireCooldown{}
-	for k, cd := range s.Cooldown {
-		if cd.Head == "" || cd.Until.IsZero() || !cd.Until.After(now) {
-			continue
-		}
-		cooldown[strings.ToLower(k)] = cd
-	}
-	s.Cooldown = cooldown
-	awaiting := map[string]FeedbackWait{}
-	for k, wait := range s.AwaitingFeedback {
-		repo, pr := wait.Repo, wait.PR
-		if repo == "" || pr <= 0 {
-			repo, pr = splitQueueKey(k)
-		}
-		repo = NormalizeRepo(repo)
-		if repo == "" || pr <= 0 || wait.Head == "" {
-			continue
-		}
-		wait.Repo = repo
-		wait.PR = pr
-		key := QueueKey(repo, pr)
-		awaiting[key] = wait
-		if s.Fired[key] == "" {
-			s.Fired[key] = wait.Head
-		}
-	}
-	s.AwaitingFeedback = awaiting
-	if cfg.FiredMax > 0 && len(s.Fired) > cfg.FiredMax {
-		// Protect markers for recently-fired heads (those still in History) from
-		// eviction. Normalize runs right after a fire records st.Fired[key]=head, and
-		// a plain lexicographic trim could drop that just-written marker for a repo
-		// whose name sorts early — making crq forget the head was already requested
-		// and fire a duplicate review. Only the older remainder is trimmed.
-		type kv struct {
-			Key string
-			Val string
-		}
-		type historyMarker struct {
-			Key    string
-			Commit string
-			At     time.Time
-			Index  int
-		}
-		recent := make([]historyMarker, 0, len(s.History))
-		for i, h := range s.History {
-			key := strings.ToLower(QueueKey(h.Repo, h.PR))
-			if fired := s.Fired[key]; fired != "" && (h.Commit == "" || h.Commit == fired) {
-				recent = append(recent, historyMarker{Key: key, Commit: fired, At: h.At, Index: i})
-			}
-		}
-		sort.SliceStable(recent, func(i, j int) bool {
-			if !recent[i].At.Equal(recent[j].At) {
-				return recent[i].At.After(recent[j].At)
-			}
-			return recent[i].Index < recent[j].Index
-		})
-		protected := map[string]string{}
-		awaitingMarkers := make([]historyMarker, 0, len(s.AwaitingFeedback))
-		for _, wait := range s.AwaitingFeedback {
-			key := QueueKey(wait.Repo, wait.PR)
-			if fired := s.Fired[key]; fired != "" && fired == wait.Head {
-				awaitingMarkers = append(awaitingMarkers, historyMarker{Key: key, Commit: fired, At: wait.StartedAt})
-			}
-		}
-		sort.SliceStable(awaitingMarkers, func(i, j int) bool {
-			return awaitingMarkers[i].At.After(awaitingMarkers[j].At)
-		})
-		for _, marker := range awaitingMarkers {
-			if len(protected) >= cfg.FiredMax {
-				break
-			}
-			protected[marker.Key] = marker.Commit
-		}
-		for _, marker := range recent {
-			if len(protected) >= cfg.FiredMax {
-				break
-			}
-			if _, ok := protected[marker.Key]; ok {
-				continue
-			}
-			protected[marker.Key] = marker.Commit
-		}
-		items := make([]kv, 0, len(s.Fired))
-		for k, v := range s.Fired {
-			if _, ok := protected[k]; ok {
-				continue
-			}
-			items = append(items, kv{k, v})
-		}
-		budget := cfg.FiredMax - len(protected)
-		if budget < 0 {
-			budget = 0
-		}
-		sort.Slice(items, func(i, j int) bool { return items[i].Key < items[j].Key })
-		if len(items) > budget {
-			items = items[len(items)-budget:]
-		}
-		s.Fired = protected
-		for _, item := range items {
-			s.Fired[item.Key] = item.Val
-		}
-	}
+func renderDashboard(st State, cfg Config) string {
+	return crqstate.RenderDashboard(st, cfg.storeConfig())
+}
+func renderTitle(st State) string { return crqstate.RenderTitle(st) }
+func issueBody(st State, cfg Config) (string, error) {
+	return crqstate.IssueBody(st, cfg.storeConfig())
 }
 
-func splitQueueKey(key string) (string, int) {
-	repo, prText, ok := strings.Cut(strings.ToLower(key), "#")
-	if !ok {
-		return "", 0
+// policy assembles the engine Policy from config.
+func (s *Service) policy() engine.Policy {
+	return engine.Policy{
+		Bot:               s.cfg.Bot,
+		RequiredBots:      s.cfg.RequiredBots,
+		MinInterval:       s.cfg.MinInterval,
+		InflightTimeout:   s.cfg.InflightTimeout,
+		RateLimitFallback: s.cfg.RateLimitFallback,
 	}
-	pr, err := strconv.Atoi(prText)
-	if err != nil {
-		return "", 0
-	}
-	return NormalizeRepo(repo), pr
 }
 
 func NormalizeRepo(repo string) string {
@@ -304,189 +99,83 @@ func QueueKey(repo string, pr int) string {
 	return fmt.Sprintf("%s#%d", NormalizeRepo(repo), pr)
 }
 
-func (s State) Contains(repo string, pr int) bool {
-	repo = NormalizeRepo(repo)
-	if s.InFlight != nil && s.InFlight.Repo == repo && s.InFlight.PR == pr {
-		return true
-	}
-	for _, item := range s.Queue {
-		if item.Repo == repo && item.PR == pr {
-			return true
-		}
-	}
-	return false
+// --- v2→v3 compatibility shims (consumed by feedback.go / Wait, rewritten in 4b) ---
+
+// FeedbackWait is the v2-shaped view of a fired/reviewing round, retained so
+// the feedback/loop code keeps compiling against round state until stage 4b
+// rewrites it.
+type FeedbackWait struct {
+	Repo           string
+	PR             int
+	Head           string
+	StartedAt      time.Time
+	Deadline       time.Time
+	FiredCommentID int64
+	ByHost         string
 }
 
-// CooledDown reports whether the given repo#pr@head is under an active fire
-// cooldown — a rate-limited requeue that must not be re-fired (or re-enqueued)
-// until its window passes. Keyed on head, so a new commit is never blocked by a
-// prior head's cooldown.
-func (s State) CooledDown(repo string, pr int, head string, now time.Time) bool {
-	cd, ok := s.Cooldown[strings.ToLower(QueueKey(repo, pr))]
-	return ok && cd.Head == head && cd.Until.After(now)
+// waitView presents a repo#pr's current round as a FeedbackWait when it is
+// fired or reviewing (the v2 "awaiting feedback" states); otherwise the zero
+// value, whose empty Head reads as "no wait" at every call site.
+func waitView(st *State, repo string, pr int) FeedbackWait {
+	r := st.Round(repo, pr)
+	if r == nil || (r.Phase != PhaseFired && r.Phase != PhaseReviewing) {
+		return FeedbackWait{}
+	}
+	w := FeedbackWait{Repo: r.Repo, PR: r.PR, Head: r.Head, FiredCommentID: r.CommandID, ByHost: r.ByHost}
+	if r.FiredAt != nil {
+		w.StartedAt = r.FiredAt.UTC()
+	}
+	if r.WaitDeadline != nil {
+		w.Deadline = r.WaitDeadline.UTC()
+	}
+	return w
 }
 
-func (s State) SortedQueue() []QueueItem {
-	out := append([]QueueItem(nil), s.Queue...)
-	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
-	return out
+// roundAnchor returns the fire timestamp and command id for repo#pr's current
+// round when its head matches — the completion cutoff anchor that v2 read from
+// AwaitingFeedback/InFlight/History.
+func roundAnchor(st *State, repo string, pr int, head string) (firedAt time.Time, commandID int64, ok bool) {
+	r := st.Round(repo, pr)
+	if r == nil || r.Head != head || r.FiredAt == nil {
+		return time.Time{}, 0, false
+	}
+	return r.FiredAt.UTC(), r.CommandID, true
 }
 
-func (s State) SortedAwaitingFeedback() []FeedbackWait {
-	out := make([]FeedbackWait, 0, len(s.AwaitingFeedback))
-	for _, wait := range s.AwaitingFeedback {
-		out = append(out, wait)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].Deadline.Equal(out[j].Deadline) {
-			return out[i].Deadline.Before(out[j].Deadline)
-		}
-		if out[i].Repo != out[j].Repo {
-			return out[i].Repo < out[j].Repo
-		}
-		return out[i].PR < out[j].PR
-	})
-	return out
+// containsActive reports whether repo#pr has a round still occupying its slot
+// (queued through awaiting_retry) — the v2 State.Contains for the queue/inflight.
+func containsActive(st *State, repo string, pr int) bool {
+	r := st.Round(repo, pr)
+	return r != nil && r.Active()
 }
 
-const crqProjectURL = "https://github.com/kristofferR/coderabbit-queue"
-
-func dashboardLoc(cfg Config) *time.Location {
-	if cfg.Timezone != "" {
-		if loc, err := time.LoadLocation(cfg.Timezone); err == nil {
-			return loc
-		}
+// firedMarker returns the head for which repo#pr has already been requested and
+// must not be re-fired without a new head — the v2 Fired[key] dedupe. A
+// completed round, or one still fired/reviewing, is such a marker; a parked
+// awaiting_retry round is not (Pump re-fires it once RetryAt passes).
+func firedMarker(st *State, repo string, pr int) string {
+	r := st.Round(repo, pr)
+	if r == nil {
+		return ""
 	}
-	return time.UTC
+	switch r.Phase {
+	case PhaseFired, PhaseReviewing, PhaseCompleted:
+		return r.Head
+	}
+	return ""
 }
 
-func fmtStamp(t *time.Time, loc *time.Location) string {
-	if t == nil {
-		return "—"
+// accountBlockedUntil returns the latest active block preventing repo#pr@head
+// from firing: the account-wide quota block or this round's own retry window
+// (the v2 feedbackBlockedUntil over Blocked + per-head Cooldown).
+func accountBlockedUntil(st *State, repo string, pr int, head string, now time.Time) (time.Time, bool) {
+	var until time.Time
+	if st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now) {
+		until = st.Account.BlockedUntil.UTC()
 	}
-	return t.In(loc).Format("2006-01-02 15:04 MST")
-}
-
-func minutesUntil(t time.Time, now time.Time) int {
-	mins := int(t.Sub(now).Minutes()) + 1
-	if mins < 1 {
-		mins = 1
+	if r := st.Round(repo, pr); r != nil && r.Phase == PhaseAwaitingRetry && r.Head == head && r.RetryAt != nil && r.RetryAt.After(now) && r.RetryAt.After(until) {
+		until = r.RetryAt.UTC()
 	}
-	return mins
-}
-
-func renderDashboard(state State, cfg Config) string {
-	loc := dashboardLoc(cfg)
-	now := time.Now().UTC()
-	queue := state.SortedQueue()
-	awaiting := state.SortedAwaitingFeedback()
-	blocked := state.Blocked.BlockedUntil != nil && state.Blocked.BlockedUntil.After(now)
-
-	var b strings.Builder
-	fmt.Fprintf(&b, "# 🐰 crq — CodeRabbit review queue\n\n")
-
-	switch {
-	case blocked:
-		fmt.Fprintf(&b, "### 🔴 Blocked — next review in ~%dm\n\n", minutesUntil(*state.Blocked.BlockedUntil, now))
-	case state.InFlight != nil:
-		fmt.Fprintf(&b, "### 🟡 Reviewing %s#%d\n\n", state.InFlight.Repo, state.InFlight.PR)
-	case len(awaiting) > 0:
-		fmt.Fprintf(&b, "### 🟡 Awaiting feedback for %s#%d\n\n", awaiting[0].Repo, awaiting[0].PR)
-	case len(queue) > 0:
-		fmt.Fprintf(&b, "### 🟠 %d queued\n\n", len(queue))
-	default:
-		fmt.Fprintf(&b, "### 🟢 Idle\n\n")
-	}
-
-	via := ""
-	if state.Blocked.Source != "" && state.Blocked.Source != "init" {
-		via = fmt.Sprintf("  _(via %s)_", state.Blocked.Source)
-	}
-	remaining := "available now"
-	if blocked {
-		remaining = "0 — rate-limited"
-	}
-
-	fmt.Fprintf(&b, "|   |   |\n|---|---|\n")
-	fmt.Fprintf(&b, "| **Scope** | `%s` |\n", state.Blocked.Scope)
-	fmt.Fprintf(&b, "| **Reviews remaining** | %s%s |\n", remaining, via)
-	if blocked {
-		fmt.Fprintf(&b, "| **Rate limit** | ⚠️ rate limited |\n")
-	} else {
-		fmt.Fprintf(&b, "| **Rate limit** | ✅ not currently limited |\n")
-	}
-	fmt.Fprintf(&b, "| **Last review fired** | %s |\n", fmtStamp(state.LastFired, loc))
-	if state.InFlight != nil {
-		fmt.Fprintf(&b, "| **In flight** | [%s#%d](https://github.com/%s/pull/%d) · fired %s · `%s` |\n",
-			state.InFlight.Repo, state.InFlight.PR, state.InFlight.Repo, state.InFlight.PR,
-			fmtStamp(state.InFlight.FiredAt, loc), state.InFlight.ByHost)
-	} else {
-		fmt.Fprintf(&b, "| **In flight** | — |\n")
-	}
-	if len(awaiting) > 0 {
-		wait := awaiting[0]
-		fmt.Fprintf(&b, "| **Feedback wait** | [%s#%d](https://github.com/%s/pull/%d) · `%s` · deadline %s |\n",
-			wait.Repo, wait.PR, wait.Repo, wait.PR, wait.Head, fmtStamp(&wait.Deadline, loc))
-	} else {
-		fmt.Fprintf(&b, "| **Feedback wait** | — |\n")
-	}
-	if state.Warn != "" {
-		fmt.Fprintf(&b, "\n> ⚠️ %s\n", state.Warn)
-	}
-
-	fmt.Fprintf(&b, "\n## ⏳ Queue — %d waiting\n\n", len(queue))
-	if len(queue) == 0 {
-		fmt.Fprintf(&b, "_Nothing queued._\n")
-	} else {
-		fmt.Fprintf(&b, "| # | PR | enqueued | host |\n|--:|---|---|---|\n")
-		for i, item := range queue {
-			fmt.Fprintf(&b, "| %d | [%s#%d](https://github.com/%s/pull/%d) | %s | `%s` |\n",
-				i+1, item.Repo, item.PR, item.Repo, item.PR, fmtStamp(&item.EnqueuedAt, loc), item.Host)
-		}
-	}
-
-	fmt.Fprintf(&b, "\n## 📨 Recently requested — last %d\n\n", len(state.History))
-	if len(state.History) == 0 {
-		fmt.Fprintf(&b, "_None yet._\n")
-	} else {
-		fmt.Fprintf(&b, "| PR | commit | requested | host |\n|---|---|---|---|\n")
-		for _, item := range state.History {
-			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | `%s` |\n",
-				item.Repo, item.PR, item.Repo, item.PR, item.Commit, fmtStamp(&item.At, loc), item.Host)
-		}
-	}
-
-	fmt.Fprintf(&b, "\n---\n")
-	fmt.Fprintf(&b, "<sub>🤖 Managed by [crq](%s) · rev %d · updated %s · do not edit by hand (machine state is in the hidden block at the top).</sub>\n",
-		crqProjectURL, state.Rev, fmtStamp(state.UpdatedAt, loc))
-	return b.String()
-}
-
-func renderTitle(state State) string {
-	now := time.Now().UTC()
-	switch {
-	case state.Blocked.BlockedUntil != nil && state.Blocked.BlockedUntil.After(now):
-		return fmt.Sprintf("🐰 crq — blocked · queue %d", len(state.Queue))
-	case state.InFlight != nil:
-		return fmt.Sprintf("🐰 crq — reviewing #%d · queue %d", state.InFlight.PR, len(state.Queue))
-	case len(state.AwaitingFeedback) > 0:
-		return fmt.Sprintf("🐰 crq — awaiting feedback · queue %d", len(state.Queue))
-	case len(state.Queue) > 0:
-		return fmt.Sprintf("🐰 crq — %d queued", len(state.Queue))
-	default:
-		return "🐰 crq — idle"
-	}
-}
-
-func issueBody(state State, cfg Config) (string, error) {
-	machine, err := json.Marshal(state)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s\n%s\n%s\n\n%s", stateBegin, machine, stateEnd, renderDashboard(state, cfg)), nil
-}
-
-func hashString(value string) string {
-	sum := sha1.Sum([]byte(value))
-	return hex.EncodeToString(sum[:])
+	return until, !until.IsZero()
 }

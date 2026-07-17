@@ -124,10 +124,10 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 		return Transition{Outcome: KeepWaiting, Reason: "review in flight"}
 	}
 
-	// Reviewing: the slot is long released; the wait deadline bounds the round.
-	if r.WaitDeadline != nil && now.After(*r.WaitDeadline) {
-		return Transition{Outcome: OutRetry, Reason: "wait deadline expired", RetryAt: now}
-	}
+	// Reviewing: the slot is long released and the review is running. The
+	// wall-clock wait deadline is the loop's concern (it times out its own wait),
+	// not the daemon's — the daemon keeps waiting for real bot evidence rather
+	// than re-firing a review that is still in progress.
 	return Transition{Outcome: KeepWaiting, Reason: "reviewing"}
 }
 

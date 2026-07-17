@@ -68,7 +68,7 @@ func run(ctx context.Context, args []string) int {
 		return 1
 	}
 	gh.SetLogger(stderrLogger{})
-	store := crq.NewGitStateStore(cfg, gh)
+	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
 	service := crq.NewService(cfg, gh, store, stderrLogger{})
 
 	switch args[0] {
@@ -241,7 +241,7 @@ func debug(ctx context.Context, service *crq.Service, store crq.StateStore, cfg 
 			fatal(err)
 			return 1
 		}
-		printJSON(state.Blocked)
+		printJSON(state.Account)
 		return 0
 	case "state":
 		state, _, err := store.Load(ctx)

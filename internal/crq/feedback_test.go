@@ -110,12 +110,7 @@ func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 		}
 		store := NewMemoryStore(cfg)
 		if seedHistory {
-			if _, err := store.Update(context.Background(), func(st *State) error {
-				st.History = append(st.History, HistoryItem{Repo: "o/repo", PR: 3, Commit: head, At: firedAt, Host: "testhost"})
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
+			seedRound(t, store, cfg, "o/repo", 3, head, PhaseReviewing, firedAt, 1)
 		}
 		return NewService(cfg, gh, store, nil)
 	}
@@ -218,12 +213,7 @@ func TestFeedbackRejectsCompletionReplyWhileTopSummaryIsProcessing(t *testing.T)
 	prior.User.Login = cfg.Bot
 	gh.reviews[fakeKey("o/repo", 3)] = []Review{prior}
 	store := NewMemoryStore(cfg)
-	if _, err := store.Update(context.Background(), func(st *State) error {
-		st.History = append(st.History, HistoryItem{Repo: "o/repo", PR: 3, Commit: head, At: firedAt, Host: "testhost"})
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRound(t, store, cfg, "o/repo", 3, head, PhaseReviewing, firedAt, 1)
 	service := NewService(cfg, gh, store, nil)
 
 	report, err := service.Feedback(context.Background(), "o/repo", 3)
@@ -277,12 +267,7 @@ func TestFeedbackRejectsCompletionReplyWhenTopSummaryFailed(t *testing.T) {
 	prior.User.Login = cfg.Bot
 	gh.reviews[fakeKey("o/repo", 3)] = []Review{prior}
 	store := NewMemoryStore(cfg)
-	if _, err := store.Update(context.Background(), func(st *State) error {
-		st.History = append(st.History, HistoryItem{Repo: "o/repo", PR: 3, Commit: head, At: firedAt, Host: "testhost"})
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRound(t, store, cfg, "o/repo", 3, head, PhaseReviewing, firedAt, 1)
 	service := NewService(cfg, gh, store, nil)
 
 	report, err := service.Feedback(context.Background(), "o/repo", 3)
@@ -333,12 +318,7 @@ func TestFeedbackRejectsCompletionReplyFromEarlierRound(t *testing.T) {
 		prior.User.Login = "coderabbitai[bot]"
 		gh.reviews[fakeKey("o/repo", 3)] = []Review{prior}
 		store := NewMemoryStore(cfg)
-		if _, err := store.Update(context.Background(), func(st *State) error {
-			st.History = append(st.History, HistoryItem{Repo: "o/repo", PR: 3, Commit: head, At: firedAt, Host: "testhost"})
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
+		seedRound(t, store, cfg, "o/repo", 3, head, PhaseReviewing, firedAt, 1)
 		return NewService(cfg, gh, store, nil)
 	}
 
@@ -396,12 +376,7 @@ func TestFeedbackSkipsReviewAnsweredCommandsWhenPairingCompletionReplies(t *test
 	oldReview.User.Login = cfg.Bot
 	gh.reviews[fakeKey("o/repo", 3)] = []Review{oldReview}
 	store := NewMemoryStore(cfg)
-	if _, err := store.Update(context.Background(), func(st *State) error {
-		st.History = append(st.History, HistoryItem{Repo: "o/repo", PR: 3, Commit: head, At: firedAt, Host: "testhost"})
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRound(t, store, cfg, "o/repo", 3, head, PhaseReviewing, firedAt, 1)
 	svc := NewService(cfg, gh, store, nil)
 
 	rep, err := svc.Feedback(context.Background(), "o/repo", 3)
@@ -782,20 +757,7 @@ func TestFeedbackCurrentRoundDoesNotResurfacePreRoundBodyFindings(t *testing.T) 
 	gh.comments[fakeKey("o/repo", 5)] = []IssueComment{completion}
 
 	store := NewMemoryStore(cfg)
-	if _, err := store.Update(ctx, func(st *State) error {
-		key := QueueKey("o/repo", 5)
-		st.Fired[key] = head[:9]
-		st.AwaitingFeedback[key] = FeedbackWait{
-			Repo:      "o/repo",
-			PR:        5,
-			Head:      head[:9],
-			StartedAt: started,
-			Deadline:  started.Add(time.Hour),
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRound(t, store, cfg, "o/repo", 5, head[:9], PhaseReviewing, started, 0)
 
 	rep, err := NewService(cfg, gh, store, nil).Feedback(ctx, "o/repo", 5)
 	if err != nil {
@@ -839,20 +801,7 @@ Fetch by topic before applying the result limit.`,
 	gh.reviews[fakeKey("o/repo", 5)] = []Review{codex, codeRabbit}
 
 	store := NewMemoryStore(cfg)
-	if _, err := store.Update(ctx, func(st *State) error {
-		key := QueueKey("o/repo", 5)
-		st.Fired[key] = head[:9]
-		st.AwaitingFeedback[key] = FeedbackWait{
-			Repo:      "o/repo",
-			PR:        5,
-			Head:      head[:9],
-			StartedAt: started,
-			Deadline:  started.Add(time.Hour),
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRound(t, store, cfg, "o/repo", 5, head[:9], PhaseReviewing, started, 0)
 
 	rep, err := NewService(cfg, gh, store, nil).Feedback(ctx, "o/repo", 5)
 	if err != nil {
@@ -996,20 +945,7 @@ func TestFeedbackMarksCurrentNoActionCompletionCommentReviewed(t *testing.T) {
 	comment.User.Login = "coderabbitai[bot]"
 	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
 	store := NewMemoryStore(cfg)
-	if _, err := store.Update(ctx, func(st *State) error {
-		key := QueueKey("o/repo", 1)
-		st.Fired[key] = "abcdef123"
-		st.AwaitingFeedback[key] = FeedbackWait{
-			Repo:      "o/repo",
-			PR:        1,
-			Head:      "abcdef123",
-			StartedAt: started,
-			Deadline:  started.Add(time.Hour),
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRound(t, store, cfg, "o/repo", 1, "abcdef123", PhaseReviewing, started, 0)
 	svc := NewService(cfg, gh, store, nil)
 
 	report, err := svc.Feedback(ctx, "o/repo", 1)
@@ -1048,20 +984,7 @@ func TestFeedbackIgnoresStaleNoActionCompletionComment(t *testing.T) {
 	comment.User.Login = "coderabbitai[bot]"
 	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
 	store := NewMemoryStore(cfg)
-	if _, err := store.Update(ctx, func(st *State) error {
-		key := QueueKey("o/repo", 1)
-		st.Fired[key] = "abcdef123"
-		st.AwaitingFeedback[key] = FeedbackWait{
-			Repo:      "o/repo",
-			PR:        1,
-			Head:      "abcdef123",
-			StartedAt: started,
-			Deadline:  started.Add(time.Hour),
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRound(t, store, cfg, "o/repo", 1, "abcdef123", PhaseReviewing, started, 0)
 	svc := NewService(cfg, gh, store, nil)
 
 	report, err := svc.Feedback(ctx, "o/repo", 1)
@@ -1094,20 +1017,7 @@ func TestFeedbackDoesNotUseNoActionCompletionWhileCodexRequiredWithoutThumbsUp(t
 	comment.User.Login = "coderabbitai[bot]"
 	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
 	store := NewMemoryStore(cfg)
-	if _, err := store.Update(ctx, func(st *State) error {
-		key := QueueKey("o/repo", 1)
-		st.Fired[key] = "abcdef123"
-		st.AwaitingFeedback[key] = FeedbackWait{
-			Repo:      "o/repo",
-			PR:        1,
-			Head:      "abcdef123",
-			StartedAt: started,
-			Deadline:  started.Add(time.Hour),
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRound(t, store, cfg, "o/repo", 1, "abcdef123", PhaseReviewing, started, 0)
 	svc := NewService(cfg, gh, store, nil)
 
 	report, err := svc.Feedback(ctx, "o/repo", 1)
@@ -1146,21 +1056,7 @@ func TestFeedbackUsesNoActionCompletionAfterCodexThumbsUp(t *testing.T) {
 	thumb.User.Login = "chatgpt-codex-connector[bot]"
 	gh.reactions[99] = []Reaction{thumb}
 	store := NewMemoryStore(cfg)
-	if _, err := store.Update(ctx, func(st *State) error {
-		key := QueueKey("o/repo", 1)
-		st.Fired[key] = "abcdef123"
-		st.AwaitingFeedback[key] = FeedbackWait{
-			Repo:           "o/repo",
-			PR:             1,
-			Head:           "abcdef123",
-			StartedAt:      started,
-			Deadline:       started.Add(time.Hour),
-			FiredCommentID: 99,
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRound(t, store, cfg, "o/repo", 1, "abcdef123", PhaseReviewing, started, 99)
 	svc := NewService(cfg, gh, store, nil)
 
 	report, err := svc.Feedback(ctx, "o/repo", 1)
@@ -1238,20 +1134,7 @@ func TestFeedbackMarksRequiredCodexCleanReviewSummaryReviewed(t *testing.T) {
 	comment.User.Login = "chatgpt-codex-connector[bot]"
 	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
 	store := NewMemoryStore(cfg)
-	if _, err := store.Update(ctx, func(st *State) error {
-		key := QueueKey("o/repo", 1)
-		st.Fired[key] = "abcdef123"
-		st.AwaitingFeedback[key] = FeedbackWait{
-			Repo:      "o/repo",
-			PR:        1,
-			Head:      "abcdef123",
-			StartedAt: started,
-			Deadline:  started.Add(time.Hour),
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRound(t, store, cfg, "o/repo", 1, "abcdef123", PhaseReviewing, started, 0)
 	svc := NewService(cfg, gh, store, nil)
 
 	report, err := svc.Feedback(ctx, "o/repo", 1)
@@ -1293,20 +1176,7 @@ func TestFeedbackDoesNotUseStaleCodexCleanReviewSummary(t *testing.T) {
 	comment.User.Login = "chatgpt-codex-connector[bot]"
 	gh.comments[fakeKey("o/repo", 1)] = []IssueComment{comment}
 	store := NewMemoryStore(cfg)
-	if _, err := store.Update(ctx, func(st *State) error {
-		key := QueueKey("o/repo", 1)
-		st.Fired[key] = "abcdef123"
-		st.AwaitingFeedback[key] = FeedbackWait{
-			Repo:      "o/repo",
-			PR:        1,
-			Head:      "abcdef123",
-			StartedAt: started,
-			Deadline:  started.Add(time.Hour),
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRound(t, store, cfg, "o/repo", 1, "abcdef123", PhaseReviewing, started, 0)
 	svc := NewService(cfg, gh, store, nil)
 
 	report, err := svc.Feedback(ctx, "o/repo", 1)
@@ -1351,20 +1221,7 @@ func TestLoopConvergesOnCurrentNoActionCompletionComment(t *testing.T) {
 	comment.User.Login = "coderabbitai[bot]"
 	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
 	store := NewMemoryStore(cfg)
-	if _, err := store.Update(ctx, func(st *State) error {
-		key := QueueKey("owner/repo", 12)
-		st.Fired[key] = "abcdef123"
-		st.AwaitingFeedback[key] = FeedbackWait{
-			Repo:      "owner/repo",
-			PR:        12,
-			Head:      "abcdef123",
-			StartedAt: started,
-			Deadline:  started.Add(time.Millisecond),
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseReviewing, started, 0)
 	svc := NewService(cfg, gh, store, nil)
 
 	report, code, err := svc.Loop(ctx, "owner/repo", 12)
@@ -1500,21 +1357,39 @@ func TestExtendDeadlineForBlock(t *testing.T) {
 	}
 }
 
+// parkedRound builds a State whose repo#pr round is parked awaiting_retry at
+// head until retryAt — the v3 per-head cooldown.
+func parkedRound(t *testing.T, repo string, pr int, head string, retryAt, now time.Time) State {
+	t.Helper()
+	st := DefaultState(Config{})
+	r, err := st.NewRound(repo, pr, head, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Reserve("t", "h", now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Fire(1, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.AwaitRetry(retryAt, "rate limited", now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	st.PutRound(*r)
+	return st
+}
+
 func TestFeedbackBlockedUntilHonorsPerHeadCooldownAfterGlobalBlockClears(t *testing.T) {
 	now := time.Date(2026, 7, 13, 14, 4, 0, 0, time.UTC)
 	cooldownUntil := now.Add(15 * time.Minute)
-	st := State{
-		Cooldown: map[string]FireCooldown{
-			QueueKey("owner/repo", 947): {Head: "168df6ae6", Until: cooldownUntil},
-		},
-	}
+	st := parkedRound(t, "owner/repo", 947, "168df6ae6", cooldownUntil, now)
 
 	got, ok := feedbackBlockedUntil(st, "owner/repo", 947, "168df6ae6", now)
 	if !ok || !got.Equal(cooldownUntil) {
-		t.Fatalf("matching head cooldown must keep feedback wait blocked: got %v, ok=%v", got, ok)
+		t.Fatalf("matching head retry window must keep feedback wait blocked: got %v, ok=%v", got, ok)
 	}
 	if _, ok := feedbackBlockedUntil(st, "owner/repo", 947, "different", now); ok {
-		t.Fatal("a cooldown for an older head must not block the current head")
+		t.Fatal("a retry window for an older head must not block the current head")
 	}
 }
 
@@ -1522,12 +1397,8 @@ func TestFeedbackBlockedUntilUsesLatestAccountOrHeadWindow(t *testing.T) {
 	now := time.Date(2026, 7, 13, 14, 4, 0, 0, time.UTC)
 	accountUntil := now.Add(20 * time.Minute)
 	cooldownUntil := now.Add(15 * time.Minute)
-	st := State{
-		Blocked: Blocked{BlockedUntil: &accountUntil},
-		Cooldown: map[string]FireCooldown{
-			QueueKey("owner/repo", 947): {Head: "168df6ae6", Until: cooldownUntil},
-		},
-	}
+	st := parkedRound(t, "owner/repo", 947, "168df6ae6", cooldownUntil, now)
+	st.Account.BlockedUntil = &accountUntil
 
 	got, ok := feedbackBlockedUntil(st, "owner/repo", 947, "168df6ae6", now)
 	if !ok || !got.Equal(accountUntil) {
@@ -1620,12 +1491,7 @@ func TestLoopRequiresAllRequiredBotsAfterDedupe(t *testing.T) {
 	review.User.Login = "coderabbitai[bot]"
 	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review}
 	store := NewMemoryStore(cfg)
-	if _, err := store.Update(ctx, func(st *State) error {
-		st.Fired[QueueKey("owner/repo", 12)] = "abcdef123"
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseCompleted, time.Now().UTC(), 1)
 	svc := NewService(cfg, gh, store, nil)
 
 	report, code, err := svc.Loop(ctx, "owner/repo", 12)
@@ -1667,21 +1533,7 @@ func TestLoopResumesAwaitingFeedbackWithoutRefiring(t *testing.T) {
 	gh.reviews[fakeKey("owner/repo", 12)] = []Review{review}
 	store := NewMemoryStore(cfg)
 	started := time.Now().UTC().Add(-time.Minute)
-	if _, err := store.Update(ctx, func(st *State) error {
-		key := QueueKey("owner/repo", 12)
-		st.Fired[key] = "abcdef123"
-		st.AwaitingFeedback[key] = FeedbackWait{
-			Repo:      "owner/repo",
-			PR:        12,
-			Head:      "abcdef123",
-			StartedAt: started,
-			Deadline:  started.Add(cfg.FeedbackWaitTimeout),
-			ByHost:    "oldhost",
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseReviewing, started, 0)
 	svc := NewService(cfg, gh, store, nil)
 
 	report, code, err := svc.Loop(ctx, "owner/repo", 12)
@@ -1698,11 +1550,11 @@ func TestLoopResumesAwaitingFeedbackWithoutRefiring(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if wait := state.AwaitingFeedback[QueueKey("owner/repo", 12)]; wait.Head != "" {
-		t.Fatalf("feedback wait should clear after findings are collected, got %#v", wait)
+	if waitView(&state, "owner/repo", 12).Head != "" {
+		t.Fatalf("feedback wait should clear after findings are collected")
 	}
-	if state.Fired[QueueKey("owner/repo", 12)] != "abcdef123" {
-		t.Fatalf("fired marker should remain for dedupe after collection: %#v", state.Fired)
+	if firedMarker(&state, "owner/repo", 12) != "abcdef123" {
+		t.Fatalf("fired marker should remain for dedupe after collection")
 	}
 }
 
@@ -1735,20 +1587,7 @@ func TestLoopWaitsForReplacementReviewInsteadOfReturningCarriedPrompt(t *testing
 	gh.reviews[fakeKey("owner/repo", 12)] = []Review{stale}
 	store := NewMemoryStore(cfg)
 	started := time.Now().UTC()
-	if _, err := store.Update(ctx, func(st *State) error {
-		key := QueueKey("owner/repo", 12)
-		st.Fired[key] = "abcdef123"
-		st.AwaitingFeedback[key] = FeedbackWait{
-			Repo:      "owner/repo",
-			PR:        12,
-			Head:      "abcdef123",
-			StartedAt: started,
-			Deadline:  started.Add(cfg.FeedbackWaitTimeout),
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseReviewing, started, 0)
 
 	go func() {
 		time.Sleep(5 * time.Millisecond)
@@ -1807,7 +1646,7 @@ func TestLoopReturnsExistingCodexFeedbackBeforeWaitingForReviewSlot(t *testing.T
 	store := NewMemoryStore(cfg)
 	blockedUntil := time.Now().UTC().Add(time.Hour)
 	if _, err := store.Update(ctx, func(st *State) error {
-		st.Blocked.BlockedUntil = &blockedUntil
+		st.Account.BlockedUntil = &blockedUntil
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -1916,20 +1755,7 @@ func TestLoopReturnsFindingsBeforeRequiredReviewerTimeout(t *testing.T) {
 	comment.User.Login = "chatgpt-codex-connector[bot]"
 	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{comment}
 	store := NewMemoryStore(cfg)
-	if _, err := store.Update(ctx, func(st *State) error {
-		key := QueueKey("owner/repo", 12)
-		st.Fired[key] = "abcdef123"
-		st.AwaitingFeedback[key] = FeedbackWait{
-			Repo:      "owner/repo",
-			PR:        12,
-			Head:      "abcdef123",
-			StartedAt: started,
-			Deadline:  started.Add(cfg.FeedbackWaitTimeout),
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseReviewing, started, 0)
 	svc := NewService(cfg, gh, store, nil)
 
 	report, code, err := svc.Loop(ctx, "owner/repo", 12)
@@ -1977,20 +1803,7 @@ func TestLoopReturnsFasterCodexFeedbackBeforeCodeRabbitReviews(t *testing.T) {
 	gh.comments[fakeKey("owner/repo", 12)] = []IssueComment{codexFinding}
 	store := NewMemoryStore(cfg)
 	started := time.Now().UTC()
-	if _, err := store.Update(ctx, func(st *State) error {
-		key := QueueKey("owner/repo", 12)
-		st.Fired[key] = "abcdef123"
-		st.AwaitingFeedback[key] = FeedbackWait{
-			Repo:      "owner/repo",
-			PR:        12,
-			Head:      "abcdef123",
-			StartedAt: started,
-			Deadline:  started.Add(cfg.FeedbackWaitTimeout),
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseReviewing, started, 0)
 
 	svc := NewService(cfg, gh, store, nil)
 	report, code, err := svc.Loop(ctx, "owner/repo", 12)
@@ -2025,21 +1838,7 @@ func TestLoopUsesPersistedFeedbackDeadline(t *testing.T) {
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
 	store := NewMemoryStore(cfg)
 	started := time.Now().UTC().Add(-2 * time.Hour)
-	if _, err := store.Update(ctx, func(st *State) error {
-		key := QueueKey("owner/repo", 12)
-		st.Fired[key] = "abcdef123"
-		st.AwaitingFeedback[key] = FeedbackWait{
-			Repo:      "owner/repo",
-			PR:        12,
-			Head:      "abcdef123",
-			StartedAt: started,
-			Deadline:  started.Add(cfg.FeedbackWaitTimeout),
-			ByHost:    "oldhost",
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseReviewing, started, 0)
 	svc := NewService(cfg, gh, store, nil)
 
 	begin := time.Now()
@@ -2060,8 +1859,8 @@ func TestLoopUsesPersistedFeedbackDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if wait := state.AwaitingFeedback[QueueKey("owner/repo", 12)]; wait.Head != "" {
-		t.Fatalf("expired feedback wait should clear after timeout, got %#v", wait)
+	if waitView(&state, "owner/repo", 12).Head != "" {
+		t.Fatalf("expired feedback wait should clear after timeout")
 	}
 }
 
