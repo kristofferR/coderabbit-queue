@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/crq"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 type stderrLogger struct{}
@@ -62,13 +63,13 @@ func run(ctx context.Context, args []string) int {
 		fatal(err)
 		return 1
 	}
-	gh, err := crq.NewGitHub(ctx)
+	gh, err := ghapi.NewGitHub(ctx)
 	if err != nil {
 		fatal(err)
 		return 1
 	}
 	gh.SetLogger(stderrLogger{})
-	store := crq.NewGitStateStore(cfg, gh)
+	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
 	service := crq.NewService(cfg, gh, store, stderrLogger{})
 
 	switch args[0] {
@@ -241,7 +242,7 @@ func debug(ctx context.Context, service *crq.Service, store crq.StateStore, cfg 
 			fatal(err)
 			return 1
 		}
-		printJSON(state.Blocked)
+		printJSON(state.Account)
 		return 0
 	case "state":
 		state, _, err := store.Load(ctx)

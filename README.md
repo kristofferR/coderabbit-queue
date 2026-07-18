@@ -95,7 +95,7 @@ Everything lives in one small **gate repo** (private is fine):
 
 | Piece | What it is |
 |-------|-----------|
-| 🔒 **State ref** | The typed queue state is JSON stored in a git ref (`CRQ_STATE_REF`, default `crq-state`), updated with optimistic **compare-and-swap** — a new commit is written only if the ref hasn't moved, so concurrent callers across machines never corrupt the queue. No database, service account, or always-on server. |
+| 🔒 **State ref** | The typed queue state is JSON stored in a git ref (`CRQ_STATE_REF`, default `crq-state-v3`), updated with optimistic **compare-and-swap** — a new commit is written only if the ref hasn't moved, so concurrent callers across machines never corrupt the queue. No database, service account, or always-on server. |
 | 📊 **Dashboard issue** | A tracking **issue** renders the live state below a hidden machine-readable block: status, the queue, in-flight review, recently requested review commands, and the current quota — every PR linked. The issue **title** is a one-glance status (`🐰 crq — 2 queued`). |
 | 🐰 **Calibration PR** | A throwaway draft PR where crq asks `@coderabbitai rate limit` to read your real quota *without spending a review*. crq prunes its own probe comments so the PR never hits GitHub's 2500-comment cap. |
 
@@ -154,7 +154,7 @@ export CRQ_REPO=YOURUSER/crq-state
 export CRQ_ISSUE=2
 export CRQ_CAL_PR=1
 export CRQ_SCOPE=YOURUSER
-export CRQ_STATE_REF=crq-state
+export CRQ_STATE_REF=crq-state-v3
 EOF
 ```
 
@@ -402,6 +402,12 @@ feedback. crq keys resolution off GitHub's own thread state, so a finding keeps 
 surfaces still-open findings from earlier commits, so nothing is silently dropped between passes. A
 finding without `thread_id` came from a review body or comment GitHub can't expose as a resolvable
 thread; CodeRabbit clears those on its next review.
+
+`source: "review_reply"` is special: when you `crq decline --resolve` a finding and the bot replies
+**contesting** the decline ("I'm retaining the finding: …") rather than conceding ("I'm withdrawing
+this finding"), crq re-surfaces that rebuttal as a finding so the loop won't converge over a rebuttal
+you haven't answered. Fix it, or `crq decline` again with a stronger reason; a bot that then withdraws
+clears it. Ambiguous replies surface too — crq never buries a possible rebuttal on a false concession.
 </details>
 
 ## Configuration
@@ -414,18 +420,20 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_ISSUE` | from `init` | dashboard issue number |
 | `CRQ_CAL_PR` | from `init` | calibration PR number |
 | `CRQ_SCOPE` | owner of `CRQ_REPO` | which owners/orgs share this quota (comma-separated) |
-| `CRQ_STATE_REF` | `crq-state` | git ref that stores the typed CAS state |
+| `CRQ_STATE_REF` | `crq-state-v3` | git ref that stores the typed CAS state |
 | `CRQ_REPOS` | _(all in scope)_ | `autoreview` allowlist — only these `owner/name` repos (comma-separated) |
 | `CRQ_EXCLUDE` | _(none)_ | `autoreview` denylist — never these `owner/name` repos (comma-separated) |
 | `CRQ_AUTOREVIEW_SKIP_AUTHORS` | `dependabot[bot]` | PR authors `autoreview` never enqueues (comma-separated; case and `[bot]` suffix don't matter) — set to empty to auto-review bot PRs too; manual `crq review` is unaffected |
 | `CRQ_AUTOREVIEW_SKIP_MARKER` | `<!-- crq:skip-autoreview -->` | exact PR-body marker that suppresses fleet auto-review; set empty to disable; manual `crq loop` is unaffected |
 | `CRQ_REQUIRED_BOTS` | `coderabbitai[bot]` | bots that must review the head for convergence (crq waits for all of them) |
+| `CRQ_CODEX_CMD` | `@codex review` | Codex trigger crq posts alongside the CodeRabbit command when Codex is in `CRQ_REQUIRED_BOTS` and does not auto-review the PR; empty disables Codex firing |
 | `CRQ_FEEDBACK_BOTS` | required bots + `chatgpt-codex-connector[bot]` | bots whose findings are surfaced — a superset of required bots, so Codex reviews show up without gating convergence on repos where Codex isn't installed |
 | `CRQ_TZ` | `UTC` | dashboard display timezone (IANA name, e.g. `Europe/Oslo`) |
 | `CRQ_MIN_INTERVAL` | `90s` | minimum time between fired reviews |
 | `CRQ_POLL` | `15s` | how often `crq loop` checks its place in line |
 | `CRQ_WAIT_TIMEOUT` | `0` | give up waiting for a slot after this long (`0` = never) |
 | `CRQ_FEEDBACK_WAIT_TIMEOUT` | `20m` | how long `crq loop` waits for feedback after firing |
+| `CRQ_SETTLE` | `90s` | after convergence the loop keeps polling this long before exiting 0, so a trailing review wave (e.g. a Codex auto-review of the pushed head) is caught by crq, not by a human re-checking the PR |
 | `CRQ_CALIBRATE_TTL` | `2m` | how long to trust a quota reading before re-asking CodeRabbit |
 | `CRQ_AUTOREVIEW_POLL` | `1m` | how often the `autoreview` daemon scans for PRs to enqueue |
 | `CRQ_INFLIGHT_TIMEOUT` | `15m` | backstop to release a stuck in-flight review |
@@ -441,6 +449,15 @@ them coming!`. crq recognizes that text as a successful, non-actionable review. 
 `CRQ_REQUIRED_BOTS`, the current-head wait must be active and the comment must be newer than that wait
 before it satisfies the Codex gate; otherwise the clean summary is simply ignored rather than emitted
 as a false finding.
+
+**Codex firing and auto-detection:** when Codex is in `CRQ_REQUIRED_BOTS`, crq posts `CRQ_CODEX_CMD`
+in the same fire step as the CodeRabbit command — unless it detects Codex auto-review on the PR (any
+Codex review that no `@codex review` command preceded), in which case it never posts and simply waits
+for Codex's own review. Conversely, when Codex is *not* required but joins a round on its own (an
+actionable comment or review mid-round), the round gates on Codex dynamically: convergence waits for
+its review too. A Codex usage-limit notice releases that dynamic gate so an exhausted Codex can't
+stall rounds it volunteered for; an explicitly required Codex is still bounded only by the normal
+feedback deadline.
 
 **Multiple orgs:** CodeRabbit's quota is per-org, so PRs in different orgs draw from *different*
 buckets. Run a separate gate (its own `CRQ_REPO`) per org rather than mixing them — otherwise you'd

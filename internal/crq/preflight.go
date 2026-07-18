@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 )
 
 type PreflightOptions struct {
@@ -240,8 +242,8 @@ func preflightFinding(event map[string]any) PreflightFinding {
 	codegen := stringField(event, "codegenInstructions")
 	comment := stringField(event, "comment")
 	body := firstNonEmpty(codegen, comment)
-	title := firstNonEmpty(stringField(event, "title"), titleOf(body))
-	severity := strings.ToLower(firstNonEmpty(stringField(event, "severity"), severityOf(title+"\n"+body)))
+	title := firstNonEmpty(stringField(event, "title"), dialect.TitleOf(body))
+	severity := strings.ToLower(firstNonEmpty(stringField(event, "severity"), dialect.SeverityOf(title+"\n"+body)))
 	finding := PreflightFinding{
 		ID:                  firstNonEmpty(stringField(event, "id"), stringField(event, "fingerprint")),
 		Bot:                 "coderabbit-cli",

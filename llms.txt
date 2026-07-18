@@ -30,7 +30,7 @@ export CRQ_REPO=OWNER/crq-state
 export CRQ_ISSUE=1
 export CRQ_CAL_PR=1
 export CRQ_SCOPE=OWNER
-export CRQ_STATE_REF=crq-state
+export CRQ_STATE_REF=crq-state-v3
 ```
 
 CodeRabbit native auto-review must be off.
@@ -61,7 +61,10 @@ crq loop OWNER/REPO PR_NUMBER > crq-feedback.json
 rc=$?
 ```
 
-`crq loop` queues the PR and triggers CodeRabbit when the account can spend a review. If a bot reports
+`crq loop` queues the PR and triggers CodeRabbit when the account can spend a review. If Codex is in
+`CRQ_REQUIRED_BOTS`, crq also posts `CRQ_CODEX_CMD` (default `@codex review`) in the same fire step —
+never when Codex auto-reviews the PR on its own. A Codex that joins a round uninvited gates that
+round's convergence dynamically (its usage-limit notice releases the dynamic gate). If a bot reports
 actionable findings first, it emits them immediately while leaving the queued round alive. Fix and
 validate locally and resolve or decline each addressed thread immediately. While any required bot's
 `.reviewed_by` value is false, do not commit or push. Only after every `CRQ_REQUIRED_BOTS` entry is true
@@ -88,6 +91,12 @@ Decline a finding you are not addressing: post the reason on its thread (left un
 ```bash
 crq decline OWNER/REPO PR_NUMBER --thread THREAD_ID --reason "why declined"
 ```
+
+If the bot replies contesting a decline you resolved ("I'm retaining the finding: ..."), crq
+re-surfaces that reply as a `source: "review_reply"` finding on the next `feedback`/`loop`, so a
+convergence never hides a rebuttal you have not answered. Address it or decline again with a stronger
+reason; the loop clears it once the bot withdraws (or you stop declining and fix it). Ambiguous bot
+replies surface too — crq errs toward showing a possible rebuttal rather than burying it.
 
 Current feedback without triggering a review:
 

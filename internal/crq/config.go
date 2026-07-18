@@ -8,9 +8,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 const Version = "2.0.0-dev"
+
+// The GitHub transport tags its User-Agent with the crq version. Version lives
+// in this package, so the wiring stays here now that the gh alias layer is gone.
+func init() { ghapi.UserAgent = "crq/" + Version }
 
 type Config struct {
 	GateRepo       string
@@ -25,12 +32,15 @@ type Config struct {
 	SkipAuthors map[string]bool
 	// SkipMarker suppresses fleet auto-review when present in a PR body.
 	// Manual `crq loop` remains unaffected so an explicit review can override it.
-	SkipMarker        string
-	StateRef          string
-	Bot               string
-	RequiredBots      []string
-	FeedbackBots      []string
-	ReviewCommand     string
+	SkipMarker    string
+	StateRef      string
+	Bot           string
+	RequiredBots  []string
+	FeedbackBots  []string
+	ReviewCommand string
+	// CodexCommand is the Codex review trigger crq posts when Codex gates a round
+	// and does not auto-review (CRQ_CODEX_CMD). Empty disables all Codex firing.
+	CodexCommand      string
 	RateLimitCommand  string
 	RateLimitMarker   string
 	CalibrationMarker string
@@ -54,6 +64,11 @@ type Config struct {
 	NoOpen              bool
 	DryRun              bool
 	FeedbackWaitTimeout time.Duration
+	// SettleWindow keeps a converged loop polling briefly before it exits 0, so
+	// a trailing review wave (a Codex auto-review of the just-pushed head, a
+	// CodeRabbit review following its comment shells) is caught by crq instead
+	// of by a human re-checking the PR. 0 disables.
+	SettleWindow time.Duration
 }
 
 func LoadConfig() (Config, error) {
@@ -93,13 +108,14 @@ func LoadConfig() (Config, error) {
 		ExcludeRepos:        repoSet(env["CRQ_EXCLUDE"]),
 		SkipAuthors:         authorSet(stringEnvAllowEmpty(env, "CRQ_AUTOREVIEW_SKIP_AUTHORS", "dependabot[bot]")),
 		SkipMarker:          stringEnvAllowEmpty(env, "CRQ_AUTOREVIEW_SKIP_MARKER", "<!-- crq:skip-autoreview -->"),
-		StateRef:            stringEnv(env, "CRQ_STATE_REF", "crq-state"),
+		StateRef:            stringEnv(env, "CRQ_STATE_REF", "crq-state-v3"),
 		Bot:                 bot,
 		RequiredBots:        requiredBots,
 		FeedbackBots:        listEnv(env, "CRQ_FEEDBACK_BOTS", strings.Join(unionBots(requiredBots, extraFeedbackBots), ",")),
 		ReviewCommand:       stringEnv(env, "CRQ_REVIEW_CMD", "@coderabbitai review"),
-		RateLimitCommand:    stringEnv(env, "CRQ_RATELIMIT_CMD", "@coderabbitai rate limit"),
-		RateLimitMarker:     stringEnv(env, "CRQ_RL_MARKER", "rate limited by coderabbit.ai"),
+		CodexCommand:        stringEnvAllowEmpty(env, "CRQ_CODEX_CMD", "@codex review"),
+		RateLimitCommand:    stringEnv(env, "CRQ_RATELIMIT_CMD", dialect.DefaultRateLimitCommand),
+		RateLimitMarker:     stringEnv(env, "CRQ_RL_MARKER", dialect.DefaultRateLimitMarker),
 		CalibrationMarker:   stringEnv(env, "CRQ_CAL_REPLY_MARKER", "auto-generated reply by CodeRabbit"),
 		ReviewDoneMarker:    stringEnv(env, "CRQ_REVIEW_DONE_MARKER", "summarize by coderabbit.ai"),
 		CompletionMarker:    stringEnvAllowEmpty(env, "CRQ_COMPLETION_MARKER", "Review finished"),
@@ -118,6 +134,7 @@ func LoadConfig() (Config, error) {
 		NoOpen:              env["CRQ_NO_OPEN"] != "",
 		DryRun:              env["CRQ_DRY_RUN"] == "1",
 		FeedbackWaitTimeout: durationEnv(env, "CRQ_FEEDBACK_WAIT_TIMEOUT", 20*time.Minute),
+		SettleWindow:        durationEnv(env, "CRQ_SETTLE", 90*time.Second),
 	}
 	if len(cfg.Scope) == 0 && cfg.GateRepo != "" {
 		cfg.Scope = []string{ownerOf(cfg.GateRepo)}
@@ -237,7 +254,7 @@ func listEnv(env map[string]string, key, fallback string) []string {
 // Codex — CodeRabbit (or any configured reviewer) already enters the feedback
 // set via RequiredBots, so listing it here too would wrongly surface CodeRabbit
 // findings even when crq is configured for a different reviewer.
-var extraFeedbackBots = []string{"chatgpt-codex-connector[bot]"}
+var extraFeedbackBots = []string{dialect.CodexBotLogin}
 
 // unionBots concatenates bot lists, dropping blanks and case-insensitively
 // de-duplicating on the normalized login (so "coderabbitai" and
@@ -251,7 +268,7 @@ func unionBots(lists ...[]string) []string {
 			if item == "" {
 				continue
 			}
-			key := normalizeBotName(item)
+			key := dialect.NormalizeBotName(item)
 			if seen[key] {
 				continue
 			}
@@ -279,7 +296,7 @@ func repoSet(value string) map[string]bool {
 func authorSet(value string) map[string]bool {
 	set := map[string]bool{}
 	for _, item := range strings.Split(value, ",") {
-		item = normalizeBotName(strings.ToLower(strings.TrimSpace(item)))
+		item = dialect.NormalizeBotName(strings.ToLower(strings.TrimSpace(item)))
 		if item != "" {
 			set[item] = true
 		}

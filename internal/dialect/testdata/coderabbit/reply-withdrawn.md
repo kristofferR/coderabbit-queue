@@ -1,0 +1,1 @@
+`@kristofferR`, you're right—my finding was incorrect. The current `internal/crq/service_test.go` declares `retryNoChangeStore` only once, so there is no Go redeclaration error. I'm withdrawing this comment. Sorry for the noise.

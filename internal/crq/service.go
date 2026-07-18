@@ -11,6 +11,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 type Logger interface {
@@ -18,32 +22,63 @@ type Logger interface {
 }
 
 type GitHubAPI interface {
-	GetPull(context.Context, string, int) (Pull, error)
-	GetCommit(context.Context, string, string) (gitCommit, error)
-	ListReviews(context.Context, string, int) ([]Review, error)
-	ListIssueComments(context.Context, string, int) ([]IssueComment, error)
-	ListIssueCommentsPage(context.Context, string, int, int, int) ([]IssueComment, error)
-	ListReviewComments(context.Context, string, int) ([]ReviewComment, error)
-	ListIssueReactions(context.Context, string, int) ([]Reaction, error)
-	ListCommentReactions(context.Context, string, int64) ([]Reaction, error)
-	PostIssueComment(context.Context, string, int, string) (IssueComment, error)
+	GetPull(context.Context, string, int) (ghapi.Pull, error)
+	GetCommit(context.Context, string, string) (ghapi.Commit, error)
+	ListReviews(context.Context, string, int) ([]ghapi.Review, error)
+	ListIssueComments(context.Context, string, int) ([]ghapi.IssueComment, error)
+	ListIssueCommentsPage(context.Context, string, int, int, int) ([]ghapi.IssueComment, error)
+	ListReviewComments(context.Context, string, int) ([]ghapi.ReviewComment, error)
+	ListIssueReactions(context.Context, string, int) ([]ghapi.Reaction, error)
+	ListCommentReactions(context.Context, string, int64) ([]ghapi.Reaction, error)
+	PostIssueComment(context.Context, string, int, string) (ghapi.IssueComment, error)
 	DeleteIssueComment(context.Context, string, int64) error
-	CreateIssue(context.Context, string, string, string) (Issue, error)
-	SearchOpenPRs(context.Context, string, bool, int) ([]SearchPR, error)
-	EachOpenPR(context.Context, string, bool, func(SearchPR) (bool, error)) error
+	CreateIssue(context.Context, string, string, string) (ghapi.Issue, error)
+	SearchOpenPRs(context.Context, string, bool, int) ([]ghapi.SearchPR, error)
+	EachOpenPR(context.Context, string, bool, func(ghapi.SearchPR) (bool, error)) error
 	GraphQL(context.Context, string, map[string]any, any) error
 }
 
 type Service struct {
 	cfg   Config
+	cr    dialect.CodeRabbit
 	gh    GitHubAPI
 	store StateStore
 	log   Logger
+	// lastParkedSweep rotates sweepParkedClosed's candidate across pumps (see
+	// there); in-memory only, single-writer (the pump caller).
+	lastParkedSweep string
+	// now overrides the wall clock for the scheduling DECISIONS in the
+	// pump/enqueue/sweep/wait paths (see clock). nil in production; the replay
+	// suite injects a controllable fake so an incident can be re-enacted
+	// deterministically. It intentionally does NOT reach logging/jitter/token or
+	// the fake GitHub timestamps, which stay on real time.
+	now func() time.Time
 }
 
 func NewService(cfg Config, gh GitHubAPI, store StateStore, log Logger) *Service {
-	return &Service{cfg: cfg, gh: gh, store: store, log: log}
+	cr := dialect.CodeRabbit{
+		CompletionMarker:  cfg.CompletionMarker,
+		RateLimitMarker:   cfg.RateLimitMarker,
+		CalibrationMarker: cfg.CalibrationMarker,
+	}
+	return &Service{cfg: cfg, cr: cr, gh: gh, store: store, log: log}
 }
+
+// clock is the service's notion of "now" (UTC) for scheduling decisions: retry
+// windows, fire pacing, adoption cutoffs, feedback deadlines. Tests inject s.now
+// to drive these deterministically; production leaves it nil and reads the wall
+// clock.
+func (s *Service) clock() time.Time {
+	if s.now != nil {
+		return s.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+// warnRateLimited is the requeue reason for a fire that came back account
+// blocked. It matches the engine's Transition.Reason (both reference the one
+// dialect constant) and is surfaced via AccountQuota, not the sticky Warn field.
+const warnRateLimited = dialect.ReasonRateLimited
 
 type EnqueueResult struct {
 	Repo          string `json:"repo"`
@@ -55,48 +90,41 @@ type EnqueueResult struct {
 	Seq           int64  `json:"seq,omitempty"`
 }
 
+// Enqueue records a review round for repo#pr's current head. A round already
+// tracking the head is reported (queued/deduped) instead of duplicated; a round
+// on a stale head is superseded to track the new one.
 func (s *Service) Enqueue(ctx context.Context, repo string, pr int) (EnqueueResult, error) {
 	repo = NormalizeRepo(repo)
 	result := EnqueueResult{Repo: repo, PR: pr}
-	state, err := s.store.Update(ctx, func(state *State) error {
-		if state.Contains(repo, pr) {
-			result.AlreadyQueued = true
+	head, err := s.headShort(ctx, repo, pr)
+	if err != nil {
+		return result, err
+	}
+	state, err := s.store.Update(ctx, func(st *State) error {
+		now := s.clock()
+		r := st.Round(repo, pr)
+		if r != nil && r.Head == head {
+			switch r.Phase {
+			case PhaseFired, PhaseReviewing, PhaseCompleted:
+				result.Deduped = true
+				result.Head = head
+			default:
+				result.AlreadyQueued = true
+			}
 			return ErrNoChange
 		}
-		key := QueueKey(repo, pr)
-		head := ""
-		if wait := state.AwaitingFeedback[key]; wait.Head != "" {
-			var err error
-			head, err = s.headShort(ctx, repo, pr)
-			if err == nil && head == wait.Head {
-				result.Deduped = true
-				result.Head = head
-				return ErrNoChange
-			}
+		var nr *Round
+		if r != nil {
+			// The tracked head is stale — supersede to the current one.
+			nr, err = st.Supersede(repo, pr, head, now)
+		} else {
+			nr, err = st.NewRound(repo, pr, head, now)
 		}
-		if fired := state.Fired[key]; fired != "" {
-			var err error
-			if head == "" {
-				head, err = s.headShort(ctx, repo, pr)
-			}
-			if err == nil && head == fired {
-				result.Deduped = true
-				result.Head = head
-				return ErrNoChange
-			}
+		if err != nil {
+			return err
 		}
-		state.NextSeq++
-		item := QueueItem{
-			Seq:        state.NextSeq,
-			Owner:      ownerOf(repo),
-			Repo:       repo,
-			PR:         pr,
-			Host:       s.cfg.Host,
-			EnqueuedAt: time.Now().UTC(),
-		}
-		state.Queue = append(state.Queue, item)
 		result.Queued = true
-		result.Seq = item.Seq
+		result.Seq = nr.Seq
 		return nil
 	})
 	if err != nil {
@@ -106,31 +134,40 @@ func (s *Service) Enqueue(ctx context.Context, repo string, pr int) (EnqueueResu
 	return result, nil
 }
 
-// enqueueBatch appends several PRs to the queue in a single compare-and-swap
-// write plus one dashboard sync, so a large autoreview pass doesn't produce N
-// separate state writes / issue edits (the write-storm in #2). PRs already
-// queued or in flight are skipped; the fired-head dedup still happens at pump
-// time, so a stale candidate can't cause a double review.
-func (s *Service) enqueueBatch(ctx context.Context, items []SearchPR) error {
+// queueCandidate is one PR the autoreview pass decided to enqueue, carrying the
+// head it resolved so enqueueBatch can create the round without re-fetching.
+type queueCandidate struct {
+	Repo string
+	PR   int
+	Head string
+}
+
+// enqueueBatch appends several PRs in a single compare-and-swap write plus one
+// dashboard sync, so a large autoreview pass doesn't produce N separate state
+// writes / issue edits. A PR already tracked at the same head is skipped; a
+// stale head is superseded. The DecideFire dedup still backstops at pump time.
+func (s *Service) enqueueBatch(ctx context.Context, items []queueCandidate) error {
 	if len(items) == 0 {
 		return nil
 	}
 	state, err := s.store.Update(ctx, func(st *State) error {
+		now := s.clock()
 		added := 0
 		for _, it := range items {
 			repo := NormalizeRepo(it.Repo)
-			if st.Contains(repo, it.Number) {
+			if r := st.Round(repo, it.PR); r != nil {
+				if r.Head == it.Head {
+					continue
+				}
+				if _, err := st.Supersede(repo, it.PR, it.Head, now); err != nil {
+					return err
+				}
+				added++
 				continue
 			}
-			st.NextSeq++
-			st.Queue = append(st.Queue, QueueItem{
-				Seq:        st.NextSeq,
-				Owner:      ownerOf(repo),
-				Repo:       repo,
-				PR:         it.Number,
-				Host:       s.cfg.Host,
-				EnqueuedAt: time.Now().UTC(),
-			})
+			if _, err := st.NewRound(repo, it.PR, it.Head, now); err != nil {
+				return err
+			}
 			added++
 		}
 		if added == 0 {
@@ -153,673 +190,825 @@ type PumpResult struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// Pump advances the queue by one observe → engine → apply step: it progresses
+// the round holding the fire slot, sweeps one reviewing round toward
+// completion, then fires the next eligible round. In DryRun it computes the
+// same decisions but writes and posts nothing.
 func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
-	if state, _, err := s.store.Load(ctx); err == nil && state.InFlight != nil {
-		status, err := s.inflightStatus(ctx, state)
-		if err != nil {
-			return PumpResult{}, err
-		}
-		if status.Done || status.Requeue {
-			updated, err := s.store.Update(ctx, func(st *State) error {
-				if st.InFlight == nil || st.InFlight.Token != state.InFlight.Token {
-					return nil
-				}
-				if status.Requeue {
-					s.requeueInflight(st, status)
-				} else {
-					// The review round is over. If every required bot's feedback
-					// arrived, the wait is satisfied — clear it here, because in
-					// autoreview flows no Loop is running to call clearFeedbackWait
-					// and the entry would linger forever. A bare acknowledgement
-					// (bot reacted) or an outstanding required bot means reviewing
-					// is still underway, so that wait stays until feedback lands or
-					// its deadline expires.
-					if status.FeedbackComplete {
-						key := QueueKey(st.InFlight.Repo, st.InFlight.PR)
-						if wait := st.AwaitingFeedback[key]; wait.Head == st.InFlight.Head {
-							delete(st.AwaitingFeedback, key)
-						}
-					}
-					st.InFlight = nil
-					st.Warn = ""
-				}
-				return nil
-			})
-			if err != nil {
-				return PumpResult{}, err
-			}
-			s.sync(ctx, updated)
-			if status.Requeue {
-				return PumpResult{Action: "requeued", Repo: state.InFlight.Repo, PR: state.InFlight.PR, Reason: status.Reason}, nil
-			}
-			return PumpResult{Action: "cleared", Repo: state.InFlight.Repo, PR: state.InFlight.PR, Reason: status.Reason}, nil
-		}
-		return PumpResult{Action: "waiting", Repo: state.InFlight.Repo, PR: state.InFlight.PR, Reason: "review in flight"}, nil
-	}
-
-	state, _, err := s.store.Load(ctx)
+	now := s.clock()
+	st, _, err := s.store.Load(ctx)
 	if err != nil {
 		return PumpResult{}, err
 	}
-	if pruned := s.pruneExpiredWaits(ctx, state); pruned != nil {
-		state = *pruned
+
+	// 1. The round holding the fire slot: progress it and return, mirroring v2's
+	//    "handle in-flight first" so a single pump never both progresses and fires.
+	if slot := st.SlotRound(); slot != nil {
+		return s.progressSlotRound(ctx, *slot)
 	}
-	state = s.sweepFeedbackWaits(ctx, state)
-	queue := state.SortedQueue()
-	if len(queue) == 0 {
+
+	// 2. Reviewing rounds no longer hold the slot; sweep the oldest one toward
+	//    completion/retry (bounded to one per pump, like v2's feedback sweep).
+	if updated, err := s.sweepReviewing(ctx, st, now); err != nil {
+		return PumpResult{}, err
+	} else {
+		st = updated
+	}
+
+	// 2b. A PR closed during a cooldown parks invisibly (NextEligible skips
+	//    awaiting_retry until RetryAt): sweep the oldest parked round's PR state
+	//    so closure abandons it now instead of after the window.
+	if res, handled, err := s.sweepParkedClosed(ctx, st); err != nil {
+		return PumpResult{}, err
+	} else if handled {
+		return res, nil
+	}
+
+	// 3. Fire the next eligible round.
+	next := st.NextEligible(now)
+	if next == nil {
 		return PumpResult{Action: "idle"}, nil
 	}
-	// Terminal PR cleanup is independent of review quota and pacing. Check the
-	// queue head before either gate so a PR merged while CodeRabbit is blocked (or
-	// while MinInterval is active) leaves the queue on the next pump instead of
-	// lingering until another review slot becomes available.
-	item := queue[0]
-	if _, open, err := s.pullHead(ctx, item.Repo, item.PR); err != nil {
+	// Terminal cleanup is independent of quota and pacing: drop a closed/merged
+	// PR before either gate so it leaves on this pump instead of lingering.
+	if _, open, err := s.pullHead(ctx, next.Repo, next.PR); err != nil {
 		return PumpResult{}, err
 	} else if !open {
-		return s.dropClosedQueueItem(ctx, item)
+		return s.abandonRound(ctx, *next, "pr closed", "skipped")
 	}
-	if refreshed, err := s.RefreshQuota(ctx); err == nil {
-		state = refreshed
-	} else {
-		return PumpResult{}, err
+	// A dry-run pump reports decisions and writes nothing — that includes the
+	// calibration probe RefreshQuota may post; decide from the loaded snapshot.
+	if !s.cfg.DryRun {
+		if refreshed, err := s.RefreshQuota(ctx); err == nil {
+			st = refreshed
+		} else {
+			return PumpResult{}, err
+		}
 	}
-	now := time.Now().UTC()
-	if state.Blocked.BlockedUntil != nil && state.Blocked.BlockedUntil.After(now) {
-		return PumpResult{Action: "blocked", Reason: state.Blocked.BlockedUntil.Format(time.RFC3339)}, nil
-	}
-	if state.LastFired != nil && now.Sub(*state.LastFired) < s.cfg.MinInterval {
-		return PumpResult{Action: "min_interval", Reason: s.cfg.MinInterval.String()}, nil
-	}
-	queue = state.SortedQueue()
-	if len(queue) == 0 {
+	now = s.clock()
+	// No early blocked/min-interval return here: DecideFire owns those gates and
+	// deliberately resolves the quota-free verdicts (dedupe, FireCodexOnly,
+	// FireCoReviewWait) before them, so an account block from another PR does not
+	// delay resolutions that spend no CodeRabbit quota. mapFireNo still reports
+	// "blocked"/"min_interval" for real fires; observing while blocked costs
+	// ETag-cached 304s.
+	next = st.NextEligible(now)
+	if next == nil {
 		return PumpResult{Action: "idle"}, nil
 	}
-	item = queue[0]
-	head, open, err := s.pullHead(ctx, item.Repo, item.PR)
+	obs, err := s.observe(ctx, next.Repo, next.PR, next, now)
 	if err != nil {
 		return PumpResult{}, err
 	}
-	if s.cfg.DryRun {
-		// A dry-run pump only reports the action it would take. Every branch
-		// below this point mutates persisted state (dropping closed PRs,
-		// deduping reviewed heads, adopting commands, firing), so simulate the
-		// same decisions read-only instead of falling through to them.
-		key := QueueKey(item.Repo, item.PR)
-		switch {
-		case !open:
-			return PumpResult{Action: "skipped", Repo: item.Repo, PR: item.PR, Reason: "pr closed"}, nil
-		case !isShortSHA(head):
-			return PumpResult{Action: "skipped", Repo: item.Repo, PR: item.PR, Reason: "could not read head"}, nil
-		case state.Fired[key] == head || state.AwaitingFeedback[key].Head == head:
-			return PumpResult{Action: "deduped", Repo: item.Repo, PR: item.PR, Head: head}, nil
-		}
-		if reviewed, err := s.botReviewedHead(ctx, item.Repo, item.PR, head); err == nil && reviewed {
-			return PumpResult{Action: "deduped", Repo: item.Repo, PR: item.PR, Head: head, Reason: "bot already reviewed head"}, nil
-		} else if err != nil {
-			return PumpResult{}, err
-		}
-		return PumpResult{Action: "dry_run", Repo: item.Repo, PR: item.PR, Head: head}, nil
-	}
-	if !open {
-		return s.dropClosedQueueItem(ctx, item)
-	}
-	if !isShortSHA(head) {
-		return PumpResult{Action: "skipped", Repo: item.Repo, PR: item.PR, Reason: "could not read head"}, nil
-	}
-	key := QueueKey(item.Repo, item.PR)
-	pending := state.AwaitingFeedback[key]
-	if state.Fired[key] == head || pending.Head == head {
-		deduped := false
-		updated, err := s.store.Update(ctx, func(st *State) error {
-			deduped = false
-			q := st.SortedQueue()
-			if len(q) == 0 || q[0].Seq != item.Seq {
-				return ErrNoChange
-			}
-			currentPending := st.AwaitingFeedback[key]
-			if st.Fired[key] != head && currentPending.Head != head {
-				return ErrNoChange
-			}
-			removeQueued(st, item.Seq)
-			if currentPending.Head == head {
-				st.Fired[key] = head
-			}
-			deduped = true
-			return nil
-		})
-		if err != nil {
-			return PumpResult{}, err
-		}
-		if !deduped {
-			return PumpResult{Action: "lost_race"}, nil
-		}
-		s.sync(ctx, updated)
-		return PumpResult{Action: "deduped", Repo: item.Repo, PR: item.PR, Head: head}, nil
-	}
-	if reviewed, err := s.botReviewedHead(ctx, item.Repo, item.PR, head); err == nil && reviewed {
-		updated, err := s.store.Update(ctx, func(st *State) error {
-			removeQueued(st, item.Seq)
-			st.Fired[key] = head
-			return nil
-		})
-		if err != nil {
-			return PumpResult{}, err
-		}
-		s.sync(ctx, updated)
-		return PumpResult{Action: "deduped", Repo: item.Repo, PR: item.PR, Head: head, Reason: "bot already reviewed head"}, nil
-	} else if err != nil {
-		return PumpResult{}, err
-	}
-	if existing, ok, err := s.existingReviewCommand(ctx, item.Repo, item.PR, head, item.adoptCutoff()); err != nil {
-		return PumpResult{}, err
-	} else if ok {
-		firedAt := existing.CreatedAt.UTC()
-		if firedAt.IsZero() {
-			firedAt = existing.UpdatedAt.UTC()
-		}
-		if firedAt.IsZero() {
-			firedAt = time.Now().UTC()
-		}
-		updated, err := s.recordExistingReviewPosted(ctx, item, head, existing.ID, firedAt)
-		if err != nil {
-			if errors.Is(err, ErrNoChange) {
-				return PumpResult{Action: "lost_race"}, nil
-			}
-			return PumpResult{}, err
-		}
-		s.sync(ctx, updated)
-		if s.log != nil {
-			s.log.Printf("fire %s@%s (adopted existing review command)", key, head)
-		}
-		return PumpResult{Action: "fired", Repo: item.Repo, PR: item.PR, Head: head, Reason: "review command already posted"}, nil
-	}
+	decision := engine.DecideFire(s.global(st, now), *next, obs.eng, now, s.policy())
+	return s.applyFire(ctx, *next, obs.eng, decision, now)
+}
 
-	token := randomToken()
-	reserved, err := s.store.Update(ctx, func(st *State) error {
-		// Another worker already holds an in-flight slot, or won the race for this
-		// queue head (or it was cancelled) since we picked it. These are benign lost
-		// races, not write conflicts — return ErrNoChange so Update reports lost_race
-		// rather than failing the loop with "state changed while writing".
-		if st.InFlight != nil {
+func (s *Service) global(st State, now time.Time) engine.Global {
+	return engine.Global{
+		SlotFree:     st.SlotRound() == nil,
+		BlockedUntil: st.Account.BlockedUntil,
+		LastFired:    st.LastFired,
+	}
+}
+
+// progressSlotRound observes and progresses the round holding the fire slot.
+func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult, error) {
+	now := s.clock()
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return PumpResult{}, err
+	}
+	obs, err := s.observe(ctx, slot.Repo, slot.PR, &slot, now)
+	if err != nil {
+		return PumpResult{}, err
+	}
+	s.selfHealCodex(ctx, slot, obs.eng, now)
+	tr := engine.Progress(slot, st.Account, obs.eng, now, s.policy())
+	if tr.Outcome == engine.KeepWaiting {
+		return PumpResult{Action: "waiting", Repo: slot.Repo, PR: slot.PR, Reason: tr.Reason}, nil
+	}
+	if s.cfg.DryRun {
+		return slotResult(slot, tr), nil
+	}
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		r := st.Round(slot.Repo, slot.PR)
+		if r == nil || st.FireSlot == nil || st.FireSlot.Token != slot.Token {
 			return ErrNoChange
 		}
-		q := st.SortedQueue()
-		if len(q) == 0 || q[0].Seq != item.Seq {
+		return s.applyTransition(st, r, tr, now)
+	})
+	if err != nil {
+		return PumpResult{}, err
+	}
+	s.sync(ctx, updated)
+	if s.log != nil && (tr.Outcome == engine.OutRetry || tr.Outcome == engine.OutReleaseSlot) {
+		blockedUntil := "-"
+		if updated.Account.BlockedUntil != nil {
+			blockedUntil = updated.Account.BlockedUntil.UTC().Format(time.RFC3339)
+		}
+		s.log.Printf("requeue %s@%s reason=%q blocked_until=%s", QueueKey(slot.Repo, slot.PR), slot.Head, tr.Reason, blockedUntil)
+	}
+	return slotResult(slot, tr), nil
+}
+
+// applyTransition applies a fired/reviewing round's engine Transition to state:
+// the round transition plus any fire-slot release and account-quota block.
+func (s *Service) applyTransition(st *State, r *Round, tr engine.Transition, now time.Time) error {
+	key := QueueKey(r.Repo, r.PR)
+	switch tr.Outcome {
+	case engine.OutComplete:
+		if err := r.Complete(); err != nil {
+			return err
+		}
+	case engine.OutReviewing:
+		if err := r.Acknowledge(); err != nil {
+			return err
+		}
+	case engine.OutRetry:
+		if tr.Blocked != nil {
+			applyAccountBlock(st, tr.Blocked, now)
+		}
+		if err := r.AwaitRetry(tr.RetryAt, tr.Reason, now); err != nil {
+			return err
+		}
+	case engine.OutReleaseSlot:
+		if err := r.ReleaseToQueue(tr.Reason, now); err != nil {
+			return err
+		}
+	case engine.OutAbandon:
+		st.EndRound(r.Repo, r.PR, tr.Reason)
+		releaseSlot(st, key)
+		return nil
+	default:
+		return nil
+	}
+	st.PutRound(*r)
+	releaseSlot(st, key)
+	return nil
+}
+
+// releaseSlot clears the fire slot when it points at key.
+func releaseSlot(st *State, key string) {
+	if st.FireSlot != nil && st.FireSlot.Key == key {
+		st.FireSlot = nil
+	}
+}
+
+// sameRound reports whether the stored round r is still the one that was
+// observed — same Seq and Head. Every CAS mutation guards on it so a concurrent
+// supersede (which archives the old round and creates a fresh one with a new Seq)
+// between observe and write reads as a benign lost race rather than a mutation of
+// the wrong round.
+func sameRound(r *Round, want Round) bool {
+	return r != nil && r.Seq == want.Seq && r.Head == want.Head
+}
+
+// applyAccountBlock ports requeueInflight's account-quota bookkeeping. The window
+// (including same-comment reuse) was resolved by the engine, so only the store
+// write happens here.
+func applyAccountBlock(st *State, blk *engine.AccountBlock, now time.Time) {
+	until := blk.Until.UTC()
+	zero := 0
+	st.Account.BlockedUntil = &until
+	st.Account.Remaining = &zero
+	st.Account.Source = "warning"
+	st.Account.CheckedAt = &now
+	if blk.CommentID != 0 {
+		st.Account.RLCommentID = blk.CommentID
+		u := blk.CommentUpdated.UTC()
+		st.Account.RLCommentUpdated = &u
+	}
+	st.Warn = ""
+}
+
+func slotResult(slot Round, tr engine.Transition) PumpResult {
+	r := PumpResult{Repo: slot.Repo, PR: slot.PR, Head: slot.Head, Reason: tr.Reason}
+	switch tr.Outcome {
+	case engine.OutComplete, engine.OutReviewing:
+		r.Action = "cleared"
+	case engine.OutRetry, engine.OutReleaseSlot:
+		r.Action = "requeued"
+	case engine.OutAbandon:
+		r.Action = "cleared"
+	default:
+		r.Action = "waiting"
+	}
+	return r
+}
+
+// sweepReviewing progresses the oldest fired/reviewing round that is not holding
+// the fire slot, so a round whose slot was released on a bot ack still reaches
+// completion (or parks) without a Loop running. Bounded to one per pump.
+func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (State, error) {
+	if s.cfg.DryRun {
+		return st, nil
+	}
+	var target *Round
+	for key := range st.Rounds {
+		r := st.Rounds[key]
+		if r.Phase != PhaseFired && r.Phase != PhaseReviewing {
+			continue
+		}
+		if target == nil || firedOrEnqueuedAt(r).Before(firedOrEnqueuedAt(*target)) {
+			c := r
+			target = &c
+		}
+	}
+	if target == nil {
+		return st, nil
+	}
+	obs, err := s.observe(ctx, target.Repo, target.PR, target, now)
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("warning: reviewing-round sweep for %s#%d failed: %v", target.Repo, target.PR, err)
+		}
+		return st, nil
+	}
+	s.selfHealCodex(ctx, *target, obs.eng, now)
+	tr := engine.Progress(*target, st.Account, obs.eng, now, s.policy())
+	if tr.Outcome == engine.KeepWaiting {
+		return st, nil
+	}
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		r := st.Round(target.Repo, target.PR)
+		// Guard on round identity: a supersede/cancel-and-re-enqueue between observe
+		// and this CAS could otherwise apply the old head's Progress to a replacement
+		// round for a newer head, deduping or cooling it on stale observations.
+		if r == nil || !sameRound(r, *target) || (r.Phase != PhaseFired && r.Phase != PhaseReviewing) {
 			return ErrNoChange
 		}
-		removeQueued(st, item.Seq)
-		st.InFlight = &InFlight{
-			Seq:        item.Seq,
-			Repo:       item.Repo,
-			PR:         item.PR,
-			Head:       head,
-			Token:      token,
-			Phase:      "reserved",
-			ReservedAt: now,
-			ByHost:     s.cfg.Host,
+		return s.applyTransition(st, r, tr, now)
+	})
+	if err != nil {
+		return st, err
+	}
+	s.sync(ctx, updated)
+	return updated, nil
+}
+
+func firedOrEnqueuedAt(r Round) time.Time {
+	if r.FiredAt != nil {
+		return *r.FiredAt
+	}
+	return r.EnqueuedAt
+}
+
+// applyFire executes a DecideFire verdict.
+func (s *Service) applyFire(ctx context.Context, round Round, obs engine.Observation, d engine.FireDecision, now time.Time) (PumpResult, error) {
+	switch d.Verdict {
+	case engine.FireDrop:
+		return s.abandonRound(ctx, round, "pr closed", "skipped")
+	case engine.FireDedupe:
+		return s.dedupeRound(ctx, round, now, d.Reason)
+	case engine.FireCodexOnly:
+		return s.fireCodexOnly(ctx, round, d.Reason, now)
+	case engine.FireCoReviewWait:
+		return s.fireCoReviewWait(ctx, round, obs, d.Reason, now)
+	case engine.FireSupersede:
+		return s.supersedeRound(ctx, round, obs.Head, now)
+	case engine.FireAdopt:
+		return s.fireRound(ctx, round, obs, false, d.AdoptCommandID, d.AdoptAt, d.Reason, d.PostCodex, now)
+	case engine.FirePost:
+		return s.fireRound(ctx, round, obs, true, 0, time.Time{}, "", d.PostCodex, now)
+	default: // FireNo
+		return PumpResult{Action: mapFireNo(d.Reason), Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: d.Reason}, nil
+	}
+}
+
+func mapFireNo(reason string) string {
+	switch {
+	case strings.Contains(reason, "could not read head"):
+		return "skipped"
+	case strings.Contains(reason, "min interval"):
+		return "min_interval"
+	case strings.Contains(reason, "account blocked"):
+		return "blocked"
+	case strings.Contains(reason, "fire slot busy"):
+		return "lost_race"
+	default:
+		return "waiting"
+	}
+}
+
+// abandonRound ends a round (closed/merged PR) without consuming review
+// readiness. The identity guard makes a concurrent cancel or supersede between
+// observe and write a benign lost race, never an abandon of a replacement round.
+func (s *Service) abandonRound(ctx context.Context, round Round, reason, action string) (PumpResult, error) {
+	result := PumpResult{Action: action, Repo: round.Repo, PR: round.PR, Reason: reason}
+	if s.cfg.DryRun {
+		return result, nil
+	}
+	ended := false
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		if !sameRound(st.Round(round.Repo, round.PR), round) {
+			return ErrNoChange
 		}
+		st.EndRound(round.Repo, round.PR, reason)
+		releaseSlot(st, QueueKey(round.Repo, round.PR))
+		ended = true
 		return nil
 	})
 	if err != nil {
 		return PumpResult{}, err
 	}
-	s.sync(ctx, reserved)
-	if reserved.InFlight == nil || reserved.InFlight.Token != token {
-		return PumpResult{Action: "lost_race"}, nil
-	}
-	comment, err := s.gh.PostIssueComment(ctx, item.Repo, item.PR, s.cfg.ReviewCommand)
-	if err != nil {
-		updated, uerr := s.store.Update(ctx, func(st *State) error {
-			if st.InFlight == nil || st.InFlight.Token != token {
-				return nil
-			}
-			st.Queue = append(st.Queue, item)
-			st.InFlight = nil
-			st.Warn = "failed to post review command: " + err.Error()
-			return nil
-		})
-		if uerr == nil {
-			s.sync(ctx, updated)
-		}
-		return PumpResult{Action: "post_failed", Repo: item.Repo, PR: item.PR, Head: head, Reason: err.Error()}, err
-	}
-	// Baseline completion detection on the trigger comment's GitHub timestamp, not a
-	// local clock that may run ahead of GitHub's: a completion landing in the same
-	// second (or before a fast local clock) would otherwise fail the strict After
-	// check in inflightStatus and get missed, refiring a duplicate review.
-	firedAt := comment.CreatedAt.UTC()
-	if firedAt.IsZero() {
-		firedAt = time.Now().UTC()
-	}
-	updated, err := s.markReviewPosted(ctx, token, item, head, comment.ID, firedAt)
-	if err != nil {
-		retryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		updated, err = s.markReviewPosted(retryCtx, token, item, head, comment.ID, firedAt)
-		if err != nil {
-			if errors.Is(err, ErrNoChange) {
-				return PumpResult{Action: "lost_race"}, nil
-			}
-			return PumpResult{}, err
-		}
-	}
-	s.sync(ctx, updated)
-	if s.log != nil {
-		s.log.Printf("fire %s@%s (posted %s)", key, head, strings.TrimSpace(s.cfg.ReviewCommand))
-	}
-	return PumpResult{Action: "fired", Repo: item.Repo, PR: item.PR, Head: head}, nil
-}
-
-// dropClosedQueueItem removes a closed or merged queue entry without consuming
-// review readiness. The sequence check makes a concurrent cancel/pump a benign
-// lost race instead of writing a no-op state revision.
-func (s *Service) dropClosedQueueItem(ctx context.Context, item QueueItem) (PumpResult, error) {
-	result := PumpResult{Action: "skipped", Repo: item.Repo, PR: item.PR, Reason: "pr closed"}
-	if s.cfg.DryRun {
-		return result, nil
-	}
-	removed := false
-	updated, err := s.store.Update(ctx, func(st *State) error {
-		removed = false
-		for _, queued := range st.Queue {
-			if queued.Seq == item.Seq {
-				removeQueued(st, item.Seq)
-				removed = true
-				return nil
-			}
-		}
-		return ErrNoChange
-	})
-	if err != nil {
-		return PumpResult{}, err
-	}
-	if !removed {
+	if !ended {
 		return PumpResult{Action: "lost_race"}, nil
 	}
 	s.sync(ctx, updated)
 	return result, nil
 }
 
-func (s *Service) markReviewPosted(ctx context.Context, token string, item QueueItem, head string, commentID int64, firedAt time.Time) (State, error) {
-	key := QueueKey(item.Repo, item.PR)
-	recorded := false
-	state, err := s.store.Update(ctx, func(st *State) error {
-		recorded = false
-		if st.InFlight == nil || st.InFlight.Token != token {
+// dedupeRound completes a not-yet-fired round because the bot already reviewed
+// its head, leaving the completed round as the dedupe marker (v2's Fired[key]).
+func (s *Service) dedupeRound(ctx context.Context, round Round, now time.Time, reason string) (PumpResult, error) {
+	result := PumpResult{Action: "deduped", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}
+	if s.cfg.DryRun {
+		return result, nil
+	}
+	deduped := false
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		deduped = false
+		r := st.Round(round.Repo, round.PR)
+		if !sameRound(r, round) || !r.FireEligible(now) {
 			return ErrNoChange
 		}
-		recorded = true
-		st.InFlight.Phase = "posted"
-		st.InFlight.FiredAt = &firedAt
-		st.InFlight.FiredCommentID = commentID
-		st.LastFired = &firedAt
-		st.Warn = ""
-		st.Fired[key] = head
-		if st.AwaitingFeedback == nil {
-			st.AwaitingFeedback = map[string]FeedbackWait{}
+		if err := r.Dedupe(now); err != nil {
+			return err
 		}
-		st.AwaitingFeedback[key] = s.newFeedbackWait(item.Repo, item.PR, head, firedAt, commentID)
-		st.History = append([]HistoryItem{{
-			Repo:   item.Repo,
-			PR:     item.PR,
-			Commit: head,
-			At:     firedAt,
-			Host:   s.cfg.Host,
-		}}, st.History...)
-		if len(st.History) > 20 {
-			st.History = st.History[:20]
-		}
+		st.PutRound(*r)
+		deduped = true
 		return nil
 	})
+	if err != nil {
+		return PumpResult{}, err
+	}
+	if !deduped {
+		return PumpResult{Action: "lost_race"}, nil
+	}
+	s.sync(ctx, updated)
+	return result, nil
+}
+
+// supersedeRound retargets a queued round whose live head moved since it was
+// enqueued; the fresh round fires on a later pump.
+func (s *Service) supersedeRound(ctx context.Context, round Round, head string, now time.Time) (PumpResult, error) {
+	result := PumpResult{Action: "requeued", Repo: round.Repo, PR: round.PR, Head: head, Reason: "head moved"}
+	if s.cfg.DryRun || head == "" {
+		result.Action = "skipped"
+		return result, nil
+	}
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		if !sameRound(st.Round(round.Repo, round.PR), round) {
+			return ErrNoChange
+		}
+		_, err := st.Supersede(round.Repo, round.PR, head, now)
+		return err
+	})
+	if err != nil {
+		return PumpResult{}, err
+	}
+	s.sync(ctx, updated)
+	return result, nil
+}
+
+// fireRound posts (or adopts) the review command and records the fire on the
+// round, reserving the global slot under compare-and-swap. When postCodex, it
+// also posts the Codex review command alongside (non-fatal on failure — the
+// self-heal path retries).
+func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observation, post bool, adoptID int64, adoptAt time.Time, reason string, postCodex bool, now time.Time) (PumpResult, error) {
+	key := QueueKey(round.Repo, round.PR)
+	if s.cfg.DryRun {
+		return PumpResult{Action: "dry_run", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}, nil
+	}
+	token := randomToken()
+
+	if !post {
+		// Adopt an already-posted command: reserve the slot and record the fire in
+		// one write (no network post in between).
+		firedAt := adoptAt.UTC()
+		if firedAt.IsZero() {
+			firedAt = now
+		}
+		recorded := false
+		updated, err := s.store.Update(ctx, func(st *State) error {
+			recorded = false
+			if st.FireSlot != nil {
+				return ErrNoChange
+			}
+			r := st.Round(round.Repo, round.PR)
+			if !sameRound(r, round) || !r.FireEligible(now) {
+				return ErrNoChange
+			}
+			if err := r.Reserve(token, s.cfg.Host, now); err != nil {
+				return err
+			}
+			if err := r.Fire(adoptID, firedAt); err != nil {
+				return err
+			}
+			lf := firedAt
+			st.LastFired = &lf
+			dl := firedAt.Add(s.cfg.FeedbackWaitTimeout)
+			r.WaitDeadline = &dl
+			st.Warn = ""
+			st.FireSlot = &FireSlot{Key: key, Token: token, Since: now}
+			// Claim the Codex post in the SAME write: the fired state must never be
+			// visible with CodexCommandID == 0 and no claim, or another daemon can
+			// self-heal-post in the gap before fireCodexReview below runs.
+			if postCodex {
+				t := now.UTC()
+				r.CodexClaimedAt = &t
+			} else if id := newestCommandID(obs.CodexCommands); id != 0 && r.CodexCommandID == 0 {
+				// Not posting because a live `@codex review` command already answers
+				// this head — record its id now. The self-heal scan anchors on FiredAt
+				// and would miss a command posted before the adopted CodeRabbit command,
+				// posting a duplicate; recording it here keeps the round "asked".
+				r.CodexCommandID = id
+			}
+			st.PutRound(*r)
+			recorded = true
+			return nil
+		})
+		if err != nil {
+			return PumpResult{}, err
+		}
+		if !recorded {
+			return PumpResult{Action: "lost_race"}, nil
+		}
+		s.sync(ctx, updated)
+		if s.log != nil {
+			s.log.Printf("fire %s@%s (adopted existing review command)", key, round.Head)
+		}
+		if postCodex {
+			s.fireCodexReview(ctx, round)
+		}
+		return PumpResult{Action: "fired", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}, nil
+	}
+
+	// Reserve the slot, then post the command.
+	reserved, err := s.store.Update(ctx, func(st *State) error {
+		if st.FireSlot != nil {
+			return ErrNoChange
+		}
+		r := st.Round(round.Repo, round.PR)
+		if !sameRound(r, round) || !r.FireEligible(now) {
+			return ErrNoChange
+		}
+		if err := r.Reserve(token, s.cfg.Host, now); err != nil {
+			return err
+		}
+		st.FireSlot = &FireSlot{Key: key, Token: token, Since: now}
+		st.PutRound(*r)
+		return nil
+	})
+	if err != nil {
+		return PumpResult{}, err
+	}
+	if reserved.FireSlot == nil || reserved.FireSlot.Token != token {
+		return PumpResult{Action: "lost_race"}, nil
+	}
+	s.sync(ctx, reserved)
+
+	comment, err := s.gh.PostIssueComment(ctx, round.Repo, round.PR, s.cfg.ReviewCommand)
+	if err != nil {
+		updated, uerr := s.store.Update(ctx, func(st *State) error {
+			r := st.Round(round.Repo, round.PR)
+			if r == nil || r.Token != token {
+				return ErrNoChange
+			}
+			if rerr := r.AwaitRetry(now.Add(postFailureBackoff), "failed to post review command: "+err.Error(), now); rerr != nil {
+				return rerr
+			}
+			releaseSlot(st, key)
+			st.Warn = "failed to post review command: " + err.Error()
+			st.PutRound(*r)
+			return nil
+		})
+		if uerr == nil {
+			s.sync(ctx, updated)
+		}
+		return PumpResult{Action: "post_failed", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: err.Error()}, err
+	}
+	// Baseline the fire on the comment's GitHub timestamp, not a local clock that
+	// may run ahead of GitHub's — a completion landing in the same second must
+	// still count against a strict After check.
+	firedAt := comment.CreatedAt.UTC()
+	if firedAt.IsZero() {
+		firedAt = now
+	}
+	// Post the Codex command before recording so its id lands in the same fire
+	// write. A failed post returns 0 (logged) and the self-heal path retries.
+	var codexID int64
+	if postCodex {
+		codexID = s.postCodexReviewComment(ctx, round)
+	}
+	updated, err := s.recordFire(ctx, round, token, comment.ID, codexID, firedAt, now)
+	if err != nil {
+		if errors.Is(err, ErrNoChange) {
+			return PumpResult{Action: "lost_race"}, nil
+		}
+		return PumpResult{}, err
+	}
+	s.sync(ctx, updated)
+	if s.log != nil {
+		s.log.Printf("fire %s@%s (posted %s)", key, round.Head, strings.TrimSpace(s.cfg.ReviewCommand))
+	}
+	return PumpResult{Action: "fired", Repo: round.Repo, PR: round.PR, Head: round.Head}, nil
+}
+
+// fireCodexOnly handles a round where CodeRabbit already reviewed the head but a
+// required Codex has not: it reserves the slot, posts ONLY the Codex command, and
+// records the round as fired with that comment as both the CommandID anchor and
+// the CodexCommandID. Completion already counts the existing CodeRabbit review, so
+// the round then waits on Codex alone — no `@coderabbitai review` is ever posted.
+func (s *Service) fireCodexOnly(ctx context.Context, round Round, reason string, now time.Time) (PumpResult, error) {
+	key := QueueKey(round.Repo, round.PR)
+	if s.cfg.DryRun {
+		return PumpResult{Action: "dry_run", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}, nil
+	}
+	token := randomToken()
+
+	reserved, err := s.store.Update(ctx, func(st *State) error {
+		if st.FireSlot != nil {
+			return ErrNoChange
+		}
+		r := st.Round(round.Repo, round.PR)
+		if !sameRound(r, round) || !r.FireEligible(now) {
+			return ErrNoChange
+		}
+		if err := r.Reserve(token, s.cfg.Host, now); err != nil {
+			return err
+		}
+		st.FireSlot = &FireSlot{Key: key, Token: token, Since: now}
+		st.PutRound(*r)
+		return nil
+	})
+	if err != nil {
+		return PumpResult{}, err
+	}
+	if reserved.FireSlot == nil || reserved.FireSlot.Token != token {
+		return PumpResult{Action: "lost_race"}, nil
+	}
+	s.sync(ctx, reserved)
+
+	comment, err := s.gh.PostIssueComment(ctx, round.Repo, round.PR, s.cfg.CodexCommand)
+	if err != nil {
+		updated, uerr := s.store.Update(ctx, func(st *State) error {
+			r := st.Round(round.Repo, round.PR)
+			if r == nil || r.Token != token {
+				return ErrNoChange
+			}
+			if rerr := r.AwaitRetry(now.Add(postFailureBackoff), "failed to post codex review command: "+err.Error(), now); rerr != nil {
+				return rerr
+			}
+			releaseSlot(st, key)
+			st.Warn = "failed to post codex review command: " + err.Error()
+			st.PutRound(*r)
+			return nil
+		})
+		if uerr == nil {
+			s.sync(ctx, updated)
+		}
+		return PumpResult{Action: "post_failed", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: err.Error()}, err
+	}
+	firedAt := comment.CreatedAt.UTC()
+	if firedAt.IsZero() {
+		firedAt = now
+	}
+	// The Codex comment anchors the round both as its fired command and as the
+	// recorded Codex command, so self-heal will not re-post it.
+	updated, err := s.recordFire(ctx, round, token, comment.ID, comment.ID, firedAt, now)
+	if err != nil {
+		if errors.Is(err, ErrNoChange) {
+			return PumpResult{Action: "lost_race"}, nil
+		}
+		return PumpResult{}, err
+	}
+	s.sync(ctx, updated)
+	if s.log != nil {
+		s.log.Printf("fire %s@%s (coderabbit already reviewed; posted %s)", key, round.Head, strings.TrimSpace(s.cfg.CodexCommand))
+	}
+	return PumpResult{Action: "fired", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}, nil
+}
+
+// newestCommandID returns the id of the most recently created adoptable command,
+// or 0 when there are none.
+func newestCommandID(cmds []engine.CommandSeen) int64 {
+	var best engine.CommandSeen
+	for _, c := range cmds {
+		if best.ID == 0 || c.CreatedAt.After(best.CreatedAt) {
+			best = c
+		}
+	}
+	return best.ID
+}
+
+// fireCoReviewWait bounds a co-review wait: CodeRabbit already reviewed the head
+// but a gating Codex has not yet, and crq must not post (Codex auto-reviews, or a
+// command is already outstanding). Leaving the round queued with no WaitDeadline
+// is the hang — Wait then loops forever. Park it in reviewing with a WaitDeadline
+// instead: no slot is reserved and no command is posted. An existing `@codex
+// review` command on the PR is adopted as the round's CodexCommandID so the
+// self-heal path (which anchors on the round's fire time, later than a pre-existing
+// command) does not re-post it.
+func (s *Service) fireCoReviewWait(ctx context.Context, round Round, obs engine.Observation, reason string, now time.Time) (PumpResult, error) {
+	result := PumpResult{Action: "waiting", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}
+	if s.cfg.DryRun {
+		return result, nil
+	}
+	codexID := newestCommandID(obs.CodexCommands)
+	// The anchor is the wait's evidence floor. Prefer the adopted command's
+	// time; with no command (auto-review) fall back to the primary bot's head
+	// review — a SHA-less legacy clean summary posted after either must count,
+	// or an answer that already exists is hidden until the deadline.
+	anchor := now
+	for _, rv := range obs.Reviews {
+		if isConfiguredBotLogin(s.cfg.Bot, rv.Bot) && rv.Commit != "" && strings.HasPrefix(rv.Commit, round.Head) &&
+			!rv.SubmittedAt.IsZero() && rv.SubmittedAt.Before(anchor) {
+			anchor = rv.SubmittedAt
+		}
+	}
+	for _, c := range obs.CodexCommands {
+		if c.ID == codexID && !c.CreatedAt.IsZero() {
+			anchor = c.CreatedAt
+		}
+	}
+	changed := false
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		changed = false
+		r := st.Round(round.Repo, round.PR)
+		if !sameRound(r, round) || !r.FireEligible(now) {
+			return ErrNoChange
+		}
+		deadline := now.Add(s.cfg.FeedbackWaitTimeout)
+		if err := r.AwaitCoReview(deadline, anchor); err != nil {
+			return err
+		}
+		if r.CodexCommandID == 0 && codexID != 0 {
+			r.CodexCommandID = codexID
+		}
+		st.PutRound(*r)
+		changed = true
+		return nil
+	})
+	if err != nil {
+		return PumpResult{}, err
+	}
+	if !changed {
+		return PumpResult{Action: "lost_race"}, nil
+	}
+	s.sync(ctx, updated)
+	return result, nil
+}
+
+// recordFire records the posted command on the reserved round, with a 30s retry
+// on a transient state-write failure so a fired command is never lost. codexID
+// is the Codex command comment posted alongside (0 when none), recorded in the
+// same write.
+func (s *Service) recordFire(ctx context.Context, round Round, token string, commandID, codexID int64, firedAt, now time.Time) (State, error) {
+	record := func(c context.Context) (State, bool, error) {
+		recorded := false
+		st, err := s.store.Update(c, func(st *State) error {
+			recorded = false
+			r := st.Round(round.Repo, round.PR)
+			if !sameRound(r, round) || st.FireSlot == nil || st.FireSlot.Token != token || r.Token != token {
+				return ErrNoChange
+			}
+			if err := r.Fire(commandID, firedAt); err != nil {
+				return err
+			}
+			if codexID != 0 {
+				r.CodexCommandID = codexID
+			}
+			lf := firedAt
+			st.LastFired = &lf
+			dl := firedAt.Add(s.cfg.FeedbackWaitTimeout)
+			r.WaitDeadline = &dl
+			st.Warn = ""
+			st.PutRound(*r)
+			recorded = true
+			return nil
+		})
+		return st, recorded, err
+	}
+	st, recorded, err := record(ctx)
+	if err != nil {
+		retryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		st, recorded, err = record(retryCtx)
+	}
 	if err != nil {
 		return State{}, err
 	}
 	if !recorded {
-		return state, ErrNoChange
+		return st, ErrNoChange
 	}
-	return state, nil
+	return st, nil
 }
 
-// existingReviewCommand looks for a review command already posted at the PR's
-// current head so Pump can adopt it instead of posting a duplicate. notBefore
-// bounds adoption: comments created before it (e.g. the stale command left
-// behind by a requeued fire) are never adopted — re-adopting one would replay
-// the very rate-limit reply or timeout that caused the requeue, looping forever
-// without ever posting a fresh command.
-func (s *Service) existingReviewCommand(ctx context.Context, repo string, pr int, expectedHead string, notBefore time.Time) (IssueComment, bool, error) {
-	comments, err := s.gh.ListIssueComments(ctx, repo, pr)
+// postCodexReviewComment posts the Codex review command and returns its comment
+// id, or 0 on failure. A failed post is non-fatal: it logs and leaves
+// CodexCommandID unset so a later pump's self-heal retries. The fresh-fire path
+// folds the returned id into recordFire's write.
+func (s *Service) postCodexReviewComment(ctx context.Context, round Round) int64 {
+	comment, err := s.gh.PostIssueComment(ctx, round.Repo, round.PR, s.cfg.CodexCommand)
 	if err != nil {
-		return IssueComment{}, false, err
-	}
-	command := strings.TrimSpace(s.cfg.ReviewCommand)
-	if command == "" {
-		return IssueComment{}, false, nil
-	}
-	// The head-guard and cutoff lookups below cost REST/GraphQL calls; in the
-	// common case — no command comment on the PR at all — skip them entirely.
-	hasCandidate := false
-	for _, comment := range comments {
-		if strings.TrimSpace(comment.Body) == command {
-			hasCandidate = true
-			break
+		if s.log != nil {
+			s.log.Printf("warning: Codex review command post failed for %s@%s: %v (will retry on a later pump)", QueueKey(round.Repo, round.PR), round.Head, err)
 		}
+		return 0
 	}
-	if !hasCandidate {
-		return IssueComment{}, false, nil
+	if s.log != nil {
+		s.log.Printf("fire %s@%s (posted %s)", QueueKey(round.Repo, round.PR), round.Head, strings.TrimSpace(s.cfg.CodexCommand))
 	}
-	cutoff := notBefore
-	pull, err := s.gh.GetPull(ctx, repo, pr)
-	if err != nil {
-		return IssueComment{}, false, err
-	}
-	if pull.Head.SHA != "" {
-		if shortOID(pull.Head.SHA) != expectedHead {
-			return IssueComment{}, false, nil
-		}
-		commit, err := s.gh.GetCommit(ctx, repo, pull.Head.SHA)
-		if err != nil {
-			if _, ok := rateLimitWait(err); ok {
-				return IssueComment{}, false, err
-			}
-			// No head-commit cutoff available (e.g. an unreadable or 404 head):
-			// skip adoption rather than wedging the queue on this PR — the worst
-			// case is posting a command that already exists, which is exactly the
-			// pre-adoption behavior.
-			return IssueComment{}, false, nil
-		}
-		if commit.Committer.Date.After(cutoff) {
-			cutoff = commit.Committer.Date
-		}
-	}
-	// A force-push can point the PR at a commit object whose committer date
-	// predates commands made for an earlier head, so the commit date alone
-	// is not a safe cutoff — any command older than the last force-push
-	// belongs to a previous head and must not be adopted.
-	if fp := s.headForcePushCutoff(ctx, repo, pr); fp.After(cutoff) {
-		cutoff = fp
-	}
-	var best IssueComment
-	var bestAt time.Time
-	ok := false
-	for _, comment := range comments {
-		if strings.TrimSpace(comment.Body) != command {
-			continue
-		}
-		when := comment.CreatedAt
-		if when.IsZero() {
-			when = comment.UpdatedAt
-		}
-		if !cutoff.IsZero() && when.Before(cutoff) {
-			continue
-		}
-		if !ok || when.After(bestAt) {
-			best = comment
-			bestAt = when
-			ok = true
-		}
-	}
-	if !ok {
-		return IssueComment{}, false, nil
-	}
-	// A command the bot has already answered with a review belongs to a
-	// completed round for an earlier head. No cutoff can prove this case away:
-	// a regular push has no timestamped head-update event, and the new head's
-	// committer date can predate an old command (a local commit pushed later).
-	// Adopting a consumed command would mark the new head fired without ever
-	// reviewing it — skip adoption instead; the worst case is a duplicate
-	// command, the pre-adoption behavior.
-	reviews, err := s.gh.ListReviews(ctx, repo, pr)
-	if err != nil {
-		if _, ok := rateLimitWait(err); ok {
-			return IssueComment{}, false, err
-		}
-		return IssueComment{}, false, nil
-	}
-	for _, review := range reviews {
-		if s.isConfiguredBot(review.User.Login) && !review.SubmittedAt.Before(bestAt) {
-			return IssueComment{}, false, nil
-		}
-	}
-	if s.reviewCommandHasCompletionReply(comments, reviews, best.ID) {
-		return IssueComment{}, false, nil
-	}
-	return best, ok, nil
+	return comment.ID
 }
 
-// headForcePushCutoff returns when the PR head was last force-pushed, zero if
-// unknown or never. Best-effort: on GraphQL failure adoption falls back to the
-// commit-date cutoff rather than blocking the pump.
-func (s *Service) headForcePushCutoff(ctx context.Context, repo string, pr int) time.Time {
-	owner, name, found := strings.Cut(repo, "/")
-	if !found {
-		return time.Time{}
+// fireCodexReview posts the Codex review command for an already-fired round and
+// records its id under CAS. It is used by the adopt fire path and the self-heal
+// retry (the fresh-post path records the id inside recordFire instead). The CAS
+// guard (same head, CodexCommandID still unset) makes a concurrent post benign.
+func (s *Service) fireCodexReview(ctx context.Context, round Round) {
+	codexID := s.postCodexReviewComment(ctx, round)
+	if codexID == 0 {
+		// Failed post: KEEP the claim — its TTL is the retry backoff. Clearing it
+		// here would let the very next pump repost, bypassing codexClaimTTL.
+		return
 	}
-	var result struct {
-		Repository struct {
-			PullRequest struct {
-				TimelineItems struct {
-					Nodes []struct {
-						CreatedAt time.Time `json:"createdAt"`
-					} `json:"nodes"`
-				} `json:"timelineItems"`
-			} `json:"pullRequest"`
-		} `json:"repository"`
-	}
-	query := `query($owner:String!, $name:String!, $number:Int!) {
-  repository(owner:$owner, name:$name) {
-    pullRequest(number:$number) {
-      timelineItems(itemTypes: HEAD_REF_FORCE_PUSHED_EVENT, last: 1) {
-        nodes { ... on HeadRefForcePushedEvent { createdAt } }
-      }
-    }
-  }
-}`
-	if err := s.gh.GraphQL(ctx, query, map[string]any{"owner": owner, "name": name, "number": pr}, &result); err != nil {
-		return time.Time{}
-	}
-	nodes := result.Repository.PullRequest.TimelineItems.Nodes
-	if len(nodes) == 0 {
-		return time.Time{}
-	}
-	return nodes[len(nodes)-1].CreatedAt.UTC()
-}
-
-func (s *Service) recordExistingReviewPosted(ctx context.Context, item QueueItem, head string, commentID int64, firedAt time.Time) (State, error) {
-	key := QueueKey(item.Repo, item.PR)
-	recorded := false
-	state, err := s.store.Update(ctx, func(st *State) error {
-		recorded = false
-		if st.InFlight != nil {
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		r := st.Round(round.Repo, round.PR)
+		// Identity guard: a same-head replacement round (new Seq) must not
+		// inherit this post's result.
+		if !sameRound(r, round) {
 			return ErrNoChange
 		}
-		q := st.SortedQueue()
-		if len(q) == 0 || q[0].Seq != item.Seq {
-			return ErrNoChange
+		r.CodexClaimedAt = nil
+		if r.CodexCommandID == 0 {
+			r.CodexCommandID = codexID
 		}
-		recorded = true
-		removeQueued(st, item.Seq)
-		st.InFlight = &InFlight{
-			Seq:            item.Seq,
-			Repo:           item.Repo,
-			PR:             item.PR,
-			Head:           head,
-			Token:          randomToken(),
-			Phase:          "posted",
-			ReservedAt:     firedAt,
-			FiredAt:        &firedAt,
-			FiredCommentID: commentID,
-			ByHost:         firstNonEmpty(item.Host, s.cfg.Host),
-		}
-		st.LastFired = &firedAt
-		st.Warn = ""
-		st.Fired[key] = head
-		if st.AwaitingFeedback == nil {
-			st.AwaitingFeedback = map[string]FeedbackWait{}
-		}
-		st.AwaitingFeedback[key] = s.newFeedbackWait(item.Repo, item.PR, head, firedAt, commentID)
-		st.History = append([]HistoryItem{{
-			Repo:   item.Repo,
-			PR:     item.PR,
-			Commit: head,
-			At:     firedAt,
-			Host:   firstNonEmpty(item.Host, s.cfg.Host),
-		}}, st.History...)
-		if len(st.History) > 20 {
-			st.History = st.History[:20]
-		}
+		st.PutRound(*r)
 		return nil
 	})
 	if err != nil {
-		return State{}, err
+		if s.log != nil && !errors.Is(err, ErrNoChange) {
+			s.log.Printf("warning: failed to record Codex command %d for %s: %v", codexID, QueueKey(round.Repo, round.PR), err)
+		}
+		return
 	}
-	if !recorded {
-		return state, ErrNoChange
-	}
-	return state, nil
+	s.sync(ctx, updated)
 }
 
-func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, int, error) {
-	repo = NormalizeRepo(repo)
-	start := time.Now()
-	enqueued := false
-	var lastLog time.Time
-	var lastFeedbackCheck time.Time
-	feedbackCheckEvery := queuedFeedbackCheckEvery(s.cfg.PollInterval)
-	for {
-		if s.cfg.WaitTimeout > 0 && time.Since(start) > s.cfg.WaitTimeout {
-			return PumpResult{Action: "timeout", Repo: repo, PR: pr}, 2, nil
-		}
-		if !enqueued {
-			result, err := s.Enqueue(ctx, repo, pr)
-			if err != nil {
-				return PumpResult{}, 1, err
-			}
-			enqueued = result.Queued || result.AlreadyQueued
-			if result.Deduped {
-				state, _, err := s.store.Load(ctx)
-				if err != nil {
-					return PumpResult{}, 1, err
-				}
-				key := QueueKey(repo, pr)
-				if state.AwaitingFeedback[key].Head == result.Head {
-					return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
-				}
-				report, err := s.Feedback(ctx, repo, pr)
-				if err != nil {
-					return PumpResult{}, 1, err
-				}
-				if len(findingsReportedOnHead(report.Findings, report.Head)) > 0 || allReviewed(report.ReviewedBy) {
-					return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
-				}
-				// Older versions could mark a head fired after mistaking carried-over
-				// review prompts or a faster non-required bot for completion. With no
-				// active wait or completed required-bot gate, remove that poisoned
-				// marker and enqueue the real replacement review.
-				updated, err := s.store.Update(ctx, func(st *State) error {
-					if st.Fired[key] != result.Head || st.AwaitingFeedback[key].Head == result.Head || st.Contains(repo, pr) {
-						return ErrNoChange
-					}
-					delete(st.Fired, key)
-					return nil
-				})
-				if err != nil {
-					return PumpResult{}, 1, err
-				}
-				s.sync(ctx, updated)
-				enqueued = false
-				continue
-			}
-		}
-		if lastFeedbackCheck.IsZero() || time.Since(lastFeedbackCheck) >= feedbackCheckEvery {
-			report, err := s.Feedback(ctx, repo, pr)
-			if err != nil {
-				return PumpResult{}, 1, err
-			}
-			lastFeedbackCheck = time.Now()
-			// Return current-head findings immediately so the caller can fix locally.
-			// The queue entry stays active: policy requires holding this head until the
-			// account slot and every required reviewer finish.
-			if len(findingsReportedOnHead(report.Findings, report.Head)) > 0 {
-				if s.log != nil {
-					s.log.Printf("%s#%d feedback already available on %s; leaving review slot wait", repo, pr, report.Head)
-				}
-				return PumpResult{
-					Action: "deduped",
-					Repo:   repo,
-					PR:     pr,
-					Head:   report.Head,
-					Reason: "feedback already available",
-				}, 3, nil
-			}
-		}
-		result, err := s.Pump(ctx)
-		if err != nil {
-			return PumpResult{}, 1, err
-		}
-		state, _, err := s.store.Load(ctx)
-		if err != nil {
-			return PumpResult{}, 1, err
-		}
-		if state.InFlight != nil && state.InFlight.Repo == repo && state.InFlight.PR == pr && state.InFlight.Phase == "posted" {
-			return PumpResult{Action: "fired", Repo: repo, PR: pr, Head: state.InFlight.Head}, 0, nil
-		}
-		if !state.Contains(repo, pr) {
-			head, open, herr := s.pullHead(ctx, repo, pr)
-			if herr == nil && !open {
-				// PR was closed/merged and dropped from the queue — nothing to review.
-				// Return a terminal result so crq loop stops instead of polling forever.
-				return PumpResult{Action: "skipped", Repo: repo, PR: pr, Reason: "pr closed"}, 2, nil
-			}
-			if herr == nil && head != "" && state.Fired[QueueKey(repo, pr)] == head {
-				return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: head}, 3, nil
-			}
-			if result.Action == "fired" && result.Repo == repo && result.PR == pr {
-				return result, 0, nil
-			}
-			enqueued = false
-			continue
-		}
-		if s.log != nil && time.Since(lastLog) >= 30*time.Second {
-			reason := result.Reason
-			if reason == "" {
-				reason = result.Action
-			}
-			s.log.Printf("%s#%d waiting for a review slot — %s (%s elapsed)", repo, pr, reason, time.Since(start).Round(time.Second))
-			lastLog = time.Now()
-		}
-		select {
-		case <-ctx.Done():
-			return PumpResult{}, 1, ctx.Err()
-		case <-time.After(s.cfg.PollInterval):
-		}
+// selfHealCodex re-posts the Codex review command for a fired/reviewing round
+// whose initial Codex post failed (CodexCommandID still 0). It runs on the
+// daemon's progress/sweep paths; idempotence comes from the observation — Codex
+// evidence, a live `@codex review` command, or an account that reviews on its
+// own all suppress it — not a retry counter.
+func (s *Service) selfHealCodex(ctx context.Context, round Round, obs engine.Observation, now time.Time) {
+	if s.cfg.DryRun || round.CodexCommandID != 0 || round.FiredAt == nil || obs.Head != round.Head {
+		return
 	}
+	commandPresent := engine.CodexCommandSince(obs, round.FiredAt.UTC())
+	if !engine.DecideCodexPost(round, obs, s.policy(), commandPresent) {
+		return
+	}
+	// Claim the post under CAS BEFORE the network call: this sweep path is not
+	// serialized by the fire slot, so two concurrent pumps observing
+	// CodexCommandID == 0 would otherwise both post. A claim older than
+	// codexClaimTTL is stale (the poster died mid-flight) and may be re-claimed.
+	claimed := false
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		r := st.Round(round.Repo, round.PR)
+		if !sameRound(r, round) || r.CodexCommandID != 0 {
+			return ErrNoChange
+		}
+		if r.CodexClaimedAt != nil && now.Sub(r.CodexClaimedAt.UTC()) < codexClaimTTL {
+			return ErrNoChange
+		}
+		t := now.UTC()
+		r.CodexClaimedAt = &t
+		st.PutRound(*r)
+		claimed = true
+		return nil
+	})
+	if err != nil || !claimed {
+		return
+	}
+	s.sync(ctx, updated)
+	s.fireCodexReview(ctx, round)
 }
 
-func queuedFeedbackCheckEvery(poll time.Duration) time.Duration {
-	if poll <= 0 {
-		return 30 * time.Second
-	}
-	if poll < 30*time.Second {
-		return poll
-	}
-	return 30 * time.Second
-}
+// codexClaimTTL bounds a Codex self-heal claim: past it, a claim whose poster
+// never recorded a command id is stale and the post may be retried.
+const codexClaimTTL = 2 * time.Minute
 
 func (s *Service) Cancel(ctx context.Context, repo string, pr int) error {
 	repo = NormalizeRepo(repo)
 	state, err := s.store.Update(ctx, func(st *State) error {
-		for i := 0; i < len(st.Queue); i++ {
-			if st.Queue[i].Repo == repo && st.Queue[i].PR == pr {
-				st.Queue = append(st.Queue[:i], st.Queue[i+1:]...)
-				i--
-			}
+		if st.Round(repo, pr) == nil {
+			return ErrNoChange
 		}
-		if st.InFlight != nil && st.InFlight.Repo == repo && st.InFlight.PR == pr {
-			st.InFlight = nil
-		}
-		delete(st.Fired, QueueKey(repo, pr))
-		delete(st.AwaitingFeedback, QueueKey(repo, pr))
+		st.EndRound(repo, pr, "cancelled")
+		releaseSlot(st, QueueKey(repo, pr))
 		return nil
 	})
 	if err != nil {
@@ -837,10 +1026,6 @@ func (s *Service) Status(ctx context.Context) (State, string, error) {
 	return state, renderDashboard(state, s.cfg), nil
 }
 
-// warnRateLimited is the inflight requeue reason for a rate-limited fire. It is
-// surfaced via the Blocked state, not the sticky Warn field.
-const warnRateLimited = "rate limited"
-
 func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 	state, _, err := s.store.Load(ctx)
 	if err != nil {
@@ -849,34 +1034,42 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 	if s.cfg.CalibrationPR <= 0 {
 		return state, nil
 	}
-	now := time.Now().UTC()
+	now := s.clock()
 	// Honor the freshness shortcut only when the last reading was conclusive. If a
 	// probe is still pending (CalibAskedAt set, no reply yet), keep re-checking so a
-	// late "rate-limited" reply isn't ignored for the full TTL — which would let Pump
-	// fire straight into the limit.
-	if state.Blocked.CalibAskedAt == nil && state.Blocked.CheckedAt != nil && now.Sub(*state.Blocked.CheckedAt) < s.cfg.CalibrationTTL {
+	// late "account blocked" reply isn't ignored for the full TTL.
+	if state.Account.CalibAskedAt == nil && state.Account.CheckedAt != nil && now.Sub(*state.Account.CheckedAt) < s.cfg.CalibrationTTL {
 		return state, nil
 	}
-	blocked, err := s.readQuota(ctx, s.calibrationIssue(state), now, state.Blocked.CalibAskedAt)
+	quota, err := s.readQuota(ctx, s.calibrationIssue(state), now, state.Account.CalibAskedAt)
 	if err != nil {
 		return state, err
 	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
-		if st.Blocked.CalibAskedAt == nil && st.Blocked.CheckedAt != nil && time.Since(*st.Blocked.CheckedAt) < s.cfg.CalibrationTTL {
+		if st.Account.CalibAskedAt == nil && st.Account.CheckedAt != nil && now.Sub(*st.Account.CheckedAt) < s.cfg.CalibrationTTL {
 			return ErrNoChange
 		}
-		// A fresh calibrate reading replaces the whole Blocked struct; carry the
-		// rate-limit comment identity over so requeueInflight can still recognise an
-		// edited comment it already accounted for.
-		rlID, rlUpdated := st.Blocked.RLCommentID, st.Blocked.RLCommentUpdated
-		st.Blocked = blocked
-		if st.Blocked.RLCommentID == 0 {
-			st.Blocked.RLCommentID = rlID
-			st.Blocked.RLCommentUpdated = rlUpdated
+		// A fresh reading replaces the whole quota; carry the account-quota comment
+		// identity over so the engine can still recognise an edited comment it
+		// already accounted for.
+		rlID, rlUpdated := st.Account.RLCommentID, st.Account.RLCommentUpdated
+		prevBlock, prevRemaining := st.Account.BlockedUntil, st.Account.Remaining
+		st.Account = quota
+		if st.Account.RLCommentID == 0 {
+			st.Account.RLCommentID = rlID
+			st.Account.RLCommentUpdated = rlUpdated
 		}
-		// Clear a stale "rate limited" warning once the window has passed, so the
-		// dashboard can't show both "not currently limited" and a rate-limit warn.
-		if st.Warn == warnRateLimited && (blocked.BlockedUntil == nil || !blocked.BlockedUntil.After(now)) {
+		// An inconclusive probe (still awaiting a calibration reply) carries no
+		// BlockedUntil, but it is not evidence the account is clear. Preserve a
+		// still-active block until a conclusive reply lands — otherwise the block
+		// vanishes after CalibrationTTL and Pump fires queued reviews inside the
+		// original window, recreating the duplicate attempts this whole system
+		// exists to prevent.
+		if quota.CalibAskedAt != nil && prevBlock != nil && prevBlock.After(now) {
+			st.Account.BlockedUntil = prevBlock
+			st.Account.Remaining = prevRemaining
+		}
+		if st.Warn == warnRateLimited && (st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.After(now)) {
 			st.Warn = ""
 		}
 		return nil
@@ -888,7 +1081,7 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 	return updated, nil
 }
 
-// calibrationIssue returns the calibration issue crq should probe: the rotated
+// calibrationIssue returns the calibration issue to probe: the rotated
 // replacement recorded in state after a cap wedge, or the configured one.
 func (s *Service) calibrationIssue(state State) int {
 	if state.CalibrationIssue > 0 {
@@ -897,16 +1090,13 @@ func (s *Service) calibrationIssue(state State) int {
 	return s.cfg.CalibrationPR
 }
 
-const calibrationIssueBody = "crq probes CodeRabbit's account-wide rate-limit state here with `@coderabbitai rate limit` so it never spends a real review to calibrate. Auto-created after a prior calibration thread hit GitHub's 2500-comment cap. Managed by crq — safe to leave alone."
+const calibrationIssueBody = "crq probes CodeRabbit's account-wide review quota here with `" + dialect.DefaultRateLimitCommand + "` so it never spends a real review to calibrate. Auto-created after a prior calibration thread hit GitHub's 2500-comment cap. Managed by crq — safe to leave alone."
 
-// rotateCalibration creates a fresh calibration issue in the gate repo and
-// records its number in the shared state, so the whole fleet abandons a
-// calibration thread that hit GitHub's hard 2500-comment cap. A capped thread is
-// permanently unpostable — pruning can't recover it once every deletable comment
-// is already gone — which otherwise wedges quota calibration and floods the log
-// with 403s. Returns the new issue number.
+// rotateCalibration creates a fresh calibration issue and records its number in
+// the shared state so the whole fleet abandons a thread that hit GitHub's hard
+// 2500-comment cap.
 func (s *Service) rotateCalibration(ctx context.Context, oldIssue int) (int, error) {
-	issue, err := s.gh.CreateIssue(ctx, s.cfg.GateRepo, "crq rate-limit calibration", calibrationIssueBody)
+	issue, err := s.gh.CreateIssue(ctx, s.cfg.GateRepo, "crq account-quota calibration", calibrationIssueBody)
 	if err != nil {
 		return 0, err
 	}
@@ -928,32 +1118,31 @@ func (s *Service) rotateCalibration(ctx context.Context, oldIssue int) (int, err
 	return issue.Number, nil
 }
 
-func (s *Service) readQuota(ctx context.Context, issue int, now time.Time, pendingAsked *time.Time) (Blocked, error) {
-	blocked := Blocked{Scope: strings.Join(s.cfg.Scope, ","), Source: "calibrate", CheckedAt: &now}
+func (s *Service) readQuota(ctx context.Context, issue int, now time.Time, pendingAsked *time.Time) (AccountQuota, error) {
+	quota := AccountQuota{Scope: strings.Join(s.cfg.Scope, ","), Source: "calibrate", CheckedAt: &now}
 	cutoff := now.Add(-s.cfg.CalibrationTTL)
 	keepAfter := now.Add(-2 * s.cfg.CalibrationTTL)
 	if reply, ok, err := s.latestCalibrationReply(ctx, issue, cutoff); err != nil {
-		return blocked, err
+		return quota, err
 	} else if ok {
-		remaining, reset := parseQuota(reply.Body, reply.UpdatedAt)
-		blocked.Remaining = remaining
-		blocked.BlockedUntil = reset
+		remaining, reset := dialect.ParseQuota(reply.Body, reply.UpdatedAt)
+		quota.Remaining = remaining
+		quota.BlockedUntil = reset
 		s.pruneCalibration(ctx, issue, keepAfter, 80)
-		return blocked, nil
+		return quota, nil
 	}
-	// A probe from a previous call is still pending and not yet stale, and the check
-	// above found no reply to it yet: keep waiting for its (possibly late) reply
-	// instead of posting another probe every cycle.
+	// A probe from a previous call is still pending and not yet stale, and no
+	// reply to it was found: keep waiting for its (possibly late) reply instead of
+	// posting another probe every cycle.
 	if pendingAsked != nil && pendingAsked.After(cutoff) {
-		blocked.CalibAskedAt = pendingAsked
-		return blocked, nil
+		quota.CalibAskedAt = pendingAsked
+		return quota, nil
 	}
 	asked, err := s.gh.PostIssueComment(ctx, s.cfg.GateRepo, issue, s.cfg.RateLimitCommand)
 	if err != nil {
-		// The calibration thread hit GitHub's 2500-comment cap. Prune our old probe
-		// comments and retry once; if pruning can't drop us back under the cap (all
-		// deletable comments are already gone), rotate to a fresh issue and retry
-		// there instead of failing every cycle.
+		// The calibration thread hit GitHub's 2500-comment cap. Prune old probe
+		// comments and retry once; if pruning can't drop under the cap, rotate to a
+		// fresh issue and retry there instead of failing every cycle.
 		if isCommentCapError(err) {
 			if pruned := s.pruneCalibration(ctx, issue, keepAfter, 100); pruned > 0 {
 				asked, err = s.gh.PostIssueComment(ctx, s.cfg.GateRepo, issue, s.cfg.RateLimitCommand)
@@ -971,37 +1160,34 @@ func (s *Service) readQuota(ctx context.Context, issue int, now time.Time, pendi
 			if s.log != nil {
 				s.log.Printf("calibration probe on #%d failed: %v", issue, err)
 			}
-			return blocked, err
+			return quota, err
 		}
 	}
-	blocked.CalibAskedAt = &asked.CreatedAt
+	quota.CalibAskedAt = &asked.CreatedAt
 	for i := 0; i < 6; i++ {
 		select {
 		case <-ctx.Done():
-			return blocked, ctx.Err()
+			return quota, ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
 		reply, ok, err := s.latestCalibrationReply(ctx, issue, asked.CreatedAt.Add(-time.Second))
 		if err != nil {
-			return blocked, err
+			return quota, err
 		}
 		if ok {
-			remaining, reset := parseQuota(reply.Body, reply.UpdatedAt)
-			blocked.Remaining = remaining
-			blocked.BlockedUntil = reset
-			blocked.CalibAskedAt = nil
+			remaining, reset := dialect.ParseQuota(reply.Body, reply.UpdatedAt)
+			quota.Remaining = remaining
+			quota.BlockedUntil = reset
+			quota.CalibAskedAt = nil
 			s.pruneCalibration(ctx, issue, keepAfter, 80)
-			return blocked, nil
+			return quota, nil
 		}
 	}
-	return blocked, nil
+	return quota, nil
 }
 
 // pruneCalibration deletes crq's old calibration probe comments and CodeRabbit's
-// replies from the calibration PR so it never reaches GitHub's hard 2500-comment
-// cap (which silently wedges the whole queue). It reads only the oldest page and
-// deletes up to max comments older than keepAfter, so cost stays bounded and the
-// most recent reading is preserved.
+// replies so the thread never reaches GitHub's hard 2500-comment cap.
 func (s *Service) pruneCalibration(ctx context.Context, issue int, keepAfter time.Time, max int) int {
 	if issue <= 0 || max <= 0 {
 		return 0
@@ -1039,20 +1225,20 @@ func (s *Service) pruneCalibration(ctx context.Context, issue int, keepAfter tim
 }
 
 // isCalibrationNoise reports whether a comment is a spent calibration artifact:
-// one of crq's "@coderabbitai rate limit" probes or a CodeRabbit auto-reply.
-func (s *Service) isCalibrationNoise(c IssueComment) bool {
+// one of crq's account-quota probes or a CodeRabbit auto-reply.
+func (s *Service) isCalibrationNoise(c ghapi.IssueComment) bool {
 	if strings.TrimSpace(c.Body) == strings.TrimSpace(s.cfg.RateLimitCommand) {
 		return true
 	}
 	return s.isConfiguredBot(c.User.Login) && strings.Contains(c.Body, s.cfg.CalibrationMarker)
 }
 
-func (s *Service) latestCalibrationReply(ctx context.Context, issue int, after time.Time) (IssueComment, bool, error) {
+func (s *Service) latestCalibrationReply(ctx context.Context, issue int, after time.Time) (ghapi.IssueComment, bool, error) {
 	comments, err := s.gh.ListIssueComments(ctx, s.cfg.GateRepo, issue)
 	if err != nil {
-		return IssueComment{}, false, err
+		return ghapi.IssueComment{}, false, err
 	}
-	var best IssueComment
+	var best ghapi.IssueComment
 	ok := false
 	for _, comment := range comments {
 		if !s.isConfiguredBot(comment.User.Login) || !comment.UpdatedAt.After(after) {
@@ -1069,94 +1255,30 @@ func (s *Service) latestCalibrationReply(ctx context.Context, issue int, after t
 	return best, ok, nil
 }
 
+// isConfiguredBotLogin is isConfiguredBot for callers holding only the config
+// value, and reviewedByConfiguredBot checks a ReviewedBy map with the same
+// suffix tolerance.
+func isConfiguredBotLogin(bot, login string) bool {
+	return dialect.NormalizeBotName(login) == dialect.NormalizeBotName(bot)
+}
+
+func reviewedByConfiguredBot(reviewedBy map[string]bool, bot string) bool {
+	for login, ok := range reviewedBy {
+		if ok && isConfiguredBotLogin(bot, login) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) isConfiguredBot(login string) bool {
-	return normalizeBotName(login) == normalizeBotName(s.cfg.Bot)
+	return dialect.NormalizeBotName(login) == dialect.NormalizeBotName(s.cfg.Bot)
 }
-
-type inflightCheck struct {
-	Done         bool
-	Requeue      bool
-	Reason       string
-	BlockedUntil *time.Time
-	// FeedbackComplete is set on Done when every required bot has submitted a
-	// review for the fired round, so Pump knows whether the feedback wait is
-	// satisfied or must survive for the bots that are still reviewing.
-	FeedbackComplete bool
-	// RLCommentID/RLCommentUpdated identify the rate-limit comment that produced a
-	// warnRateLimited requeue, so requeueInflight can tell a fresh rate-limit event
-	// from a re-observation of the same edited comment.
-	RLCommentID      int64
-	RLCommentUpdated time.Time
-}
-
-// Done reasons from inflightStatus. Pump distinguishes them: a submitted
-// review or bot comment means feedback arrived, while a bare reaction only
-// acknowledges the command — the review is still in progress.
-const (
-	doneReviewSubmitted = "review submitted"
-	doneBotReacted      = "bot reacted"
-	doneBotComment      = "bot comment"
-	doneAlreadyReviewed = "head already reviewed"
-)
 
 // notBefore reports whether t is at or after baseline. GitHub timestamps are
 // second-granular, so a bot completion in the same second as the trigger must
 // still count — a strict After would miss it and refire a duplicate review.
 func notBefore(t, baseline time.Time) bool { return !t.Before(baseline) }
-
-// requiredFeedbackComplete reports whether every bot in CRQ_REQUIRED_BOTS has
-// submitted a review for the fired round. It mirrors what flips Feedback's
-// ReviewedBy — submitted reviews matching the fired head — so Pump never drops
-// a wait that Feedback would still report as waiting on another required bot.
-// With no required bots configured, the configured reviewer's response that
-// produced the Done is all there is to wait for.
-func (s *Service) requiredFeedbackComplete(inf *InFlight, reviews []Review, comments []IssueComment) bool {
-	if len(s.cfg.RequiredBots) == 0 {
-		return true
-	}
-	return s.feedbackCompleteForRound(reviews, comments, s.cfg.RequiredBots, inf.Head, *inf.FiredAt)
-}
-
-// botsReviewedHead reports whether every bot in the set has reviewed head —
-// the same check Feedback uses before flipping ReviewedBy: a review whose
-// commit matches the fired head counts regardless of when it was submitted,
-// because a required bot may have reviewed the commit before this round was
-// even triggered. Only when there is no head to match does the submission
-// time (at/after since) gate the round, so a review for some other push never
-// counts toward it.
-func botsReviewedHead(reviews []Review, bots map[string]struct{}, head string, since time.Time) bool {
-	return allReviewed(reviewedByForRound(reviews, bots, head, since))
-}
-
-func (s *Service) feedbackCompleteForRound(reviews []Review, comments []IssueComment, awaited []string, head string, since time.Time) bool {
-	reviewedBy := reviewedByForRound(reviews, botSet(awaited), head, since)
-	if needsConfiguredBotReview(reviewedBy, s.cfg.Bot) && s.completionReplyForFiredCommand(comments, reviews, since) {
-		markReviewed(reviewedBy, s.cfg.Bot)
-	}
-	return allReviewed(reviewedBy)
-}
-
-func reviewedByForRound(reviews []Review, bots map[string]struct{}, head string, since time.Time) map[string]bool {
-	reviewedBy := map[string]bool{}
-	for bot := range bots {
-		reviewedBy[bot] = false
-	}
-	for _, review := range reviews {
-		if !inBots(bots, review.User.Login) {
-			continue
-		}
-		if head != "" {
-			if strings.HasPrefix(review.CommitID, head) {
-				markReviewed(reviewedBy, review.User.Login)
-			}
-			continue
-		}
-		if notBefore(review.SubmittedAt, since) {
-			markReviewed(reviewedBy, review.User.Login)
-		}
-	}
-	return reviewedBy
-}
 
 func allReviewed(reviewedBy map[string]bool) bool {
 	for _, reviewed := range reviewedBy {
@@ -1165,298 +1287,6 @@ func allReviewed(reviewedBy map[string]bool) bool {
 		}
 	}
 	return true
-}
-
-func (s *Service) inflightStatus(ctx context.Context, state State) (inflightCheck, error) {
-	inf := state.InFlight
-	if inf == nil {
-		return inflightCheck{Done: true, Reason: "none"}, nil
-	}
-	if inf.Phase == "reserved" && time.Since(inf.ReservedAt) > 2*time.Minute {
-		return inflightCheck{Requeue: true, Reason: "reserved review was never posted"}, nil
-	}
-	if inf.FiredAt == nil {
-		return inflightCheck{}, nil
-	}
-	comments, err := s.gh.ListIssueComments(ctx, inf.Repo, inf.PR)
-	if err != nil {
-		return inflightCheck{}, err
-	}
-	reviews, err := s.gh.ListReviews(ctx, inf.Repo, inf.PR)
-	if err != nil {
-		return inflightCheck{}, err
-	}
-	// CodeRabbit can post the "does not re-review already reviewed commits"
-	// boilerplate after a rate-limited first attempt, even though no review exists.
-	// Treat that acknowledgement as terminal only when GitHub has the evidence it
-	// claims: a configured-bot review matching this fired head. Without that proof,
-	// a co-occurring rate-limit notice must requeue the PR for a real later attempt.
-	alreadyReviewedAck := false
-	for _, comment := range comments {
-		if !s.isConfiguredBot(comment.User.Login) || comment.UpdatedAt.Before(*inf.FiredAt) {
-			continue
-		}
-		if s.isReviewAlreadyDone(comment.Body) {
-			alreadyReviewedAck = true
-			break
-		}
-	}
-	for _, review := range reviews {
-		if !s.isConfiguredBot(review.User.Login) || !reviewMatchesRound(review, inf.Head, *inf.FiredAt) {
-			continue
-		}
-		reason := doneReviewSubmitted
-		if alreadyReviewedAck {
-			reason = doneAlreadyReviewed
-		}
-		return inflightCheck{Done: true, Reason: reason, FeedbackComplete: s.requiredFeedbackComplete(inf, reviews, comments)}, nil
-	}
-	for _, comment := range comments {
-		if !s.isConfiguredBot(comment.User.Login) || comment.UpdatedAt.Before(*inf.FiredAt) {
-			continue
-		}
-		if s.isRateLimited(comment.Body) {
-			reset := parseAvailableIn(comment.Body, comment.UpdatedAt)
-			return inflightCheck{Requeue: true, Reason: warnRateLimited, BlockedUntil: reset, RLCommentID: comment.ID, RLCommentUpdated: comment.UpdatedAt}, nil
-		}
-	}
-	if inf.FiredCommentID != 0 {
-		reactions, err := s.gh.ListCommentReactions(ctx, inf.Repo, inf.FiredCommentID)
-		if err != nil {
-			// Don't treat a transient/rate-limited reactions failure as "no reaction":
-			// that can misclassify an acknowledged review as timed out and refire it.
-			return inflightCheck{}, err
-		}
-		for _, reaction := range reactions {
-			if s.isConfiguredBot(reaction.User.Login) {
-				return inflightCheck{Done: true, Reason: doneBotReacted}, nil
-			}
-		}
-	}
-	for _, comment := range comments {
-		if s.isConfiguredBot(comment.User.Login) && comment.ID != inf.FiredCommentID && notBefore(comment.UpdatedAt, *inf.FiredAt) && !s.isRateLimited(comment.Body) && !s.isReviewsPaused(comment.Body) && !s.isReviewAlreadyDone(comment.Body) {
-			return inflightCheck{Done: true, Reason: doneBotComment, FeedbackComplete: s.requiredFeedbackComplete(inf, reviews, comments)}, nil
-		}
-	}
-	if time.Since(*inf.FiredAt) > s.cfg.InflightTimeout {
-		return inflightCheck{Requeue: true, Reason: "in-flight timeout"}, nil
-	}
-	return inflightCheck{}, nil
-}
-
-// reviewMatchesRound reports whether a submitted review is evidence for this
-// fired round. A known head must match the review commit; submission time alone
-// could otherwise let a delayed review of an older head complete the new one.
-func reviewMatchesRound(review Review, head string, firedAt time.Time) bool {
-	if head != "" {
-		return strings.HasPrefix(review.CommitID, head)
-	}
-	return notBefore(review.SubmittedAt, firedAt)
-}
-
-// pruneExpiredWaits drops AwaitingFeedback entries whose deadline has passed.
-// A wait can outlive its review round — a crashed loop, or an autoreview fire
-// whose in-flight slot was released on a bot reaction before the review was
-// submitted — and nothing else removes it. Any loop resumed after pruning
-// reconstructs its start from History and times out immediately, so no wait
-// gets a fresh clock out of this. Returns the updated state, or nil if nothing
-// was pruned.
-func (s *Service) pruneExpiredWaits(ctx context.Context, state State) *State {
-	if s.cfg.DryRun {
-		return nil
-	}
-	now := time.Now().UTC()
-	stale := false
-	for _, wait := range state.AwaitingFeedback {
-		if !wait.Deadline.IsZero() && now.After(wait.Deadline) {
-			stale = true
-			break
-		}
-	}
-	if !stale {
-		return nil
-	}
-	updated, err := s.store.Update(ctx, func(st *State) error {
-		changed := false
-		for key, wait := range st.AwaitingFeedback {
-			if !wait.Deadline.IsZero() && now.After(wait.Deadline) {
-				delete(st.AwaitingFeedback, key)
-				changed = true
-			}
-		}
-		if !changed {
-			return ErrNoChange
-		}
-		return nil
-	})
-	if err != nil {
-		if s.log != nil {
-			s.log.Printf("warning: failed to prune expired feedback waits: %v", err)
-		}
-		return nil
-	}
-	s.sync(ctx, updated)
-	return &updated
-}
-
-// sweepFeedbackWaits checks at most one lingering feedback wait per pump — the
-// oldest — against the PR's submitted reviews, and clears it once every awaited
-// bot (CRQ_REQUIRED_BOTS, or the configured reviewer when none are set) has
-// reviewed the fired head. This is what finishes a round whose in-flight slot
-// was released on a bare bot reaction: once InFlight is nil no Pump path runs
-// inflightStatus again, and without a Loop nothing else would clear the wait
-// before the deadline prune. One wait per pump bounds the sweep's use of the
-// shared REST quota; the deadline prune stays the backstop for rounds whose
-// feedback never becomes a head-matched review.
-func (s *Service) sweepFeedbackWaits(ctx context.Context, state State) State {
-	if s.cfg.DryRun || len(state.AwaitingFeedback) == 0 {
-		return state
-	}
-	var oldest FeedbackWait
-	found := false
-	for _, wait := range state.AwaitingFeedback {
-		if wait.Head == "" {
-			continue
-		}
-		if !found || wait.StartedAt.Before(oldest.StartedAt) {
-			oldest = wait
-			found = true
-		}
-	}
-	if !found {
-		return state
-	}
-	reviews, err := s.gh.ListReviews(ctx, oldest.Repo, oldest.PR)
-	if err != nil {
-		if s.log != nil {
-			s.log.Printf("warning: feedback wait sweep for %s#%d failed: %v", oldest.Repo, oldest.PR, err)
-		}
-		return state
-	}
-	awaited := s.cfg.RequiredBots
-	if len(awaited) == 0 {
-		awaited = []string{s.cfg.Bot}
-	}
-	reviewedBy := reviewedByForRound(reviews, botSet(awaited), oldest.Head, oldest.StartedAt)
-	if allReviewed(reviewedBy) {
-		s.clearFeedbackWait(ctx, oldest.Repo, oldest.PR, oldest.Head)
-		if updated, _, err := s.store.Load(ctx); err == nil {
-			return updated
-		}
-		return state
-	}
-	if !needsConfiguredBotReview(reviewedBy, s.cfg.Bot) {
-		return state
-	}
-	comments, err := s.gh.ListIssueComments(ctx, oldest.Repo, oldest.PR)
-	if err != nil {
-		if s.log != nil {
-			s.log.Printf("warning: feedback wait completion sweep for %s#%d failed: %v", oldest.Repo, oldest.PR, err)
-		}
-		return state
-	}
-	if !s.completionReplyForFiredCommand(comments, reviews, oldest.StartedAt) {
-		return state
-	}
-	s.clearFeedbackWait(ctx, oldest.Repo, oldest.PR, oldest.Head)
-	if updated, _, err := s.store.Load(ctx); err == nil {
-		return updated
-	}
-	return state
-}
-
-func (s *Service) requeueInflight(st *State, status inflightCheck) {
-	if st.InFlight == nil {
-		return
-	}
-	inf := *st.InFlight
-	now := time.Now().UTC()
-	st.Queue = append(st.Queue, QueueItem{
-		Seq:   inf.Seq,
-		Owner: ownerOf(inf.Repo),
-		Repo:  inf.Repo,
-		PR:    inf.PR,
-		Host:  inf.ByHost,
-		// The command comment from the abandoned fire is still on the PR and
-		// still newer than the head commit; RequeuedAt keeps the next fire from
-		// adopting it (see existingReviewCommand).
-		EnqueuedAt: now,
-		RequeuedAt: &now,
-	})
-	sort.Slice(st.Queue, func(i, j int) bool { return st.Queue[i].Seq < st.Queue[j].Seq })
-	key := QueueKey(inf.Repo, inf.PR)
-	delete(st.Fired, key)
-	delete(st.AwaitingFeedback, key)
-	st.InFlight = nil
-	if status.Reason == warnRateLimited {
-		// A rate limit is shown by the Blocked state (the dashboard's Rate-limit
-		// row), not a sticky Warn — otherwise once the window passes the table says
-		// "not currently limited" while a stale "rate limited" warning lingers.
-		until := status.BlockedUntil
-		// CodeRabbit edits one rate-limit comment in place, so a later fire sees the
-		// same comment with an advanced UpdatedAt. Don't let that re-observation
-		// extend the block on every bounce: if this is the comment that already set
-		// the standing block and its window is still open, keep the existing window.
-		sameComment := status.RLCommentID != 0 && status.RLCommentID == st.Blocked.RLCommentID
-		if sameComment && st.Blocked.BlockedUntil != nil && st.Blocked.BlockedUntil.After(now) {
-			until = st.Blocked.BlockedUntil
-		}
-		if until == nil || !until.After(now) {
-			// No parseable "available in" window: back off a conservative fixed
-			// interval instead of a short re-calibrate, so an unrecognised phrasing
-			// can't drop us into a couple-of-minutes retry against the shared quota.
-			t := now.Add(s.rateLimitFallback())
-			until = &t
-		}
-		zero := 0
-		st.Blocked.BlockedUntil = until
-		st.Blocked.Remaining = &zero
-		st.Blocked.Source = "warning"
-		st.Blocked.CheckedAt = &now
-		if status.RLCommentID != 0 {
-			st.Blocked.RLCommentID = status.RLCommentID
-			u := status.RLCommentUpdated
-			st.Blocked.RLCommentUpdated = &u
-		}
-		st.Warn = ""
-		// Per-head cooldown that survives this requeue: needsReview refuses to
-		// re-enqueue inf.Head until the window passes. Fired is cleared above so a
-		// genuinely throttled PR can still retry once the window clears, and this
-		// cooldown is what keeps that gap from letting the same head be re-fired
-		// before then — the guard whose absence let one head fire seven times.
-		setCooldown(st, key, inf.Head, *until)
-	} else {
-		st.Warn = status.Reason
-	}
-	if s.log != nil {
-		blockedUntil := "-"
-		if st.Blocked.BlockedUntil != nil {
-			blockedUntil = st.Blocked.BlockedUntil.UTC().Format(time.RFC3339)
-		}
-		s.log.Printf("requeue %s@%s reason=%q blocked_until=%s", key, inf.Head, status.Reason, blockedUntil)
-	}
-}
-
-// rateLimitFallback is the block window applied when a rate-limit comment carries
-// no parseable "available in" duration. CodeRabbit's real windows run to tens of
-// minutes, so a conservative floor is far safer than retrying in a minute or two.
-func (s *Service) rateLimitFallback() time.Duration {
-	if s.cfg.RateLimitFallback > 0 {
-		return s.cfg.RateLimitFallback
-	}
-	return 15 * time.Minute
-}
-
-// setCooldown records a per-head fire cooldown, ignoring an empty head or an
-// already-passed deadline so the map never carries dead entries.
-func setCooldown(st *State, key, head string, until time.Time) {
-	if head == "" || !until.After(time.Now().UTC()) {
-		return
-	}
-	if st.Cooldown == nil {
-		st.Cooldown = map[string]FireCooldown{}
-	}
-	st.Cooldown[strings.ToLower(key)] = FireCooldown{Head: head, Until: until}
 }
 
 func (s *Service) headShort(ctx context.Context, repo string, pr int) (string, error) {
@@ -1471,9 +1301,8 @@ func (s *Service) headShort(ctx context.Context, repo string, pr int) (string, e
 }
 
 // pullHead returns the PR's short head SHA and whether it is still open (neither
-// closed nor merged). Pump uses it so a PR that was closed or merged after it was
-// queued is dropped instead of having a review fired at a dead PR — which would
-// never converge, time out, and requeue forever, wasting the shared slot.
+// closed nor merged), so a PR closed after it was queued is dropped instead of
+// firing a review at a dead PR.
 func (s *Service) pullHead(ctx context.Context, repo string, pr int) (head string, open bool, err error) {
 	pull, err := s.gh.GetPull(ctx, repo, pr)
 	if err != nil {
@@ -1489,19 +1318,6 @@ func (s *Service) pullHead(ctx context.Context, repo string, pr int) (head strin
 	return pull.Head.SHA[:9], open, nil
 }
 
-func (s *Service) botReviewedHead(ctx context.Context, repo string, pr int, head string) (bool, error) {
-	reviews, err := s.gh.ListReviews(ctx, repo, pr)
-	if err != nil {
-		return false, err
-	}
-	for _, review := range reviews {
-		if normalizeBotName(review.User.Login) == normalizeBotName(s.cfg.Bot) && strings.HasPrefix(review.CommitID, head) {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 func (s *Service) sync(ctx context.Context, state State) {
 	if s.log == nil || s.cfg.DashboardIssue <= 0 {
 		return
@@ -1509,27 +1325,6 @@ func (s *Service) sync(ctx context.Context, state State) {
 	if err := s.store.SyncDashboard(ctx, state); err != nil {
 		s.log.Printf("warning: dashboard sync failed: %v", err)
 	}
-}
-
-func removeQueued(st *State, seq int64) {
-	for i := range st.Queue {
-		if st.Queue[i].Seq == seq {
-			st.Queue = append(st.Queue[:i], st.Queue[i+1:]...)
-			return
-		}
-	}
-}
-
-func isShortSHA(value string) bool {
-	if len(value) < 7 || len(value) > 40 {
-		return false
-	}
-	for _, r := range value {
-		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
-			return false
-		}
-	}
-	return true
 }
 
 func randomToken() string {
@@ -1540,126 +1335,199 @@ func randomToken() string {
 	return hex.EncodeToString(buf[:])
 }
 
-// isRateLimited reports whether a CodeRabbit comment is a rate-limit notice. It
-// matches the configured CRQ_RL_MARKER plus CodeRabbit's current phrasings (the
-// "Fair Usage Limits Policy" / "currently rate limited" message), which the old
-// "rate limited by coderabbit.ai" marker alone misses — so a fired review that
-// comes back rate-limited is detected and crq backs off instead of firing on.
-func (s *Service) isRateLimited(body string) bool {
-	l := strings.ToLower(body)
-	if m := strings.ToLower(strings.TrimSpace(s.cfg.RateLimitMarker)); m != "" && strings.Contains(l, m) {
-		return true
-	}
-	return strings.Contains(l, "currently rate limited") ||
-		strings.Contains(l, "rate limited under") ||
-		strings.Contains(l, "fair usage limits policy")
-}
-
-// isReviewsPaused reports whether a CodeRabbit comment is the "Reviews paused"
-// auto-pause notice. CodeRabbit posts this when a branch is under active
-// development (an influx of new commits) and auto_pause_after_reviewed_commits
-// kicks in. It acknowledges the branch but is not a review of the fired head, so
-// — like a rate-limit notice — it must not be mistaken for a completed review
-// round: doing so would falsely converge a loop with zero findings. crq keeps
-// triggering reviews explicitly, and "@coderabbitai review" still produces a
-// single review while auto-review is paused, so the round completes on the real
-// review, not this note.
-func (s *Service) isReviewsPaused(body string) bool {
-	l := strings.ToLower(body)
-	return strings.Contains(l, "reviews paused") ||
-		strings.Contains(l, "automatically paused this review") ||
-		strings.Contains(l, "auto_pause_after_reviewed_commits")
-}
-
-// isReviewAlreadyDone identifies CodeRabbit's "does not re-review already
-// reviewed commits" acknowledgement. The text is only a claim, not completion
-// evidence: inflightStatus requires a matching GitHub review before trusting it.
-// The same boilerplate can appear inside a rate-limit notice's help section, so
-// a comment that is itself a rate limit is excluded.
-func (s *Service) isReviewAlreadyDone(body string) bool {
-	l := strings.ToLower(body)
-	if !strings.Contains(l, "does not re-review already reviewed") &&
-		!strings.Contains(l, "already reviewed commit") {
+// isCommentCapError reports whether err is GitHub's hard cap of 2500 comments per
+// issue ("Commenting is disabled on issues with more than 2500 comments").
+func isCommentCapError(err error) bool {
+	var api *ghapi.APIError
+	if !errors.As(err, &api) {
 		return false
 	}
-	return !s.isRateLimited(l)
+	b := strings.ToLower(api.Body)
+	return strings.Contains(b, "commenting is disabled") || strings.Contains(b, "more than 2500 comments")
 }
 
-// parseAvailableIn extracts CodeRabbit's "next review available in <duration>"
-// window from a rate-limit comment and returns base+duration. It tolerates the
-// markdown and punctuation CodeRabbit now wraps the value in — the current
-// phrasing is "**Next review available in:** **40 minutes**", where a colon and
-// bold markers sit between "in" and the number. An unparseable body returns nil;
-// the caller then falls back to a conservative fixed window rather than a short
-// retry (getting this wrong is exactly what let the daemon re-fire every couple
-// of minutes instead of honouring a 40-minute limit).
-func parseAvailableIn(text string, base time.Time) *time.Time {
-	lower := strings.ToLower(text)
-	idx := strings.Index(lower, "available in")
-	if idx < 0 {
-		return nil
-	}
-	frag := lower[idx+len("available in"):]
-	// Normalise markdown/punctuation to spaces so "in:** **40 minutes**" scans as
-	// "40 minutes". Do this before splitting into fields so bold/colon can't fuse
-	// onto the number ("**40") and defeat the numeric parse.
-	frag = strings.Map(func(r rune) rune {
-		switch r {
-		case '*', ':', '`', ',', '_', '(', ')':
-			return ' '
+// Wait enqueues repo#pr and pumps until a review fires for its head (code 0),
+// current-head feedback is already available (code 3), the wait times out (code
+// 2), or the PR is closed (code 2). The wait IS the round: a fired/reviewing
+// round for the head is the in-flight wait, a completed round is the "already
+// reviewed" dedup marker, and firedMarker/waitingHead read those states off the
+// round rather than a separate wait record.
+// postFailureBackoff parks a round after a review-command post fails, so a
+// persistent failure (auth, a 4xx, GitHub down past the client's own retries)
+// retries on a bounded cadence instead of re-posting on every pump.
+const postFailureBackoff = 2 * time.Minute
+
+func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, int, error) {
+	repo = NormalizeRepo(repo)
+	// The slot-wait timeout anchors on the injectable clock so replay tests can
+	// drive it deterministically; cadence timers below stay on the wall clock
+	// because they gate real sleeps.
+	start := s.clock()
+	enqueued := false
+	var lastLog time.Time
+	var lastFeedbackCheck time.Time
+	feedbackCheckEvery := queuedFeedbackCheckEvery(s.cfg.PollInterval)
+	for {
+		if s.cfg.WaitTimeout > 0 && s.clock().Sub(start) > s.cfg.WaitTimeout {
+			return PumpResult{Action: "timeout", Repo: repo, PR: pr}, 2, nil
 		}
-		return r
-	}, frag)
-	// Stop at a sentence boundary so a later number in the body isn't read as part
-	// of the window.
-	if dot := strings.IndexByte(frag, '.'); dot >= 0 {
-		frag = frag[:dot]
-	}
-	fields := strings.Fields(frag)
-	var d time.Duration
-	for i := 0; i+1 < len(fields); i++ {
-		n, err := strconv.Atoi(fields[i])
+		if !enqueued {
+			result, err := s.Enqueue(ctx, repo, pr)
+			if err != nil {
+				return PumpResult{}, 1, err
+			}
+			enqueued = result.Queued || result.AlreadyQueued
+			if result.Deduped {
+				state, _, err := s.store.Load(ctx)
+				if err != nil {
+					return PumpResult{}, 1, err
+				}
+				if state.WaitingHead(repo, pr) == result.Head {
+					return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
+				}
+				report, err := s.Feedback(ctx, repo, pr)
+				if err != nil {
+					return PumpResult{}, 1, err
+				}
+				if len(engine.FindingsOnHead(report.Findings, report.Head)) > 0 || allReviewed(report.ReviewedBy) {
+					return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
+				}
+				// A real primary review at this head is NOT a poisoned marker even with
+				// a co-bot pending (a deliberate dedupe when Codex is unobtainable).
+				// Deleting it would requeue the same head into ack-and-dedupe churn.
+				if reviewedByConfiguredBot(report.ReviewedBy, s.cfg.Bot) {
+					return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
+				}
+				// A completed round at this head with no real head review is a poisoned
+				// dedup marker (a mistaken completion). Drop it and enqueue the real
+				// replacement review.
+				updated, err := s.store.Update(ctx, func(st *State) error {
+					r := st.Round(repo, pr)
+					if r == nil || r.Head != result.Head || r.Phase != PhaseCompleted {
+						return ErrNoChange
+					}
+					st.EndRound(repo, pr, "repair: completed head lacked a real review")
+					return nil
+				})
+				if err != nil {
+					return PumpResult{}, 1, err
+				}
+				s.sync(ctx, updated)
+				enqueued = false
+				continue
+			}
+		}
+		if lastFeedbackCheck.IsZero() || time.Since(lastFeedbackCheck) >= feedbackCheckEvery {
+			report, err := s.Feedback(ctx, repo, pr)
+			if err != nil {
+				return PumpResult{}, 1, err
+			}
+			lastFeedbackCheck = time.Now()
+			// Return current-head findings immediately so the caller can fix locally.
+			// The round stays active: policy holds this head until the slot and every
+			// required reviewer finish.
+			if len(engine.FindingsOnHead(report.Findings, report.Head)) > 0 {
+				if s.log != nil {
+					s.log.Printf("%s#%d feedback already available on %s; leaving review slot wait", repo, pr, report.Head)
+				}
+				return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: report.Head, Reason: "feedback already available"}, 3, nil
+			}
+		}
+		result, err := s.Pump(ctx)
 		if err != nil {
+			return PumpResult{}, 1, err
+		}
+		state, _, err := s.store.Load(ctx)
+		if err != nil {
+			return PumpResult{}, 1, err
+		}
+		if r := state.Round(repo, pr); r != nil && (r.Phase == PhaseFired || r.Phase == PhaseReviewing) {
+			// A reviewing round is in flight (a fired ack, or a bounded co-review
+			// wait): advance from the slot wait into feedback polling, which the
+			// WaitDeadline bounds — don't spin here.
+			return PumpResult{Action: "fired", Repo: repo, PR: pr, Head: r.Head}, 0, nil
+		}
+		if !state.ContainsActive(repo, pr) {
+			head, open, herr := s.pullHead(ctx, repo, pr)
+			if herr == nil && !open {
+				// PR closed/merged and dropped — nothing to review; stop the loop.
+				return PumpResult{Action: "skipped", Repo: repo, PR: pr, Reason: "pr closed"}, 2, nil
+			}
+			if herr == nil && head != "" && state.FiredMarker(repo, pr) == head {
+				return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: head}, 3, nil
+			}
+			if result.Action == "fired" && result.Repo == repo && result.PR == pr {
+				return result, 0, nil
+			}
+			enqueued = false
 			continue
 		}
-		switch unit := fields[i+1]; {
-		case strings.HasPrefix(unit, "hour"):
-			d += time.Duration(n) * time.Hour
-		case strings.HasPrefix(unit, "minute"):
-			d += time.Duration(n) * time.Minute
-		case strings.HasPrefix(unit, "second"):
-			d += time.Duration(n) * time.Second
+		if s.log != nil && time.Since(lastLog) >= 30*time.Second {
+			reason := result.Reason
+			if reason == "" {
+				reason = result.Action
+			}
+			s.log.Printf("%s#%d waiting for a review slot — %s (%s elapsed)", repo, pr, reason, s.clock().Sub(start).Round(time.Second))
+			lastLog = time.Now()
+		}
+		select {
+		case <-ctx.Done():
+			return PumpResult{}, 1, ctx.Err()
+		case <-time.After(s.cfg.PollInterval):
 		}
 	}
-	if d == 0 {
-		return nil
-	}
-	t := base.Add(d)
-	return &t
 }
 
-func parseQuota(text string, base time.Time) (*int, *time.Time) {
-	remaining := parseRemainingReviews(text)
-	reset := parseAvailableIn(text, base)
-	return remaining, reset
+func queuedFeedbackCheckEvery(poll time.Duration) time.Duration {
+	if poll <= 0 {
+		return 30 * time.Second
+	}
+	if poll < 30*time.Second {
+		return poll
+	}
+	return 30 * time.Second
 }
 
-func parseRemainingReviews(text string) *int {
-	lower := strings.ToLower(text)
-	words := strings.FieldsFunc(lower, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
-	})
-	for i := 0; i < len(words); i++ {
-		n, err := strconv.Atoi(words[i])
-		if err != nil {
-			continue
-		}
-		if i+2 < len(words) && strings.HasPrefix(words[i+1], "review") && (words[i+2] == "remaining" || words[i+2] == "left") {
-			return &n
-		}
-		if i > 0 && (words[i-1] == "remaining" || words[i-1] == "left") {
-			return &n
+// sweepParkedClosed abandons the oldest awaiting_retry round whose PR has been
+// closed or merged. Parked rounds are invisible to NextEligible until RetryAt,
+// so without this a PR closed during an account-block cooldown stays active and
+// a waiting loop times out instead of returning skipped. One pull read per
+// pump, ETag-cached.
+func (s *Service) sweepParkedClosed(ctx context.Context, st State) (PumpResult, bool, error) {
+	if s.cfg.DryRun {
+		return PumpResult{}, false, nil
+	}
+	var keys []string
+	for key := range st.Rounds {
+		if st.Rounds[key].Phase == PhaseAwaitingRetry {
+			keys = append(keys, key)
 		}
 	}
-	return nil
+	if len(keys) == 0 {
+		return PumpResult{}, false, nil
+	}
+	// Rotate the inspected candidate across pumps: always taking the oldest
+	// would let one long-cooldown open PR starve the closed-PR check for every
+	// parked round behind it. In-memory rotation is enough — only the leader
+	// daemon sweeps, and a restart merely restarts the cycle.
+	sort.Strings(keys)
+	next := keys[0]
+	for _, k := range keys {
+		if k > s.lastParkedSweep {
+			next = k
+			break
+		}
+	}
+	s.lastParkedSweep = next
+	r := st.Rounds[next]
+	target := &r
+	_, open, err := s.pullHead(ctx, target.Repo, target.PR)
+	if err != nil {
+		return PumpResult{}, false, err
+	}
+	if open {
+		return PumpResult{}, false, nil
+	}
+	res, err := s.abandonRound(ctx, *target, "pr closed", "skipped")
+	return res, true, err
 }
