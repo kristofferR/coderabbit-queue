@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"time"
+
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 )
 
@@ -26,6 +28,25 @@ func FindingsOnHead(findings []dialect.Finding, head string) []dialect.Finding {
 	current := make([]dialect.Finding, 0, len(findings))
 	for _, finding := range findings {
 		if finding.Commit == "" || head == "" || dialect.SHAPrefixMatch(finding.Commit, head) {
+			current = append(current, finding)
+		}
+	}
+	return current
+}
+
+// FindingsForActiveRound returns feedback that should interrupt an active slot
+// wait. In addition to findings attached to the current head, it includes
+// delayed review feedback that arrived after this round was enqueued even when
+// the reviewer attached it to the previous commit. Pre-existing carried review
+// bodies remain excluded so they cannot prevent a replacement review forever.
+func FindingsForActiveRound(findings []dialect.Finding, head string, enqueuedAt time.Time) []dialect.Finding {
+	current := make([]dialect.Finding, 0, len(findings))
+	for _, finding := range findings {
+		onHead := finding.Commit == "" || head == "" || dialect.SHAPrefixMatch(finding.Commit, head)
+		arrivedDuringRound := !enqueuedAt.IsZero() &&
+			!finding.CreatedAt.IsZero() &&
+			!finding.CreatedAt.Before(enqueuedAt)
+		if onHead || arrivedDuringRound {
 			current = append(current, finding)
 		}
 	}

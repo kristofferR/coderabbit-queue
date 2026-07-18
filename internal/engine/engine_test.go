@@ -622,3 +622,17 @@ func TestCodexResolutionBypassesAccountBlock(t *testing.T) {
 		t.Fatalf("a real fire must still respect the account block, got %+v", d)
 	}
 }
+
+func TestFindingsForActiveRoundIncludesOnlyCurrentOrNewlyArrivedFeedback(t *testing.T) {
+	findings := []dialect.Finding{
+		{Title: "current", Commit: "abcdef123456", CreatedAt: t0.Add(-time.Hour)},
+		{Title: "delayed", Commit: "fedcba987654", CreatedAt: t0.Add(time.Second)},
+		{Title: "carried", Commit: "fedcba987654", CreatedAt: t0.Add(-time.Second)},
+		{Title: "unbound", CreatedAt: t0.Add(-time.Hour)},
+	}
+
+	got := FindingsForActiveRound(findings, "abcdef123", t0)
+	if len(got) != 3 || got[0].Title != "current" || got[1].Title != "delayed" || got[2].Title != "unbound" {
+		t.Fatalf("unexpected active-round findings: %#v", got)
+	}
+}
