@@ -1408,6 +1408,53 @@ func TestWaitReturnsCurrentHeadFeedbackBeforeReviewSlot(t *testing.T) {
 	}
 }
 
+func TestLoopReturnsLatePreviousHeadFeedbackAfterQueueing(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RequiredBots = []string{"coderabbitai[bot]"}
+	cfg.FeedbackBots = []string{"coderabbitai[bot]"}
+	cfg.WaitTimeout = 25 * time.Millisecond
+	cfg.PollInterval = time.Millisecond
+	gh := newFakeGitHub()
+	queuedAt := time.Now().UTC().Add(-time.Minute)
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	review := ghapi.Review{
+		ID:          7,
+		Body:        "**Actionable comments posted: 1**\n<details><summary>🤖 Prompt for all review comments with AI agents</summary>\n\n```\nIn `@a.go`:\n- Around line 1: Delayed finding from the previous head.\n```\n</details>",
+		CommitID:    "fedcba9876543210",
+		SubmittedAt: queuedAt.Add(time.Second),
+	}
+	review.User.Login = "coderabbitai[bot]"
+	gh.reviews[fakeKey("owner/repo", 12)] = []ghapi.Review{review}
+	store := NewMemoryStore(cfg)
+	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseQueued, queuedAt, 0)
+	blockedUntil := queuedAt.Add(time.Hour)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Account.BlockedUntil = &blockedUntil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(cfg, gh, store, nil)
+
+	report, code, err := service.Loop(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 10 || len(report.Findings) != 1 {
+		t.Fatalf("a delayed review must end the loop with feedback, code=%d report=%#v", code, report)
+	}
+	if report.Reason != "hold current head: fix locally, but do not commit or push until every required reviewer finishes" {
+		t.Fatalf("the delayed old-head review must not satisfy the current reviewer gate: %#v", report)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("known feedback must not spend a review slot, posted=%d", len(gh.posted))
+	}
+}
+
 func TestWaitFiresRealReviewWhenOnlyCarriedReviewPromptVisible(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()

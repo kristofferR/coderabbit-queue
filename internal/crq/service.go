@@ -1423,10 +1423,19 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 				return PumpResult{}, 1, err
 			}
 			lastFeedbackCheck = time.Now()
-			// Return current-head findings immediately so the caller can fix locally.
-			// The round stays active: policy holds this head until the slot and every
-			// required reviewer finish.
-			if len(engine.FindingsOnHead(report.Findings, report.Head)) > 0 {
+			// Return current-head findings immediately, plus a delayed review
+			// attached to the previous commit when it actually arrived after this
+			// round was queued. The latter is real new feedback, not the old carried
+			// prompt that must remain excluded from replacement-review gating.
+			state, _, err := s.store.Load(ctx)
+			if err != nil {
+				return PumpResult{}, 1, err
+			}
+			enqueuedAt := time.Time{}
+			if round := state.Round(repo, pr); round != nil && round.Head == report.Head {
+				enqueuedAt = round.EnqueuedAt
+			}
+			if len(engine.FindingsForActiveRound(report.Findings, report.Head, enqueuedAt)) > 0 {
 				if s.log != nil {
 					s.log.Printf("%s#%d feedback already available on %s; leaving review slot wait", repo, pr, report.Head)
 				}
