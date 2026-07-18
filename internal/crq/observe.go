@@ -213,9 +213,33 @@ func (s *Service) reviewCommands(ctx context.Context, repo string, pr int, obs e
 		cr = s.adoptableCR(obs, cutoff, command, comments, reviews)
 	}
 	if hasCodex {
-		codex = newestCommandSince(codexCommand, cutoff, comments)
+		codex = adoptableCodex(cutoff, codexCommand, comments, reviews)
 	}
 	return cr, codex, nil
+}
+
+// adoptableCodex returns the newest `@codex review` command comment present for
+// the head that Codex has NOT already answered with a review, or none. A command
+// answered by a later Codex review belongs to a finished round for an earlier
+// head: on a regular push whose commit date predates that old command, the
+// command survives the cutoff yet is already consumed, so treating it as live
+// makes DecideCodexPost see commandPresent=true and suppress the Codex command
+// the new head still needs. Mirrors adoptableCR's review-answered guard.
+func adoptableCodex(cutoff time.Time, codexCommand string, comments []ghapi.IssueComment, reviews []ghapi.Review) []engine.CommandSeen {
+	best := newestCommandSince(codexCommand, cutoff, comments)
+	if len(best) == 0 {
+		return nil
+	}
+	bestAt := best[0].CreatedAt
+	if bestAt.IsZero() {
+		bestAt = best[0].UpdatedAt
+	}
+	for _, review := range reviews {
+		if dialect.IsCodexBot(review.User.Login) && !review.SubmittedAt.Before(bestAt) {
+			return nil
+		}
+	}
+	return best
 }
 
 // adoptableCR returns the newest CodeRabbit command comment safe to adopt as an

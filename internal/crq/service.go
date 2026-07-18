@@ -618,6 +618,12 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 			if postCodex {
 				t := now.UTC()
 				r.CodexClaimedAt = &t
+			} else if id := newestCommandID(obs.CodexCommands); id != 0 && r.CodexCommandID == 0 {
+				// Not posting because a live `@codex review` command already answers
+				// this head — record its id now. The self-heal scan anchors on FiredAt
+				// and would miss a command posted before the adopted CodeRabbit command,
+				// posting a duplicate; recording it here keeps the round "asked".
+				r.CodexCommandID = id
 			}
 			st.PutRound(*r)
 			recorded = true

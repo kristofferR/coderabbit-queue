@@ -95,7 +95,7 @@ Everything lives in one small **gate repo** (private is fine):
 
 | Piece | What it is |
 |-------|-----------|
-| 🔒 **State ref** | The typed queue state is JSON stored in a git ref (`CRQ_STATE_REF`, default `crq-state`), updated with optimistic **compare-and-swap** — a new commit is written only if the ref hasn't moved, so concurrent callers across machines never corrupt the queue. No database, service account, or always-on server. |
+| 🔒 **State ref** | The typed queue state is JSON stored in a git ref (`CRQ_STATE_REF`, default `crq-state-v3`), updated with optimistic **compare-and-swap** — a new commit is written only if the ref hasn't moved, so concurrent callers across machines never corrupt the queue. No database, service account, or always-on server. |
 | 📊 **Dashboard issue** | A tracking **issue** renders the live state below a hidden machine-readable block: status, the queue, in-flight review, recently requested review commands, and the current quota — every PR linked. The issue **title** is a one-glance status (`🐰 crq — 2 queued`). |
 | 🐰 **Calibration PR** | A throwaway draft PR where crq asks `@coderabbitai rate limit` to read your real quota *without spending a review*. crq prunes its own probe comments so the PR never hits GitHub's 2500-comment cap. |
 
@@ -154,7 +154,7 @@ export CRQ_REPO=YOURUSER/crq-state
 export CRQ_ISSUE=2
 export CRQ_CAL_PR=1
 export CRQ_SCOPE=YOURUSER
-export CRQ_STATE_REF=crq-state
+export CRQ_STATE_REF=crq-state-v3
 EOF
 ```
 
@@ -420,7 +420,7 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_ISSUE` | from `init` | dashboard issue number |
 | `CRQ_CAL_PR` | from `init` | calibration PR number |
 | `CRQ_SCOPE` | owner of `CRQ_REPO` | which owners/orgs share this quota (comma-separated) |
-| `CRQ_STATE_REF` | `crq-state` | git ref that stores the typed CAS state |
+| `CRQ_STATE_REF` | `crq-state-v3` | git ref that stores the typed CAS state |
 | `CRQ_REPOS` | _(all in scope)_ | `autoreview` allowlist — only these `owner/name` repos (comma-separated) |
 | `CRQ_EXCLUDE` | _(none)_ | `autoreview` denylist — never these `owner/name` repos (comma-separated) |
 | `CRQ_AUTOREVIEW_SKIP_AUTHORS` | `dependabot[bot]` | PR authors `autoreview` never enqueues (comma-separated; case and `[bot]` suffix don't matter) — set to empty to auto-review bot PRs too; manual `crq review` is unaffected |

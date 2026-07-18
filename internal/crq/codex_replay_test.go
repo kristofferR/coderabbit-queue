@@ -627,3 +627,80 @@ func TestLoopSettleWindowCatchesTrailingWave(t *testing.T) {
 		t.Fatalf("a quiet settle window must converge, got code=%d", code)
 	}
 }
+
+// TestCodexReplayIgnoresAnsweredCommandForNewHead pins the observe fix: an old
+// `@codex review` command Codex already answered with a review must not read as
+// live for a later head. On a regular push whose commit date predates that
+// consumed command, the command survives the adoption cutoff — but treating it as
+// present would make DecideCodexPost see the head as already-asked and suppress
+// the Codex command the new head still needs. crq must post a fresh @codex review.
+func TestCodexReplayIgnoresAnsweredCommandForNewHead(t *testing.T) {
+	base := time.Date(2026, 7, 17, 9, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = []string{cfg.Bot, codexLogin}
+	})
+	f.gh.graphQL = noForcePush // resolve the force-push cutoff so a surviving command would be adoptable
+	repo, pr := "o/r", 21
+	oldHead, head := "1111222233334444", "5555666677778888"
+	f.openPull(repo, pr, head)
+	// The new head is an ordinary push whose commit date predates the old command,
+	// so that command clears the cutoff and only the answered-review guard rejects it.
+	f.setCommitDate(head, base.Add(-2*time.Hour))
+	// Previous head's history: a `@codex review` command Codex already answered.
+	f.humanComment(repo, pr, 600, f.cfg.CodexCommand, base.Add(-time.Hour))
+	f.codexReview(repo, pr, 400, oldHead, base.Add(-30*time.Minute))
+
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected fire, got %+v", res)
+	}
+	// The consumed command is ignored, so crq commands Codex for the new head.
+	if got := f.codexPosted(repo, pr); got != 1 {
+		t.Fatalf("codex must be commanded for the new head, got %d posts", got)
+	}
+	if r := f.round(repo, pr); r == nil || r.CodexCommandID == 0 {
+		t.Fatalf("round must record the fresh codex command, got %+v", r)
+	}
+}
+
+// TestCodexReplayAdoptRecordsExistingCodexCommand pins the adopt-path fix: when a
+// round adopts an already-posted `@coderabbitai review` command and a live `@codex
+// review` command already answers the head, crq is not posting Codex — but it must
+// still record that command's id. Otherwise the self-heal scan (which anchors on
+// FiredAt) misses a Codex command posted before the adopted CodeRabbit one and
+// posts a duplicate.
+func TestCodexReplayAdoptRecordsExistingCodexCommand(t *testing.T) {
+	base := time.Date(2026, 7, 17, 9, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = []string{cfg.Bot, codexLogin}
+	})
+	f.gh.graphQL = noForcePush // resolve the cutoff so both commands are adoptable
+	repo, pr, head := "o/r", 22, "aaaabbbbccccdddd"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Hour))
+	// The Codex command is posted BEFORE the CodeRabbit command crq will adopt, so a
+	// self-heal scan anchored on the fire time would miss it and repost.
+	const codexCmdID = 601
+	f.humanComment(repo, pr, codexCmdID, f.cfg.CodexCommand, base.Add(-2*time.Minute))
+	f.humanComment(repo, pr, 602, f.cfg.ReviewCommand, base.Add(-time.Minute))
+
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected an adopt fire, got %+v", res)
+	}
+	// The adopt path posts neither command; it records the existing Codex command.
+	if got := f.codexPosted(repo, pr); got != 0 {
+		t.Fatalf("adopt must not post a codex command, got %d", got)
+	}
+	if r := f.round(repo, pr); r == nil || r.CodexCommandID != codexCmdID {
+		t.Fatalf("adopt must record the existing codex command id %d, got %+v", codexCmdID, r)
+	}
+
+	// A later pump's self-heal must not repost the Codex command now that it is
+	// recorded as the round's CodexCommandID.
+	f.clk.advance(2 * time.Minute)
+	f.pump()
+	if got := f.codexPosted(repo, pr); got != 0 {
+		t.Fatalf("self-heal must not repost the recorded codex command, got %d", got)
+	}
+}

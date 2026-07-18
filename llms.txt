@@ -30,7 +30,7 @@ export CRQ_REPO=OWNER/crq-state
 export CRQ_ISSUE=1
 export CRQ_CAL_PR=1
 export CRQ_SCOPE=OWNER
-export CRQ_STATE_REF=crq-state
+export CRQ_STATE_REF=crq-state-v3
 ```
 
 CodeRabbit native auto-review must be off.
