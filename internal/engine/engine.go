@@ -22,6 +22,11 @@ type Policy struct {
 	InflightTimeout   time.Duration // fired round with no bot response at all
 	RateLimitFallback time.Duration // block window when "available in" is unparseable
 	RetryBackoff      time.Duration // cooldown after a non-rate-limit retry (timeout, failure)
+
+	// RateLimitCodexDegrade lets an account-blocked round degrade to a
+	// Codex-only round (post the Codex command now, keep CodeRabbit queued
+	// for the window) instead of waiting the block out. CRQ_RL_CODEX_DEGRADE.
+	RateLimitCodexDegrade bool
 }
 
 func (p Policy) rateLimitFallback() time.Duration {

@@ -48,6 +48,9 @@ The loop also returns as soon as any feedback bot reports a finding; it does not
 remaining required bots or a shared review slot. Fix those findings locally, but HOLD THE HEAD:
 resolve each addressed thread immediately, but do not commit or push while any `.reviewed_by` value
 is false, because changing the head restarts the pending checks while thread resolution does not.
+Exception: when `.coderabbit_deferred` is true and every non-CodeRabbit required reviewer is true,
+the round is Codex-only (CodeRabbit rate-limited) — fix, push, and loop again without holding the
+head; the queued CodeRabbit review is untouched.
 Keep the queued review alive and poll `crq feedback` with the same `CRQ_REQUIRED_BOTS`. When every
 required bot is true, fix and resolve the rest, then commit all fixes once and push once.
 
@@ -67,16 +70,29 @@ never when Codex auto-reviews the PR on its own. A Codex that joins a round unin
 round's convergence dynamically (its usage-limit notice releases the dynamic gate). If a bot reports
 actionable findings first, it emits them immediately while leaving the queued round alive. Fix and
 validate locally and resolve or decline each addressed thread immediately. While any required bot's
-`.reviewed_by` value is false, do not commit or push. Only after every `CRQ_REQUIRED_BOTS` entry is true
-for the current head should you fix and resolve the rest, then commit and push the combined fixes once.
-Convergence is reported only after that same condition is met.
+`.reviewed_by` value is false, do not commit or push — unless `.coderabbit_deferred` is true and all
+non-CodeRabbit required reviewers are true, in which case push freely: the round is Codex-only while
+CodeRabbit is rate-limited. Only after every
+`CRQ_REQUIRED_BOTS` entry is true for the current head should you fix and resolve the rest, then
+commit and push the combined fixes once. Convergence is reported only after that same condition is met.
 
 Exit codes:
-- `0`: done; converged or no actionable findings.
+- `0`: done; converged or no actionable findings. Check `.coderabbit_deferred`: when true (with
+  `.status == "deferred"`), Codex reviewed clean but the CodeRabbit review is still owed — this is
+  progress, NOT convergence (`.converged` stays false). Re-run `crq loop` after
+  `.coderabbit_deferred_until` or on the next push; the queued CodeRabbit review fires by itself
+  once the window opens.
 - `10`: read `.findings[]`, fix valid issues, and validate locally. If any `.reviewed_by` value is
-  false, resolve addressed threads but hold the head. After all are true, fix/resolve the rest,
-  commit/push once, then repeat.
+  false, resolve addressed threads but hold the head — EXCEPT when `.coderabbit_deferred` is true
+  and all non-CodeRabbit required reviewers are true: those are Codex-only findings during a
+  CodeRabbit rate-limit window, so fix, push, and loop again (each Codex round takes minutes;
+  several fit inside one CodeRabbit window).
 - `2`: timed out waiting for feedback; do not push a stale-feedback round.
+
+Rate-limit degrade: when CodeRabbit is rate-limited ("Review limit reached … Next review available
+in: NN minutes") and Codex demonstrably reviews the PR, the loop degrades to Codex-only rounds
+instead of waiting the window out, and the pump posts `CRQ_CODEX_CMD` for blocked rounds while
+keeping the CodeRabbit review queued. Disable with `CRQ_RL_CODEX_DEGRADE=0` (default on).
 
 Resolve addressed threads on GitHub (crq keys off GitHub resolution state; a finding keeps
 reappearing until its thread is resolved there):

@@ -84,7 +84,10 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 			}
 			continue
 		}
-		if r.FiredAt != nil && notBefore(ev.ObservedTime(), cutoff) {
+		// SHA-less summaries bind from the Codex command time when crq posted
+		// it before the (deferred) CodeRabbit fire — see codexCutoff.
+		if (r.FiredAt != nil || r.CodexCommandedAt != nil) &&
+			notBefore(ev.ObservedTime(), codexCutoff(r)) {
 			markReviewed(reviewedBy, ev.Bot)
 		}
 	}
@@ -275,6 +278,46 @@ func commandReplies(obs Observation, p Policy) []commandReply {
 		}
 	}
 	return out
+}
+
+// DoneExcept reports whether every gating bot EXCEPT the named one has review
+// evidence — and at least one other bot gates at all. The vacuous case
+// matters: with only the excluded bot required, a degraded round must never
+// read as done, or a CodeRabbit rate-limit window with no Codex configured
+// would let rounds complete with no review evidence whatsoever.
+func DoneExcept(reviewedBy map[string]bool, except string) bool {
+	norm := dialect.NormalizeBotName(except)
+	others := 0
+	for bot, reviewed := range reviewedBy {
+		if bot == except || dialect.NormalizeBotName(bot) == norm {
+			continue
+		}
+		if !reviewed {
+			return false
+		}
+		others++
+	}
+	return others > 0
+}
+
+// DoneExceptWithEvidence is DoneExcept after applying independently established
+// review evidence for one bot. It preserves every other gating bot, while also
+// handling configured login spellings that differ only by the "[bot]" suffix.
+func DoneExceptWithEvidence(reviewedBy map[string]bool, except, evidenceBot string) bool {
+	withEvidence := make(map[string]bool, len(reviewedBy)+1)
+	evidenceNorm := dialect.NormalizeBotName(evidenceBot)
+	found := false
+	for bot, reviewed := range reviewedBy {
+		if dialect.NormalizeBotName(bot) == evidenceNorm {
+			reviewed = true
+			found = true
+		}
+		withEvidence[bot] = reviewed
+	}
+	if !found {
+		withEvidence[evidenceBot] = true
+	}
+	return DoneExcept(withEvidence, except)
 }
 
 // needsBotReview reports whether login gates completion (has a ReviewedBy

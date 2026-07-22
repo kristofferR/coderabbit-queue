@@ -1894,3 +1894,338 @@ func TestRefreshQuotaPreservesBlockOnInconclusiveProbe(t *testing.T) {
 		t.Fatalf("an inconclusive probe must preserve the live block %v, got %v", block, updated.Account.BlockedUntil)
 	}
 }
+
+// TestLoopDegradesToCodexOnlyOnRateLimit: a rate-limited round with Codex
+// activity must return Codex findings promptly — marked deferred — instead of
+// waiting out the CodeRabbit window.
+func TestLoopDegradesToCodexOnlyOnRateLimit(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RateLimitCodexDegrade = true
+	cfg.FeedbackBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
+	gh := newFakeGitHub()
+	head := "a0646f010"
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = head + "abcdef0"
+	gh.pulls[fakeKey("o/carrier", 90)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	if _, err := svc.Enqueue(ctx, "o/carrier", 90); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := svc.Pump(ctx); err != nil || res.Action != "fired" {
+		t.Fatalf("expected fire, got %#v err=%v", res, err)
+	}
+	answer := time.Now().UTC().Add(time.Second)
+	rl := ghapi.IssueComment{ID: 501, Body: "<!-- rate limited by coderabbit.ai -->\n> ## Review limit reached\n> **Next review available in:** **40 minutes**", CreatedAt: answer, UpdatedAt: answer}
+	rl.User.Login = "coderabbitai[bot]"
+	finding := ghapi.IssueComment{ID: 502, Body: "Actionable Codex finding on the current head", CreatedAt: answer.Add(time.Second), UpdatedAt: answer.Add(time.Second)}
+	finding.User.Login = "chatgpt-codex-connector[bot]"
+	gh.comments[fakeKey("o/carrier", 90)] = []ghapi.IssueComment{rl, finding}
+	if res, err := svc.Pump(ctx); err != nil || res.Action != "requeued" {
+		t.Fatalf("expected rate-limited requeue, got %#v err=%v", res, err)
+	}
+
+	begin := time.Now()
+	report, code, err := svc.Loop(ctx, "o/carrier", 90)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 10 || len(report.Findings) == 0 {
+		t.Fatalf("degraded loop must return the codex findings, code=%d report=%#v", code, report)
+	}
+	if !report.CodeRabbitDeferred || report.DeferredUntil == nil {
+		t.Fatalf("the report must mark coderabbit deferred with a window, got %#v", report)
+	}
+	if report.ReviewedBy["coderabbitai[bot]"] {
+		t.Fatalf("coderabbit must still read as unreviewed: %#v", report.ReviewedBy)
+	}
+	if report.Converged {
+		t.Fatal("a deferred round must never read as converged")
+	}
+	if elapsed := time.Since(begin); elapsed > 5*time.Second {
+		t.Fatalf("degraded loop must not wait out the rate-limit window, took %s", elapsed)
+	}
+}
+
+// TestFeedbackDefersCleanAutoCodexWithDefaultRequiredBots covers the default
+// feedback-only Codex setup: its SHA-bound clean verdict is sufficient evidence
+// even though Completion.ReviewedBy contains only the pending CodeRabbit key.
+func TestFeedbackDefersCleanAutoCodexWithDefaultRequiredBots(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RateLimitCodexDegrade = true
+	cfg.FeedbackBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
+	gh := newFakeGitHub()
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("o/carrier", 93)] = pull
+	cleanAt := time.Now().UTC().Add(-time.Minute)
+	clean := ghapi.IssueComment{ID: 701,
+		Body:      "Codex Review: Didn't find any major issues. :tada:\n\n**Reviewed commit:** `abcdef1234`",
+		CreatedAt: cleanAt, UpdatedAt: cleanAt}
+	clean.User.Login = "chatgpt-codex-connector[bot]"
+	gh.comments[fakeKey("o/carrier", 93)] = []ghapi.IssueComment{clean}
+	store := NewMemoryStore(cfg)
+	seedRound(t, store, cfg, "o/carrier", 93, "abcdef123", PhaseQueued, cleanAt.Add(-time.Minute), 0)
+	blockedUntil := time.Now().UTC().Add(30 * time.Minute)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Account.BlockedUntil = &blockedUntil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewService(cfg, gh, store, nil)
+	report, err := svc.Feedback(ctx, "o/carrier", 93)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "deferred" || !report.CodeRabbitDeferred || report.Converged {
+		t.Fatalf("clean feedback-only codex must produce a non-converged deferred report, got %#v", report)
+	}
+	if len(report.ReviewedBy) != 1 || report.ReviewedBy["coderabbitai[bot]"] {
+		t.Fatalf("default required-bot state must remain coderabbit-only and pending, got %#v", report.ReviewedBy)
+	}
+}
+
+// TestLoopDeferredCodexCleanExitsZeroNotConverged: a clean Codex verdict on a
+// degraded round exits 0 as "deferred" without completing the round — the
+// CodeRabbit review stays owed.
+func TestLoopDeferredCodexCleanExitsZeroNotConverged(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RateLimitCodexDegrade = true
+	cfg.RequiredBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
+	cfg.FeedbackBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
+	cfg.CodexCommand = "@codex review"
+	cfg.SettleWindow = 0
+	gh := newFakeGitHub()
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("o/carrier", 91)] = pull
+	store := NewMemoryStore(cfg)
+	started := time.Now().UTC().Add(-time.Minute)
+	seedRound(t, store, cfg, "o/carrier", 91, "abcdef123", PhaseReviewing, started, 1001)
+	blockedUntil := time.Now().UTC().Add(30 * time.Minute)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Account.BlockedUntil = &blockedUntil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clean := ghapi.IssueComment{ID: 700, Body: "## Codex Review\n\nDidn't find any major issues. Keep them coming!", CreatedAt: started.Add(30 * time.Second), UpdatedAt: started.Add(30 * time.Second)}
+	clean.User.Login = "chatgpt-codex-connector[bot]"
+	gh.comments[fakeKey("o/carrier", 91)] = []ghapi.IssueComment{clean}
+
+	svc := NewService(cfg, gh, store, nil)
+	report, code, err := svc.Loop(ctx, "o/carrier", 91)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 || report.Status != "deferred" {
+		t.Fatalf("clean codex on a degraded round must exit 0 as deferred, code=%d report=%#v", code, report)
+	}
+	if report.Converged {
+		t.Fatal("deferred must not be converged")
+	}
+	st, _, _ := store.Load(ctx)
+	if r := st.Round("o/carrier", 91); r == nil || r.Phase == PhaseCompleted {
+		t.Fatalf("a deferred round must not be completed, got %#v", r)
+	}
+	if !st.ContainsActive("o/carrier", 91) {
+		t.Fatal("the coderabbit review must stay owed (round active)")
+	}
+}
+
+// TestPumpPostsCodexDeferredDuringBlockThenFiresCodeRabbit: during a block the
+// pump posts only the Codex command and keeps the round queued; once the
+// window passes it fires the CodeRabbit review without re-posting Codex.
+func TestPumpPostsCodexDeferredDuringBlockThenFiresCodeRabbit(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RateLimitCodexDegrade = true
+	cfg.RequiredBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
+	cfg.CodexCommand = "@codex review"
+	gh := newFakeGitHub()
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("o/carrier", 92)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	svc.now = func() time.Time { return now }
+
+	if _, err := svc.Enqueue(ctx, "o/carrier", 92); err != nil {
+		t.Fatal(err)
+	}
+	blockedUntil := now.Add(30 * time.Minute)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Account.BlockedUntil = &blockedUntil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := svc.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Action != "codex_fired" {
+		t.Fatalf("expected the codex-deferred fire, got %#v", res)
+	}
+	st, _, _ := store.Load(ctx)
+	r := st.Round("o/carrier", 92)
+	if r == nil || r.Phase != PhaseQueued || r.CodexCommandID == 0 {
+		t.Fatalf("the round must stay queued with the codex command recorded, got %#v", r)
+	}
+	if _, err := svc.Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+	countPosts := func(suffix string) int {
+		n := 0
+		for _, p := range gh.posted {
+			if strings.HasSuffix(p, suffix) {
+				n++
+			}
+		}
+		return n
+	}
+	if countPosts(":@codex review") != 1 {
+		t.Fatalf("exactly one codex command must be posted during the block, got %v", gh.posted)
+	}
+	if countPosts(":@coderabbitai review") != 0 {
+		t.Fatalf("no coderabbit review may fire during the block, got %v", gh.posted)
+	}
+
+	// Window opens: the queued round fires CodeRabbit, without re-posting Codex.
+	now = blockedUntil.Add(time.Minute)
+	res, err = svc.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Action != "fired" {
+		t.Fatalf("expected the coderabbit fire after the window, got %#v", res)
+	}
+	if countPosts(":@coderabbitai review") != 1 || countPosts(":@codex review") != 1 {
+		t.Fatalf("after the window: one coderabbit fire, still one codex command, got %v", gh.posted)
+	}
+}
+
+func TestPumpAdoptsExistingCodexCommandDuringBlock(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RateLimitCodexDegrade = true
+	cfg.RequiredBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
+	cfg.CodexCommand = "@codex review"
+	gh := newFakeGitHub()
+	headTime := time.Now().UTC().Add(-2 * time.Minute)
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("o/carrier", 94)] = pull
+	commit := ghapi.Commit{SHA: pull.Head.SHA}
+	commit.Committer.Date = headTime
+	gh.commits[pull.Head.SHA] = commit
+	commandAt := headTime.Add(time.Minute)
+	command := ghapi.IssueComment{ID: 702, Body: cfg.CodexCommand, CreatedAt: commandAt, UpdatedAt: commandAt}
+	command.User.Login = "kristofferR"
+	gh.comments[fakeKey("o/carrier", 94)] = []ghapi.IssueComment{command}
+	gh.graphQL = noForcePush
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := svc.Enqueue(ctx, "o/carrier", 94); err != nil {
+		t.Fatal(err)
+	}
+	blockedUntil := time.Now().UTC().Add(30 * time.Minute)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Account.BlockedUntil = &blockedUntil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Action != "codex_adopted" {
+		t.Fatalf("expected the existing codex command to be adopted, got %#v", res)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("adopting the codex command must not post another command, got %v", gh.posted)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := st.Round("o/carrier", 94)
+	if r == nil || r.Phase != PhaseQueued || r.CodexCommandID != command.ID ||
+		r.CodexCommandedAt == nil || !r.CodexCommandedAt.Equal(commandAt) {
+		t.Fatalf("the queued round must persist the adopted codex anchor, got %#v", r)
+	}
+}
+
+func TestFireCodexDeferredAdoptionHonorsDryRunAndActiveClaim(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RateLimitCodexDegrade = true
+	cfg.RequiredBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
+	cfg.CodexCommand = "@codex review"
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	now := time.Now().UTC()
+	seedRound(t, store, cfg, "o/carrier", 95, "abcdef123", PhaseQueued, now.Add(-time.Minute), 0)
+	svc := NewService(cfg, gh, store, nil)
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := *st.Round("o/carrier", 95)
+
+	svc.cfg.DryRun = true
+	res, err := svc.fireCodexDeferred(ctx, round, 703, now.Add(-time.Minute), "dry run adopt", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Action != "codex_fired" || len(gh.posted) != 0 {
+		t.Fatalf("dry run must report the existing simulated action without posting, got %#v posts=%v", res, gh.posted)
+	}
+	st, _, _ = store.Load(ctx)
+	if got := st.Round("o/carrier", 95); got == nil || got.CodexCommandID != 0 {
+		t.Fatalf("dry run must not persist the adopted command, got %#v", got)
+	}
+
+	svc.cfg.DryRun = false
+	if _, err := store.Update(ctx, func(st *State) error {
+		r := st.Round("o/carrier", 95)
+		r.CodexClaimedAt = &now
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res, err = svc.fireCodexDeferred(ctx, round, 703, now.Add(-time.Minute), "claimed adopt", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Action != "deduped" {
+		t.Fatalf("a fresh in-flight claim must defer adoption, got %#v", res)
+	}
+	st, _, _ = store.Load(ctx)
+	if got := st.Round("o/carrier", 95); got == nil || got.CodexCommandID != 0 || got.CodexClaimedAt == nil {
+		t.Fatalf("the active claim must remain untouched, got %#v", got)
+	}
+
+	staleNow := now.Add(codexClaimTTL + time.Second)
+	res, err = svc.fireCodexDeferred(ctx, round, 703, now.Add(-time.Minute), "stale claim adopt", staleNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Action != "codex_adopted" {
+		t.Fatalf("an expired claim must allow adoption recovery, got %#v", res)
+	}
+	st, _, _ = store.Load(ctx)
+	if got := st.Round("o/carrier", 95); got == nil || got.CodexCommandID != 703 || got.CodexClaimedAt != nil {
+		t.Fatalf("the recovered adoption must replace the stale claim, got %#v", got)
+	}
+}

@@ -22,6 +22,21 @@ func roundCutoff(r state.Round) time.Time {
 	return time.Time{}
 }
 
+// codexCutoff is the evidence floor for Codex specifically: evidence produced
+// in response to crq's own Codex command binds from the command time, which
+// can precede a deferred CodeRabbit fire (the command posts while the round
+// is still queued behind a rate-limit window or busy slot).
+func codexCutoff(r state.Round) time.Time {
+	cut := roundCutoff(r)
+	if r.CodexCommandedAt != nil {
+		at := r.CodexCommandedAt.UTC()
+		if cut.IsZero() || at.Before(cut) {
+			return at
+		}
+	}
+	return cut
+}
+
 // codexReviewedRound reports whether a submitted Codex review binds to this
 // round: one whose commit prefixes the head, or — SHA-less — one submitted
 // at/after the fire.
@@ -55,15 +70,35 @@ func codexCommentedRound(obs Observation, cutoff time.Time) bool {
 	return false
 }
 
-// codexReviewedHead reports whether Codex has a submitted review whose commit
-// prefixes the observed head — the "Codex already reviewed this head" fire guard.
-func codexReviewedHead(obs Observation) bool {
+// codexReviewedHeadAt reports the newest Codex verdict explicitly bound to the
+// observed head: either a submitted review or a clean summary naming that SHA.
+// The timestamp is the evidence floor used to ignore older usage-limit notices.
+func codexReviewedHeadAt(obs Observation) (time.Time, bool) {
+	var latest time.Time
+	matched := false
 	for _, review := range obs.Reviews {
 		if dialect.IsCodexBot(review.Bot) && obs.Head != "" && review.Commit != "" && strings.HasPrefix(review.Commit, obs.Head) {
-			return true
+			matched = true
+			if review.SubmittedAt.After(latest) {
+				latest = review.SubmittedAt
+			}
 		}
 	}
-	return false
+	for _, ev := range obs.Events {
+		if ev.Kind == dialect.EvCodexClean && obs.Head != "" && dialect.SHAPrefixMatch(ev.SHA, obs.Head) {
+			matched = true
+			if at := ev.ObservedTime(); at.After(latest) {
+				latest = at
+			}
+		}
+	}
+	return latest, matched
+}
+
+// codexReviewedHead is the "Codex already reviewed this head" fire guard.
+func codexReviewedHead(obs Observation) bool {
+	_, matched := codexReviewedHeadAt(obs)
+	return matched
 }
 
 // CodexActiveThisRound reports whether Codex shows any activity bound to this
@@ -71,7 +106,7 @@ func codexReviewedHead(obs Observation) bool {
 // thumbs-up. observe() stores it on the Observation so the dynamic completion
 // gate requires Codex when it participates without being configured-required.
 func CodexActiveThisRound(r state.Round, obs Observation) bool {
-	cutoff := roundCutoff(r)
+	cutoff := codexCutoff(r)
 	return codexReviewedRound(r, obs, cutoff) || codexCommentedRound(obs, cutoff) || obs.CodexThumbsUp
 }
 
@@ -159,6 +194,35 @@ func CodexCommandSince(obs Observation, since time.Time) bool {
 		}
 	}
 	return false
+}
+
+// CodexOnlyEligible reports whether an account-blocked round may degrade to a
+// Codex-only round: the block is live AND Codex has evidence bound to THIS
+// work — a review of the current head, or round-window activity anchored by
+// the fire or by crq's own (possibly pre-fire) Codex command — AND no
+// usage-limit exhaustion notice inside that same window. Auto-activity on
+// older heads, configuration, or a live unanswered command merely predict
+// evidence; degradation waits for the evidence itself, since before Codex
+// responds there is nothing to return early anyway, and marking a round
+// deferred stops the loop from extending its deadline over the block.
+func CodexOnlyEligible(r state.Round, obs Observation, blockedUntil *time.Time, now time.Time) bool {
+	if blockedUntil == nil || !blockedUntil.After(now) {
+		return false
+	}
+	headEvidenceAt, headReviewed := codexReviewedHeadAt(obs)
+	anchored := r.FiredAt != nil || r.CodexCommandedAt != nil
+	if !headReviewed && !(anchored && obs.CodexActiveThisRound) {
+		return false
+	}
+	// The usage-limit floor is the evidence window. For an unfired,
+	// uncommanded round the cutoff is zero — floor it at the head review that
+	// qualified the round instead, or any old exhaustion notice still on the
+	// PR would suppress the degrade until the window expires.
+	floor := codexCutoff(r)
+	if floor.IsZero() {
+		floor = headEvidenceAt
+	}
+	return !codexUsageLimitedSince(obs, floor)
 }
 
 // codexUsageLimitedSince reports whether Codex posted its usage-limit

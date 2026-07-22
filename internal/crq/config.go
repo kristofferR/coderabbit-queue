@@ -69,6 +69,10 @@ type Config struct {
 	// CodeRabbit review following its comment shells) is caught by crq instead
 	// of by a human re-checking the PR. 0 disables.
 	SettleWindow time.Duration
+	// RateLimitCodexDegrade degrades an account-blocked round to Codex-only
+	// (return Codex findings promptly, keep CodeRabbit queued for the window)
+	// instead of waiting the block out. CRQ_RL_CODEX_DEGRADE, default on.
+	RateLimitCodexDegrade bool
 }
 
 func LoadConfig() (Config, error) {
@@ -135,6 +139,8 @@ func LoadConfig() (Config, error) {
 		DryRun:              env["CRQ_DRY_RUN"] == "1",
 		FeedbackWaitTimeout: durationEnv(env, "CRQ_FEEDBACK_WAIT_TIMEOUT", 20*time.Minute),
 		SettleWindow:        durationEnv(env, "CRQ_SETTLE", 90*time.Second),
+
+		RateLimitCodexDegrade: env["CRQ_RL_CODEX_DEGRADE"] != "0",
 	}
 	if len(cfg.Scope) == 0 && cfg.GateRepo != "" {
 		cfg.Scope = []string{ownerOf(cfg.GateRepo)}

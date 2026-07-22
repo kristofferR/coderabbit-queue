@@ -26,6 +26,12 @@ type FeedbackReport struct {
 	ReviewedBy map[string]bool   `json:"reviewed_by"`
 	Findings   []dialect.Finding `json:"findings"`
 	CheckedAt  time.Time         `json:"checked_at"`
+	// CodeRabbitDeferred marks a round degraded to Codex-only while the
+	// CodeRabbit account is rate-limited: Codex feedback is authoritative for
+	// this round, the CodeRabbit review stays queued and fires after
+	// DeferredUntil. Converged stays false until it does.
+	CodeRabbitDeferred bool       `json:"coderabbit_deferred,omitempty"`
+	DeferredUntil      *time.Time `json:"coderabbit_deferred_until,omitempty"`
 }
 
 func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackReport, error) {
@@ -238,9 +244,29 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		return report.Findings[i].Line < report.Findings[j].Line
 	})
 	report.Converged = engine.Converged(report.Findings, completion)
-	if report.Converged {
+	// Degrade detection: a live rate-limit window plus observed Codex
+	// responsiveness means this round runs Codex-only for now. Converged is
+	// structurally false here (CodeRabbit has no review evidence), so a
+	// deferred round can never masquerade as converged. Only the ACCOUNT-wide
+	// quota block qualifies — a round's own awaiting_retry cooldown also
+	// covers non-quota retries (post failures, timeouts) that must keep their
+	// normal retry handling.
+	if s.cfg.RateLimitCodexDegrade && !report.Converged && st.Account.BlockedUntil != nil {
+		until := st.Account.BlockedUntil.UTC()
+		if until.After(now) && engine.CodexOnlyEligible(completionRound, obs.eng, &until, now) {
+			report.CodeRabbitDeferred = true
+			report.DeferredUntil = &until
+		}
+	}
+	switch {
+	case report.Converged:
 		report.Status = "converged"
-	} else if len(report.Findings) == 0 {
+	case report.CodeRabbitDeferred && len(report.Findings) == 0 &&
+		engine.DoneExceptWithEvidence(report.ReviewedBy, s.cfg.Bot, dialect.CodexBotLogin):
+		report.Status = "deferred"
+		report.Reason = "codex reviewed clean; coderabbit review deferred until " +
+			report.DeferredUntil.UTC().Format(time.RFC3339) + " (account rate-limited)"
+	case len(report.Findings) == 0:
 		report.Status = "waiting"
 	}
 	return report, nil
@@ -325,7 +351,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		return FeedbackReport{}, 1, err
 	}
 	var lastLog time.Time
-	var convergedAt time.Time
+	var settledAt time.Time
 	// Pump keeps the queue moving while we wait, but once a minute is plenty (the
 	// autoreview daemon pumps too); pumping on every tick just burns REST quota.
 	var lastPump time.Time
@@ -362,6 +388,14 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			if allReviewed(report.ReviewedBy) {
 				report.Reason = "all required reviewers finished; address findings, push once, and resolve threads"
 				s.completeWaitRound(ctx, repo, pr, head)
+			} else if report.CodeRabbitDeferred && engine.DoneExceptWithEvidence(report.ReviewedBy, s.cfg.Bot, dialect.CodexBotLogin) {
+				// Degraded round: every required bot except the rate-limited
+				// CodeRabbit has finished. These findings are this round's work —
+				// fixing and pushing is exactly right; the CodeRabbit review stays
+				// queued and fires against the newest head once the window opens.
+				// With ANOTHER required bot still pending, the hold-head branch
+				// below applies instead: pushing would restart its checks.
+				report.Reason = "codex findings during a coderabbit rate-limit window; fix, push, and loop again — the coderabbit review stays queued and fires when the window opens"
 			} else {
 				// A required reviewer is still pending (e.g. Codex posted a finding
 				// before CodeRabbit reviewed). Return the findings to work on, but leave
@@ -372,21 +406,25 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			}
 			return report, 10, nil
 		}
-		if report.Converged {
+		if report.Converged || report.Status == "deferred" {
 			// Don't trust the first converged observation: bots deliver in waves
 			// (Codex auto-reviews a pushed head minutes later; CodeRabbit's real
 			// review can trail its comment shells). Hold the verdict for the settle
 			// window and only exit 0 if nothing new lands; any finding or pending
-			// reviewer resets the normal flow above.
-			if convergedAt.IsZero() {
-				convergedAt = s.clock()
+			// reviewer resets the normal flow above. A deferred (Codex-only) clean
+			// verdict settles the same way but must NOT complete the round — the
+			// queued CodeRabbit review is still owed for this head.
+			if settledAt.IsZero() {
+				settledAt = s.clock()
 			}
-			if s.cfg.SettleWindow <= 0 || s.clock().Sub(convergedAt) >= s.cfg.SettleWindow {
-				s.completeWaitRound(ctx, repo, pr, head)
+			if s.cfg.SettleWindow <= 0 || s.clock().Sub(settledAt) >= s.cfg.SettleWindow {
+				if report.Converged {
+					s.completeWaitRound(ctx, repo, pr, head)
+				}
 				return report, 0, nil
 			}
 		} else {
-			convergedAt = time.Time{}
+			settledAt = time.Time{}
 		}
 		// Keep the queue moving (re-fire once an account-block window clears) and pick up
 		// the Blocked state it leaves behind. Pumping every poll tick is redundant —
@@ -411,7 +449,13 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 				blockedUntil = &until
 			}
 		}
-		if blockedUntil != nil {
+		// A degraded round waits for Codex, not for the window: keep the normal
+		// poll cadence against the un-extended deadline. (The rate-limit reply
+		// usually lands before Codex answers, so an iteration or two may extend
+		// the deadline first — harmless: once Codex evidence arrives the loop
+		// exits promptly, and if Codex never answers the round degrades
+		// gracefully back to riding out the window.)
+		if blockedUntil != nil && !report.CodeRabbitDeferred {
 			extended := extendDeadlineForBlock(deadline, blockedUntil, now, s.cfg.FeedbackWaitTimeout)
 			if extended.After(deadline) {
 				deadline = extended
@@ -419,8 +463,12 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			}
 			poll = blockedPollInterval(*blockedUntil, now, s.cfg.PollInterval)
 		}
-		if now.After(deadline) && convergedAt.IsZero() {
-			s.completeWaitRound(ctx, repo, pr, head)
+		if now.After(deadline) && settledAt.IsZero() {
+			// A degraded round must not be completed on timeout: marking the head
+			// reviewed would silently cancel the still-owed CodeRabbit review.
+			if !report.CodeRabbitDeferred {
+				s.completeWaitRound(ctx, repo, pr, head)
+			}
 			if len(report.Findings) > 0 {
 				report.Status = "feedback"
 				report.Reason = "review wait timed out; actionable findings must be addressed before retrying"
@@ -431,7 +479,9 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		}
 		if s.log != nil && time.Since(lastLog) >= 30*time.Second {
 			activeElapsed := feedbackWaitElapsed(deadline, s.cfg.FeedbackWaitTimeout, now)
-			if blockedUntil != nil {
+			if blockedUntil != nil && report.CodeRabbitDeferred {
+				s.log.Printf("%s#%d degraded to codex-only — coderabbit rate-limited until %s; waiting for codex on %s (%s / %s)", repo, pr, blockedUntil.UTC().Format(time.RFC3339), report.Head, activeElapsed.Round(time.Second), s.cfg.FeedbackWaitTimeout)
+			} else if blockedUntil != nil {
 				s.log.Printf("%s#%d queued — account blocked until %s; waiting, not counting it against the %s review wait (%s active)", repo, pr, blockedUntil.UTC().Format(time.RFC3339), s.cfg.FeedbackWaitTimeout, activeElapsed.Round(time.Second))
 			} else {
 				s.log.Printf("%s#%d waiting for review feedback on %s — reviewed %s (%s / %s)", repo, pr, report.Head, reviewedSummary(report.ReviewedBy), activeElapsed.Round(time.Second), s.cfg.FeedbackWaitTimeout)

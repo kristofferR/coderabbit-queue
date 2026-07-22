@@ -67,6 +67,12 @@ type Round struct {
 	// for the same round. A stale claim (the poster died mid-flight) expires and
 	// may be re-claimed.
 	CodexClaimedAt *time.Time `json:"codex_claimed_at,omitempty"`
+	// CodexCommandedAt records when crq posted this round's Codex command. It
+	// can precede FiredAt (a deferred post while queued behind a rate-limit
+	// window or busy slot), and Codex evidence binds from it — otherwise a
+	// SHA-less Codex answer delivered before the delayed CodeRabbit fire
+	// would be ignored by the completion cutoff and never re-requested.
+	CodexCommandedAt *time.Time `json:"codex_commanded_at,omitempty"`
 
 	// LastAttemptAt is the adoption cutoff: command comments older than the
 	// most recent failed/abandoned attempt must not be adopted as this round's
