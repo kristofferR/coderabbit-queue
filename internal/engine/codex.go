@@ -177,28 +177,23 @@ func CodexCommandSince(obs Observation, since time.Time) bool {
 }
 
 // CodexOnlyEligible reports whether an account-blocked round may degrade to a
-// Codex-only round: the block is live AND Codex shows observed responsiveness
-// tied to THIS work — it auto-reviews the PR, or (for a fired round) has
-// round-bound activity, or (for an unfired round, e.g. one whose Codex
-// command was posted while queued) has reviewed the current head — AND has
-// not posted a usage-limit exhaustion notice since the fire. Configuration,
-// a live unanswered command, or stale PR-level evidence on an unfired round
-// are deliberately not enough — without current evidence the round falls
-// back to riding out the CodeRabbit window.
+// Codex-only round: the block is live AND Codex has evidence bound to THIS
+// work — a review of the current head, or round-window activity anchored by
+// the fire or by crq's own (possibly pre-fire) Codex command — AND no
+// usage-limit exhaustion notice inside that same window. Auto-activity on
+// older heads, configuration, or a live unanswered command merely predict
+// evidence; degradation waits for the evidence itself, since before Codex
+// responds there is nothing to return early anyway, and marking a round
+// deferred stops the loop from extending its deadline over the block.
 func CodexOnlyEligible(r state.Round, obs Observation, blockedUntil *time.Time, now time.Time) bool {
 	if blockedUntil == nil || !blockedUntil.After(now) {
 		return false
 	}
-	if !obs.CodexAutoActive {
-		if r.FiredAt != nil {
-			if !obs.CodexActiveThisRound {
-				return false
-			}
-		} else if !codexReviewedHead(obs) {
-			return false
-		}
+	anchored := r.FiredAt != nil || r.CodexCommandedAt != nil
+	if !codexReviewedHead(obs) && !(anchored && obs.CodexActiveThisRound) {
+		return false
 	}
-	return !codexUsageLimitedSince(obs, roundCutoff(r))
+	return !codexUsageLimitedSince(obs, codexCutoff(r))
 }
 
 // codexUsageLimitedSince reports whether Codex posted its usage-limit

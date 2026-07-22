@@ -261,7 +261,40 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		return PumpResult{}, err
 	}
 	decision := engine.DecideFire(s.global(st, now), *next, obs.eng, now, s.policy())
-	return s.applyFire(ctx, *next, obs.eng, decision, now)
+	result, err := s.applyFire(ctx, *next, obs.eng, decision, now)
+	if err != nil {
+		return result, err
+	}
+	// A blocked or slot-busy front of the queue whose Codex command is
+	// already posted must not starve later PRs of THEIR early Codex round —
+	// scan a bounded number of following queued rounds for a postable
+	// Codex defer (each costs one observation; ETag caching keeps it cheap).
+	if s.cfg.RateLimitCodexDegrade && decision.Verdict == engine.FireNo &&
+		next.CodexCommandID != 0 &&
+		(strings.Contains(decision.Reason, "account blocked") ||
+			strings.Contains(decision.Reason, "fire slot busy")) {
+		scanned := 0
+		for _, r := range st.QueuedRounds(now) {
+			if r.Repo == next.Repo && r.PR == next.PR {
+				continue
+			}
+			if r.CodexCommandID != 0 || scanned >= 3 {
+				continue
+			}
+			scanned++
+			round := r
+			robs, oerr := s.observe(ctx, round.Repo, round.PR, &round, now)
+			if oerr != nil {
+				continue
+			}
+			d := engine.DecideFire(s.global(st, now), round, robs.eng, now, s.policy())
+			if d.Verdict != engine.FireCodexDeferred {
+				continue
+			}
+			return s.applyFire(ctx, round, robs.eng, d, now)
+		}
+	}
+	return result, nil
 }
 
 func (s *Service) global(st State, now time.Time) engine.Global {
@@ -702,7 +735,7 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 	// write. A failed post returns 0 (logged) and the self-heal path retries.
 	var codexID int64
 	if postCodex {
-		codexID = s.postCodexReviewComment(ctx, round)
+		codexID, _ = s.postCodexReviewComment(ctx, round)
 	}
 	updated, err := s.recordFire(ctx, round, token, comment.ID, codexID, firedAt, now)
 	if err != nil {
@@ -912,18 +945,25 @@ func (s *Service) recordFire(ctx context.Context, round Round, token string, com
 // id, or 0 on failure. A failed post is non-fatal: it logs and leaves
 // CodexCommandID unset so a later pump's self-heal retries. The fresh-fire path
 // folds the returned id into recordFire's write.
-func (s *Service) postCodexReviewComment(ctx context.Context, round Round) int64 {
+func (s *Service) postCodexReviewComment(ctx context.Context, round Round) (int64, time.Time) {
 	comment, err := s.gh.PostIssueComment(ctx, round.Repo, round.PR, s.cfg.CodexCommand)
 	if err != nil {
 		if s.log != nil {
 			s.log.Printf("warning: Codex review command post failed for %s@%s: %v (will retry on a later pump)", QueueKey(round.Repo, round.PR), round.Head, err)
 		}
-		return 0
+		return 0, time.Time{}
 	}
 	if s.log != nil {
 		s.log.Printf("fire %s@%s (posted %s)", QueueKey(round.Repo, round.PR), round.Head, strings.TrimSpace(s.cfg.CodexCommand))
 	}
-	return comment.ID
+	// The command's GitHub timestamp is the evidence anchor: a fast Codex
+	// reply can otherwise land before a local post-return clock reading and
+	// fall outside the stored cutoff forever (with no repost possible).
+	at := comment.CreatedAt.UTC()
+	if at.IsZero() {
+		at = s.clock().UTC()
+	}
+	return comment.ID, at
 }
 
 // fireCodexReview posts the Codex review command for an already-fired round and
@@ -931,7 +971,7 @@ func (s *Service) postCodexReviewComment(ctx context.Context, round Round) int64
 // retry (the fresh-post path records the id inside recordFire instead). The CAS
 // guard (same head, CodexCommandID still unset) makes a concurrent post benign.
 func (s *Service) fireCodexReview(ctx context.Context, round Round) {
-	codexID := s.postCodexReviewComment(ctx, round)
+	codexID, codexAt := s.postCodexReviewComment(ctx, round)
 	if codexID == 0 {
 		// Failed post: KEEP the claim — its TTL is the retry backoff. Clearing it
 		// here would let the very next pump repost, bypassing codexClaimTTL.
@@ -947,8 +987,7 @@ func (s *Service) fireCodexReview(ctx context.Context, round Round) {
 		r.CodexClaimedAt = nil
 		if r.CodexCommandID == 0 {
 			r.CodexCommandID = codexID
-			t := s.clock().UTC()
-			r.CodexCommandedAt = &t
+			r.CodexCommandedAt = &codexAt
 		}
 		st.PutRound(*r)
 		return nil

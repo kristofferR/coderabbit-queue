@@ -658,9 +658,11 @@ func TestCodexOnlyEligible(t *testing.T) {
 	if !CodexOnlyEligible(r, active, &blocked, now) {
 		t.Fatal("a live block with round-bound codex activity must degrade")
 	}
+	// Auto-activity alone predicts evidence; it does not qualify until Codex
+	// actually responds to this head/round.
 	auto := Observation{Head: "abcdef123", Open: true, CodexAutoActive: true}
-	if !CodexOnlyEligible(r, auto, &blocked, now) {
-		t.Fatal("a live block with an auto-active codex must degrade")
+	if CodexOnlyEligible(r, auto, &blocked, now) {
+		t.Fatal("auto-activity without current evidence must not degrade")
 	}
 	configOnly := Observation{Head: "abcdef123", Open: true, CodexCommands: []CommandSeen{{ID: 55, CreatedAt: now}}}
 	if CodexOnlyEligible(r, configOnly, &blocked, now) {
@@ -754,7 +756,7 @@ func TestCodexOnlyEligibleUnfiredRound(t *testing.T) {
 	blocked := now.Add(25 * time.Minute)
 	queued := state.Round{Repo: "owner/repo", PR: 448, Head: "abcdef123", Phase: state.PhaseQueued, Seq: 1}
 	// A round-window flag computed from a zero cutoff (an old SHA-less review)
-	// must not qualify an unfired round.
+	// must not qualify an unfired, uncommanded round.
 	stale := Observation{Head: "abcdef123", Open: true, CodexActiveThisRound: true}
 	if CodexOnlyEligible(queued, stale, &blocked, now) {
 		t.Fatal("stale round-window evidence must not defer an unfired round")
@@ -765,8 +767,21 @@ func TestCodexOnlyEligibleUnfiredRound(t *testing.T) {
 		t.Fatal("a codex review of the current head must defer an unfired round")
 	}
 	auto := Observation{Head: "abcdef123", Open: true, CodexAutoActive: true}
-	if !CodexOnlyEligible(queued, auto, &blocked, now) {
-		t.Fatal("an auto-active codex must defer an unfired round")
+	if CodexOnlyEligible(queued, auto, &blocked, now) {
+		t.Fatal("auto-activity without current evidence must not defer an unfired round")
+	}
+	// A deferred command anchors the window: command-bound activity (e.g. the
+	// usual SHA-less clean comment) qualifies, and an old usage-limit notice
+	// from before the command no longer disqualifies.
+	commandedAt := now.Add(-5 * time.Minute)
+	commanded := queued
+	commanded.CodexCommandID = 77
+	commanded.CodexCommandedAt = &commandedAt
+	answered := Observation{Head: "abcdef123", Open: true, CodexActiveThisRound: true,
+		Events: []dialect.BotEvent{{Kind: dialect.EvCodexUsageLimit, Bot: dialect.CodexBotLogin,
+			CommentID: 600, CreatedAt: commandedAt.Add(-time.Hour), UpdatedAt: commandedAt.Add(-time.Hour)}}}
+	if !CodexOnlyEligible(commanded, answered, &blocked, now) {
+		t.Fatal("command-bound activity must defer a commanded unfired round despite an old usage-limit notice")
 	}
 }
 
