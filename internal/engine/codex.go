@@ -70,15 +70,35 @@ func codexCommentedRound(obs Observation, cutoff time.Time) bool {
 	return false
 }
 
-// codexReviewedHead reports whether Codex has a submitted review whose commit
-// prefixes the observed head — the "Codex already reviewed this head" fire guard.
-func codexReviewedHead(obs Observation) bool {
+// codexReviewedHeadAt reports the newest Codex verdict explicitly bound to the
+// observed head: either a submitted review or a clean summary naming that SHA.
+// The timestamp is the evidence floor used to ignore older usage-limit notices.
+func codexReviewedHeadAt(obs Observation) (time.Time, bool) {
+	var latest time.Time
+	matched := false
 	for _, review := range obs.Reviews {
 		if dialect.IsCodexBot(review.Bot) && obs.Head != "" && review.Commit != "" && strings.HasPrefix(review.Commit, obs.Head) {
-			return true
+			matched = true
+			if review.SubmittedAt.After(latest) {
+				latest = review.SubmittedAt
+			}
 		}
 	}
-	return false
+	for _, ev := range obs.Events {
+		if ev.Kind == dialect.EvCodexClean && obs.Head != "" && dialect.SHAPrefixMatch(ev.SHA, obs.Head) {
+			matched = true
+			if at := ev.ObservedTime(); at.After(latest) {
+				latest = at
+			}
+		}
+	}
+	return latest, matched
+}
+
+// codexReviewedHead is the "Codex already reviewed this head" fire guard.
+func codexReviewedHead(obs Observation) bool {
+	_, matched := codexReviewedHeadAt(obs)
+	return matched
 }
 
 // CodexActiveThisRound reports whether Codex shows any activity bound to this
@@ -189,8 +209,9 @@ func CodexOnlyEligible(r state.Round, obs Observation, blockedUntil *time.Time, 
 	if blockedUntil == nil || !blockedUntil.After(now) {
 		return false
 	}
+	headEvidenceAt, headReviewed := codexReviewedHeadAt(obs)
 	anchored := r.FiredAt != nil || r.CodexCommandedAt != nil
-	if !codexReviewedHead(obs) && !(anchored && obs.CodexActiveThisRound) {
+	if !headReviewed && !(anchored && obs.CodexActiveThisRound) {
 		return false
 	}
 	// The usage-limit floor is the evidence window. For an unfired,
@@ -199,12 +220,7 @@ func CodexOnlyEligible(r state.Round, obs Observation, blockedUntil *time.Time, 
 	// PR would suppress the degrade until the window expires.
 	floor := codexCutoff(r)
 	if floor.IsZero() {
-		for _, review := range obs.Reviews {
-			if dialect.IsCodexBot(review.Bot) && obs.Head != "" &&
-				strings.HasPrefix(review.Commit, obs.Head) && review.SubmittedAt.After(floor) {
-				floor = review.SubmittedAt
-			}
-		}
+		floor = headEvidenceAt
 	}
 	return !codexUsageLimitedSince(obs, floor)
 }

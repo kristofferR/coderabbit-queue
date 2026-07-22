@@ -44,9 +44,10 @@ Exit codes:
   `.status == "deferred"`), Codex reviewed clean while CodeRabbit is rate-limited — the CodeRabbit
   review is still owed and `.converged` is false. Treat it as progress, not convergence: re-run
   `crq loop` after `.coderabbit_deferred_until` or on the next push.
-- `10`: actionable findings were written to JSON. When `.coderabbit_deferred` is true these are
-  Codex-only findings during a CodeRabbit rate-limit window: fix, push, and loop again immediately
-  instead of holding the head — the queued CodeRabbit review fires by itself once the window opens.
+- `10`: actionable findings were written to JSON. When `.coderabbit_deferred` is true and all
+  non-CodeRabbit required reviewers are true, these are Codex-only findings during a CodeRabbit
+  rate-limit window: fix, push, and loop again immediately instead of holding the head — the queued
+  CodeRabbit review fires by itself once the window opens.
 - `2`: timed out waiting for feedback
 
 Rate-limit degrade (default on, `CRQ_RL_CODEX_DEGRADE=0` disables): when CodeRabbit is

@@ -496,7 +496,7 @@ func (s *Service) applyFire(ctx context.Context, round Round, obs engine.Observa
 	case engine.FireCodexOnly:
 		return s.fireCodexOnly(ctx, round, d.Reason, now)
 	case engine.FireCodexDeferred:
-		return s.fireCodexDeferred(ctx, round, d.Reason, now)
+		return s.fireCodexDeferred(ctx, round, d.AdoptCommandID, d.AdoptAt, d.Reason, now)
 	case engine.FireCoReviewWait:
 		return s.fireCoReviewWait(ctx, round, obs, d.Reason, now)
 	case engine.FireSupersede:
@@ -1021,9 +1021,47 @@ func (s *Service) fireCodexReview(ctx context.Context, round Round) {
 // opens, at which point PostCodex stays false because CodexCommandID is set.
 // The claim-then-post shape mirrors selfHealCodex — this path is not
 // serialized by the fire slot either.
-func (s *Service) fireCodexDeferred(ctx context.Context, round Round, reason string, now time.Time) (PumpResult, error) {
+func (s *Service) fireCodexDeferred(ctx context.Context, round Round, adoptID int64, adoptAt time.Time, reason string, now time.Time) (PumpResult, error) {
 	result := PumpResult{Action: "codex_fired", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}
 	if s.cfg.DryRun {
+		return result, nil
+	}
+	if adoptID != 0 {
+		adopted := false
+		updated, err := s.store.Update(ctx, func(st *State) error {
+			r := st.Round(round.Repo, round.PR)
+			if !sameRound(r, round) || r.CodexCommandID != 0 ||
+				(r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry) {
+				return ErrNoChange
+			}
+			// A concurrent worker may already be posting the command represented by
+			// this observation. Let its fresh claim finish instead of adopting and
+			// racing its state write; a stale claim no longer blocks recovery.
+			if r.CodexClaimedAt != nil && now.Sub(r.CodexClaimedAt.UTC()) < codexClaimTTL {
+				return ErrNoChange
+			}
+			at := adoptAt.UTC()
+			if at.IsZero() {
+				at = now.UTC()
+			}
+			r.CodexCommandID = adoptID
+			r.CodexCommandedAt = &at
+			r.CodexClaimedAt = nil
+			r.Note = "existing codex review command adopted; coderabbit deferred (account rate-limited)"
+			st.PutRound(*r)
+			adopted = true
+			return nil
+		})
+		if err != nil && !errors.Is(err, ErrNoChange) {
+			return result, err
+		}
+		if !adopted {
+			result.Action = "deduped"
+			result.Reason = "codex command already adopted or posted"
+			return result, nil
+		}
+		s.sync(ctx, updated)
+		result.Action = "codex_adopted"
 		return result, nil
 	}
 	claimed := false

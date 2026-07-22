@@ -300,6 +300,26 @@ func DoneExcept(reviewedBy map[string]bool, except string) bool {
 	return others > 0
 }
 
+// DoneExceptWithEvidence is DoneExcept after applying independently established
+// review evidence for one bot. It preserves every other gating bot, while also
+// handling configured login spellings that differ only by the "[bot]" suffix.
+func DoneExceptWithEvidence(reviewedBy map[string]bool, except, evidenceBot string) bool {
+	withEvidence := make(map[string]bool, len(reviewedBy)+1)
+	evidenceNorm := dialect.NormalizeBotName(evidenceBot)
+	found := false
+	for bot, reviewed := range reviewedBy {
+		if dialect.NormalizeBotName(bot) == evidenceNorm {
+			reviewed = true
+			found = true
+		}
+		withEvidence[bot] = reviewed
+	}
+	if !found {
+		withEvidence[evidenceBot] = true
+	}
+	return DoneExcept(withEvidence, except)
+}
+
 // needsBotReview reports whether login gates completion (has a ReviewedBy
 // key) and its review hasn't been seen yet.
 func needsBotReview(reviewedBy map[string]bool, login string) bool {

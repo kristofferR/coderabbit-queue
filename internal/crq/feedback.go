@@ -262,7 +262,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	case report.Converged:
 		report.Status = "converged"
 	case report.CodeRabbitDeferred && len(report.Findings) == 0 &&
-		engine.DoneExcept(report.ReviewedBy, s.cfg.Bot):
+		engine.DoneExceptWithEvidence(report.ReviewedBy, s.cfg.Bot, dialect.CodexBotLogin):
 		report.Status = "deferred"
 		report.Reason = "codex reviewed clean; coderabbit review deferred until " +
 			report.DeferredUntil.UTC().Format(time.RFC3339) + " (account rate-limited)"
@@ -388,7 +388,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			if allReviewed(report.ReviewedBy) {
 				report.Reason = "all required reviewers finished; address findings, push once, and resolve threads"
 				s.completeWaitRound(ctx, repo, pr, head)
-			} else if report.CodeRabbitDeferred && engine.DoneExcept(report.ReviewedBy, s.cfg.Bot) {
+			} else if report.CodeRabbitDeferred && engine.DoneExceptWithEvidence(report.ReviewedBy, s.cfg.Bot, dialect.CodexBotLogin) {
 				// Degraded round: every required bot except the rate-limited
 				// CodeRabbit has finished. These findings are this round's work —
 				// fixing and pushing is exactly right; the CodeRabbit review stays

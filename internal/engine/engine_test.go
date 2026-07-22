@@ -696,6 +696,28 @@ func TestDoneExcept(t *testing.T) {
 	}
 }
 
+func TestDoneExceptWithEvidence(t *testing.T) {
+	cr := "coderabbitai[bot]"
+	tests := []struct {
+		name       string
+		reviewedBy map[string]bool
+		want       bool
+	}{
+		{name: "feedback-only evidence supplies non-vacuous gate", reviewedBy: map[string]bool{cr: false}, want: true},
+		{name: "configured evidence bot is marked reviewed", reviewedBy: map[string]bool{cr: false, dialect.CodexBotLogin: false}, want: true},
+		{name: "suffixless evidence bot is normalized", reviewedBy: map[string]bool{cr: false, "chatgpt-codex-connector": false}, want: true},
+		{name: "another pending reviewer still gates", reviewedBy: map[string]bool{cr: false, dialect.CodexBotLogin: false, "other[bot]": false}, want: false},
+		{name: "another completed reviewer permits", reviewedBy: map[string]bool{cr: false, "other[bot]": true}, want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := DoneExceptWithEvidence(tc.reviewedBy, cr, dialect.CodexBotLogin); got != tc.want {
+				t.Fatalf("DoneExceptWithEvidence() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestDecideFireBlockedCodexDeferred: an account block with the degrade flag
 // posts only the Codex command and keeps the round queued for CodeRabbit.
 func TestDecideFireBlockedCodexDeferred(t *testing.T) {
@@ -726,10 +748,12 @@ func TestDecideFireBlockedCodexDeferred(t *testing.T) {
 	if d := DecideFire(g, posted, open, now, degrade); d.Verdict != FireNo {
 		t.Fatalf("an already-posted codex command must not re-defer, got %+v", d)
 	}
-	// A live command on the PR → nothing to post; blocked FireNo.
+	// A live command on the PR is adopted as this round's Codex anchor rather
+	// than re-posted or left unrecorded.
 	cmdObs := Observation{Head: head, Open: true, CodexCommands: []CommandSeen{{ID: 55, CreatedAt: now}}}
-	if d := DecideFire(g, queued, cmdObs, now, degrade); d.Verdict != FireNo {
-		t.Fatalf("a live codex command must not re-post, got %+v", d)
+	if d := DecideFire(g, queued, cmdObs, now, degrade); d.Verdict != FireCodexDeferred ||
+		d.AdoptCommandID != 55 || !d.AdoptAt.Equal(now) || d.PostCodex {
+		t.Fatalf("a live codex command must be adopted without re-posting, got %+v", d)
 	}
 	// Auto-active Codex reviews unprompted → nothing to post; blocked FireNo.
 	autoObs := Observation{Head: head, Open: true, CodexAutoActive: true}
@@ -769,6 +793,13 @@ func TestCodexOnlyEligibleUnfiredRound(t *testing.T) {
 	auto := Observation{Head: "abcdef123", Open: true, CodexAutoActive: true}
 	if CodexOnlyEligible(queued, auto, &blocked, now) {
 		t.Fatal("auto-activity without current evidence must not defer an unfired round")
+	}
+	cleanAt := now.Add(-time.Minute)
+	cleanHead := Observation{Head: "abcdef123", Open: true, CodexAutoActive: true,
+		Events: []dialect.BotEvent{{Kind: dialect.EvCodexClean, Bot: dialect.CodexBotLogin,
+			SHA: "abcdef1234567890", CommentID: 601, CreatedAt: cleanAt, UpdatedAt: cleanAt}}}
+	if !CodexOnlyEligible(queued, cleanHead, &blocked, now) {
+		t.Fatal("a clean codex summary naming the current head must defer an unfired round")
 	}
 	// A deferred command anchors the window: command-bound activity (e.g. the
 	// usual SHA-less clean comment) qualifies, and an old usage-limit notice
