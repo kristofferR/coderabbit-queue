@@ -746,3 +746,55 @@ func TestDecideFireBlockedCodexDeferred(t *testing.T) {
 		t.Fatalf("slot-busy with degrade off must stay FireNo, got %+v", d)
 	}
 }
+
+// TestCodexOnlyEligibleUnfiredRound: stale PR-level Codex evidence must not
+// defer an unfired round — only a head-bound review (or auto-activity) may.
+func TestCodexOnlyEligibleUnfiredRound(t *testing.T) {
+	now := t0.Add(10 * time.Minute)
+	blocked := now.Add(25 * time.Minute)
+	queued := state.Round{Repo: "owner/repo", PR: 448, Head: "abcdef123", Phase: state.PhaseQueued, Seq: 1}
+	// A round-window flag computed from a zero cutoff (an old SHA-less review)
+	// must not qualify an unfired round.
+	stale := Observation{Head: "abcdef123", Open: true, CodexActiveThisRound: true}
+	if CodexOnlyEligible(queued, stale, &blocked, now) {
+		t.Fatal("stale round-window evidence must not defer an unfired round")
+	}
+	headReviewed := Observation{Head: "abcdef123", Open: true,
+		Reviews: []ReviewSeen{{Bot: dialect.CodexBotLogin, Commit: "abcdef1234567890", SubmittedAt: now}}}
+	if !CodexOnlyEligible(queued, headReviewed, &blocked, now) {
+		t.Fatal("a codex review of the current head must defer an unfired round")
+	}
+	auto := Observation{Head: "abcdef123", Open: true, CodexAutoActive: true}
+	if !CodexOnlyEligible(queued, auto, &blocked, now) {
+		t.Fatal("an auto-active codex must defer an unfired round")
+	}
+}
+
+// TestCompletionBindsPreFireCodexAnswer: a SHA-less Codex clean summary
+// delivered after the deferred command but before the delayed CodeRabbit fire
+// must still count for the round — the command time is the codex cutoff.
+func TestCompletionBindsPreFireCodexAnswer(t *testing.T) {
+	r := firedRound(t, "abcdef123")
+	commandedAt := r.FiredAt.Add(-10 * time.Minute)
+	r.CodexCommandedAt = &commandedAt
+	r.CodexCommandID = 77
+	gated := policy
+	gated.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
+	crReview := ReviewSeen{Bot: "coderabbitai[bot]", Commit: "abcdef1234567890", SubmittedAt: r.FiredAt.Add(time.Minute)}
+	cleanBeforeFire := dialect.BotEvent{Kind: dialect.EvCodexClean, Bot: dialect.CodexBotLogin, CommentID: 900,
+		CreatedAt: commandedAt.Add(2 * time.Minute), UpdatedAt: commandedAt.Add(2 * time.Minute)}
+
+	obs := Observation{Head: "abcdef123", Open: true, Reviews: []ReviewSeen{crReview},
+		Events: []dialect.BotEvent{cleanBeforeFire}}
+	if got := Completion(r, obs, gated); !got.Done {
+		t.Fatalf("a codex answer after its command but before the deferred fire must count: %+v", got)
+	}
+	// Evidence from before the command stays excluded.
+	early := cleanBeforeFire
+	early.CreatedAt = commandedAt.Add(-time.Minute)
+	early.UpdatedAt = early.CreatedAt
+	obs.Events = []dialect.BotEvent{early}
+	if got := Completion(r, obs, gated); got.Done {
+		t.Fatalf("evidence older than the codex command must not count: %+v", got)
+	}
+}

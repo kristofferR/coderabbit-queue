@@ -68,8 +68,18 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 		// Codex needs no fire slot: a round parked behind another PR's
 		// in-flight review can start its Codex round immediately. The round
 		// stays queued and CodeRabbit fires once the slot frees, with
-		// CodexCommandID preventing a duplicate Codex post.
-		if p.RateLimitCodexDegrade && DecideCodexPost(r, obs, p, len(obs.CodexCommands) > 0) {
+		// CodexCommandID preventing a duplicate Codex post. NOT for a head
+		// CodeRabbit already reviewed — that round belongs to the dedupe
+		// resolution below once the slot frees (a queued round Codex answers
+		// clean cannot complete, so deferring it here could wedge the wait).
+		reviewedHead := false
+		for _, review := range obs.Reviews {
+			if sameBot(review.Bot, p.Bot) && review.Commit != "" && strings.HasPrefix(review.Commit, obs.Head) {
+				reviewedHead = true
+				break
+			}
+		}
+		if !reviewedHead && p.RateLimitCodexDegrade && DecideCodexPost(r, obs, p, len(obs.CodexCommands) > 0) {
 			return FireDecision{Verdict: FireCodexDeferred,
 				Reason: "fire slot busy; requesting codex review now, coderabbit deferred"}
 		}

@@ -247,13 +247,15 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// Degrade detection: a live rate-limit window plus observed Codex
 	// responsiveness means this round runs Codex-only for now. Converged is
 	// structurally false here (CodeRabbit has no review evidence), so a
-	// deferred round can never masquerade as converged.
-	if s.cfg.RateLimitCodexDegrade && !report.Converged {
-		if until, ok := st.AccountBlockedUntil(repo, pr, head, now); ok &&
-			engine.CodexOnlyEligible(completionRound, obs.eng, &until, now) {
+	// deferred round can never masquerade as converged. Only the ACCOUNT-wide
+	// quota block qualifies — a round's own awaiting_retry cooldown also
+	// covers non-quota retries (post failures, timeouts) that must keep their
+	// normal retry handling.
+	if s.cfg.RateLimitCodexDegrade && !report.Converged && st.Account.BlockedUntil != nil {
+		until := st.Account.BlockedUntil.UTC()
+		if until.After(now) && engine.CodexOnlyEligible(completionRound, obs.eng, &until, now) {
 			report.CodeRabbitDeferred = true
-			u := until
-			report.DeferredUntil = &u
+			report.DeferredUntil = &until
 		}
 	}
 	switch {

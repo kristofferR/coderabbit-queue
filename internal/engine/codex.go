@@ -22,6 +22,21 @@ func roundCutoff(r state.Round) time.Time {
 	return time.Time{}
 }
 
+// codexCutoff is the evidence floor for Codex specifically: evidence produced
+// in response to crq's own Codex command binds from the command time, which
+// can precede a deferred CodeRabbit fire (the command posts while the round
+// is still queued behind a rate-limit window or busy slot).
+func codexCutoff(r state.Round) time.Time {
+	cut := roundCutoff(r)
+	if r.CodexCommandedAt != nil {
+		at := r.CodexCommandedAt.UTC()
+		if cut.IsZero() || at.Before(cut) {
+			return at
+		}
+	}
+	return cut
+}
+
 // codexReviewedRound reports whether a submitted Codex review binds to this
 // round: one whose commit prefixes the head, or — SHA-less — one submitted
 // at/after the fire.
@@ -71,7 +86,7 @@ func codexReviewedHead(obs Observation) bool {
 // thumbs-up. observe() stores it on the Observation so the dynamic completion
 // gate requires Codex when it participates without being configured-required.
 func CodexActiveThisRound(r state.Round, obs Observation) bool {
-	cutoff := roundCutoff(r)
+	cutoff := codexCutoff(r)
 	return codexReviewedRound(r, obs, cutoff) || codexCommentedRound(obs, cutoff) || obs.CodexThumbsUp
 }
 
@@ -163,17 +178,25 @@ func CodexCommandSince(obs Observation, since time.Time) bool {
 
 // CodexOnlyEligible reports whether an account-blocked round may degrade to a
 // Codex-only round: the block is live AND Codex shows observed responsiveness
-// on this PR (it auto-reviews, or has activity bound to this round) AND has
-// not posted a usage-limit exhaustion notice since the fire. Configuration
-// alone (a configured Codex command, or a live unanswered `@codex review`)
-// is deliberately not enough — without observed evidence the round falls back
-// to riding out the CodeRabbit window.
+// tied to THIS work — it auto-reviews the PR, or (for a fired round) has
+// round-bound activity, or (for an unfired round, e.g. one whose Codex
+// command was posted while queued) has reviewed the current head — AND has
+// not posted a usage-limit exhaustion notice since the fire. Configuration,
+// a live unanswered command, or stale PR-level evidence on an unfired round
+// are deliberately not enough — without current evidence the round falls
+// back to riding out the CodeRabbit window.
 func CodexOnlyEligible(r state.Round, obs Observation, blockedUntil *time.Time, now time.Time) bool {
 	if blockedUntil == nil || !blockedUntil.After(now) {
 		return false
 	}
-	if !obs.CodexAutoActive && !obs.CodexActiveThisRound {
-		return false
+	if !obs.CodexAutoActive {
+		if r.FiredAt != nil {
+			if !obs.CodexActiveThisRound {
+				return false
+			}
+		} else if !codexReviewedHead(obs) {
+			return false
+		}
 	}
 	return !codexUsageLimitedSince(obs, roundCutoff(r))
 }

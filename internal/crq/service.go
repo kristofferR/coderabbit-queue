@@ -947,6 +947,8 @@ func (s *Service) fireCodexReview(ctx context.Context, round Round) {
 		r.CodexClaimedAt = nil
 		if r.CodexCommandID == 0 {
 			r.CodexCommandID = codexID
+			t := s.clock().UTC()
+			r.CodexCommandedAt = &t
 		}
 		st.PutRound(*r)
 		return nil

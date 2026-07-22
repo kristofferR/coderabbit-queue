@@ -84,7 +84,10 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 			}
 			continue
 		}
-		if r.FiredAt != nil && notBefore(ev.ObservedTime(), cutoff) {
+		// SHA-less summaries bind from the Codex command time when crq posted
+		// it before the (deferred) CodeRabbit fire — see codexCutoff.
+		if (r.FiredAt != nil || r.CodexCommandedAt != nil) &&
+			notBefore(ev.ObservedTime(), codexCutoff(r)) {
 			markReviewed(reviewedBy, ev.Bot)
 		}
 	}
