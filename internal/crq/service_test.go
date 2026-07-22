@@ -2112,6 +2112,61 @@ func TestPumpPostsCodexDeferredDuringBlockThenFiresCodeRabbit(t *testing.T) {
 	}
 }
 
+func TestPumpScansPastBlockedRoundWithCodexAlreadyRequested(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RateLimitCodexDegrade = true
+	cfg.RequiredBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
+	cfg.CodexCommand = "@codex review"
+	gh := newFakeGitHub()
+	for _, target := range []struct {
+		repo string
+		pr   int
+		sha  string
+	}{
+		{repo: "o/first", pr: 1, sha: "111111111abcdef0"},
+		{repo: "o/second", pr: 2, sha: "222222222abcdef0"},
+	} {
+		pull := ghapi.Pull{State: "open"}
+		pull.Head.SHA = target.sha
+		gh.pulls[fakeKey(target.repo, target.pr)] = pull
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	svc.now = func() time.Time { return now }
+	if _, err := svc.Enqueue(ctx, "o/first", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Enqueue(ctx, "o/second", 2); err != nil {
+		t.Fatal(err)
+	}
+	blockedUntil := now.Add(30 * time.Minute)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Account.BlockedUntil = &blockedUntil
+		first := st.Round("o/first", 1)
+		first.CodexCommandID = 700
+		commandedAt := now.Add(-time.Minute)
+		first.CodexCommandedAt = &commandedAt
+		st.PutRound(*first)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Action != "codex_fired" || res.Repo != "o/second" || res.PR != 2 {
+		t.Fatalf("the blocked front round must not starve a later codex round, got %#v", res)
+	}
+	st, _, _ := store.Load(ctx)
+	if second := st.Round("o/second", 2); second == nil || second.CodexCommandID == 0 {
+		t.Fatalf("the later round must record its codex command, got %#v", second)
+	}
+}
+
 func TestPumpAdoptsExistingCodexCommandDuringBlock(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
