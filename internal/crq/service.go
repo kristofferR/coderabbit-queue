@@ -260,7 +260,8 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if err != nil {
 		return PumpResult{}, err
 	}
-	decision := engine.DecideFire(s.global(st, now), *next, obs.eng, now, s.policy())
+	global := s.global(st, now)
+	decision := engine.DecideFire(global, *next, obs.eng, now, s.policy())
 	result, err := s.applyFire(ctx, *next, obs.eng, decision, now)
 	if err != nil {
 		return result, err
@@ -269,9 +270,9 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	// already posted must not starve later PRs of THEIR early Codex round —
 	// scan a bounded number of following queued rounds for a postable
 	// Codex defer (each costs one observation; ETag caching keeps it cheap).
+	accountBlocked := global.BlockedUntil != nil && global.BlockedUntil.After(now)
 	if s.cfg.RateLimitCodexDegrade && decision.Verdict == engine.FireNo &&
-		(strings.Contains(decision.Reason, "account blocked") ||
-			strings.Contains(decision.Reason, "fire slot busy")) {
+		(accountBlocked || !global.SlotFree) {
 		scanned := 0
 		for _, r := range st.QueuedRounds(now) {
 			if r.Repo == next.Repo && r.PR == next.PR {
@@ -660,12 +661,7 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 				// timestamp anchors the codex cutoff too, or a SHA-less answer that
 				// landed before this adopted fire would never bind to the round.
 				r.CodexCommandID = id
-				for _, c := range obs.CodexCommands {
-					if c.ID == id && !c.CreatedAt.IsZero() {
-						at := c.CreatedAt.UTC()
-						r.CodexCommandedAt = &at
-					}
-				}
+				r.CodexCommandedAt = codexCommandTime(obs.CodexCommands, id)
 			}
 			st.PutRound(*r)
 			recorded = true
@@ -845,6 +841,16 @@ func newestCommandID(cmds []engine.CommandSeen) int64 {
 	return best.ID
 }
 
+func codexCommandTime(commands []engine.CommandSeen, id int64) *time.Time {
+	for _, command := range commands {
+		if command.ID == id && !command.CreatedAt.IsZero() {
+			at := command.CreatedAt.UTC()
+			return &at
+		}
+	}
+	return nil
+}
+
 // fireCoReviewWait bounds a co-review wait: CodeRabbit already reviewed the head
 // but a gating Codex has not yet, and crq must not post (Codex auto-reviews, or a
 // command is already outstanding). Leaving the round queued with no WaitDeadline
@@ -888,12 +894,7 @@ func (s *Service) fireCoReviewWait(ctx context.Context, round Round, obs engine.
 		}
 		if r.CodexCommandID == 0 && codexID != 0 {
 			r.CodexCommandID = codexID
-			for _, c := range obs.CodexCommands {
-				if c.ID == codexID && !c.CreatedAt.IsZero() {
-					at := c.CreatedAt.UTC()
-					r.CodexCommandedAt = &at
-				}
-			}
+			r.CodexCommandedAt = codexCommandTime(obs.CodexCommands, codexID)
 		}
 		st.PutRound(*r)
 		changed = true

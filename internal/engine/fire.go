@@ -64,6 +64,13 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 		}
 		return FireDecision{Verdict: FireNo, Reason: reason}
 	}
+	reviewedHead := false
+	for _, review := range obs.Reviews {
+		if sameBot(review.Bot, p.Bot) && review.Commit != "" && strings.HasPrefix(review.Commit, obs.Head) {
+			reviewedHead = true
+			break
+		}
+	}
 	if !g.SlotFree {
 		// Codex needs no fire slot: a round parked behind another PR's
 		// in-flight review can start its Codex round immediately. The round
@@ -72,13 +79,6 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 		// CodeRabbit already reviewed — that round belongs to the dedupe
 		// resolution below once the slot frees (a queued round Codex answers
 		// clean cannot complete, so deferring it here could wedge the wait).
-		reviewedHead := false
-		for _, review := range obs.Reviews {
-			if sameBot(review.Bot, p.Bot) && review.Commit != "" && strings.HasPrefix(review.Commit, obs.Head) {
-				reviewedHead = true
-				break
-			}
-		}
 		if !reviewedHead {
 			if d, ok := decideCodexDeferred(r, obs, p, "fire slot busy"); ok {
 				return d
@@ -94,10 +94,8 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 	// verdicts spend CodeRabbit quota (dedupe completes, FireCodexOnly posts
 	// only the Codex command, a co-review wait posts nothing), so an account
 	// block from another PR must not delay them.
-	for _, review := range obs.Reviews {
-		if sameBot(review.Bot, p.Bot) && review.Commit != "" && strings.HasPrefix(review.Commit, obs.Head) {
-			return codexAwareDedupe(r, obs, p)
-		}
+	if reviewedHead {
+		return codexAwareDedupe(r, obs, p)
 	}
 	if g.BlockedUntil != nil && g.BlockedUntil.After(now) {
 		// Degrade instead of stalling: the block only gates CodeRabbit quota,
