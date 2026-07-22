@@ -40,9 +40,19 @@ and `CODERABBIT_API_KEY` presence for headless local review.
 
 Exit codes:
 
-- `0`: converged or no actionable findings
-- `10`: actionable findings were written to JSON
+- `0`: converged or no actionable findings. Check `.coderabbit_deferred` first: when true (with
+  `.status == "deferred"`), Codex reviewed clean while CodeRabbit is rate-limited — the CodeRabbit
+  review is still owed and `.converged` is false. Treat it as progress, not convergence: re-run
+  `crq loop` after `.coderabbit_deferred_until` or on the next push.
+- `10`: actionable findings were written to JSON. When `.coderabbit_deferred` is true these are
+  Codex-only findings during a CodeRabbit rate-limit window: fix, push, and loop again immediately
+  instead of holding the head — the queued CodeRabbit review fires by itself once the window opens.
 - `2`: timed out waiting for feedback
+
+Rate-limit degrade (default on, `CRQ_RL_CODEX_DEGRADE=0` disables): when CodeRabbit is
+rate-limited and Codex demonstrably reviews the PR, the loop returns Codex feedback promptly
+instead of waiting out the window, and the pump posts the Codex command for blocked rounds while
+keeping the CodeRabbit review queued.
 
 ## Drain Findings Before Waiting
 

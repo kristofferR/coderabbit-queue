@@ -636,3 +636,106 @@ func TestFindingsForActiveRoundIncludesOnlyCurrentOrNewlyArrivedFeedback(t *test
 		t.Fatalf("unexpected active-round findings: %#v", got)
 	}
 }
+
+// TestCodexOnlyEligible covers the degrade predicate: a live block plus
+// OBSERVED Codex responsiveness — configuration or a live command alone never
+// qualifies, and a usage-limit notice disengages it.
+func TestCodexOnlyEligible(t *testing.T) {
+	r := firedRound(t, "abcdef123")
+	now := t0.Add(5 * time.Minute)
+	blocked := now.Add(25 * time.Minute)
+	expired := now.Add(-time.Minute)
+	usageLimit := dialect.BotEvent{Kind: dialect.EvCodexUsageLimit, Bot: dialect.CodexBotLogin, CommentID: 700,
+		CreatedAt: r.FiredAt.Add(30 * time.Second), UpdatedAt: r.FiredAt.Add(30 * time.Second)}
+
+	active := Observation{Head: "abcdef123", Open: true, CodexActiveThisRound: true}
+	if CodexOnlyEligible(r, active, nil, now) {
+		t.Fatal("no block must not degrade")
+	}
+	if CodexOnlyEligible(r, active, &expired, now) {
+		t.Fatal("an expired block must not degrade")
+	}
+	if !CodexOnlyEligible(r, active, &blocked, now) {
+		t.Fatal("a live block with round-bound codex activity must degrade")
+	}
+	auto := Observation{Head: "abcdef123", Open: true, CodexAutoActive: true}
+	if !CodexOnlyEligible(r, auto, &blocked, now) {
+		t.Fatal("a live block with an auto-active codex must degrade")
+	}
+	configOnly := Observation{Head: "abcdef123", Open: true, CodexCommands: []CommandSeen{{ID: 55, CreatedAt: now}}}
+	if CodexOnlyEligible(r, configOnly, &blocked, now) {
+		t.Fatal("a live command without observed codex evidence must not degrade")
+	}
+	limited := Observation{Head: "abcdef123", Open: true, CodexActiveThisRound: true, Events: []dialect.BotEvent{usageLimit}}
+	if CodexOnlyEligible(r, limited, &blocked, now) {
+		t.Fatal("a codex usage limit since the fire must disengage the degrade")
+	}
+}
+
+// TestDoneExcept covers the Codex-side completeness check for degraded rounds,
+// including the vacuous guard: an excluded bot alone never reads as done.
+func TestDoneExcept(t *testing.T) {
+	cr := "coderabbitai[bot]"
+	if !DoneExcept(map[string]bool{cr: false, dialect.CodexBotLogin: true}, cr) {
+		t.Fatal("codex reviewed, coderabbit excluded: must be done-except")
+	}
+	if DoneExcept(map[string]bool{cr: false}, cr) {
+		t.Fatal("only the excluded bot gates: must NOT be vacuously done")
+	}
+	if DoneExcept(map[string]bool{cr: false, dialect.CodexBotLogin: false}, cr) {
+		t.Fatal("codex still pending: must not be done-except")
+	}
+	if !DoneExcept(map[string]bool{cr: true, dialect.CodexBotLogin: true}, cr) {
+		t.Fatal("everything reviewed must be done-except too")
+	}
+	// Bot-name normalization: the suffixless form excludes the bracketed key.
+	if DoneExcept(map[string]bool{"coderabbitai": false}, cr) {
+		t.Fatal("normalized excluded bot alone must not be vacuously done")
+	}
+}
+
+// TestDecideFireBlockedCodexDeferred: an account block with the degrade flag
+// posts only the Codex command and keeps the round queued for CodeRabbit.
+func TestDecideFireBlockedCodexDeferred(t *testing.T) {
+	now := t0.Add(10 * time.Minute)
+	blocked := now.Add(25 * time.Minute)
+	g := Global{SlotFree: true, BlockedUntil: &blocked}
+	head := "abcdef123"
+	queued := state.Round{Repo: "owner/repo", PR: 448, Head: head, Phase: state.PhaseQueued, Seq: 1}
+	open := Observation{Head: head, Open: true}
+
+	degrade := policy
+	degrade.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
+	degrade.CodexCommand = "@codex review"
+	degrade.RateLimitCodexDegrade = true
+
+	if d := DecideFire(g, queued, open, now, degrade); d.Verdict != FireCodexDeferred {
+		t.Fatalf("blocked + degrade + postable codex must defer to codex, got %+v", d)
+	}
+	// Flag off → today's behavior.
+	off := degrade
+	off.RateLimitCodexDegrade = false
+	if d := DecideFire(g, queued, open, now, off); d.Verdict != FireNo {
+		t.Fatalf("degrade off must stay FireNo blocked, got %+v", d)
+	}
+	// Codex command already posted for this round → plain blocked FireNo.
+	posted := queued
+	posted.CodexCommandID = 99
+	if d := DecideFire(g, posted, open, now, degrade); d.Verdict != FireNo {
+		t.Fatalf("an already-posted codex command must not re-defer, got %+v", d)
+	}
+	// A live command on the PR → nothing to post; blocked FireNo.
+	cmdObs := Observation{Head: head, Open: true, CodexCommands: []CommandSeen{{ID: 55, CreatedAt: now}}}
+	if d := DecideFire(g, queued, cmdObs, now, degrade); d.Verdict != FireNo {
+		t.Fatalf("a live codex command must not re-post, got %+v", d)
+	}
+	// Auto-active Codex reviews unprompted → nothing to post; blocked FireNo.
+	autoObs := Observation{Head: head, Open: true, CodexAutoActive: true}
+	if d := DecideFire(g, queued, autoObs, now, degrade); d.Verdict != FireNo {
+		t.Fatalf("auto-active codex must not be commanded, got %+v", d)
+	}
+	// Unblocked → the normal fire path is untouched.
+	if d := DecideFire(Global{SlotFree: true}, queued, open, now, degrade); d.Verdict != FirePost || !d.PostCodex {
+		t.Fatalf("unblocked fire must stay FirePost with codex, got %+v", d)
+	}
+}

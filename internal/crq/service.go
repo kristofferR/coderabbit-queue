@@ -463,6 +463,8 @@ func (s *Service) applyFire(ctx context.Context, round Round, obs engine.Observa
 		return s.dedupeRound(ctx, round, now, d.Reason)
 	case engine.FireCodexOnly:
 		return s.fireCodexOnly(ctx, round, d.Reason, now)
+	case engine.FireCodexDeferred:
+		return s.fireCodexDeferred(ctx, round, d.Reason, now)
 	case engine.FireCoReviewWait:
 		return s.fireCoReviewWait(ctx, round, obs, d.Reason, now)
 	case engine.FireSupersede:
@@ -958,6 +960,50 @@ func (s *Service) fireCodexReview(ctx context.Context, round Round) {
 	s.sync(ctx, updated)
 }
 
+// fireCodexDeferred posts ONLY the Codex review command for a round the
+// CodeRabbit account block is holding back. Unlike fireCodexOnly (CodeRabbit
+// already reviewed the head) the round stays queued/awaiting-retry: the
+// CodeRabbit review is still owed and fires normally the moment the window
+// opens, at which point PostCodex stays false because CodexCommandID is set.
+// The claim-then-post shape mirrors selfHealCodex — this path is not
+// serialized by the fire slot either.
+func (s *Service) fireCodexDeferred(ctx context.Context, round Round, reason string, now time.Time) (PumpResult, error) {
+	result := PumpResult{Action: "codex_fired", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}
+	if s.cfg.DryRun {
+		return result, nil
+	}
+	claimed := false
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		r := st.Round(round.Repo, round.PR)
+		if !sameRound(r, round) || r.CodexCommandID != 0 {
+			return ErrNoChange
+		}
+		if r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry {
+			return ErrNoChange
+		}
+		if r.CodexClaimedAt != nil && now.Sub(r.CodexClaimedAt.UTC()) < codexClaimTTL {
+			return ErrNoChange
+		}
+		t := now.UTC()
+		r.CodexClaimedAt = &t
+		r.Note = "codex review requested; coderabbit deferred (account rate-limited)"
+		st.PutRound(*r)
+		claimed = true
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrNoChange) {
+		return result, err
+	}
+	if !claimed {
+		result.Action = "deduped"
+		result.Reason = "codex command already claimed or posted"
+		return result, nil
+	}
+	s.sync(ctx, updated)
+	s.fireCodexReview(ctx, round)
+	return result, nil
+}
+
 // selfHealCodex re-posts the Codex review command for a fired/reviewing round
 // whose initial Codex post failed (CodexCommandID still 0). It runs on the
 // daemon's progress/sweep paths; idempotence comes from the observation — Codex
@@ -1440,6 +1486,15 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 					s.log.Printf("%s#%d feedback already available on %s; leaving review slot wait", repo, pr, report.Head)
 				}
 				return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: report.Head, Reason: "feedback already available"}, 3, nil
+			}
+			// A clean Codex answer on a degraded (rate-limited) round is the
+			// round's verdict for now — hand off to the feedback poll loop
+			// instead of spinning here until the CodeRabbit window opens.
+			if report.Status == "deferred" {
+				if s.log != nil {
+					s.log.Printf("%s#%d codex answered on %s; coderabbit deferred — leaving review slot wait", repo, pr, report.Head)
+				}
+				return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: report.Head, Reason: "codex answered; coderabbit deferred"}, 3, nil
 			}
 		}
 		result, err := s.Pump(ctx)

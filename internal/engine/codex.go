@@ -161,6 +161,23 @@ func CodexCommandSince(obs Observation, since time.Time) bool {
 	return false
 }
 
+// CodexOnlyEligible reports whether an account-blocked round may degrade to a
+// Codex-only round: the block is live AND Codex shows observed responsiveness
+// on this PR (it auto-reviews, or has activity bound to this round) AND has
+// not posted a usage-limit exhaustion notice since the fire. Configuration
+// alone (a configured Codex command, or a live unanswered `@codex review`)
+// is deliberately not enough — without observed evidence the round falls back
+// to riding out the CodeRabbit window.
+func CodexOnlyEligible(r state.Round, obs Observation, blockedUntil *time.Time, now time.Time) bool {
+	if blockedUntil == nil || !blockedUntil.After(now) {
+		return false
+	}
+	if !obs.CodexAutoActive && !obs.CodexActiveThisRound {
+		return false
+	}
+	return !codexUsageLimitedSince(obs, roundCutoff(r))
+}
+
 // codexUsageLimitedSince reports whether Codex posted its usage-limit
 // exhaustion notice at/after since — the round window it can no longer finish.
 func codexUsageLimitedSince(obs Observation, since time.Time) bool {

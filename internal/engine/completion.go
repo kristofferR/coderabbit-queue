@@ -277,6 +277,26 @@ func commandReplies(obs Observation, p Policy) []commandReply {
 	return out
 }
 
+// DoneExcept reports whether every gating bot EXCEPT the named one has review
+// evidence — and at least one other bot gates at all. The vacuous case
+// matters: with only the excluded bot required, a degraded round must never
+// read as done, or a CodeRabbit rate-limit window with no Codex configured
+// would let rounds complete with no review evidence whatsoever.
+func DoneExcept(reviewedBy map[string]bool, except string) bool {
+	norm := dialect.NormalizeBotName(except)
+	others := 0
+	for bot, reviewed := range reviewedBy {
+		if bot == except || dialect.NormalizeBotName(bot) == norm {
+			continue
+		}
+		if !reviewed {
+			return false
+		}
+		others++
+	}
+	return others > 0
+}
+
 // needsBotReview reports whether login gates completion (has a ReviewedBy
 // key) and its review hasn't been seen yet.
 func needsBotReview(reviewedBy map[string]bool, login string) bool {

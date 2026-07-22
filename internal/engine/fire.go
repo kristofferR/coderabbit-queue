@@ -20,6 +20,7 @@ const (
 	FireDedupe                          // bot already reviewed this head — complete without firing
 	FireCodexOnly                       // CodeRabbit reviewed the head but a required Codex still must — post only the Codex command
 	FireCoReviewWait                    // CodeRabbit reviewed the head; a gating co-bot has not — wait for it, bounded, without posting or holding the slot
+	FireCodexDeferred                   // account blocked — post only the Codex command now; the round stays queued so CodeRabbit fires when the window opens
 	FireSupersede                       // observed head differs — supersede the round first
 	FireDrop                            // PR closed/merged — abandon the round
 )
@@ -80,6 +81,15 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 		}
 	}
 	if g.BlockedUntil != nil && g.BlockedUntil.After(now) {
+		// Degrade instead of stalling: the block only gates CodeRabbit quota,
+		// so ask Codex now and leave the round queued — CodeRabbit still
+		// fires the moment the window opens. DecideCodexPost's guards
+		// (command configured, codex required, not auto-active, no live or
+		// already-posted command) make this idempotent per round.
+		if p.RateLimitCodexDegrade && DecideCodexPost(r, obs, p, len(obs.CodexCommands) > 0) {
+			return FireDecision{Verdict: FireCodexDeferred,
+				Reason: "account blocked; requesting codex review now, coderabbit deferred"}
+		}
 		return FireDecision{Verdict: FireNo, Reason: "account blocked until " + g.BlockedUntil.UTC().Format(time.RFC3339)}
 	}
 	if g.LastFired != nil && now.Sub(*g.LastFired) < p.MinInterval {
