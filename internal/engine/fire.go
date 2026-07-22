@@ -65,6 +65,14 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 		return FireDecision{Verdict: FireNo, Reason: reason}
 	}
 	if !g.SlotFree {
+		// Codex needs no fire slot: a round parked behind another PR's
+		// in-flight review can start its Codex round immediately. The round
+		// stays queued and CodeRabbit fires once the slot frees, with
+		// CodexCommandID preventing a duplicate Codex post.
+		if p.RateLimitCodexDegrade && DecideCodexPost(r, obs, p, len(obs.CodexCommands) > 0) {
+			return FireDecision{Verdict: FireCodexDeferred,
+				Reason: "fire slot busy; requesting codex review now, coderabbit deferred"}
+		}
 		return FireDecision{Verdict: FireNo, Reason: "fire slot busy"}
 	}
 	// Belt-and-braces live check: even with a fresh round, never fire at a

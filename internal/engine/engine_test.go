@@ -738,4 +738,11 @@ func TestDecideFireBlockedCodexDeferred(t *testing.T) {
 	if d := DecideFire(Global{SlotFree: true}, queued, open, now, degrade); d.Verdict != FirePost || !d.PostCodex {
 		t.Fatalf("unblocked fire must stay FirePost with codex, got %+v", d)
 	}
+	// A busy fire slot defers to Codex the same way — Codex needs no slot.
+	if d := DecideFire(Global{SlotFree: false}, queued, open, now, degrade); d.Verdict != FireCodexDeferred {
+		t.Fatalf("slot-busy + degrade + postable codex must defer to codex, got %+v", d)
+	}
+	if d := DecideFire(Global{SlotFree: false}, queued, open, now, off); d.Verdict != FireNo {
+		t.Fatalf("slot-busy with degrade off must stay FireNo, got %+v", d)
+	}
 }
