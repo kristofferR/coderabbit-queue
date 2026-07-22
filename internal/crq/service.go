@@ -270,7 +270,6 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	// scan a bounded number of following queued rounds for a postable
 	// Codex defer (each costs one observation; ETag caching keeps it cheap).
 	if s.cfg.RateLimitCodexDegrade && decision.Verdict == engine.FireNo &&
-		next.CodexCommandID != 0 &&
 		(strings.Contains(decision.Reason, "account blocked") ||
 			strings.Contains(decision.Reason, "fire slot busy")) {
 		scanned := 0
@@ -657,8 +656,16 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 				// Not posting because a live `@codex review` command already answers
 				// this head — record its id now. The self-heal scan anchors on FiredAt
 				// and would miss a command posted before the adopted CodeRabbit command,
-				// posting a duplicate; recording it here keeps the round "asked".
+				// posting a duplicate; recording it here keeps the round "asked". Its
+				// timestamp anchors the codex cutoff too, or a SHA-less answer that
+				// landed before this adopted fire would never bind to the round.
 				r.CodexCommandID = id
+				for _, c := range obs.CodexCommands {
+					if c.ID == id && !c.CreatedAt.IsZero() {
+						at := c.CreatedAt.UTC()
+						r.CodexCommandedAt = &at
+					}
+				}
 			}
 			st.PutRound(*r)
 			recorded = true
@@ -881,6 +888,12 @@ func (s *Service) fireCoReviewWait(ctx context.Context, round Round, obs engine.
 		}
 		if r.CodexCommandID == 0 && codexID != 0 {
 			r.CodexCommandID = codexID
+			for _, c := range obs.CodexCommands {
+				if c.ID == codexID && !c.CreatedAt.IsZero() {
+					at := c.CreatedAt.UTC()
+					r.CodexCommandedAt = &at
+				}
+			}
 		}
 		st.PutRound(*r)
 		changed = true

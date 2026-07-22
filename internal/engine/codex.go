@@ -193,7 +193,20 @@ func CodexOnlyEligible(r state.Round, obs Observation, blockedUntil *time.Time, 
 	if !codexReviewedHead(obs) && !(anchored && obs.CodexActiveThisRound) {
 		return false
 	}
-	return !codexUsageLimitedSince(obs, codexCutoff(r))
+	// The usage-limit floor is the evidence window. For an unfired,
+	// uncommanded round the cutoff is zero — floor it at the head review that
+	// qualified the round instead, or any old exhaustion notice still on the
+	// PR would suppress the degrade until the window expires.
+	floor := codexCutoff(r)
+	if floor.IsZero() {
+		for _, review := range obs.Reviews {
+			if dialect.IsCodexBot(review.Bot) && obs.Head != "" &&
+				strings.HasPrefix(review.Commit, obs.Head) && review.SubmittedAt.After(floor) {
+				floor = review.SubmittedAt
+			}
+		}
+	}
+	return !codexUsageLimitedSince(obs, floor)
 }
 
 // codexUsageLimitedSince reports whether Codex posted its usage-limit

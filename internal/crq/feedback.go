@@ -388,11 +388,13 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			if allReviewed(report.ReviewedBy) {
 				report.Reason = "all required reviewers finished; address findings, push once, and resolve threads"
 				s.completeWaitRound(ctx, repo, pr, head)
-			} else if report.CodeRabbitDeferred {
-				// Degraded round: Codex answered while CodeRabbit is rate-limited.
-				// These findings are this round's work — fixing and pushing is
-				// exactly right; the CodeRabbit review stays queued and fires
-				// against the newest head once the window opens.
+			} else if report.CodeRabbitDeferred && engine.DoneExcept(report.ReviewedBy, s.cfg.Bot) {
+				// Degraded round: every required bot except the rate-limited
+				// CodeRabbit has finished. These findings are this round's work —
+				// fixing and pushing is exactly right; the CodeRabbit review stays
+				// queued and fires against the newest head once the window opens.
+				// With ANOTHER required bot still pending, the hold-head branch
+				// below applies instead: pushing would restart its checks.
 				report.Reason = "codex findings during a coderabbit rate-limit window; fix, push, and loop again — the coderabbit review stays queued and fires when the window opens"
 			} else {
 				// A required reviewer is still pending (e.g. Codex posted a finding
