@@ -2333,3 +2333,91 @@ func TestFireCoDeferredAdoptionHonorsDryRunAndActiveClaim(t *testing.T) {
 		t.Fatalf("the recovered adoption must replace the stale claim, got %#v", got)
 	}
 }
+
+// TestPumpRescuesSummaryOnlyRoundBehindBlockedQueue pins a starvation bug found
+// by dogfooding on a private CodeRabbit-Free repo. A summary-only round needs no
+// CodeRabbit quota and no fire slot — no review is ever coming from CodeRabbit —
+// yet it sat queued behind a rate-limited round from another PR. Pump's bounded
+// rescue scan DID observe it and DID compute its verdict, then threw the verdict
+// away because it only accepted FireCoDeferred, leaving the round queued with an
+// empty note while its Codex review went unused.
+func TestPumpRescuesSummaryOnlyRoundBehindBlockedQueue(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
+	cfg.FeedbackBots = cfg.RequiredBots
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+
+	// Front of the queue: another PR, blocked, whose Codex trigger is already
+	// posted — so it yields FireNo and nothing more can be done for it.
+	frontSHA := "1111111111111111"
+	frontPull := ghapi.Pull{State: "open"}
+	frontPull.Head.SHA = frontSHA
+	gh.pulls[fakeKey("o/front", 10)] = frontPull
+
+	// Behind it: a summary-only PR. CodeRabbit posted only its Free-plan
+	// walkthrough, which is the whole review it will ever produce.
+	backSHA := "2222222222222222"
+	backPull := ghapi.Pull{State: "open"}
+	backPull.Head.SHA = backSHA
+	gh.pulls[fakeKey("o/back", 20)] = backPull
+	walkthrough := ghapi.IssueComment{
+		ID:        900,
+		Body:      corpusMessage(t, "coderabbit/summary-only-free-plan.md"),
+		CreatedAt: now.Add(-time.Minute),
+		UpdatedAt: now.Add(-time.Minute),
+	}
+	walkthrough.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/back", 20)] = []ghapi.IssueComment{walkthrough}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+
+	if _, err := svc.Enqueue(ctx, "o/front", 10); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Enqueue(ctx, "o/back", 20); err != nil {
+		t.Fatal(err)
+	}
+	blockedUntil := now.Add(30 * time.Minute)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Account.BlockedUntil = &blockedUntil
+		// The front round has already asked Codex, so the degrade has nothing
+		// left to post for it and it can only report FireNo while blocked.
+		r := st.Round("o/front", 10)
+		r.SetCoCommand(dialect.CodexBotLogin, 701, now.Add(-2*time.Minute))
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The blocked front round must not swallow the pump: the summary-only round
+	// behind it gets resolved instead of staying queued.
+	if res.Repo != "o/back" || res.PR != 20 {
+		t.Fatalf("the summary-only round behind the block must be rescued, got %#v", res)
+	}
+	st, _, _ := store.Load(ctx)
+	back := st.Round("o/back", 20)
+	if back == nil || back.Phase == PhaseQueued {
+		t.Fatalf("the summary-only round must leave the queue, got %#v", back)
+	}
+	// Whatever the resolution, it must never have spent CodeRabbit quota: no
+	// `@coderabbitai review` posted and no fire slot taken.
+	for _, p := range gh.posted {
+		if strings.Contains(p, cfg.ReviewCommand) {
+			t.Fatalf("a summary-only round must never post the CodeRabbit command, posted=%v", gh.posted)
+		}
+	}
+	if st.FireSlot != nil {
+		t.Fatalf("a summary-only round must not take the fire slot, got %#v", st.FireSlot)
+	}
+}

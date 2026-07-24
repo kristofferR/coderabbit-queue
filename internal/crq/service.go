@@ -267,20 +267,33 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if err != nil {
 		return result, err
 	}
-	// A blocked or slot-busy front of the queue whose co-reviewer triggers are
-	// already posted must not starve later PRs of THEIR early co-review round —
-	// scan a bounded number of following queued rounds for a postable defer
-	// (each costs one observation; ETag caching keeps it cheap).
+	// A blocked or slot-busy front of the queue must not starve later PRs of
+	// resolutions that spend NO CodeRabbit quota — a co-reviewer defer, or a
+	// summary-only round whose review is never coming from CodeRabbit at all.
+	// Scan a bounded number of following queued rounds and apply any quota-free
+	// verdict (each costs one observation; ETag caching keeps it cheap).
+	//
+	// The scan is deliberately verdict-driven rather than flag-driven:
+	// `decideCoDeferred` already honours RateLimitCoDegrade internally, so a
+	// disabled degrade simply never yields FireCoDeferred, while a summary-only
+	// round must be rescued regardless of that flag.
 	accountBlocked := global.BlockedUntil != nil && global.BlockedUntil.After(now)
-	if s.cfg.RateLimitCoDegrade && decision.Verdict == engine.FireNo &&
-		(accountBlocked || !global.SlotFree) {
+	if decision.Verdict == engine.FireNo && (accountBlocked || !global.SlotFree) {
 		scanned := 0
 		policy := s.policy()
 		for _, r := range st.QueuedRounds(now) {
 			if r.Repo == next.Repo && r.PR == next.PR {
 				continue
 			}
-			if !anyCoUncommanded(r, policy) || scanned >= 3 {
+			if scanned >= 3 {
+				break
+			}
+			// Cheap pre-filter: a round with every trigger already posted has
+			// nothing left for this scan to start. (A summary-only round in
+			// that state is merely delayed, not starved — it resolves when it
+			// reaches the front of the queue; recognising it here would cost an
+			// observation for every queued round on every pump.)
+			if !anyCoUncommanded(r, policy) {
 				continue
 			}
 			scanned++
@@ -290,13 +303,24 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 				continue
 			}
 			d := engine.DecideFire(s.global(st, now), round, robs.eng, now, policy)
-			if d.Verdict != engine.FireCoDeferred {
+			if !quotaFreeVerdict(d.Verdict) {
 				continue
 			}
 			return s.applyFire(ctx, round, robs.eng, d, now)
 		}
 	}
 	return result, nil
+}
+
+// quotaFreeVerdict reports whether a fire verdict can be applied while another
+// PR holds the slot or the account is blocked: none of these post
+// `@coderabbitai review`, reserve the FireSlot, or spend account quota.
+func quotaFreeVerdict(v engine.FireVerdict) bool {
+	switch v {
+	case engine.FireCoDeferred, engine.FireCoOnly, engine.FireCoReviewWait, engine.FireDedupe:
+		return true
+	}
+	return false
 }
 
 // anyCoUncommanded reports whether some triggerable co-reviewer has no
