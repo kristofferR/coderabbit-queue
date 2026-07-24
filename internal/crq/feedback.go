@@ -271,7 +271,8 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 			continue
 		}
 		if s.cr.IsReviewSkipped(comment.Body) && s.isConfiguredBot(comment.User.Login) &&
-			skipAppliesToHead(comment.Body, head) {
+			skipAppliesToHead(comment.Body, head) &&
+			!skipPredatesHead(comment, headCutoffOf) {
 			// Checked BEFORE the rate-limit guard below: the skip notice embeds
 			// the rate-limit marker, so that guard would drop it and the round
 			// would converge with a silently absent primary reviewer — worse than
@@ -1186,6 +1187,19 @@ func dedupeFindings(in []dialect.Finding, suppressPromptAt, settledStableIDs map
 // so a skip of an EARLIER head must not keep surfacing: Loop treats findings as
 // blocking before it enqueues, which would stop the replacement head from ever
 // being submitted — the repair would permanently disable the reviewer.
+// skipPredatesHead reports whether a skip notice was posted before the current
+// head existed. A notice naming no commit cannot be bound by SHA, so it falls
+// back to the same head-commit cutoff every other issue comment uses — without
+// it a stale skip keeps surfacing as a blocking, thread-less finding and the
+// loop exits 10 forever without ever waiting for a review.
+func skipPredatesHead(comment ghapi.IssueComment, headCutoff func() time.Time) bool {
+	if dialect.ReviewSkippedHeadSHA(comment.Body) != "" {
+		return false // names its commit: SHA binding already decided this
+	}
+	cutoff := headCutoff()
+	return !cutoff.IsZero() && comment.CreatedAt.Before(cutoff)
+}
+
 func skipAppliesToHead(body, head string) bool {
 	skipped := dialect.ReviewSkippedHeadSHA(body)
 	if skipped == "" || head == "" {

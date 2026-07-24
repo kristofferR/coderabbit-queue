@@ -125,6 +125,11 @@ var (
 	// than matched as loose prose: a false positive stops crq firing CodeRabbit
 	// on a PR it could really review.
 	reviewSkippedRE = regexp.MustCompile(`(?mi)^\s*>?\s*#{1,4}\s*review skipped\s*$`)
+	// autoReviewsDisabledRE matches the routine "auto-review is off, ask me
+	// explicitly" notice that shares the "Review skipped" heading. crq REQUIRES
+	// auto-review to be off, so this fires on every push it manages: reading it
+	// as a refusal would stop crq firing CodeRabbit on every repo.
+	autoReviewsDisabledRE = regexp.MustCompile(`(?i)auto reviews are disabled`)
 	// reviewSkippedHeadRE captures the head SHA a skip was evaluated against,
 	// from "Reviewing files that changed ... between <base> and <head>.".
 	reviewSkippedHeadRE = regexp.MustCompile(`(?i)between\s+[0-9a-f]{7,40}\s+and\s+([0-9a-f]{7,40})`)
@@ -133,15 +138,23 @@ var (
 	reviewSkippedReasonRE = regexp.MustCompile(`(?mi)^\s*>\s*(?:##+\s*)?([A-Z][^\n]*?[.!])\s*$`)
 )
 
-// IsReviewSkipped reports whether body is CodeRabbit's "Review skipped" notice:
-// it declined to review this head outright (too many files, no usage credits,
-// an unsupported diff). This is NOT a rate limit even though the notice carries
-// the rate-limit marker — there is no window after which it clears, so waiting
-// and re-firing produce the same refusal forever while poisoning the
-// account-wide quota with a fabricated block. Treat it as "no CodeRabbit review
-// is coming for this head" and let the co-reviewers decide the round.
+// IsReviewSkipped reports whether body is CodeRabbit REFUSING to review this
+// head (too many files, no usage credits, an unsupported diff). This is NOT a
+// rate limit even though the notice carries the rate-limit marker — there is no
+// window after which it clears, so waiting and re-firing produce the same
+// refusal forever while poisoning the account-wide quota with a fabricated
+// block. Treat it as "no CodeRabbit review is coming for this head" and let the
+// co-reviewers decide the round.
+//
+// CodeRabbit reuses the same "Review skipped" heading for a notice that is the
+// exact OPPOSITE of a refusal: "Auto reviews are disabled on this repository …
+// To trigger a single review, invoke the `@coderabbitai review` command." That
+// one says a review IS available on request — it is what CodeRabbit posts on
+// every push once auto-review is off, which is crq's REQUIRED prerequisite and
+// therefore its steady state on every repo it manages. Reading it as a refusal
+// stops crq firing CodeRabbit anywhere, so it is excluded explicitly.
 func (d CodeRabbit) IsReviewSkipped(body string) bool {
-	return reviewSkippedRE.MatchString(body)
+	return reviewSkippedRE.MatchString(body) && !autoReviewsDisabledRE.MatchString(body)
 }
 
 // ReviewSkippedHeadSHA returns the head commit the skip was evaluated against,

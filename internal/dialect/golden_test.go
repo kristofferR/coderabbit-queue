@@ -72,6 +72,13 @@ func TestGoldenClassification(t *testing.T) {
 		// clears, re-fires forever, and blocks the whole account's quota.
 		{file: "coderabbit/review-skipped-too-many-files.md", reviewSkipped: true, rateLimited: true,
 			author: "coderabbitai[bot]", wantKind: EvSkipped},
+		// The SAME "Review skipped" heading, meaning the opposite: auto-review is
+		// off and CodeRabbit is inviting the explicit trigger. That is crq's
+		// REQUIRED prerequisite, so this notice appears on every push crq
+		// manages — reading it as a refusal stops crq firing CodeRabbit
+		// everywhere. It must NOT be a skip. (This capture is from a Free
+		// private repo, so summaryOnly is true for an unrelated reason.)
+		{file: "coderabbit/review-skipped-auto-reviews-disabled.md", reviewSkipped: false, summaryOnly: true},
 		{file: "coderabbit/already-reviewed.md", alreadyDone: true, autoReply: true},
 		{file: "coderabbit/completion-reply.md", completionReply: true, autoReply: true},
 		// The standalone trailer is an ack; a real finding CARRYING the trailer
@@ -496,5 +503,34 @@ func TestCheckRunsThatAreNotReviewEvidence(t *testing.T) {
 				t.Fatalf("verdict = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestAutoReviewsDisabledIsNotARefusal guards the regression that broke crq's
+// core function: "Review skipped — Auto reviews are disabled on this
+// repository … To trigger a single review, invoke the `@coderabbitai review`
+// command" shares a heading with the real refusals but means the opposite. It
+// says a review IS available on request, and because crq REQUIRES auto-review
+// to be off it appears on every push crq manages. Classifying it as a refusal
+// makes PrimaryReviewUnavailable true everywhere, so crq stops firing
+// CodeRabbit on every repo it manages and every loop exits instantly on an
+// unresolvable, thread-less finding.
+func TestAutoReviewsDisabledIsNotARefusal(t *testing.T) {
+	body := readGolden(t, "coderabbit/review-skipped-auto-reviews-disabled.md")
+	if goldenCR.IsReviewSkipped(body) {
+		t.Fatal("the auto-review-disabled notice must never read as a refusal to review")
+	}
+	// The classifier must still see it as an ordinary CodeRabbit comment, not
+	// as the EvSkipped state.
+	classifier := Classifier{CodeRabbit: goldenCR, Bot: "coderabbitai[bot]",
+		ReviewCommand: "@coderabbitai review", CoReviewers: KnownCoReviewers()}
+	base := time.Date(2026, 7, 24, 21, 15, 52, 0, time.UTC)
+	if got := classifier.Classify("coderabbitai[bot]", body, 1, base, base).Kind; got == EvSkipped {
+		t.Fatal("Classify must not report EvSkipped for the auto-review-disabled notice")
+	}
+	// The genuine refusal still classifies, so the fix is a discrimination and
+	// not a blanket disable.
+	if !goldenCR.IsReviewSkipped(readGolden(t, "coderabbit/review-skipped-too-many-files.md")) {
+		t.Fatal("a real refusal must still be recognised")
 	}
 }
