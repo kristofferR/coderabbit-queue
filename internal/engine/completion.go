@@ -22,12 +22,15 @@ type CompletionStatus struct {
 //
 //  1. A submitted review whose commit prefixes the head counts; with no head
 //     to match, submission at/after the fire counts (reviewedByForRound).
-//  2. Codex's clean summary counts when its "Reviewed commit" SHA matches the
-//     head, or — SHA-less legacy format — when posted at/after the fire.
+//  2. A co-reviewer's clean summary counts when its "Reviewed commit" SHA
+//     matches the head, or — SHA-less legacy format — when posted at/after
+//     the fire. 2b: a completed co-reviewer check run for the head counts
+//     (Bugbot's clean rounds exist ONLY as a check run).
 //  3. CodeRabbit's clean-review summary counts when posted at/after the fire,
-//     gated on Codex being inactive or thumbed-up (codexInactiveOrThumbed):
-//     if Codex gates or participates in this round, its silence must not let
-//     the round converge on CodeRabbit's word alone.
+//     gated on every gating co-reviewer being satisfied
+//     (coReviewersSatisfied): if a co-bot gates or participates in this
+//     round, its silence must not let the round converge on CodeRabbit's
+//     word alone.
 //  4. The completion-reply fallback: a "Review finished." reply pairs to this
 //     round's command and stands in for a no-findings re-review — only if the
 //     bot has ANY prior submitted review, the pairing is chronologically
@@ -46,15 +49,23 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 		cutoff = r.FiredAt.UTC()
 	}
 
-	// Dynamic Codex gate: a fired round that Codex participates in — reviewing the
-	// PR on its own (CodexAutoActive) or acting this round (CodexActiveThisRound) —
-	// waits for Codex too, even when Codex is not configured-required, so its
-	// findings are not skipped. A usage-limit exhaustion notice disengages this
-	// gate (Codex cannot finish this round); configured-required Codex is left to
-	// the wait deadline as before.
-	if r.FiredAt != nil && !dialect.HasCodexBot(p.RequiredBots) &&
-		(obs.CodexAutoActive || obs.CodexActiveThisRound) && !codexUsageLimitedSince(obs, cutoff) {
-		reviewedBy[codexBot] = false
+	// Dynamic co-reviewer gate: a fired round that a co-bot participates in —
+	// reviewing the PR on its own (AutoActive) or acting this round
+	// (ActiveThisRound) — waits for that bot too, even when it is not
+	// configured-required, so its findings are not skipped. An unable notice
+	// (Codex's usage-limit exhaustion) disengages this gate (the bot cannot
+	// finish this round); configured-required bots are left to the wait
+	// deadline as before.
+	if r.FiredAt != nil {
+		for _, cp := range p.coReviewers() {
+			if requiredBot(p, cp.Login) {
+				continue
+			}
+			co := obs.co(cp.Login)
+			if (co.AutoActive || co.ActiveThisRound) && !coUnableSince(obs, cp.Login, cutoff) {
+				reviewedBy[cp.Login] = false
+			}
+		}
 	}
 
 	// 1. Submitted reviews.
@@ -70,30 +81,44 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 		}
 	}
 
-	// 2. Codex clean-summary issue comments.
+	// 2. Co-reviewer clean-summary issue comments.
 	for _, ev := range obs.Events {
-		if ev.Kind != dialect.EvCodexClean {
+		if ev.Kind != dialect.EvCoClean {
 			continue
+		}
+		login := ev.For
+		if login == "" {
+			login = ev.Bot
 		}
 		if ev.SHA != "" {
 			// The newer format names the reviewed commit — bind on that SHA
 			// directly. A summary for another commit never counts, and a
 			// matching one counts even when the round anchor was lost.
 			if r.Head != "" && dialect.SHAPrefixMatch(ev.SHA, r.Head) {
-				markReviewed(reviewedBy, ev.Bot)
+				markReviewed(reviewedBy, login)
 			}
 			continue
 		}
-		// SHA-less summaries bind from the Codex command time when crq posted
-		// it before the (deferred) CodeRabbit fire — see codexCutoff.
-		if (r.FiredAt != nil || r.CodexCommandedAt != nil) &&
-			notBefore(ev.ObservedTime(), codexCutoff(r)) {
-			markReviewed(reviewedBy, ev.Bot)
+		// SHA-less summaries bind from the co-bot command time when crq posted
+		// it before the (deferred) CodeRabbit fire — see coCutoff.
+		if (r.FiredAt != nil || roundCoCommandedAt(r, login) != nil) &&
+			notBefore(ev.ObservedTime(), coCutoff(r, login)) {
+			markReviewed(reviewedBy, login)
+		}
+	}
+
+	// 2b. Completed co-reviewer check runs. Head-scoped by construction, so a
+	// Done/DoneClean verdict IS that bot's review of this head — this is how a
+	// silent-clean Bugbot round converges (findings, if any, gate via threads
+	// in the feedback layer, so counting Done here cannot skip them).
+	for _, c := range obs.Checks {
+		if c.Verdict == dialect.CheckDone || c.Verdict == dialect.CheckDoneClean {
+			markReviewed(reviewedBy, c.Bot)
 		}
 	}
 
 	// A Codex thumbs-up stands in for its review whenever Codex gates the round.
-	// codexInactiveOrThumbed also consumes it on the CodeRabbit clean-summary path;
+	// coReviewersSatisfied also consumes it on the CodeRabbit clean-summary path;
 	// marking it here covers the case where CodeRabbit submitted a real review, so
 	// step 3 never runs — otherwise a thumbs-up would engage the dynamic gate
 	// without being able to satisfy it.
@@ -101,13 +126,13 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 		markReviewed(reviewedBy, codexBot)
 	}
 
-	// 3. CodeRabbit clean-review summary, Codex-gated.
+	// 3. CodeRabbit clean-review summary, co-reviewer-gated.
 	if r.FiredAt != nil {
 		for _, ev := range obs.Events {
 			if ev.Kind != dialect.EvNoAction || !sameBot(ev.Bot, p.Bot) || !notBefore(ev.ObservedTime(), cutoff) {
 				continue
 			}
-			if codexInactiveOrThumbed(r, obs, p, cutoff, reviewedBy) {
+			if coReviewersSatisfied(r, obs, p, cutoff, reviewedBy) {
 				markReviewed(reviewedBy, ev.Bot)
 			}
 		}
@@ -122,24 +147,30 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 	return CompletionStatus{ReviewedBy: reviewedBy, Done: allReviewed(reviewedBy)}
 }
 
-// codexInactiveOrThumbed ports v2's rule: CodeRabbit's clean summary may only
-// converge the round when Codex either has already reviewed, was never active
-// on this round, or has thumbed the round up. A thumbs-up also counts as
-// Codex's review.
-func codexInactiveOrThumbed(r state.Round, obs Observation, p Policy, cutoff time.Time, reviewedBy map[string]bool) bool {
-	if reviewedByBot(reviewedBy, codexBot) || codexReviewedRound(r, obs, cutoff) {
-		return true
+// coReviewersSatisfied generalizes v2's codexInactiveOrThumbed rule to every
+// registered co-reviewer: CodeRabbit's clean summary may only converge the
+// round when each co-bot either has already reviewed, was never active on
+// this round, or (Codex only) has thumbed the round up. A thumbs-up also
+// counts as Codex's review. A completed check run already marked its bot
+// reviewed in step 2b, so it satisfies the first clause here.
+func coReviewersSatisfied(r state.Round, obs Observation, p Policy, cutoff time.Time, reviewedBy map[string]bool) bool {
+	for _, cp := range p.coReviewers() {
+		if reviewedByBot(reviewedBy, cp.Login) || coReviewedRound(r, obs, cp.Login, cutoff) {
+			continue
+		}
+		// The bot either gates by configuration, or participates via a
+		// round-window comment/clean summary; its notices (unable, acks,
+		// verdicts) do not count.
+		if !requiredBot(p, cp.Login) && !coCommentedRound(obs, cp.Login, cutoff) {
+			continue
+		}
+		if dialect.IsCodexBot(cp.Login) && obs.CodexThumbsUp {
+			markReviewed(reviewedBy, codexBot)
+			continue
+		}
+		return false
 	}
-	// Codex either gates by configuration, or participates via a round-window
-	// comment/clean summary; its notices (usage limits, acks) do not count.
-	if !dialect.HasCodexBot(p.RequiredBots) && !codexCommentedRound(obs, cutoff) {
-		return true
-	}
-	if obs.CodexThumbsUp {
-		markReviewed(reviewedBy, codexBot)
-		return true
-	}
-	return false
+	return true
 }
 
 // completionReplyForRound ports v2's completionReplyForFiredCommand: replies

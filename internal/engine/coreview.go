@@ -173,13 +173,29 @@ func coReviewedHead(obs Observation, login string) bool {
 }
 
 // CoActiveThisRound reports whether login shows activity bound to this round —
-// a head review, a round-window comment/clean summary, or any head check run.
-// observe() stores it on the Observation so the dynamic completion gate
-// requires the bot when it participates without being configured-required.
-// (Codex's thumbs-up quirk is layered on by CodexActiveThisRound.)
+// a head review, a round-window comment/clean summary, a per-round verdict
+// comment, or any head check run. observe() stores it on the Observation so
+// the dynamic completion gate requires the bot when it participates without
+// being configured-required. (Codex's thumbs-up quirk is layered on by
+// CodexActiveThisRound.)
 func CoActiveThisRound(r state.Round, obs Observation, login string) bool {
 	cutoff := coCutoff(r, login)
-	return coReviewedRound(r, obs, login, cutoff) || coCommentedRound(obs, login, cutoff) || coCheckAny(obs, login)
+	return coReviewedRound(r, obs, login, cutoff) || coCommentedRound(obs, login, cutoff) ||
+		coVerdictSince(obs, login, cutoff) || coCheckAny(obs, login)
+}
+
+// coVerdictSince reports a per-round verdict comment (Macroscope's
+// Approvability) by login at/after since. A verdict is round PARTICIPATION —
+// it engages the dynamic gate so the bot's review is waited for — but never
+// completion evidence: only reviews, clean summaries, and completed checks
+// mark a bot reviewed.
+func coVerdictSince(obs Observation, login string, since time.Time) bool {
+	for _, ev := range obs.Events {
+		if ev.Kind == dialect.EvCoVerdict && eventConcerns(ev, login) && notBefore(ev.ObservedTime(), since) {
+			return true
+		}
+	}
+	return false
 }
 
 // CoAutoActive reports whether login reviews this PR on its own right now: its
