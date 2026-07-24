@@ -27,6 +27,7 @@ type fakeGitHub struct {
 	reactions       map[int64][]ghapi.Reaction
 	checkRuns       map[string][]ghapi.CheckRun // key: ref (short or full sha)
 	checkRunErrs    map[string]error
+	postBodyErrs    map[string]error // body → error (selective trigger-post failures)
 	posted          []string
 	deleted         []int64
 	commentID       int64
@@ -142,6 +143,9 @@ func (f *fakeGitHub) PostIssueComment(_ context.Context, repo string, pr int, bo
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.postErrs[fakeKey(repo, pr)]; err != nil {
+		return ghapi.IssueComment{}, err
+	}
+	if err := f.postBodyErrs[body]; err != nil {
 		return ghapi.IssueComment{}, err
 	}
 	f.commentID++
