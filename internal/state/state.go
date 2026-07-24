@@ -182,15 +182,12 @@ func (r *Round) ClearCoClaim(login string) {
 }
 
 // foldLegacyCodex folds the legacy per-round Codex fields into CoBots on
-// load. Old binaries write ONLY the legacy fields while new ones dual-write
-// both, so whenever any legacy field is set it is authoritative for Codex and
-// overwrites the mirror entry.
+// load. Every writer keeps the legacy fields current for Codex (old binaries
+// write only them, new ones dual-write), so they are authoritative in BOTH
+// directions: they overwrite the mirror entry, and an empty legacy set clears
+// a stale mirror (a writer zeroed the legacy fields directly).
 func (r *Round) foldLegacyCodex() {
-	legacy := CoBotRound{CommandID: r.CodexCommandID, CommandedAt: r.CodexCommandedAt, ClaimedAt: r.CodexClaimedAt}
-	if legacy.empty() {
-		return
-	}
-	r.setCo(codexCoBotKey, legacy)
+	r.setCo(codexCoBotKey, CoBotRound{CommandID: r.CodexCommandID, CommandedAt: r.CodexCommandedAt, ClaimedAt: r.CodexClaimedAt})
 }
 
 // FireSlot is the single global in-flight reservation: at most one review

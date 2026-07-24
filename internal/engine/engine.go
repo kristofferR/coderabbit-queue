@@ -12,11 +12,43 @@ import (
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 )
 
+// TriggerMode is how crq may post a co-reviewer's trigger command.
+type TriggerMode string
+
+const (
+	TriggerNever    TriggerMode = "never"    // crq never posts this bot's command
+	TriggerSelfHeal TriggerMode = "selfheal" // post only when an active bot missed the head past a grace period
+	TriggerAlways   TriggerMode = "always"   // post at fire time unless the bot auto-reviews
+)
+
+// CoReviewerPolicy is the configured stance toward one co-reviewer: whether
+// and how crq triggers it. Required-ness stays solely RequiredBots membership.
+type CoReviewerPolicy struct {
+	Login   string
+	Command string      // trigger comment crq posts ("" disables posting)
+	Trigger TriggerMode // zero value ("") reads as never
+	// SelfHealGrace is how long a selfheal trigger waits past its anchor for
+	// the bot to show up on its own (<=0: a conservative default).
+	SelfHealGrace time.Duration
+}
+
+func (cp CoReviewerPolicy) selfHealGrace() time.Duration {
+	if cp.SelfHealGrace > 0 {
+		return cp.SelfHealGrace
+	}
+	return 10 * time.Minute
+}
+
 // Policy carries the configured knobs the decisions depend on.
 type Policy struct {
 	Bot          string   // configured CodeRabbit login
 	RequiredBots []string // bots that gate round completion
 	CodexCommand string   // Codex review trigger crq posts ("" disables Codex firing)
+
+	// CoReviewers are the enabled co-reviewer bots with their trigger stances.
+	// When nil, the legacy Codex fields above synthesize the one entry
+	// (Trigger always iff Codex is in RequiredBots) — see codexPolicy.
+	CoReviewers []CoReviewerPolicy
 
 	MinInterval       time.Duration // global pacing between fires
 	InflightTimeout   time.Duration // fired round with no bot response at all
@@ -60,6 +92,34 @@ type CommandSeen struct {
 	UpdatedAt time.Time
 }
 
+// CheckSeen is one classified check run owned by a co-reviewer. observe()
+// fetches check runs per-ref for the observed head, so every CheckSeen is
+// head-scoped by construction — a completed one IS head review evidence
+// (Bugbot's clean rounds exist ONLY as a check run).
+type CheckSeen struct {
+	Bot         string // co-reviewer login owning the check
+	Name        string
+	Verdict     dialect.CheckVerdict
+	CompletedAt time.Time
+}
+
+// CoSeen is one co-reviewer's slice of the Observation, keyed in
+// Observation.Co by normalized login.
+type CoSeen struct {
+	// Commands are live adoptable trigger comments for this bot at the head
+	// (cutoff-filtered by observe like Observation.Commands). Non-empty means
+	// a trigger already exists, so crq must not post a duplicate.
+	Commands []CommandSeen
+	// AutoActive reports the bot reviews this PR on its own: its latest
+	// review/clean-summary/check evidence was not preceded by a trigger
+	// command. When true, crq never posts its command unprompted.
+	AutoActive bool
+	// ActiveThisRound reports activity bound to the current round (a head
+	// review, a round-window comment/clean summary, or a head check run). It
+	// drives the dynamic completion gate for non-required co-reviewers.
+	ActiveThisRound bool
+}
+
 // Observation is everything the engine may know about one PR at one moment.
 // crq's observe() builds it from GitHub exactly once per decision.
 type Observation struct {
@@ -86,6 +146,26 @@ type Observation struct {
 	// head review, a round-window comment/clean summary, or a thumbs-up). It
 	// drives the dynamic completion gate when Codex is not configured-required.
 	CodexActiveThisRound bool
+
+	// Checks are the head's classified co-reviewer check runs.
+	Checks []CheckSeen
+	// Co carries each co-reviewer's per-bot observation slice, keyed by
+	// normalized login. The legacy Codex* fields above remain the fallback for
+	// callers that predate the map — see Observation.co.
+	Co map[string]CoSeen
+}
+
+// co returns login's observation slice, falling back to the legacy Codex
+// fields when the map has no entry (engine tests and pre-migration callers
+// still populate those directly).
+func (o Observation) co(login string) CoSeen {
+	if c, ok := o.Co[dialect.NormalizeBotName(login)]; ok {
+		return c
+	}
+	if dialect.IsCodexBot(login) {
+		return CoSeen{Commands: o.CodexCommands, AutoActive: o.CodexAutoActive, ActiveThisRound: o.CodexActiveThisRound}
+	}
+	return CoSeen{}
 }
 
 // notBefore mirrors v2: GitHub timestamps are second-granular, so a bot
