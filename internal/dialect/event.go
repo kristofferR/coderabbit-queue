@@ -10,12 +10,18 @@ import (
 // over the completion marker it may also contain (a rate-limited reply must
 // never converge a round), and the already-reviewed ack is only reported when
 // the body is not itself a rate limit.
+//
+// Co-reviewer kinds are generic — the bot's identity travels as data
+// (BotEvent.For), never as a per-bot kind, so the engine's rules stay
+// bot-shape-generic ("participated", "clean at SHA", "cannot finish", "was
+// commanded") without enumerating bots. Kind values are in-memory only (never
+// persisted), so renumbering between versions is safe.
 type EventKind int
 
 const (
 	EvOther           EventKind = iota
 	EvCommand                   // the review trigger command, posted by a human/agent
-	EvCodexCommand              // the Codex review trigger command, posted by a human/agent
+	EvCoCommand                 // a co-reviewer's trigger command, posted by a human/agent
 	EvCompletion                // "Review finished." auto-reply (and not rate-limited)
 	EvRateLimited               // CodeRabbit account-quota notice
 	EvPaused                    // "Reviews paused" auto-pause notice
@@ -23,9 +29,19 @@ const (
 	EvFailed                    // editable top summary: review failed
 	EvAlreadyReviewed           // "does not re-review already reviewed commits" claim
 	EvNoAction                  // CodeRabbit clean-review summary (no actionable comments)
-	EvCodexClean                // Codex clean-summary issue comment
-	EvCodexUsageLimit           // Codex "usage limits for code reviews" exhaustion notice
-	EvCodexNotice               // other non-actionable Codex notice (acks, lgtm)
+	EvCoClean                   // co-reviewer clean-summary issue comment
+	EvCoUnable                  // co-reviewer cannot finish this round (Codex usage limits)
+	EvCoNotice                  // other non-actionable co-reviewer notice (acks)
+	EvCoVerdict                 // Macroscope approvability verdict (informational only)
+)
+
+// Deprecated: Codex-named aliases for the generic co-reviewer kinds, kept
+// while engine/crq migrate. In-memory only — never persisted.
+const (
+	EvCodexCommand    = EvCoCommand
+	EvCodexClean      = EvCoClean
+	EvCodexUsageLimit = EvCoUnable
+	EvCodexNotice     = EvCoNotice
 )
 
 // BotEvent is one classified issue comment. CreatedAt orders command↔reply
@@ -40,7 +56,13 @@ type BotEvent struct {
 	AutoReply bool       // body carries the auto-reply (calibration) marker
 	Window    *time.Time // EvRateLimited: parsed "available in" deadline
 	Remaining *int       // EvRateLimited: parsed remaining reviews
-	SHA       string     // EvCodexClean: reviewed-commit sha, "" if absent
+	SHA       string     // EvCoClean: reviewed-commit sha, "" if absent
+	// For is the canonical co-reviewer login the event concerns: the commanded
+	// bot for EvCoCommand, the authoring bot for a co-reviewer's own comments.
+	// "" for primary-bot and human events.
+	For string
+	// Approved is the EvCoVerdict approvability verdict.
+	Approved *bool
 }
 
 // PairTime is the timestamp used for command↔reply pairing (CreatedAt, with
@@ -63,13 +85,32 @@ func (e BotEvent) ObservedTime() time.Time {
 }
 
 // Classifier classifies issue comments into BotEvents. Bot is the configured
-// CodeRabbit login; ReviewCommand is the exact trigger comment body; CodexCommand
-// is the exact Codex trigger comment body ("" disables Codex-command matching).
+// CodeRabbit login; ReviewCommand is the exact trigger comment body;
+// CoReviewers are the enabled co-reviewer entries with their config-resolved
+// trigger commands (a nil slice falls back to the CodexCommand shim).
 type Classifier struct {
 	CodeRabbit    CodeRabbit
 	Bot           string
 	ReviewCommand string
-	CodexCommand  string
+	CoReviewers   []CoReviewer
+	// CodexCommand is the exact Codex trigger comment body ("" disables
+	// Codex-command matching).
+	//
+	// Deprecated: shim for callers that predate CoReviewers — when CoReviewers
+	// is nil, Classify synthesizes the Codex registry entry from this field.
+	CodexCommand string
+}
+
+// coReviewers resolves the co-reviewer set: the explicit list when set,
+// otherwise the legacy Codex-only shim (preserving that Codex comments
+// classify even with command matching disabled).
+func (c Classifier) coReviewers() []CoReviewer {
+	if c.CoReviewers != nil {
+		return c.CoReviewers
+	}
+	codex, _ := CoReviewerByName("codex")
+	codex.Command = strings.TrimSpace(c.CodexCommand)
+	return []CoReviewer{codex}
 }
 
 // Classify maps one issue comment to its BotEvent. Unrecognized comments
@@ -83,22 +124,24 @@ func (c Classifier) Classify(author, body string, id int64, createdAt, updatedAt
 		ev.Kind = EvCommand
 		return ev
 	}
-	if codexCmd := strings.TrimSpace(c.CodexCommand); codexCmd != "" && trimmed == codexCmd && !IsCodexBot(author) {
-		ev.Kind = EvCodexCommand
-		return ev
+	coReviewers := c.coReviewers()
+	for _, co := range coReviewers {
+		if co.matchesCommand(trimmed) && !co.Is(author) {
+			ev.Kind = EvCoCommand
+			ev.For = co.Login
+			return ev
+		}
 	}
-	if IsCodexBot(author) {
-		switch {
-		case IsCodexNoActionReviewCompletion(body):
-			ev.Kind = EvCodexClean
-			ev.SHA = CodexReviewedCommitSHA(body)
-		case IsCodexUsageLimit(body):
-			// The usage-limit exhaustion notice is distinct from other Codex acks:
-			// the dynamic completion gate reads it to stop waiting on a Codex that
-			// cannot finish this round.
-			ev.Kind = EvCodexUsageLimit
-		case IsNonActionableText(body):
-			ev.Kind = EvCodexNotice
+	for _, co := range coReviewers {
+		if !co.Is(author) {
+			continue
+		}
+		ev.For = co.Login
+		if co.ClassifyComment != nil {
+			coEv := co.ClassifyComment(body)
+			ev.Kind = coEv.Kind
+			ev.SHA = coEv.SHA
+			ev.Approved = coEv.Approved
 		}
 		return ev
 	}

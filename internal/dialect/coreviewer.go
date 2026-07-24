@@ -1,0 +1,156 @@
+package dialect
+
+// A co-reviewer is a review bot that is not the configured primary reviewer
+// and does not spend CodeRabbit account quota: Codex, Cursor Bugbot,
+// Macroscope. This file is the static registry of the co-reviewers crq knows —
+// deliberately not a plugin system. Adding a bot means one entry here, its
+// wording helpers in its own file, corpus files, and golden rows; engine/state/
+// crq consume only the registry's structure, never the wording.
+
+// CheckVerdict classifies one check run for co-reviewer evidence purposes.
+type CheckVerdict int
+
+const (
+	CheckUnrelated  CheckVerdict = iota // not this bot's review check
+	CheckInProgress                     // review still running — evidence it is active, not done
+	CheckDone                           // review finished (findings, if any, gate via threads)
+	CheckDoneClean                      // review finished and explicitly found nothing
+)
+
+// CoEvent is the classification a co-reviewer gives one of its own issue
+// comments: the dominant kind plus the fields specific kinds carry.
+type CoEvent struct {
+	Kind     EventKind
+	SHA      string // EvCoClean: reviewed-commit SHA, "" if absent
+	Approved *bool  // EvCoVerdict: approvability verdict
+}
+
+// CoReviewer is one registry entry: the bot's identity plus the wording
+// hooks the rest of crq calls without knowing any bot's phrasing. Function
+// fields are nil when the bot has no such concept.
+type CoReviewer struct {
+	Login   string // GitHub login as REST reports it ("cursor[bot]")
+	Name    string // config key ("bugbot") — CRQ_COBOT_<NAME>_* env vars
+	AppSlug string // check-run app ownership; "" = bot posts no check runs
+	Command string // default manual trigger comment; "" = bot has none
+	// TriggerAliases are alternate command spellings recognized as this bot's
+	// trigger in addition to the (config-resolved) Command.
+	TriggerAliases []string
+
+	// ClassifyComment classifies an issue comment authored by this bot.
+	// Kind EvOther means "no special meaning" (may still be actionable text).
+	ClassifyComment func(body string) CoEvent
+	// ClassifyCheck classifies a check run owned by this bot's app.
+	ClassifyCheck func(name, title, summary, status, conclusion string) CheckVerdict
+	// ReviewBodyFindings extracts findings only representable in a review body
+	// (Codex blob-link items); nil for bots that keep findings in threads.
+	ReviewBodyFindings func(body string, review ReviewMeta) []Finding
+	// ReviewedCommitSHA extracts the commit the bot says it reviewed from a
+	// review/comment body ("" when the text names none).
+	ReviewedCommitSHA func(text string) string
+	// ResolvedInSHA extracts the commit an edited finding comment says resolved
+	// it ("" when the body carries no such marker).
+	ResolvedInSHA func(body string) string
+	// FindingDedupeKey extracts a bot-stable finding identity (Bugbot BUG_ID)
+	// so the same bug re-reported in a new thread dedupes to one finding.
+	FindingDedupeKey func(body string) (string, bool)
+}
+
+// Is reports whether login names this co-reviewer, tolerating the "[bot]"
+// suffix difference between REST and GraphQL logins.
+func (c CoReviewer) Is(login string) bool {
+	return NormalizeBotName(login) == NormalizeBotName(c.Login)
+}
+
+// matchesCommand reports whether a trimmed comment body is this bot's trigger
+// command: the (config-resolved) Command or one of the registry's aliases.
+func (c CoReviewer) matchesCommand(trimmed string) bool {
+	if c.Command != "" && trimmed == c.Command {
+		return true
+	}
+	for _, alias := range c.TriggerAliases {
+		if trimmed == alias {
+			return true
+		}
+	}
+	return false
+}
+
+// KnownCoReviewers returns the registry entries with their default commands.
+// Callers that resolve per-bot config (trigger command overrides) mutate their
+// own copy — the returned slice is fresh on every call.
+func KnownCoReviewers() []CoReviewer {
+	return []CoReviewer{
+		{
+			Login:   CodexBotLogin,
+			Name:    "codex",
+			Command: "@codex review",
+			ClassifyComment: func(body string) CoEvent {
+				switch {
+				case IsCodexNoActionReviewCompletion(body):
+					return CoEvent{Kind: EvCoClean, SHA: CodexReviewedCommitSHA(body)}
+				case IsCodexUsageLimit(body):
+					// The usage-limit exhaustion notice is distinct from other acks:
+					// the dynamic completion gate reads it to stop waiting on a Codex
+					// that cannot finish this round.
+					return CoEvent{Kind: EvCoUnable}
+				case IsNonActionableText(body):
+					return CoEvent{Kind: EvCoNotice}
+				}
+				return CoEvent{Kind: EvOther}
+			},
+			ReviewBodyFindings: func(body string, review ReviewMeta) []Finding {
+				return ParseCodexReviewFindings(body, review, CodexBotLogin)
+			},
+			ReviewedCommitSHA: CodexReviewedCommitSHA,
+		},
+		{
+			Login:          BugbotLogin,
+			Name:           "bugbot",
+			AppSlug:        "cursor",
+			Command:        "bugbot run",
+			TriggerAliases: []string{"bugbot run", "cursor review"},
+			// Bugbot posts no classifiable issue comments: its findings live in
+			// review threads and its clean verdict only in the check run.
+			ClassifyComment:   func(string) CoEvent { return CoEvent{Kind: EvOther} },
+			ClassifyCheck:     ClassifyBugbotCheck,
+			ReviewedCommitSHA: BugbotReviewedCommitSHA,
+			FindingDedupeKey:  BugbotFindingDedupeKey,
+		},
+		{
+			Login:           MacroscopeLogin,
+			Name:            "macroscope",
+			AppSlug:         "macroscopeapp",
+			Command:         "@macroscope-app review",
+			ClassifyComment: ClassifyMacroscopeComment,
+			ClassifyCheck:   ClassifyMacroscopeCheck,
+			ResolvedInSHA:   MacroscopeResolvedInSHA,
+		},
+	}
+}
+
+// CoReviewerByName resolves a registry entry by config name ("bugbot") or by
+// login ("cursor[bot]", "cursor").
+func CoReviewerByName(nameOrLogin string) (CoReviewer, bool) {
+	for _, c := range KnownCoReviewers() {
+		if c.Name == nameOrLogin || c.Is(nameOrLogin) {
+			return c, true
+		}
+	}
+	return CoReviewer{}, false
+}
+
+// ClassifyCheckRun dispatches one check run to the co-reviewer that owns it
+// (by app slug) and returns that bot's login with its verdict. Checks owned by
+// no known co-reviewer come back ("", CheckUnrelated).
+func ClassifyCheckRun(appSlug, name, title, summary, status, conclusion string) (string, CheckVerdict) {
+	for _, c := range KnownCoReviewers() {
+		if c.AppSlug == "" || c.AppSlug != appSlug || c.ClassifyCheck == nil {
+			continue
+		}
+		if v := c.ClassifyCheck(name, title, summary, status, conclusion); v != CheckUnrelated {
+			return c.Login, v
+		}
+	}
+	return "", CheckUnrelated
+}

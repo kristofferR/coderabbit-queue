@@ -1,8 +1,10 @@
 package dialect
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -223,5 +225,179 @@ func TestGoldenReplyVerdict(t *testing.T) {
 				t.Errorf("IsReviewFindingRetained = %v, want %v", got, tc.retained)
 			}
 		})
+	}
+}
+
+// TestGoldenCoReviewers pins the Bugbot/Macroscope corpus: comment
+// classification through the registry-backed Classifier, the reviewed/resolved
+// SHA extractors, the BUG_ID dedupe key, and that carrier/summary bodies parse
+// as ZERO review-body findings (their findings live in inline threads).
+func TestGoldenCoReviewers(t *testing.T) {
+	classifier := Classifier{
+		CodeRabbit:    goldenCR,
+		Bot:           "coderabbitai[bot]",
+		ReviewCommand: "@coderabbitai review",
+		CoReviewers:   KnownCoReviewers(),
+	}
+	base := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	truth, falsehood := true, false
+	cases := []struct {
+		file          string
+		author        string
+		wantKind      EventKind
+		wantFor       string
+		wantApproved  *bool  // EvCoVerdict only
+		reviewedSHA   string // BugbotReviewedCommitSHA
+		resolvedSHA   string // MacroscopeResolvedInSHA
+		dedupeKey     string // BugbotFindingDedupeKey ("" = none)
+		bodyFindings  int    // ParseReviewBodyFindings count as this bot
+		summaryReview bool   // IsBugbotReviewSummary
+	}{
+		{
+			file: "bugbot/review-summary-issues.md", author: BugbotLogin,
+			wantKind: EvOther, wantFor: BugbotLogin, summaryReview: true,
+			reviewedSHA: "2218b91213dd6303e65cf14faea4af55587342e5",
+		},
+		{
+			file: "bugbot/inline-finding-high.md", author: BugbotLogin,
+			wantKind: EvOther, wantFor: BugbotLogin,
+			reviewedSHA: "299d961f670337e6c10d020a489380ddcb69ad1e",
+			dedupeKey:   "c76cc5f6-52df-4e72-8076-e2535882a772",
+		},
+		{
+			file: "bugbot/inline-finding-medium.md", author: BugbotLogin,
+			wantKind: EvOther, wantFor: BugbotLogin,
+			reviewedSHA: "f222834e847b66f8389a9b35e1bd0ce1dbb10ba8",
+			dedupeKey:   "d228c05b-14a4-4184-81ea-44242ad98ce2",
+		},
+		{file: "bugbot/trigger-command.md", author: "kristofferR", wantKind: EvCoCommand, wantFor: BugbotLogin},
+		{file: "bugbot/trigger-command-alt.md", author: "kristofferR", wantKind: EvCoCommand, wantFor: BugbotLogin},
+		{file: "macroscope/trigger-command.md", author: "kristofferR", wantKind: EvCoCommand, wantFor: MacroscopeLogin},
+		{
+			file: "macroscope/approvability-approved.md", author: MacroscopeLogin,
+			wantKind: EvCoVerdict, wantFor: MacroscopeLogin, wantApproved: &truth,
+		},
+		{
+			file: "macroscope/approvability-needs-human.md", author: MacroscopeLogin,
+			wantKind: EvCoVerdict, wantFor: MacroscopeLogin, wantApproved: &falsehood,
+		},
+		// Open findings carry no MURMUR_IGNORE marker and no resolved line.
+		{file: "macroscope/inline-finding-high.md", author: MacroscopeLogin, wantKind: EvOther, wantFor: MacroscopeLogin},
+		{file: "macroscope/inline-finding-medium.md", author: MacroscopeLogin, wantKind: EvOther, wantFor: MacroscopeLogin},
+		// Macroscope EDITS a finding to append its settled marker — the edit IS
+		// its resolution, in either wording.
+		{
+			file: "macroscope/inline-finding-resolved.md", author: MacroscopeLogin,
+			wantKind: EvCoNotice, wantFor: MacroscopeLogin,
+			resolvedSHA: "148c355df49cc1692434f4d6689f53666523cadc",
+		},
+		{
+			file: "macroscope/inline-finding-no-longer-relevant.md", author: MacroscopeLogin,
+			wantKind: EvCoNotice, wantFor: MacroscopeLogin,
+			resolvedSHA: "6a06232237270dfc6d1e39af9611ce2ac3349ce5",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.file, func(t *testing.T) {
+			body := readGolden(t, tc.file)
+			ev := classifier.Classify(tc.author, body, 1, base, base)
+			if ev.Kind != tc.wantKind {
+				t.Errorf("Classify kind = %v, want %v", ev.Kind, tc.wantKind)
+			}
+			if ev.For != tc.wantFor {
+				t.Errorf("Classify For = %q, want %q", ev.For, tc.wantFor)
+			}
+			if tc.wantApproved != nil && (ev.Approved == nil || *ev.Approved != *tc.wantApproved) {
+				t.Errorf("Classify Approved = %v, want %v", ev.Approved, *tc.wantApproved)
+			}
+			if got := IsBugbotReviewSummary(body); got != tc.summaryReview {
+				t.Errorf("IsBugbotReviewSummary = %v, want %v", got, tc.summaryReview)
+			}
+			if strings.HasPrefix(tc.file, "bugbot/") {
+				if got := BugbotReviewedCommitSHA(body); got != tc.reviewedSHA {
+					t.Errorf("BugbotReviewedCommitSHA = %q, want %q", got, tc.reviewedSHA)
+				}
+				key, ok := BugbotFindingDedupeKey(body)
+				if ok != (tc.dedupeKey != "") || key != tc.dedupeKey {
+					t.Errorf("BugbotFindingDedupeKey = %q,%v, want %q", key, ok, tc.dedupeKey)
+				}
+			}
+			if strings.HasPrefix(tc.file, "macroscope/") {
+				if got := MacroscopeResolvedInSHA(body); got != tc.resolvedSHA {
+					t.Errorf("MacroscopeResolvedInSHA = %q, want %q", got, tc.resolvedSHA)
+				}
+			}
+			meta := ReviewMeta{ID: 7, SubmittedAt: base}
+			if got := ParseReviewBodyFindings(body, meta, tc.author); len(got) != tc.bodyFindings {
+				t.Errorf("ParseReviewBodyFindings = %d findings, want %d: %#v", len(got), tc.bodyFindings, got)
+			}
+		})
+	}
+
+	// The Bugbot footer must strip from surfaced finding bodies.
+	high := readGolden(t, "bugbot/inline-finding-high.md")
+	if cleaned := CleanBugbotCommentText(high); strings.Contains(cleaned, "Reviewed by [Cursor Bugbot]") {
+		t.Errorf("CleanBugbotCommentText left the footer: %q", cleaned)
+	}
+	// Severity vocabulary maps through the shared SeverityOf.
+	if got := SeverityOf("**High Severity**"); got != "major" {
+		t.Errorf("SeverityOf(High) = %q", got)
+	}
+	if got := SeverityOf("🟡 **Medium** `a.ts:1`"); got != "potential" {
+		t.Errorf("SeverityOf(Medium) = %q", got)
+	}
+}
+
+// TestGoldenCheckRuns pins check-run classification against the captured
+// check-run objects — the only place Bugbot reports a clean round, and the
+// name-prefix-only rule for Macroscope's custom checks (whose output titles
+// can be garbled — check-custom.json's is literally "O").
+func TestGoldenCheckRuns(t *testing.T) {
+	type run struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+		Concl  string `json:"conclusion"`
+		App    struct {
+			Slug string `json:"slug"`
+		} `json:"app"`
+		Output struct {
+			Title   string `json:"title"`
+			Summary string `json:"summary"`
+		} `json:"output"`
+	}
+	cases := []struct {
+		file        string
+		wantLogin   string
+		wantVerdict CheckVerdict
+	}{
+		{"bugbot/check-clean.json", BugbotLogin, CheckDoneClean},
+		{"bugbot/check-issues.json", BugbotLogin, CheckDone},
+		{"bugbot/check-in-progress.json", BugbotLogin, CheckInProgress},
+		{"macroscope/check-correctness-clean.json", MacroscopeLogin, CheckDoneClean},
+		{"macroscope/check-correctness-issues.json", MacroscopeLogin, CheckDone},
+		// Approvability is informational: its checks never read as clean.
+		{"macroscope/check-approvability-approved.json", MacroscopeLogin, CheckDone},
+		{"macroscope/check-approvability-not-eligible.json", MacroscopeLogin, CheckDone},
+		{"macroscope/check-custom.json", MacroscopeLogin, CheckDone},
+	}
+	for _, tc := range cases {
+		t.Run(tc.file, func(t *testing.T) {
+			var r run
+			if err := json.Unmarshal([]byte(readGolden(t, tc.file)), &r); err != nil {
+				t.Fatal(err)
+			}
+			login, verdict := ClassifyCheckRun(r.App.Slug, r.Name, r.Output.Title, r.Output.Summary, r.Status, r.Concl)
+			if login != tc.wantLogin || verdict != tc.wantVerdict {
+				t.Errorf("ClassifyCheckRun = %q,%v, want %q,%v", login, verdict, tc.wantLogin, tc.wantVerdict)
+			}
+		})
+	}
+	// A check from an unrelated app never binds to a co-reviewer.
+	if login, verdict := ClassifyCheckRun("github-actions", "CI", "ok", "", "completed", "success"); login != "" || verdict != CheckUnrelated {
+		t.Errorf("unrelated check classified as %q,%v", login, verdict)
+	}
+	// Another cursor-app check that is not the Bugbot review stays unrelated.
+	if login, verdict := ClassifyCheckRun("cursor", "Cursor Something Else", "", "", "completed", "success"); login != "" || verdict != CheckUnrelated {
+		t.Errorf("non-review cursor check classified as %q,%v", login, verdict)
 	}
 }

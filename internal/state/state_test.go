@@ -1,9 +1,13 @@
 package state
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 )
 
 var t0 = time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
@@ -264,5 +268,95 @@ func TestArchiveBounded(t *testing.T) {
 	}
 	if len(s.Archive) != ArchiveMax {
 		t.Fatalf("archive = %d, want %d", len(s.Archive), ArchiveMax)
+	}
+}
+
+// TestCoBotKeyMatchesDialect pins state's local login normalization (and the
+// Codex fold key) to dialect's, since state stays stdlib-only by design.
+func TestCoBotKeyMatchesDialect(t *testing.T) {
+	if got := coBotKey(dialect.CodexBotLogin); got != codexCoBotKey {
+		t.Fatalf("coBotKey(CodexBotLogin) = %q, want %q", got, codexCoBotKey)
+	}
+	if got := coBotKey("cursor[bot]"); got != dialect.NormalizeBotName("cursor[bot]") {
+		t.Fatalf("coBotKey = %q, want dialect normalization %q", got, dialect.NormalizeBotName("cursor[bot]"))
+	}
+}
+
+// TestCoBotsDualWrite: Codex writes through the accessors must mirror into the
+// legacy per-round fields (old binaries read codex_command_id from the shared
+// state ref); other bots live only in the map.
+func TestCoBotsDualWrite(t *testing.T) {
+	var r Round
+	r.ClaimCo(dialect.CodexBotLogin, t0)
+	if r.CodexClaimedAt == nil || !r.CodexClaimedAt.Equal(t0) {
+		t.Fatalf("ClaimCo did not mirror into CodexClaimedAt: %+v", r)
+	}
+	r.SetCoCommand(dialect.CodexBotLogin, 42, t0.Add(time.Second))
+	if r.CodexCommandID != 42 || r.CodexCommandedAt == nil || r.CodexClaimedAt != nil {
+		t.Fatalf("SetCoCommand did not mirror legacy fields: %+v", r)
+	}
+	if co := r.Co("chatgpt-codex-connector"); co.CommandID != 42 || co.ClaimedAt != nil {
+		t.Fatalf("map entry = %+v, want command 42, no claim", co)
+	}
+
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"codex_command_id":42`, `"cobots"`, `"chatgpt-codex-connector"`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("marshaled round missing %s: %s", want, data)
+		}
+	}
+
+	var other Round
+	other.SetCoCommand("cursor[bot]", 7, t0)
+	if other.CodexCommandID != 0 || other.CodexCommandedAt != nil {
+		t.Fatalf("bugbot write leaked into legacy Codex fields: %+v", other)
+	}
+	if co := other.Co("cursor"); co.CommandID != 7 {
+		t.Fatalf("Co(cursor) = %+v, want command 7", co)
+	}
+}
+
+// TestNormalizeFoldsLegacyCodex: a round written by an old binary (legacy
+// fields only) gains its CoBots mirror on load, and legacy values win over a
+// stale mirror (old binaries only write the legacy fields).
+func TestNormalizeFoldsLegacyCodex(t *testing.T) {
+	payload := `{"v":3,"rounds":{"owner/repo#1":{"repo":"owner/repo","pr":1,"head":"abcdef123",` +
+		`"seq":1,"phase":"fired","enqueued_at":"2026-07-17T12:00:00Z",` +
+		`"codex_command_id":11,"codex_commanded_at":"2026-07-17T12:01:00Z"}}}`
+	var s State
+	if err := json.Unmarshal([]byte(payload), &s); err != nil {
+		t.Fatal(err)
+	}
+	s.Normalize(t0)
+	r := s.Round("owner/repo", 1)
+	co := r.Co(dialect.CodexBotLogin)
+	if co.CommandID != 11 || co.CommandedAt == nil {
+		t.Fatalf("fold produced %+v, want command 11", co)
+	}
+
+	// Stale mirror: an old binary moved the legacy command on; fold overwrites.
+	stale := *r
+	stale.CoBots = map[string]CoBotRound{codexCoBotKey: {CommandID: 5}}
+	stale.foldLegacyCodex()
+	if got := stale.Co(dialect.CodexBotLogin).CommandID; got != 11 {
+		t.Fatalf("fold kept stale mirror %d, want legacy 11", got)
+	}
+
+	// CoBots-only rounds (new bots) survive a marshal/unmarshal round-trip.
+	var b Round
+	b.SetCoCommand("cursor[bot]", 9, t0)
+	data, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Round
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if got := back.Co("cursor[bot]").CommandID; got != 9 {
+		t.Fatalf("round-trip lost bugbot entry: %+v", back)
 	}
 }
