@@ -241,6 +241,11 @@ func TestGoldenReplyVerdict(t *testing.T) {
 		retained  bool
 	}{
 		{file: "coderabbit/reply-withdrawn.md", withdrawn: true},
+		// A concession whose PROSE reads like agreement, not like the stock
+		// "withdrawing this" phrasing. CodeRabbit ships a machine-readable
+		// marker with it; matching that is what keeps a settled finding from
+		// re-surfacing as a rebuttal and blocking convergence.
+		{file: "coderabbit/reply-withdrawn-marker.md", withdrawn: true},
 		{file: "coderabbit/reply-retained.md", retained: true},
 	}
 	for _, tc := range cases {

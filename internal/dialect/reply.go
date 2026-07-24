@@ -10,11 +10,21 @@ import "strings"
 // surfacing decision lives in crq/feedback. The golden corpus pins CodeRabbit's
 // real phrasing from testdata/coderabbit/reply-*.md.
 
+// reviewWithdrawnMarker is CodeRabbit's machine-readable concession marker. It
+// beats every prose heuristic below: the wording of a concession varies freely
+// ("you're right—thank you for the precise correction"), and misreading one as
+// a rebuttal re-surfaces a settled finding and blocks convergence.
+const reviewWithdrawnMarker = "<review_comment_withdrawn>"
+
 // IsReviewFindingWithdrawn reports whether a bot's reply concedes and withdraws
 // its finding — the agent's decline stands and the thread is done.
 func IsReviewFindingWithdrawn(text string) bool {
+	if strings.Contains(text, reviewWithdrawnMarker) {
+		return true
+	}
 	t := NormalizeReviewText(text)
-	return strings.Contains(t, "withdrawing this") ||
+	return strings.Contains(t, "should be withdrawn") ||
+		strings.Contains(t, "withdrawing this") ||
 		strings.Contains(t, "withdrawing the finding") ||
 		strings.Contains(t, "withdrawing my") ||
 		strings.Contains(t, "i'll withdraw") ||
