@@ -399,7 +399,7 @@ func TestFeedbackSurfacesCodexEvenWhenNotRequired(t *testing.T) {
 	cfg := Config{
 		Bot:          "coderabbitai[bot]",
 		RequiredBots: []string{"coderabbitai[bot]"},
-		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, extraFeedbackBots),
+		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, []string{dialect.CodexBotLogin}),
 	}
 	gh := newFakeGitHub()
 	sha := "abcdef1234567890"
@@ -637,7 +637,7 @@ func TestFeedbackSurfacesBodyFindingsFromSupersededCommit(t *testing.T) {
 	cfg := Config{
 		Bot:          "coderabbitai[bot]",
 		RequiredBots: []string{"coderabbitai[bot]"},
-		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, extraFeedbackBots),
+		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, []string{dialect.CodexBotLogin}),
 	}
 	gh := newFakeGitHub()
 	head := "9999999999999999"
@@ -692,7 +692,7 @@ func TestFeedbackNewerHeadReviewSupersedesOldBodyFindings(t *testing.T) {
 	cfg := Config{
 		Bot:          "coderabbitai[bot]",
 		RequiredBots: []string{"coderabbitai[bot]"},
-		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, extraFeedbackBots),
+		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, []string{dialect.CodexBotLogin}),
 	}
 	gh := newFakeGitHub()
 	head := "9999999999999999"
@@ -732,7 +732,7 @@ func TestFeedbackCurrentRoundDoesNotResurfacePreRoundBodyFindings(t *testing.T) 
 	cfg := Config{
 		Bot:          "coderabbitai[bot]",
 		RequiredBots: []string{"coderabbitai[bot]"},
-		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, extraFeedbackBots),
+		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, []string{dialect.CodexBotLogin}),
 	}
 	gh := newFakeGitHub()
 	head := "9999999999999999"
@@ -780,7 +780,7 @@ func TestFeedbackCurrentCodeRabbitRoundKeepsLatestCodexBodyFinding(t *testing.T)
 	cfg := Config{
 		Bot:          "coderabbitai[bot]",
 		RequiredBots: []string{"coderabbitai[bot]"},
-		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, extraFeedbackBots),
+		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, []string{dialect.CodexBotLogin}),
 	}
 	gh := newFakeGitHub()
 	head := "850772b68de27efabc7ec5eeda30bb5ea138eb29"
