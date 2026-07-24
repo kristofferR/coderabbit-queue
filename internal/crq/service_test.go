@@ -1326,7 +1326,7 @@ func TestRecordFireResetsRecordedAcrossRetry(t *testing.T) {
 	cfg := firingConfig()
 	svc := NewService(cfg, newFakeGitHub(), retryNoChangeStore{cfg: cfg}, nil)
 	round := Round{Repo: "owner/repo", PR: 12, Head: "abcdef123"}
-	_, err := svc.recordFire(context.Background(), round, "token", 1, 0, time.Now().UTC(), time.Now().UTC())
+	_, err := svc.recordFire(context.Background(), round, "token", 1, nil, time.Now().UTC(), time.Now().UTC())
 	if !errors.Is(err, ErrNoChange) {
 		t.Fatalf("expected no-change after retry lost the fire slot, got %v", err)
 	}
@@ -2266,7 +2266,7 @@ func TestFireCodexDeferredAdoptionHonorsDryRunAndActiveClaim(t *testing.T) {
 	round := *st.Round("o/carrier", 95)
 
 	svc.cfg.DryRun = true
-	res, err := svc.fireCodexDeferred(ctx, round, 703, now.Add(-time.Minute), "dry run adopt", now)
+	res, err := svc.fireCoDeferred(ctx, round, engine.FireDecision{Verdict: engine.FireCoDeferred, Reason: "dry run adopt", AdoptCo: map[string]engine.CommandSeen{dialect.CodexBotLogin: {ID: 703, CreatedAt: now.Add(-time.Minute)}}}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2287,7 +2287,7 @@ func TestFireCodexDeferredAdoptionHonorsDryRunAndActiveClaim(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	res, err = svc.fireCodexDeferred(ctx, round, 703, now.Add(-time.Minute), "claimed adopt", now)
+	res, err = svc.fireCoDeferred(ctx, round, engine.FireDecision{Verdict: engine.FireCoDeferred, Reason: "claimed adopt", AdoptCo: map[string]engine.CommandSeen{dialect.CodexBotLogin: {ID: 703, CreatedAt: now.Add(-time.Minute)}}}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2299,8 +2299,8 @@ func TestFireCodexDeferredAdoptionHonorsDryRunAndActiveClaim(t *testing.T) {
 		t.Fatalf("the active claim must remain untouched, got %#v", got)
 	}
 
-	staleNow := now.Add(codexClaimTTL + time.Second)
-	res, err = svc.fireCodexDeferred(ctx, round, 703, now.Add(-time.Minute), "stale claim adopt", staleNow)
+	staleNow := now.Add(triggerClaimTTL + time.Second)
+	res, err = svc.fireCoDeferred(ctx, round, engine.FireDecision{Verdict: engine.FireCoDeferred, Reason: "stale claim adopt", AdoptCo: map[string]engine.CommandSeen{dialect.CodexBotLogin: {ID: 703, CreatedAt: now.Add(-time.Minute)}}}, staleNow)
 	if err != nil {
 		t.Fatal(err)
 	}

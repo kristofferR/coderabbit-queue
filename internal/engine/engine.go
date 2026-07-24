@@ -155,6 +155,10 @@ type Observation struct {
 	Co map[string]CoSeen
 }
 
+// CoSeenFor exposes one co-reviewer's observation slice to the apply layer
+// (trigger adoption at fire time shares the engine's view of live commands).
+func (o Observation) CoSeenFor(login string) CoSeen { return o.co(login) }
+
 // co returns login's observation slice, falling back to the legacy Codex
 // fields when the map has no entry (engine tests and pre-migration callers
 // still populate those directly).

@@ -267,19 +267,20 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if err != nil {
 		return result, err
 	}
-	// A blocked or slot-busy front of the queue whose Codex command is
-	// already posted must not starve later PRs of THEIR early Codex round —
-	// scan a bounded number of following queued rounds for a postable
-	// Codex defer (each costs one observation; ETag caching keeps it cheap).
+	// A blocked or slot-busy front of the queue whose co-reviewer triggers are
+	// already posted must not starve later PRs of THEIR early co-review round —
+	// scan a bounded number of following queued rounds for a postable defer
+	// (each costs one observation; ETag caching keeps it cheap).
 	accountBlocked := global.BlockedUntil != nil && global.BlockedUntil.After(now)
 	if s.cfg.RateLimitCodexDegrade && decision.Verdict == engine.FireNo &&
 		(accountBlocked || !global.SlotFree) {
 		scanned := 0
+		policy := s.policy()
 		for _, r := range st.QueuedRounds(now) {
 			if r.Repo == next.Repo && r.PR == next.PR {
 				continue
 			}
-			if r.CodexCommandID != 0 || scanned >= 3 {
+			if !anyCoUncommanded(r, policy) || scanned >= 3 {
 				continue
 			}
 			scanned++
@@ -288,14 +289,29 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 			if oerr != nil {
 				continue
 			}
-			d := engine.DecideFire(s.global(st, now), round, robs.eng, now, s.policy())
-			if d.Verdict != engine.FireCodexDeferred {
+			d := engine.DecideFire(s.global(st, now), round, robs.eng, now, policy)
+			if d.Verdict != engine.FireCoDeferred {
 				continue
 			}
 			return s.applyFire(ctx, round, robs.eng, d, now)
 		}
 	}
 	return result, nil
+}
+
+// anyCoUncommanded reports whether some triggerable co-reviewer has no
+// command recorded on the round yet — the cheap pre-filter for the deferred
+// scan above (a round with every trigger already posted cannot defer again).
+func anyCoUncommanded(r Round, p engine.Policy) bool {
+	for _, cp := range p.CoReviewerPolicies() {
+		if strings.TrimSpace(cp.Command) == "" {
+			continue
+		}
+		if r.Co(cp.Login).CommandID == 0 && !(dialect.IsCodexBot(cp.Login) && r.CodexCommandID != 0) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) global(st State, now time.Time) engine.Global {
@@ -317,7 +333,7 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 	if err != nil {
 		return PumpResult{}, err
 	}
-	s.selfHealCodex(ctx, slot, obs.eng, now)
+	s.selfHealCoReviewers(ctx, slot, obs.eng, now)
 	tr := engine.Progress(slot, st.Account, obs.eng, now, s.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return PumpResult{Action: "waiting", Repo: slot.Repo, PR: slot.PR, Reason: tr.Reason}, nil
@@ -459,7 +475,7 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 		}
 		return st, nil
 	}
-	s.selfHealCodex(ctx, *target, obs.eng, now)
+	s.selfHealCoReviewers(ctx, *target, obs.eng, now)
 	tr := engine.Progress(*target, st.Account, obs.eng, now, s.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return st, nil
@@ -495,18 +511,18 @@ func (s *Service) applyFire(ctx context.Context, round Round, obs engine.Observa
 		return s.abandonRound(ctx, round, "pr closed", "skipped")
 	case engine.FireDedupe:
 		return s.dedupeRound(ctx, round, now, d.Reason)
-	case engine.FireCodexOnly:
-		return s.fireCodexOnly(ctx, round, d.Reason, now)
-	case engine.FireCodexDeferred:
-		return s.fireCodexDeferred(ctx, round, d.AdoptCommandID, d.AdoptAt, d.Reason, now)
+	case engine.FireCoOnly:
+		return s.fireCoOnly(ctx, round, d.PostCo, d.Reason, now)
+	case engine.FireCoDeferred:
+		return s.fireCoDeferred(ctx, round, d, now)
 	case engine.FireCoReviewWait:
 		return s.fireCoReviewWait(ctx, round, obs, d.Reason, now)
 	case engine.FireSupersede:
 		return s.supersedeRound(ctx, round, obs.Head, now)
 	case engine.FireAdopt:
-		return s.fireRound(ctx, round, obs, false, d.AdoptCommandID, d.AdoptAt, d.Reason, d.PostCodex, now)
+		return s.fireRound(ctx, round, obs, false, d.AdoptCommandID, d.AdoptAt, d.Reason, d.PostCo, now)
 	case engine.FirePost:
-		return s.fireRound(ctx, round, obs, true, 0, time.Time{}, "", d.PostCodex, now)
+		return s.fireRound(ctx, round, obs, true, 0, time.Time{}, "", d.PostCo, now)
 	default: // FireNo
 		return PumpResult{Action: mapFireNo(d.Reason), Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: d.Reason}, nil
 	}
@@ -609,10 +625,10 @@ func (s *Service) supersedeRound(ctx context.Context, round Round, head string, 
 }
 
 // fireRound posts (or adopts) the review command and records the fire on the
-// round, reserving the global slot under compare-and-swap. When postCodex, it
-// also posts the Codex review command alongside (non-fatal on failure — the
-// self-heal path retries).
-func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observation, post bool, adoptID int64, adoptAt time.Time, reason string, postCodex bool, now time.Time) (PumpResult, error) {
+// round, reserving the global slot under compare-and-swap. postCo lists the
+// co-reviewer logins whose trigger commands are posted alongside (non-fatal
+// on failure — the self-heal path retries).
+func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observation, post bool, adoptID int64, adoptAt time.Time, reason string, postCo []string, now time.Time) (PumpResult, error) {
 	key := QueueKey(round.Repo, round.PR)
 	if s.cfg.DryRun {
 		return PumpResult{Action: "dry_run", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}, nil
@@ -648,21 +664,26 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 			r.WaitDeadline = &dl
 			st.Warn = ""
 			st.FireSlot = &FireSlot{Key: key, Token: token, Since: now}
-			// Claim the Codex post in the SAME write: the fired state must never be
-			// visible with CodexCommandID == 0 and no claim, or another daemon can
-			// self-heal-post in the gap before fireCodexReview below runs.
-			if postCodex {
-				t := now.UTC()
-				r.CodexClaimedAt = &t
-			} else if id := newestCommandID(obs.CodexCommands); id != 0 && r.CodexCommandID == 0 {
-				// Not posting because a live `@codex review` command already answers
-				// this head — record its id now. The self-heal scan anchors on FiredAt
-				// and would miss a command posted before the adopted CodeRabbit command,
-				// posting a duplicate; recording it here keeps the round "asked". Its
-				// timestamp anchors the codex cutoff too, or a SHA-less answer that
-				// landed before this adopted fire would never bind to the round.
-				r.CodexCommandID = id
-				r.CodexCommandedAt = codexCommandTime(obs.CodexCommands, id)
+			// Claim the co-reviewer posts in the SAME write: the fired state must
+			// never be visible with no recorded command and no claim, or another
+			// daemon can self-heal-post in the gap before fireCoTrigger below runs.
+			for _, login := range postCo {
+				r.ClaimCo(login, now)
+			}
+			// For bots crq is NOT posting because a live trigger already answers
+			// this head — record its id now. The self-heal scan anchors on FiredAt
+			// and would miss a command posted before the adopted CodeRabbit command,
+			// posting a duplicate; recording it here keeps the round "asked". Its
+			// timestamp anchors that bot's cutoff too, or a SHA-less answer that
+			// landed before this adopted fire would never bind to the round.
+			for _, cp := range s.policy().CoReviewerPolicies() {
+				if hasLogin(postCo, cp.Login) || r.Co(cp.Login).CommandID != 0 {
+					continue
+				}
+				cmds := obs.CoSeenFor(cp.Login).Commands
+				if id := newestCommandID(cmds); id != 0 {
+					r.SetCoCommand(cp.Login, id, commandCreatedAt(cmds, id, now))
+				}
 			}
 			st.PutRound(*r)
 			recorded = true
@@ -678,8 +699,8 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 		if s.log != nil {
 			s.log.Printf("fire %s@%s (adopted existing review command)", key, round.Head)
 		}
-		if postCodex {
-			s.fireCodexReview(ctx, round)
+		for _, login := range postCo {
+			s.fireCoTrigger(ctx, round, login)
 		}
 		return PumpResult{Action: "fired", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}, nil
 	}
@@ -735,13 +756,16 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 	if firedAt.IsZero() {
 		firedAt = now
 	}
-	// Post the Codex command before recording so its id lands in the same fire
-	// write. A failed post returns 0 (logged) and the self-heal path retries.
-	var codexID int64
-	if postCodex {
-		codexID, _ = s.postCodexReviewComment(ctx, round)
+	// Post the co-reviewer triggers before recording so their ids land in the
+	// same fire write. A failed post returns 0 (logged) and the self-heal path
+	// retries.
+	var coPosts []coPost
+	for _, login := range postCo {
+		if id, at := s.postCoTrigger(ctx, round, login); id != 0 {
+			coPosts = append(coPosts, coPost{login: login, id: id, at: at})
+		}
 	}
-	updated, err := s.recordFire(ctx, round, token, comment.ID, codexID, firedAt, now)
+	updated, err := s.recordFire(ctx, round, token, comment.ID, coPosts, firedAt, now)
 	if err != nil {
 		if errors.Is(err, ErrNoChange) {
 			return PumpResult{Action: "lost_race"}, nil
@@ -755,77 +779,159 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 	return PumpResult{Action: "fired", Repo: round.Repo, PR: round.PR, Head: round.Head}, nil
 }
 
-// fireCodexOnly handles a round where CodeRabbit already reviewed the head but a
-// required Codex has not: it reserves the slot, posts ONLY the Codex command, and
-// records the round as fired with that comment as both the CommandID anchor and
-// the CodexCommandID. Completion already counts the existing CodeRabbit review, so
-// the round then waits on Codex alone — no `@coderabbitai review` is ever posted.
-func (s *Service) fireCodexOnly(ctx context.Context, round Round, reason string, now time.Time) (PumpResult, error) {
+// coPost is one posted (or to-post) co-reviewer trigger comment.
+type coPost struct {
+	login string
+	id    int64
+	at    time.Time
+}
+
+func hasLogin(logins []string, login string) bool {
+	for _, have := range logins {
+		if dialect.NormalizeBotName(have) == dialect.NormalizeBotName(login) {
+			return true
+		}
+	}
+	return false
+}
+
+// coCommandFor resolves the trigger comment body crq posts for login.
+func (s *Service) coCommandFor(login string) string {
+	for _, cb := range s.cfg.CoBots {
+		if dialect.NormalizeBotName(cb.Login) == dialect.NormalizeBotName(login) {
+			return cb.Command
+		}
+	}
+	if dialect.IsCodexBot(login) {
+		return s.cfg.CodexCommand
+	}
+	return ""
+}
+
+// fireCoOnly handles a round where CodeRabbit already reviewed the head but
+// gating co-reviewers have not: it posts ONLY their trigger commands and
+// records the round as fired with the first trigger as the CommandID anchor.
+// Completion already counts the existing CodeRabbit review, so the round then
+// waits on the co-reviewers alone — no `@coderabbitai review` is ever posted,
+// no CodeRabbit quota is spent, and therefore NO FireSlot is taken: the
+// per-round trigger claims (CoBots[login].ClaimedAt, CAS-set before the
+// network post) are the concurrency guard.
+func (s *Service) fireCoOnly(ctx context.Context, round Round, logins []string, reason string, now time.Time) (PumpResult, error) {
 	key := QueueKey(round.Repo, round.PR)
 	if s.cfg.DryRun {
 		return PumpResult{Action: "dry_run", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}, nil
 	}
-	token := randomToken()
-
-	reserved, err := s.store.Update(ctx, func(st *State) error {
-		if st.FireSlot != nil {
-			return ErrNoChange
-		}
+	var claimed []string
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		claimed = claimed[:0]
 		r := st.Round(round.Repo, round.PR)
 		if !sameRound(r, round) || !r.FireEligible(now) {
 			return ErrNoChange
 		}
-		if err := r.Reserve(token, s.cfg.Host, now); err != nil {
-			return err
+		for _, login := range logins {
+			c := r.Co(login)
+			if c.CommandID != 0 {
+				continue
+			}
+			if c.ClaimedAt != nil && now.Sub(c.ClaimedAt.UTC()) < triggerClaimTTL {
+				continue
+			}
+			r.ClaimCo(login, now)
+			claimed = append(claimed, login)
 		}
-		st.FireSlot = &FireSlot{Key: key, Token: token, Since: now}
+		if len(claimed) == 0 {
+			return ErrNoChange
+		}
 		st.PutRound(*r)
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrNoChange) {
+		return PumpResult{}, err
+	}
+	if len(claimed) == 0 {
+		return PumpResult{Action: "lost_race"}, nil
+	}
+	s.sync(ctx, updated)
+
+	var posts []coPost
+	for _, login := range claimed {
+		if id, at := s.postCoTrigger(ctx, round, login); id != 0 {
+			posts = append(posts, coPost{login: login, id: id, at: at})
+		}
+	}
+	if len(posts) == 0 {
+		// Every post failed: park with the post-failure cooldown. The claims
+		// stay — their TTL is the retry backoff.
+		postErr := errors.New("failed to post co-reviewer trigger command")
+		parked, uerr := s.store.Update(ctx, func(st *State) error {
+			r := st.Round(round.Repo, round.PR)
+			if !sameRound(r, round) {
+				return ErrNoChange
+			}
+			// AwaitRetry is only legal from reserved/fired/reviewing; pass a
+			// still-queued round through Reserve (a pure phase transition — no
+			// global FireSlot is registered) so the park is a legal edge.
+			if r.FireEligible(now) {
+				if rerr := r.Reserve(randomToken(), s.cfg.Host, now); rerr != nil {
+					return rerr
+				}
+			}
+			if rerr := r.AwaitRetry(now.Add(postFailureBackoff), postErr.Error(), now); rerr != nil {
+				return rerr
+			}
+			st.Warn = postErr.Error()
+			st.PutRound(*r)
+			return nil
+		})
+		if uerr == nil {
+			s.sync(ctx, parked)
+		}
+		return PumpResult{Action: "post_failed", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: postErr.Error()}, postErr
+	}
+	firedAt := posts[0].at.UTC()
+	if firedAt.IsZero() {
+		firedAt = now
+	}
+	// The first trigger comment anchors the round as its fired command; every
+	// posted trigger is recorded per bot so self-heal will not re-post them. A
+	// partially failed post set keeps its claims and heals after the TTL.
+	recorded := false
+	updated, err = s.store.Update(ctx, func(st *State) error {
+		recorded = false
+		r := st.Round(round.Repo, round.PR)
+		if !sameRound(r, round) {
+			return ErrNoChange
+		}
+		if r.FireEligible(now) {
+			if err := r.Reserve(randomToken(), s.cfg.Host, now); err != nil {
+				return err
+			}
+			if err := r.Fire(posts[0].id, firedAt); err != nil {
+				return err
+			}
+			r.Token = ""
+			dl := firedAt.Add(s.cfg.FeedbackWaitTimeout)
+			r.WaitDeadline = &dl
+			st.Warn = ""
+		}
+		for _, p := range posts {
+			if r.Co(p.login).CommandID == 0 {
+				r.SetCoCommand(p.login, p.id, p.at)
+			}
+		}
+		st.PutRound(*r)
+		recorded = true
 		return nil
 	})
 	if err != nil {
 		return PumpResult{}, err
 	}
-	if reserved.FireSlot == nil || reserved.FireSlot.Token != token {
+	if !recorded {
 		return PumpResult{Action: "lost_race"}, nil
-	}
-	s.sync(ctx, reserved)
-
-	comment, err := s.gh.PostIssueComment(ctx, round.Repo, round.PR, s.cfg.CodexCommand)
-	if err != nil {
-		updated, uerr := s.store.Update(ctx, func(st *State) error {
-			r := st.Round(round.Repo, round.PR)
-			if r == nil || r.Token != token {
-				return ErrNoChange
-			}
-			if rerr := r.AwaitRetry(now.Add(postFailureBackoff), "failed to post codex review command: "+err.Error(), now); rerr != nil {
-				return rerr
-			}
-			releaseSlot(st, key)
-			st.Warn = "failed to post codex review command: " + err.Error()
-			st.PutRound(*r)
-			return nil
-		})
-		if uerr == nil {
-			s.sync(ctx, updated)
-		}
-		return PumpResult{Action: "post_failed", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: err.Error()}, err
-	}
-	firedAt := comment.CreatedAt.UTC()
-	if firedAt.IsZero() {
-		firedAt = now
-	}
-	// The Codex comment anchors the round both as its fired command and as the
-	// recorded Codex command, so self-heal will not re-post it.
-	updated, err := s.recordFire(ctx, round, token, comment.ID, comment.ID, firedAt, now)
-	if err != nil {
-		if errors.Is(err, ErrNoChange) {
-			return PumpResult{Action: "lost_race"}, nil
-		}
-		return PumpResult{}, err
 	}
 	s.sync(ctx, updated)
 	if s.log != nil {
-		s.log.Printf("fire %s@%s (coderabbit already reviewed; posted %s)", key, round.Head, strings.TrimSpace(s.cfg.CodexCommand))
+		s.log.Printf("fire %s@%s (coderabbit already reviewed; posted co-reviewer triggers for %s)", key, round.Head, strings.Join(claimed, ","))
 	}
 	return PumpResult{Action: "fired", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}, nil
 }
@@ -842,14 +948,15 @@ func newestCommandID(cmds []engine.CommandSeen) int64 {
 	return best.ID
 }
 
-func codexCommandTime(commands []engine.CommandSeen, id int64) *time.Time {
+// commandCreatedAt resolves a command comment's creation time, falling back
+// to the caller's clock when GitHub omitted it.
+func commandCreatedAt(commands []engine.CommandSeen, id int64, fallback time.Time) time.Time {
 	for _, command := range commands {
 		if command.ID == id && !command.CreatedAt.IsZero() {
-			at := command.CreatedAt.UTC()
-			return &at
+			return command.CreatedAt.UTC()
 		}
 	}
-	return nil
+	return fallback.UTC()
 }
 
 // fireCoReviewWait bounds a co-review wait: CodeRabbit already reviewed the head
@@ -865,11 +972,10 @@ func (s *Service) fireCoReviewWait(ctx context.Context, round Round, obs engine.
 	if s.cfg.DryRun {
 		return result, nil
 	}
-	codexID := newestCommandID(obs.CodexCommands)
-	// The anchor is the wait's evidence floor. Prefer the adopted command's
-	// time; with no command (auto-review) fall back to the primary bot's head
-	// review — a SHA-less legacy clean summary posted after either must count,
-	// or an answer that already exists is hidden until the deadline.
+	// The anchor is the wait's evidence floor. Prefer an adopted trigger
+	// command's time; with no command (auto-review) fall back to the primary
+	// bot's head review — a SHA-less legacy clean summary posted after either
+	// must count, or an answer that already exists is hidden until the deadline.
 	anchor := now
 	for _, rv := range obs.Reviews {
 		if isConfiguredBotLogin(s.cfg.Bot, rv.Bot) && rv.Commit != "" && strings.HasPrefix(rv.Commit, round.Head) &&
@@ -877,10 +983,21 @@ func (s *Service) fireCoReviewWait(ctx context.Context, round Round, obs engine.
 			anchor = rv.SubmittedAt
 		}
 	}
-	for _, c := range obs.CodexCommands {
-		if c.ID == codexID && !c.CreatedAt.IsZero() {
-			anchor = c.CreatedAt
+	type adoptCmd struct {
+		login string
+		id    int64
+		at    time.Time
+	}
+	var adopts []adoptCmd
+	for _, cp := range s.policy().CoReviewerPolicies() {
+		cmds := obs.CoSeenFor(cp.Login).Commands
+		id := newestCommandID(cmds)
+		if id == 0 {
+			continue
 		}
+		at := commandCreatedAt(cmds, id, now)
+		adopts = append(adopts, adoptCmd{login: cp.Login, id: id, at: at})
+		anchor = at
 	}
 	changed := false
 	updated, err := s.store.Update(ctx, func(st *State) error {
@@ -893,9 +1010,13 @@ func (s *Service) fireCoReviewWait(ctx context.Context, round Round, obs engine.
 		if err := r.AwaitCoReview(deadline, anchor); err != nil {
 			return err
 		}
-		if r.CodexCommandID == 0 && codexID != 0 {
-			r.CodexCommandID = codexID
-			r.CodexCommandedAt = codexCommandTime(obs.CodexCommands, codexID)
+		// Existing trigger commands are adopted as the round's command anchors
+		// so the self-heal path (which anchors on the round's fire time, later
+		// than a pre-existing command) does not re-post them.
+		for _, a := range adopts {
+			if r.Co(a.login).CommandID == 0 {
+				r.SetCoCommand(a.login, a.id, a.at)
+			}
 		}
 		st.PutRound(*r)
 		changed = true
@@ -912,10 +1033,10 @@ func (s *Service) fireCoReviewWait(ctx context.Context, round Round, obs engine.
 }
 
 // recordFire records the posted command on the reserved round, with a 30s retry
-// on a transient state-write failure so a fired command is never lost. codexID
-// is the Codex command comment posted alongside (0 when none), recorded in the
-// same write.
-func (s *Service) recordFire(ctx context.Context, round Round, token string, commandID, codexID int64, firedAt, now time.Time) (State, error) {
+// on a transient state-write failure so a fired command is never lost. coPosts
+// are the co-reviewer trigger comments posted alongside (empty when none),
+// recorded in the same write.
+func (s *Service) recordFire(ctx context.Context, round Round, token string, commandID int64, coPosts []coPost, firedAt, now time.Time) (State, error) {
 	record := func(c context.Context) (State, bool, error) {
 		recorded := false
 		st, err := s.store.Update(c, func(st *State) error {
@@ -927,8 +1048,10 @@ func (s *Service) recordFire(ctx context.Context, round Round, token string, com
 			if err := r.Fire(commandID, firedAt); err != nil {
 				return err
 			}
-			if codexID != 0 {
-				r.CodexCommandID = codexID
+			for _, p := range coPosts {
+				if r.Co(p.login).CommandID == 0 {
+					r.SetCoCommand(p.login, p.id, p.at)
+				}
 			}
 			lf := firedAt
 			st.LastFired = &lf
@@ -956,24 +1079,28 @@ func (s *Service) recordFire(ctx context.Context, round Round, token string, com
 	return st, nil
 }
 
-// postCodexReviewComment posts the Codex review command and returns its comment
-// id, or 0 on failure. A failed post is non-fatal: it logs and leaves
-// CodexCommandID unset so a later pump's self-heal retries. The fresh-fire path
+// postCoTrigger posts login's trigger command and returns its comment id, or
+// 0 on failure. A failed post is non-fatal: it logs and leaves the round's
+// command unset so a later pump's self-heal retries. The fresh-fire path
 // folds the returned id into recordFire's write.
-func (s *Service) postCodexReviewComment(ctx context.Context, round Round) (int64, time.Time) {
-	comment, err := s.gh.PostIssueComment(ctx, round.Repo, round.PR, s.cfg.CodexCommand)
+func (s *Service) postCoTrigger(ctx context.Context, round Round, login string) (int64, time.Time) {
+	command := strings.TrimSpace(s.coCommandFor(login))
+	if command == "" {
+		return 0, time.Time{}
+	}
+	comment, err := s.gh.PostIssueComment(ctx, round.Repo, round.PR, command)
 	if err != nil {
 		if s.log != nil {
-			s.log.Printf("warning: Codex review command post failed for %s@%s: %v (will retry on a later pump)", QueueKey(round.Repo, round.PR), round.Head, err)
+			s.log.Printf("warning: %s trigger post failed for %s@%s: %v (will retry on a later pump)", dialect.NormalizeBotName(login), QueueKey(round.Repo, round.PR), round.Head, err)
 		}
 		return 0, time.Time{}
 	}
 	if s.log != nil {
-		s.log.Printf("fire %s@%s (posted %s)", QueueKey(round.Repo, round.PR), round.Head, strings.TrimSpace(s.cfg.CodexCommand))
+		s.log.Printf("fire %s@%s (posted %s)", QueueKey(round.Repo, round.PR), round.Head, command)
 	}
-	// The command's GitHub timestamp is the evidence anchor: a fast Codex
-	// reply can otherwise land before a local post-return clock reading and
-	// fall outside the stored cutoff forever (with no repost possible).
+	// The command's GitHub timestamp is the evidence anchor: a fast reply can
+	// otherwise land before a local post-return clock reading and fall outside
+	// the stored cutoff forever (with no repost possible).
 	at := comment.CreatedAt.UTC()
 	if at.IsZero() {
 		at = s.clock().UTC()
@@ -981,15 +1108,16 @@ func (s *Service) postCodexReviewComment(ctx context.Context, round Round) (int6
 	return comment.ID, at
 }
 
-// fireCodexReview posts the Codex review command for an already-fired round and
-// records its id under CAS. It is used by the adopt fire path and the self-heal
-// retry (the fresh-post path records the id inside recordFire instead). The CAS
-// guard (same head, CodexCommandID still unset) makes a concurrent post benign.
-func (s *Service) fireCodexReview(ctx context.Context, round Round) {
-	codexID, codexAt := s.postCodexReviewComment(ctx, round)
-	if codexID == 0 {
+// fireCoTrigger posts login's trigger command for an already-fired round and
+// records its id under CAS. It is used by the adopt fire path and the
+// self-heal retry (the fresh-post path records the id inside recordFire
+// instead). The CAS guard (same head, command still unset) makes a concurrent
+// post benign.
+func (s *Service) fireCoTrigger(ctx context.Context, round Round, login string) {
+	id, at := s.postCoTrigger(ctx, round, login)
+	if id == 0 {
 		// Failed post: KEEP the claim — its TTL is the retry backoff. Clearing it
-		// here would let the very next pump repost, bypassing codexClaimTTL.
+		// here would let the very next pump repost, bypassing triggerClaimTTL.
 		return
 	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
@@ -999,147 +1127,170 @@ func (s *Service) fireCodexReview(ctx context.Context, round Round) {
 		if !sameRound(r, round) {
 			return ErrNoChange
 		}
-		r.CodexClaimedAt = nil
-		if r.CodexCommandID == 0 {
-			r.CodexCommandID = codexID
-			r.CodexCommandedAt = &codexAt
+		if r.Co(login).CommandID == 0 {
+			r.SetCoCommand(login, id, at)
+		} else {
+			r.ClearCoClaim(login)
 		}
 		st.PutRound(*r)
 		return nil
 	})
 	if err != nil {
 		if s.log != nil && !errors.Is(err, ErrNoChange) {
-			s.log.Printf("warning: failed to record Codex command %d for %s: %v", codexID, QueueKey(round.Repo, round.PR), err)
+			s.log.Printf("warning: failed to record %s command %d for %s: %v", dialect.NormalizeBotName(login), id, QueueKey(round.Repo, round.PR), err)
 		}
 		return
 	}
 	s.sync(ctx, updated)
 }
 
-// fireCodexDeferred posts ONLY the Codex review command for a round the
-// CodeRabbit account block is holding back. Unlike fireCodexOnly (CodeRabbit
-// already reviewed the head) the round stays queued/awaiting-retry: the
-// CodeRabbit review is still owed and fires normally the moment the window
-// opens, at which point PostCodex stays false because CodexCommandID is set.
-// The claim-then-post shape mirrors selfHealCodex — this path is not
-// serialized by the fire slot either.
-func (s *Service) fireCodexDeferred(ctx context.Context, round Round, adoptID int64, adoptAt time.Time, reason string, now time.Time) (PumpResult, error) {
-	result := PumpResult{Action: "codex_fired", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}
+// fireCoDeferred posts (or adopts) ONLY co-reviewer trigger commands for a
+// round the CodeRabbit account block (or a busy slot) is holding back. Unlike
+// fireCoOnly (CodeRabbit already reviewed the head) the round stays
+// queued/awaiting-retry: the CodeRabbit review is still owed and fires
+// normally the moment the window opens, at which point the recorded command
+// ids keep the triggers from re-posting. The claim-then-post shape mirrors
+// selfHealCoReviewers — this path is not serialized by the fire slot either.
+func (s *Service) fireCoDeferred(ctx context.Context, round Round, d engine.FireDecision, now time.Time) (PumpResult, error) {
+	action := func(base string) string {
+		// Preserve the historical action names for the Codex-only case.
+		if len(d.PostCo) <= 1 && len(d.AdoptCo) <= 1 {
+			onlyCodex := true
+			for _, login := range d.PostCo {
+				onlyCodex = onlyCodex && dialect.IsCodexBot(login)
+			}
+			for login := range d.AdoptCo {
+				onlyCodex = onlyCodex && dialect.IsCodexBot(login)
+			}
+			if onlyCodex {
+				return "codex_" + base
+			}
+		}
+		return "co_" + base
+	}
+	result := PumpResult{Action: action("fired"), Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: d.Reason}
 	if s.cfg.DryRun {
 		return result, nil
 	}
-	if adoptID != 0 {
-		adopted := false
-		updated, err := s.store.Update(ctx, func(st *State) error {
-			r := st.Round(round.Repo, round.PR)
-			if !sameRound(r, round) || r.CodexCommandID != 0 ||
-				(r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry) {
-				return ErrNoChange
-			}
-			// A concurrent worker may already be posting the command represented by
-			// this observation. Let its fresh claim finish instead of adopting and
-			// racing its state write; a stale claim no longer blocks recovery.
-			if r.CodexClaimedAt != nil && now.Sub(r.CodexClaimedAt.UTC()) < codexClaimTTL {
-				return ErrNoChange
-			}
-			at := adoptAt.UTC()
-			if at.IsZero() {
-				at = now.UTC()
-			}
-			r.CodexCommandID = adoptID
-			r.CodexCommandedAt = &at
-			r.CodexClaimedAt = nil
-			r.Note = "existing codex review command adopted; coderabbit deferred (account rate-limited)"
-			st.PutRound(*r)
-			adopted = true
-			return nil
-		})
-		if err != nil && !errors.Is(err, ErrNoChange) {
-			return result, err
-		}
-		if !adopted {
-			result.Action = "deduped"
-			result.Reason = "codex command already adopted or posted"
-			return result, nil
-		}
-		s.sync(ctx, updated)
-		result.Action = "codex_adopted"
-		return result, nil
-	}
-	claimed := false
+
+	adopted, claimed := 0, []string{}
 	updated, err := s.store.Update(ctx, func(st *State) error {
+		adopted, claimed = 0, claimed[:0]
 		r := st.Round(round.Repo, round.PR)
-		if !sameRound(r, round) || r.CodexCommandID != 0 {
+		if !sameRound(r, round) || (r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry) {
 			return ErrNoChange
 		}
-		if r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry {
+		changed := false
+		for login, cmd := range d.AdoptCo {
+			c := r.Co(login)
+			if c.CommandID != 0 {
+				continue
+			}
+			// A concurrent worker may already be posting the command represented
+			// by this observation. Let its fresh claim finish instead of adopting
+			// and racing its state write; a stale claim no longer blocks recovery.
+			if c.ClaimedAt != nil && now.Sub(c.ClaimedAt.UTC()) < triggerClaimTTL {
+				continue
+			}
+			at := cmd.CreatedAt
+			if at.IsZero() {
+				at = cmd.UpdatedAt
+			}
+			if at.IsZero() {
+				at = now
+			}
+			r.SetCoCommand(login, cmd.ID, at)
+			adopted++
+			changed = true
+		}
+		for _, login := range d.PostCo {
+			c := r.Co(login)
+			if c.CommandID != 0 {
+				continue
+			}
+			if c.ClaimedAt != nil && now.Sub(c.ClaimedAt.UTC()) < triggerClaimTTL {
+				continue
+			}
+			r.ClaimCo(login, now)
+			claimed = append(claimed, login)
+			changed = true
+		}
+		if !changed {
 			return ErrNoChange
 		}
-		if r.CodexClaimedAt != nil && now.Sub(r.CodexClaimedAt.UTC()) < codexClaimTTL {
-			return ErrNoChange
-		}
-		t := now.UTC()
-		r.CodexClaimedAt = &t
-		r.Note = "codex review requested; coderabbit deferred (account rate-limited)"
+		r.Note = "co-review requested; coderabbit deferred (account rate-limited)"
 		st.PutRound(*r)
-		claimed = true
 		return nil
 	})
 	if err != nil && !errors.Is(err, ErrNoChange) {
 		return result, err
 	}
-	if !claimed {
+	if adopted == 0 && len(claimed) == 0 {
 		result.Action = "deduped"
-		result.Reason = "codex command already claimed or posted"
+		result.Reason = "co-reviewer commands already claimed, adopted, or posted"
 		return result, nil
 	}
 	s.sync(ctx, updated)
-	s.fireCodexReview(ctx, round)
+	for _, login := range claimed {
+		s.fireCoTrigger(ctx, round, login)
+	}
+	if len(claimed) == 0 {
+		result.Action = action("adopted")
+	}
 	return result, nil
 }
 
-// selfHealCodex re-posts the Codex review command for a fired/reviewing round
-// whose initial Codex post failed (CodexCommandID still 0). It runs on the
-// daemon's progress/sweep paths; idempotence comes from the observation — Codex
-// evidence, a live `@codex review` command, or an account that reviews on its
-// own all suppress it — not a retry counter.
-func (s *Service) selfHealCodex(ctx context.Context, round Round, obs engine.Observation, now time.Time) {
-	if s.cfg.DryRun || round.CodexCommandID != 0 || round.FiredAt == nil || obs.Head != round.Head {
+// selfHealCoReviewers posts (or re-posts) co-reviewer trigger commands for a
+// fired/reviewing round: an always-mode bot whose initial post failed (its
+// command id still 0), or a selfheal-mode bot observed active that missed the
+// head past its grace period. It runs on the daemon's progress/sweep paths;
+// idempotence comes from the observation — the bot's evidence, a live trigger
+// command, or an account that reviews on its own all suppress it (see
+// DecideCoPost) — not a retry counter.
+func (s *Service) selfHealCoReviewers(ctx context.Context, round Round, obs engine.Observation, now time.Time) {
+	if s.cfg.DryRun || round.FiredAt == nil || obs.Head != round.Head {
 		return
 	}
-	commandPresent := engine.CodexCommandSince(obs, round.FiredAt.UTC())
-	if !engine.DecideCodexPost(round, obs, s.policy(), commandPresent) {
-		return
-	}
-	// Claim the post under CAS BEFORE the network call: this sweep path is not
-	// serialized by the fire slot, so two concurrent pumps observing
-	// CodexCommandID == 0 would otherwise both post. A claim older than
-	// codexClaimTTL is stale (the poster died mid-flight) and may be re-claimed.
-	claimed := false
-	updated, err := s.store.Update(ctx, func(st *State) error {
-		r := st.Round(round.Repo, round.PR)
-		if !sameRound(r, round) || r.CodexCommandID != 0 {
-			return ErrNoChange
+	firedAt := round.FiredAt.UTC()
+	for _, cp := range s.policy().CoReviewerPolicies() {
+		if round.Co(cp.Login).CommandID != 0 || (dialect.IsCodexBot(cp.Login) && round.CodexCommandID != 0) {
+			continue
 		}
-		if r.CodexClaimedAt != nil && now.Sub(r.CodexClaimedAt.UTC()) < codexClaimTTL {
-			return ErrNoChange
+		commandPresent := engine.CoCommandSince(obs, cp.Login, firedAt)
+		if !engine.DecideCoPost(round, obs, cp, commandPresent, firedAt, now) {
+			continue
 		}
-		t := now.UTC()
-		r.CodexClaimedAt = &t
-		st.PutRound(*r)
-		claimed = true
-		return nil
-	})
-	if err != nil || !claimed {
-		return
+		// Claim the post under CAS BEFORE the network call: this sweep path is
+		// not serialized by the fire slot, so two concurrent pumps observing an
+		// unset command would otherwise both post. A claim older than
+		// triggerClaimTTL is stale (the poster died mid-flight) and may be
+		// re-claimed.
+		login := cp.Login
+		claimed := false
+		updated, err := s.store.Update(ctx, func(st *State) error {
+			r := st.Round(round.Repo, round.PR)
+			if !sameRound(r, round) || r.Co(login).CommandID != 0 {
+				return ErrNoChange
+			}
+			if c := r.Co(login); c.ClaimedAt != nil && now.Sub(c.ClaimedAt.UTC()) < triggerClaimTTL {
+				return ErrNoChange
+			}
+			r.ClaimCo(login, now)
+			st.PutRound(*r)
+			claimed = true
+			return nil
+		})
+		if err != nil || !claimed {
+			continue
+		}
+		s.sync(ctx, updated)
+		s.fireCoTrigger(ctx, round, login)
 	}
-	s.sync(ctx, updated)
-	s.fireCodexReview(ctx, round)
 }
 
-// codexClaimTTL bounds a Codex self-heal claim: past it, a claim whose poster
-// never recorded a command id is stale and the post may be retried.
-const codexClaimTTL = 2 * time.Minute
+// triggerClaimTTL bounds a co-reviewer trigger claim: past it, a claim whose
+// poster never recorded a command id is stale and the post may be retried.
+const triggerClaimTTL = 2 * time.Minute
 
 func (s *Service) Cancel(ctx context.Context, repo string, pr int) error {
 	repo = NormalizeRepo(repo)

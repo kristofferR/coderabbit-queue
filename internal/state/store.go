@@ -38,6 +38,10 @@ type StoreConfig struct {
 	DashboardIssue int
 	Timezone       string
 	Scope          []string
+	// CoReviewers is a preformatted display string of the enabled co-reviewer
+	// bots ("" hides the dashboard row, keeping co-bot-less dashboards
+	// byte-identical).
+	CoReviewers string
 }
 
 func (c StoreConfig) requireState() error {

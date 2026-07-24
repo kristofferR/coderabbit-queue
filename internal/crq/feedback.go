@@ -32,6 +32,23 @@ type FeedbackReport struct {
 	// DeferredUntil. Converged stays false until it does.
 	CodeRabbitDeferred bool       `json:"coderabbit_deferred,omitempty"`
 	DeferredUntil      *time.Time `json:"coderabbit_deferred_until,omitempty"`
+	// CoReviewers is each enabled co-reviewer's per-head status, keyed by
+	// normalized login. Informational only — the Verdict never gates
+	// convergence or changes exit codes.
+	CoReviewers map[string]CoReviewerStatus `json:"co_reviewers,omitempty"`
+}
+
+// CoReviewerStatus is one co-reviewer's observed state for the current head.
+type CoReviewerStatus struct {
+	// Reviewed reports head review evidence: a review, a SHA-matched clean
+	// summary, or a completed check run.
+	Reviewed bool `json:"reviewed"`
+	// CheckState summarizes the bot's check runs for the head:
+	// clean | issues | in_progress | unknown (no check observed).
+	CheckState string `json:"check_state,omitempty"`
+	// Verdict is Macroscope's approvability verdict when one was posted:
+	// approved | needs_human_review.
+	Verdict string `json:"verdict,omitempty"`
 }
 
 func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackReport, error) {
@@ -82,6 +99,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	}
 	completion := engine.Completion(completionRound, obs.eng, s.policy())
 	report.ReviewedBy = completion.ReviewedBy
+	report.CoReviewers = coReviewerStatuses(s.cfg, obs.eng)
 
 	// extractBots is the broader set whose findings we surface — a superset that
 	// includes Codex — so a bot that reviews without being required (and would
@@ -199,6 +217,18 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		}
 		return headCutoff
 	}
+	// Classified co-reviewer events (clean summaries, verdicts, notices,
+	// trigger commands, unable notices) are completion/participation signals,
+	// not actionable findings — index them by comment id so the loop below
+	// skips them (the same pattern as the Codex clean-summary skip, which the
+	// classifier now owns generically).
+	coEventKinds := map[int64]dialect.EventKind{}
+	for _, ev := range obs.eng.Events {
+		switch ev.Kind {
+		case dialect.EvCoClean, dialect.EvCoUnable, dialect.EvCoNotice, dialect.EvCoVerdict, dialect.EvCoCommand:
+			coEventKinds[ev.CommentID] = ev.Kind
+		}
+	}
 	for _, comment := range obs.comments {
 		if !dialect.InBots(extractBots, comment.User.Login) {
 			continue
@@ -206,10 +236,11 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		if s.cr.IsRateLimited(comment.Body) {
 			continue // an account-quota notice is never a finding
 		}
-		// Codex clean-review summaries and every configured-bot issue comment are
-		// completion signals, not actionable findings: engine.Completion already
-		// folded them into ReviewedBy, so they are never surfaced here.
-		if dialect.IsCodexBot(comment.User.Login) && dialect.IsCodexNoActionReviewCompletion(comment.Body) {
+		// Co-reviewer clean summaries/verdicts/notices and every configured-bot
+		// issue comment are completion signals, not actionable findings:
+		// engine.Completion already folded them into ReviewedBy, so they are
+		// never surfaced here.
+		if _, ok := coEventKinds[comment.ID]; ok {
 			continue
 		}
 		if s.isConfiguredBot(comment.User.Login) {
@@ -984,6 +1015,14 @@ func threadFindings(thread reviewThread, bots map[string]struct{}) []dialect.Fin
 		if !dialect.InBots(bots, comment.Author.Login) {
 			continue
 		}
+		// A settled-marker edit means the bot considers the finding addressed —
+		// Macroscope never resolves threads, it EDITS the comment ("✅ Resolved
+		// in <sha>" / "No longer relevant as of <sha>"); the edit IS its
+		// resolution, trusted like a thread resolution (no head match required).
+		if co, ok := dialect.CoReviewerByName(comment.Author.Login); ok &&
+			co.ResolvedInSHA != nil && co.ResolvedInSHA(comment.Body) != "" {
+			continue
+		}
 		commit := dialect.ShortOID(comment.Commit.OID)
 		if commit == "" {
 			commit = dialect.ShortOID(comment.OriginalCommit.OID)
@@ -1047,6 +1086,14 @@ func dedupeFindings(in []dialect.Finding, suppressPromptAt map[string]bool) []di
 			}
 		}
 		key := dialect.NormalizeBotName(finding.Bot) + "|" + finding.Path + "|" + strconv.Itoa(finding.Line) + "|" + finding.Title + "|" + finding.Body + "|" + finding.ThreadID
+		// A bot-stable identity marker (Bugbot's BUG_ID) supersedes the
+		// location/title key: the same bug re-reported in a new thread after a
+		// push must collapse to one finding.
+		if co, ok := dialect.CoReviewerByName(finding.Bot); ok && co.FindingDedupeKey != nil {
+			if stable, ok := co.FindingDedupeKey(finding.Body); ok {
+				key = dialect.NormalizeBotName(finding.Bot) + "|" + stable
+			}
+		}
 		sum := sha256.Sum256([]byte(key))
 		finding.ID = hex.EncodeToString(sum[:])
 		if seen[finding.ID] {
@@ -1054,6 +1101,63 @@ func dedupeFindings(in []dialect.Finding, suppressPromptAt map[string]bool) []di
 		}
 		seen[finding.ID] = true
 		out = append(out, finding)
+	}
+	return out
+}
+
+// coReviewerStatuses summarizes each enabled co-reviewer's observed state for
+// the current head: head review evidence, check-run state, and Macroscope's
+// approvability verdict. Informational only — nothing here gates convergence.
+func coReviewerStatuses(cfg Config, obs engine.Observation) map[string]CoReviewerStatus {
+	if len(cfg.CoBots) == 0 {
+		return nil
+	}
+	out := map[string]CoReviewerStatus{}
+	for _, cb := range cfg.CoBots {
+		key := dialect.NormalizeBotName(cb.Login)
+		status := CoReviewerStatus{Reviewed: engine.CoReviewedHead(obs, cb.Login)}
+		inProgress, clean, done := false, false, false
+		for _, c := range obs.Checks {
+			if dialect.NormalizeBotName(c.Bot) != key {
+				continue
+			}
+			switch c.Verdict {
+			case dialect.CheckInProgress:
+				inProgress = true
+			case dialect.CheckDoneClean:
+				clean = true
+			case dialect.CheckDone:
+				done = true
+			}
+		}
+		switch {
+		case inProgress:
+			status.CheckState = "in_progress"
+		case clean:
+			status.CheckState = "clean"
+		case done:
+			status.CheckState = "issues"
+		default:
+			status.CheckState = "unknown"
+		}
+		var latest time.Time
+		for _, ev := range obs.Events {
+			if ev.Kind != dialect.EvCoVerdict || ev.Approved == nil {
+				continue
+			}
+			if dialect.NormalizeBotName(firstNonEmpty(ev.For, ev.Bot)) != key {
+				continue
+			}
+			if at := ev.ObservedTime(); latest.IsZero() || at.After(latest) {
+				latest = at
+				if *ev.Approved {
+					status.Verdict = "approved"
+				} else {
+					status.Verdict = "needs_human_review"
+				}
+			}
+		}
+		out[key] = status
 	}
 	return out
 }

@@ -496,9 +496,9 @@ func TestSelfHealCodexClaimPreventsDoublePost(t *testing.T) {
 	}
 	obs.eng.Events = events
 	before := f.codexPosted(repo, pr)
-	f.svc.selfHealCodex(f.ctx, *round, obs.eng, f.clk.now())
+	f.svc.selfHealCoReviewers(f.ctx, *round, obs.eng, f.clk.now())
 	// Second sweeper with the SAME stale observation (still CodexCommandID==0).
-	f.svc.selfHealCodex(f.ctx, *round, obs.eng, f.clk.now())
+	f.svc.selfHealCoReviewers(f.ctx, *round, obs.eng, f.clk.now())
 	if got := f.codexPosted(repo, pr) - before; got != 1 {
 		t.Fatalf("concurrent self-heals must post exactly once, got %d extra posts", got)
 	}

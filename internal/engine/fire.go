@@ -69,6 +69,16 @@ func (p Policy) coReviewers() []CoReviewerPolicy {
 	return []CoReviewerPolicy{codexPolicy(p)}
 }
 
+// CoReviewerPolicies exposes the effective co-reviewer list to the apply
+// layer (self-heal sweeps, trigger posting), which shares DecideCoPost with
+// the fire path and so must iterate the same resolved entries.
+func (p Policy) CoReviewerPolicies() []CoReviewerPolicy { return p.coReviewers() }
+
+// CoReviewedHead reports whether login already has head review evidence (a
+// head review, a SHA-matched clean summary, or a completed check run) — the
+// feedback layer surfaces it as per-bot status.
+func CoReviewedHead(obs Observation, login string) bool { return coReviewedHead(obs, login) }
+
 // requiredBot reports whether login is in RequiredBots (normalized).
 func requiredBot(p Policy, login string) bool {
 	norm := dialect.NormalizeBotName(login)

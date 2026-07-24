@@ -88,6 +88,34 @@ func requestedRounds(st State) []Round {
 	return out
 }
 
+// coBotMarks renders a round's co-reviewer trigger bookkeeping for the
+// feedback-wait row: ✓ = trigger posted/adopted, ⏳ = post claimed but not
+// yet recorded. Empty (byte-identical row) when the round tracks no co-bots.
+func coBotMarks(r Round) string {
+	if len(r.CoBots) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(r.CoBots))
+	for name := range r.CoBots {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		c := r.CoBots[name]
+		switch {
+		case c.CommandID != 0:
+			parts = append(parts, name+" ✓")
+		case c.ClaimedAt != nil:
+			parts = append(parts, name+" ⏳")
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " · triggers: " + strings.Join(parts, ", ")
+}
+
 // RenderDashboard renders the human-facing dashboard for v3 state: rounds by
 // phase instead of v2's queue/fired/awaiting maps.
 func RenderDashboard(st State, cfg StoreConfig) string {
@@ -134,6 +162,9 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	} else {
 		fmt.Fprintf(&b, "| **CodeRabbit quota** | ✅ not currently blocked |\n")
 	}
+	if cfg.CoReviewers != "" {
+		fmt.Fprintf(&b, "| **Co-reviewers** | %s |\n", cfg.CoReviewers)
+	}
 	fmt.Fprintf(&b, "| **Last review fired** | %s |\n", fmtStamp(st.LastFired, loc))
 	if slot != nil {
 		fmt.Fprintf(&b, "| **In flight** | [%s#%d](https://github.com/%s/pull/%d) · fired %s · `%s` |\n",
@@ -143,8 +174,8 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	}
 	if len(reviewing) > 0 {
 		r := reviewing[0]
-		fmt.Fprintf(&b, "| **Feedback wait** | [%s#%d](https://github.com/%s/pull/%d) · `%s` · deadline %s |\n",
-			r.Repo, r.PR, r.Repo, r.PR, r.Head, fmtStamp(r.WaitDeadline, loc))
+		fmt.Fprintf(&b, "| **Feedback wait** | [%s#%d](https://github.com/%s/pull/%d) · `%s` · deadline %s%s |\n",
+			r.Repo, r.PR, r.Repo, r.PR, r.Head, fmtStamp(r.WaitDeadline, loc), coBotMarks(r))
 	} else {
 		fmt.Fprintf(&b, "| **Feedback wait** | — |\n")
 	}
