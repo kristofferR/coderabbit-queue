@@ -64,10 +64,22 @@ crq loop OWNER/REPO PR_NUMBER > crq-feedback.json
 rc=$?
 ```
 
-`crq loop` queues the PR and triggers CodeRabbit when the account can spend a review. If Codex is in
-`CRQ_REQUIRED_BOTS`, crq also posts `CRQ_CODEX_CMD` (default `@codex review`) in the same fire step —
-never when Codex auto-reviews the PR on its own. A Codex that joins a round uninvited gates that
-round's convergence dynamically (its usage-limit notice releases the dynamic gate). If a bot reports
+`crq loop` queues the PR and triggers CodeRabbit when the account can spend a review. Alongside it
+crq runs its **co-reviewers** — Codex, Cursor Bugbot and Macroscope (`CRQ_COBOTS`, all enabled by
+default). None of them spends CodeRabbit quota or takes the fire slot. Each has a trigger mode
+(`CRQ_COBOT_<NAME>_TRIGGER`): `always` posts its command in the same fire step, `selfheal` (the
+Bugbot/Macroscope default) only nudges a bot that reviews on its own but missed the head past
+`CRQ_COBOT_<NAME>_GRACE`, and `never` posts nothing. crq never triggers a bot that auto-reviews, has
+already reviewed the head, or has a check run in flight. A co-reviewer that joins a round uninvited
+gates that round's convergence dynamically (an exhaustion notice such as Codex's usage limit
+releases the dynamic gate); one listed in `CRQ_REQUIRED_BOTS` always gates.
+
+Bugbot and Macroscope report through **check runs** as well as comments — a clean Bugbot round posts
+nothing at all on the timeline, so its `Cursor Bugbot` check IS the evidence crq converges on.
+`.co_reviewers[<bot>]` reports each one's `reviewed` / `check_state`
+(`clean|issues|in_progress|unknown`) / `verdict`. Macroscope's approvability `verdict`
+(`approved|needs_human_review`) is informational only: it never gates convergence and never changes
+an exit code. If a bot reports
 actionable findings first, it emits them immediately while leaving the queued round alive. Fix and
 validate locally and resolve or decline each addressed thread immediately. While any required bot's
 `.reviewed_by` value is false, do not commit or push — unless `.coderabbit_deferred` is true and all
@@ -91,8 +103,8 @@ Exit codes:
 
 Rate-limit degrade: when CodeRabbit is rate-limited ("Review limit reached … Next review available
 in: NN minutes") and Codex demonstrably reviews the PR, the loop degrades to Codex-only rounds
-instead of waiting the window out, and the pump posts `CRQ_CODEX_CMD` for blocked rounds while
-keeping the CodeRabbit review queued. Disable with `CRQ_RL_CODEX_DEGRADE=0` (default on).
+instead of waiting the window out, and the pump posts the co-reviewer triggers for blocked rounds
+while keeping the CodeRabbit review queued. Disable with `CRQ_RL_CO_DEGRADE=0` (default on).
 
 Summary-only plans: on a private repo under a Free CodeRabbit plan the bot posts a walkthrough and
 never a line-by-line review ("Summarized by CodeRabbit Free … upgrade … for a comprehensive

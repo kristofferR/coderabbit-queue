@@ -11,22 +11,36 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
 `gh ← {state, crq}`. The engine does no I/O by construction.
 
 - `internal/dialect/` — ALL bot-text knowledge, zero deps. CodeRabbit/Codex
-  completion, rate-limit, paused, in-progress, failed and clean-review
-  classifiers; finding parsers; the decline-reply verdict classifiers
-  (`IsReviewFindingWithdrawn`/`IsReviewFindingRetained`) that let crq read a
-  bot's rebuttal to a declined finding; SHA/severity vocabulary; the `Finding`
-  type (frozen JSON tags); the typed `BotEvent`/`Classifier`. The only place a
-  bot's literal wording may appear.
-- `internal/gh/` — GitHub REST/GraphQL transport. Owns the "GitHub REST quota"
-  concept under the name **Throttle** (`ThrottleWait`/`IsThrottled`). The only
-  package (besides dialect) allowed to say "rate limit".
+  completion, rate-limit, paused, in-progress, failed, summary-only-plan and
+  clean-review classifiers; finding parsers; the decline-reply verdict
+  classifiers (`IsReviewFindingWithdrawn`/`IsReviewFindingRetained`) that let
+  crq read a bot's rebuttal to a declined finding; SHA/severity vocabulary; the
+  `Finding` type (frozen JSON tags); the typed `BotEvent`/`Classifier`. Also the
+  **co-reviewer registry** (`coreviewer.go` + `bugbot.go`/`macroscope.go`): the
+  static `KnownCoReviewers()` list — Codex, Cursor Bugbot, Macroscope — each
+  carrying its login, config name, check-run app slug, trigger command, and its
+  wording hooks (`ClassifyComment`, `ClassifyCheck`, `ResolvedInSHA`,
+  `FindingDedupeKey`, …). The only place a bot's literal wording may appear.
+- `internal/gh/` — GitHub REST/GraphQL transport, bot-agnostic. Owns the "GitHub
+  REST quota" concept under the name **Throttle** (`ThrottleWait`/`IsThrottled`).
+  The only package (besides dialect) allowed to say "rate limit".
+  `ListCheckRuns` fetches a ref's check runs (envelope-paged, ETag'd); matching
+  them to a bot is dialect's `ClassifyCheckRun`, never gh's.
 - `internal/state/` — persisted schema v3: one `Round` per PR, one global
   `FireSlot`, the CodeRabbit `AccountQuota`, an `Archive` ring. Round transition
-  methods, the CAS store, and dashboard rendering.
+  methods, the CAS store, and dashboard rendering. `Round.CoBots` holds per-
+  co-reviewer trigger bookkeeping; Codex's entry is **dual-written** to the
+  legacy `Codex*` round fields because the fleet shares one state ref across
+  binary versions (`Normalize` folds them back on load).
 - `internal/engine/` — PURE decision logic, `now` passed in, no ctx/gh:
   `DecideFire` (the single fire owner), `Progress` (fired/reviewing round
   transitions), `Completion` (the one "is the round done?"), `BlockingFindings`
-  /`FindingsOnHead`/`Converged`, `Policy`. Every rule is table-tested.
+  /`FindingsOnHead`/`Converged`, `Policy`. `coreview.go` holds the co-reviewer
+  evidence/gate algebra, keyed by login and bot-shape-generic (participated,
+  clean at SHA, cannot finish, was commanded) — including `DecideCoPost` and its
+  `never|selfheal|always` trigger modes. `codex.go` keeps only what is genuinely
+  Codex-specific (the thumbs-up quirk, the rate-limit degrade). Every rule is
+  table-tested.
 - `internal/crq/` — orchestration only: `service.go` (Enqueue/Pump/Wait/Cancel),
   `observe.go`, `auto.go`, `feedback.go` (Loop/Feedback assembly), `config.go`,
   `calibration`/`preflight`/`init`. Holds `Service` and wires the packages.
@@ -87,12 +101,31 @@ When a bot ships a new phrasing that crq must recognise, change three things and
 nothing else:
 
 1. the matching classifier/parser in `internal/dialect` (`coderabbit.go`,
-   `codex.go`, or `common.go`);
-2. one corpus file under `internal/dialect/testdata/{coderabbit,codex}/` holding
-   the real message;
-3. one row in `TestGoldenClassification` (`golden_test.go`) — the row IS the
-   spec for how that file classifies.
+   `codex.go`, `bugbot.go`, `macroscope.go`, or `common.go`);
+2. one corpus file under `internal/dialect/testdata/<bot>/` holding the real
+   message, captured verbatim;
+3. one row in `TestGoldenClassification` / `TestGoldenCoReviewers` /
+   `TestGoldenCheckRuns` (`golden_test.go`) — the row IS the spec for how that
+   file classifies.
 
 Convergence/fire rules that consume those classifications live in
 `internal/engine` and are table-tested in `engine_test.go`; orchestration stays
 in `internal/crq`. Keep bot wording out of engine/state/crq.
+
+## Adding a new co-reviewer
+
+A **co-reviewer** is a review bot that is not the configured primary and spends
+no CodeRabbit quota — so its rounds never take the `FireSlot` (a per-round
+`CoBots[login].ClaimedAt` CAS claim serializes its trigger post instead). Adding
+one is deliberately contained:
+
+1. one entry in `dialect.KnownCoReviewers()` with its login, config name, check
+   app slug, trigger command, and whichever wording hooks it needs;
+2. its wording helpers in a new `internal/dialect/<bot>.go`;
+3. corpus files + golden rows as above;
+4. a default in `parseCoBots` (`internal/crq/config.go`) if it should ship on.
+
+Nothing in `engine`/`state`/`crq` enumerates bots: they key on the login and
+consume the registry's hooks. That is why a bot's identity travels as data
+(`BotEvent.For`, `CheckSeen.Bot`, `Observation.Co[login]`) and never as a
+per-bot event kind or verdict.
