@@ -106,7 +106,14 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	}
 	completion := engine.Completion(completionRound, obs.eng, s.policy())
 	report.ReviewedBy = completion.ReviewedBy
-	report.CoReviewers = coReviewerStatuses(s.cfg, obs.eng, anchorCutoff)
+	verdictCutoff := anchorCutoff
+	if verdictCutoff.IsZero() {
+		// Not fired yet (queued behind another PR): without a fire anchor the
+		// newest verdict on the PR describes the PREVIOUS head. Bound it by the
+		// head commit instead of reporting stale state as current.
+		verdictCutoff = obs.eng.HeadAt
+	}
+	report.CoReviewers = coReviewerStatuses(s.cfg, obs.eng, verdictCutoff)
 	if why := engine.PrimaryUnavailableReason(obs.eng, s.policy(), head); why != "" {
 		report.PrimaryUnavailable = true
 		report.PrimaryUnavailableReason = s.cfg.Bot + " " + why
@@ -163,17 +170,32 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// ids settled in ANY thread first and suppress the whole family.
 	settledStableIDs := map[string]bool{}
 	if threads, err := s.reviewThreads(ctx, repo, pr); err == nil {
+		openStableIDs := map[string]bool{}
 		for _, thread := range threads {
-			if !thread.IsResolved && !thread.IsOutdated {
-				continue
-			}
+			settled := thread.IsResolved || thread.IsOutdated
 			for _, c := range thread.Comments.Nodes {
-				if co, ok := dialect.CoReviewerByName(c.Author.Login); ok && co.FindingDedupeKey != nil {
-					if stable, ok := co.FindingDedupeKey(c.Body); ok {
-						settledStableIDs[dialect.NormalizeBotName(c.Author.Login)+"|"+stable] = true
-					}
+				co, ok := dialect.CoReviewerByName(c.Author.Login)
+				if !ok || co.FindingDedupeKey == nil {
+					continue
+				}
+				stable, ok := co.FindingDedupeKey(c.Body)
+				if !ok {
+					continue
+				}
+				key := dialect.NormalizeBotName(c.Author.Login) + "|" + stable
+				if settled {
+					settledStableIDs[key] = true
+				} else {
+					openStableIDs[key] = true
 				}
 			}
+		}
+		// reviewThreads spans the PR's whole history, so an old resolved thread
+		// can share an id with a CURRENT re-report — after a regression, or an
+		// incorrect manual resolve. The live occurrence wins: otherwise the loop
+		// converges while the bot has an open finding.
+		for key := range openStableIDs {
+			delete(settledStableIDs, key)
 		}
 		for _, thread := range threads {
 			report.Findings = append(report.Findings, threadFindings(thread, extractBots)...)

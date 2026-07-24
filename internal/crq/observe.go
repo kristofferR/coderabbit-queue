@@ -41,6 +41,15 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 	if o.eng.Open && len(pull.Head.SHA) >= 9 {
 		o.eng.Head = pull.Head.SHA[:9]
 	}
+	// The head's commit time bounds evidence that names no commit of its own
+	// (a SHA-less "Review skipped"), so such a notice cannot suppress a later
+	// head forever. Best-effort: an unreadable commit leaves it zero and the
+	// engine falls back to accepting the notice, the conservative reading.
+	if o.eng.Open && pull.Head.SHA != "" {
+		if c, cerr := s.gh.GetCommit(ctx, repo, pull.Head.SHA); cerr == nil {
+			o.eng.HeadAt = c.Committer.Date.UTC()
+		}
+	}
 
 	// Reviews and issue comments are fetched even for a closed PR: the daemon's
 	// Progress/DecideFire abandon it regardless, but Feedback still surfaces its

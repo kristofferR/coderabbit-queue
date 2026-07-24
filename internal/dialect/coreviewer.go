@@ -13,9 +13,15 @@ import "strings"
 // run did not produce a review. GitHub reports these alongside status
 // "completed", so status alone cannot distinguish a finished review from a
 // crashed one.
+//
+// "skipped" is deliberately absent: it is not universally a non-delivery.
+// Macroscope's Correctness Check concludes `skipped` for the benign
+// "No code objects were reviewed." outcome, which is a real clean verdict.
+// Each bot decides what its own skip means.
 func checkRunFailed(conclusion string) bool {
 	switch strings.ToLower(strings.TrimSpace(conclusion)) {
-	case "failure", "cancelled", "canceled", "timed_out", "action_required", "stale":
+	case "failure", "cancelled", "canceled", "timed_out", "action_required",
+		"stale", "startup_failure":
 		return true
 	}
 	return false

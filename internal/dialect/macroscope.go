@@ -98,9 +98,9 @@ func ClassifyMacroscopeCheck(name, title, summary, status, conclusion string) Ch
 		return CheckUnrelated
 	}
 	if name != macroscopeCorrectnessCheck {
-		if !strings.EqualFold(status, "completed") {
-			return CheckInProgress
-		}
+		// Auxiliary whether running or finished. Reporting a running auxiliary
+		// check as CheckInProgress would let it suppress the trigger and engage
+		// the completion gate it can never satisfy, stranding the round.
 		return CheckAuxiliary
 	}
 	if !strings.EqualFold(status, "completed") {
@@ -108,6 +108,12 @@ func ClassifyMacroscopeCheck(name, title, summary, status, conclusion string) Ch
 	}
 	if checkRunFailed(conclusion) {
 		return CheckFailed
+	}
+	// Correctness concludes `skipped` for "No code objects were reviewed." —
+	// it ran and had nothing to analyse, which is a clean verdict, not a
+	// non-delivery. Treating it as failed would strand docs-only PRs.
+	if strings.EqualFold(strings.TrimSpace(conclusion), "skipped") {
+		return CheckDoneClean
 	}
 	if strings.Contains(NormalizeReviewText(title), "no issues identified") ||
 		strings.Contains(NormalizeReviewText(summary), "no issues identified") {

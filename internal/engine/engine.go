@@ -132,6 +132,9 @@ type Observation struct {
 	// (pre-fetched only when a Codex-gated completion needs it).
 	CodexThumbsUp bool
 
+	// HeadAt is when the observed head commit was created, the cutoff for
+	// evidence that names no commit of its own. Zero when unknown.
+	HeadAt time.Time
 	// Checks are the head's classified co-reviewer check runs.
 	Checks []CheckSeen
 	// Co carries each co-reviewer's per-bot observation slice, keyed by
@@ -179,7 +182,18 @@ func ReviewSkippedHead(obs Observation, p Policy, head string) bool {
 		if ev.Kind != dialect.EvSkipped || !sameBot(ev.Bot, p.Bot) {
 			continue
 		}
-		if ev.SHA == "" || head == "" || dialect.SHAPrefixMatch(ev.SHA, head) {
+		if ev.SHA != "" {
+			if head == "" || dialect.SHAPrefixMatch(ev.SHA, head) {
+				return true
+			}
+			continue
+		}
+		// A skip naming no commit cannot be bound by SHA, so bind it by time:
+		// only one observed at/after this head appeared may suppress it.
+		// Accepting it indefinitely means a narrowed PR is never reviewed
+		// again — and silently, since Feedback filters the same notice by
+		// commit time and stops surfacing it.
+		if obs.HeadAt.IsZero() || notBefore(ev.ObservedTime(), obs.HeadAt) {
 			return true
 		}
 	}

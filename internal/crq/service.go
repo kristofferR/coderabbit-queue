@@ -288,14 +288,12 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 			if scanned >= 3 {
 				break
 			}
-			// Cheap pre-filter: a round with every trigger already posted has
-			// nothing left for this scan to start. (A summary-only round in
-			// that state is merely delayed, not starved — it resolves when it
-			// reaches the front of the queue; recognising it here would cost an
-			// observation for every queued round on every pump.)
-			if !anyCoUncommanded(r, policy) {
-				continue
-			}
+			// No cheap pre-filter here. "Every trigger already posted" is not
+			// proof that nothing is left to do: a primary-unavailable round in
+			// that state still needs its quota-free FireDedupe/FireCoReviewWait,
+			// and a co-review answer to an earlier deferred command needs
+			// collecting. Skipping those left them behind the account block for
+			// hours. The scan budget below bounds the cost instead.
 			scanned++
 			round := r
 			robs, oerr := s.observe(ctx, round.Repo, round.PR, &round, now)

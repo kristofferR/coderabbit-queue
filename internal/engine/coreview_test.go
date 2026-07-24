@@ -452,3 +452,59 @@ func TestReviewSkippedRunsCoReviewersInsteadOfFiring(t *testing.T) {
 		t.Fatalf("a blocked account must not delay a skipped round: %+v", d)
 	}
 }
+
+// TestSkippedNoticeExpiresWithTheHead: a real "Review skipped" that names no
+// commit must not suppress CodeRabbit forever. Accepting it indefinitely means
+// a narrowed PR is never reviewed again — and silently, because Feedback
+// filters the same notice by commit time and stops surfacing it.
+func TestSkippedNoticeExpiresWithTheHead(t *testing.T) {
+	p := Policy{Bot: "coderabbitai[bot]", RequiredBots: []string{"coderabbitai[bot]"}}
+	postedAt := time.Date(2026, 7, 24, 20, 0, 0, 0, time.UTC)
+	skip := dialect.BotEvent{Kind: dialect.EvSkipped, Bot: "coderabbitai[bot]",
+		CommentID: 1, CreatedAt: postedAt, UpdatedAt: postedAt}
+
+	// Head predates the notice: it describes this head, so it still applies.
+	current := Observation{Head: "abcdef123", Open: true, HeadAt: postedAt.Add(-time.Hour),
+		Events: []dialect.BotEvent{skip}}
+	if !PrimaryReviewUnavailable(current, p, current.Head) {
+		t.Fatal("a skip observed after the head appeared must apply to it")
+	}
+	// The PR was narrowed: the new head is NEWER than the notice, so the old
+	// refusal must not suppress it.
+	narrowed := Observation{Head: "9999abcde", Open: true, HeadAt: postedAt.Add(time.Hour),
+		Events: []dialect.BotEvent{skip}}
+	if PrimaryReviewUnavailable(narrowed, p, narrowed.Head) {
+		t.Fatal("a narrowed head must be reviewable again, not suppressed by the old skip")
+	}
+	// Unknown head time falls back to accepting it (conservative).
+	unknown := Observation{Head: "9999abcde", Open: true, Events: []dialect.BotEvent{skip}}
+	if !PrimaryReviewUnavailable(unknown, p, unknown.Head) {
+		t.Fatal("with no head time the skip is read conservatively as applying")
+	}
+}
+
+// TestUnavailablePrimaryWaitsForTheBotItJustCommanded: when no primary review
+// is coming, coAwareDedupe may post an optional co-reviewer's trigger. That bot
+// is not yet AutoActive or ActiveThisRound, so without counting the recorded
+// command the round marks the primary delivered and reports done immediately
+// after asking — before its only real reviewer has said anything.
+func TestUnavailablePrimaryWaitsForTheBotItJustCommanded(t *testing.T) {
+	head := "abcdef123"
+	p := Policy{Bot: "coderabbitai[bot]", RequiredBots: []string{"coderabbitai[bot]"},
+		CoReviewers: []CoReviewerPolicy{{Login: bugbotLogin, Command: "bugbot run", Trigger: TriggerAlways}}}
+	summaryOnly := dialect.BotEvent{Kind: dialect.EvOther, Bot: "coderabbitai[bot]",
+		SummaryOnly: true, CommentID: 1}
+	obs := Observation{Head: head, Open: true, Events: []dialect.BotEvent{summaryOnly}}
+
+	// Nothing commanded yet and the bot is silent: nothing to wait for.
+	bare := state.Round{Head: head}
+	if got := Completion(bare, obs, p); !got.Done {
+		t.Fatalf("with no co-reviewer engaged the round resolves: %+v", got)
+	}
+	// crq has now posted its trigger — the round must wait for the answer.
+	commanded := state.Round{Head: head}
+	commanded.SetCoCommand(bugbotLogin, 55, time.Now().UTC())
+	if got := Completion(commanded, obs, p); got.Done {
+		t.Fatalf("a round must not complete right after commanding its only reviewer: %+v", got)
+	}
+}

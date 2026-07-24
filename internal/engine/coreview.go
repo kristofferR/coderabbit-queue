@@ -82,16 +82,23 @@ func coChecks(obs Observation, login string) []CheckSeen {
 	return out
 }
 
-// coCheckAny reports whether a check run of login's is engaged with this head:
-// running, auxiliary, or finished. Posting a trigger alongside one would
-// double-review. A FAILED run is deliberately excluded — the bot tried and did
-// not deliver, so a self-heal trigger is exactly the right response to it, and
-// the round's recorded command id still bounds crq to one post.
+// coCheckAny reports whether login's REVIEW check is engaged with this head —
+// running or finished. Posting a trigger alongside one would double-review.
+//
+// Two verdicts are deliberately excluded, because neither can ever satisfy the
+// gate they would otherwise hold open. A FAILED run means the bot tried and did
+// not deliver, so a self-heal trigger is the right response. An AUXILIARY check
+// (Macroscope's Approvability or a repo-custom check) is not the review at all:
+// treating it as engagement suppressed every trigger while the Correctness
+// Check had not even started, leaving required rounds to time out with no
+// recovery path.
 func coCheckAny(obs Observation, login string) bool {
 	for _, c := range coChecks(obs, login) {
-		if c.Verdict != dialect.CheckFailed {
-			return true
+		switch c.Verdict {
+		case dialect.CheckFailed, dialect.CheckAuxiliary:
+			continue
 		}
+		return true
 	}
 	return false
 }

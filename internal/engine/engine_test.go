@@ -775,8 +775,16 @@ func TestDecideFireBlockedCodexDeferred(t *testing.T) {
 	if d := DecideFire(Global{SlotFree: false}, queued, open, now, degrade); d.Verdict != FireCoDeferred {
 		t.Fatalf("slot-busy + degrade + postable codex must defer to codex, got %+v", d)
 	}
-	if d := DecideFire(Global{SlotFree: false}, queued, open, now, off); d.Verdict != FireNo {
-		t.Fatalf("slot-busy with degrade off must stay FireNo, got %+v", d)
+	// CRQ_RL_CO_DEGRADE governs the ACCOUNT-LIMIT window only, which is what it
+	// is named and documented for. Turning it off must not park quota-free
+	// co-review work behind an unrelated PR's CodeRabbit slot — that would add a
+	// whole in-flight review timeout to bots that never touch the quota.
+	if d := DecideFire(Global{SlotFree: false}, queued, open, now, off); d.Verdict != FireCoDeferred {
+		t.Fatalf("degrade off must still let a busy slot defer to codex, got %+v", d)
+	}
+	// It does still suppress the deferral during an account block.
+	if d := DecideFire(g, queued, open, now, off); d.Verdict != FireNo {
+		t.Fatalf("degrade off must suppress the account-blocked deferral, got %+v", d)
 	}
 }
 

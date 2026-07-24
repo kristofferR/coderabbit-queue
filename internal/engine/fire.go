@@ -130,7 +130,7 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 		// resolution below once the slot frees (a queued round a co-bot answers
 		// clean cannot complete, so deferring it here could wedge the wait).
 		if !reviewedHead {
-			if d, ok := decideCoDeferred(r, obs, p, now, "fire slot busy"); ok {
+			if d, ok := decideCoDeferred(r, obs, p, now, "fire slot busy", false); ok {
 				return d
 			}
 		}
@@ -153,7 +153,7 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 		// still fires the moment the window opens. DecideCoPost's guards
 		// (command configured, no already-posted or live command) make this
 		// idempotent per round.
-		if d, ok := decideCoDeferred(r, obs, p, now, "account blocked"); ok {
+		if d, ok := decideCoDeferred(r, obs, p, now, "account blocked", true); ok {
 			return d
 		}
 		return FireDecision{Verdict: FireNo, Reason: "account blocked until " + g.BlockedUntil.UTC().Format(time.RFC3339)}
@@ -190,8 +190,12 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 // be recorded as the round anchor rather than merely suppressing a duplicate
 // post. The legacy Adopt fields mirror the Codex entry for pre-migration
 // consumers.
-func decideCoDeferred(r state.Round, obs Observation, p Policy, now time.Time, reason string) (FireDecision, bool) {
-	if !p.RateLimitCoDegrade {
+func decideCoDeferred(r state.Round, obs Observation, p Policy, now time.Time, reason string, accountBlocked bool) (FireDecision, bool) {
+	// RateLimitCoDegrade is documented as governing behaviour during an
+	// account-limit window. Applying it to the busy-slot path too would park
+	// quota-free co-review work behind an unrelated PR's CodeRabbit review —
+	// adding a whole in-flight timeout to bots that never touch the quota.
+	if accountBlocked && !p.RateLimitCoDegrade {
 		return FireDecision{}, false
 	}
 	var post []string

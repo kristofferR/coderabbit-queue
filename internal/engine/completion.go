@@ -69,7 +69,12 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 				continue
 			}
 			co := obs.co(cp.Login)
-			if (co.AutoActive || co.ActiveThisRound) && !coUnableSince(obs, cp.Login, cutoff) {
+			// A trigger crq recorded THIS round counts too. Without it a
+			// primary-unavailable round posts an optional bot's command and then
+			// immediately marks the primary delivered and reports done — before
+			// the only reviewer it actually has has said anything.
+			commanded := roundCoCommandID(r, cp.Login) != 0
+			if (co.AutoActive || co.ActiveThisRound || commanded) && !coUnableSince(obs, cp.Login, cutoff) {
 				reviewedBy[cp.Login] = false
 			}
 		}

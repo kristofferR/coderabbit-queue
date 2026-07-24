@@ -84,7 +84,8 @@ func ClassifyBugbotCheck(name, title, summary, status, conclusion string) CheckV
 	if !strings.EqualFold(status, "completed") {
 		return CheckInProgress
 	}
-	if checkRunFailed(conclusion) {
+	// Bugbot has no benign skip: a skipped run simply did not review.
+	if checkRunFailed(conclusion) || strings.EqualFold(strings.TrimSpace(conclusion), "skipped") {
 		return CheckFailed
 	}
 	if strings.Contains(NormalizeReviewText(summary), "no issues found") ||
