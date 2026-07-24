@@ -2026,3 +2026,72 @@ func TestFeedbackSurfacesSkippedReviewDespiteRateLimitMarker(t *testing.T) {
 		t.Error("a skipped review with an open finding must not report converged")
 	}
 }
+
+// TestLoopIgnoresAccountBlockWhenPrimaryWillNotReview pins the rule that stopped
+// agents reasoning about CodeRabbit on repos it never reviews. On a summary-only
+// round the account block is meaningless: it must not extend the wait deadline,
+// must not slow the poll to the block window, and must not be narrated. Agents
+// were reading that narration and concluding "hold the head until CodeRabbit
+// lands" — on a repo where CodeRabbit never lands, i.e. never push, never
+// converge.
+func TestLoopIgnoresAccountBlockWhenPrimaryWillNotReview(t *testing.T) {
+	now := time.Now().UTC()
+	blocked := now.Add(42 * time.Minute)
+	deadline := now.Add(5 * time.Minute)
+
+	// The block must not buy a summary-only round any extra deadline...
+	if got := extendDeadlineForBlock(deadline, nil, now, 20*time.Minute); !got.Equal(deadline) {
+		t.Fatalf("a nil block must leave the deadline alone, got %v", got)
+	}
+	// ...whereas a round that genuinely awaits CodeRabbit still gets it.
+	if got := extendDeadlineForBlock(deadline, &blocked, now, 20*time.Minute); !got.After(deadline) {
+		t.Fatalf("a real block must still extend a round that waits on it, got %v", got)
+	}
+	// And the poll must stay fast rather than sliding to the block window.
+	if got := blockedPollInterval(blocked, now, time.Second); got < time.Minute {
+		t.Fatalf("precondition: a real block slows the poll, got %v", got)
+	}
+
+	cfg := Config{
+		Bot:               "coderabbitai[bot]",
+		RequiredBots:      []string{"coderabbitai[bot]"},
+		FeedbackBots:      []string{"coderabbitai[bot]"},
+		RateLimitMarker:   "rate limited by coderabbit.ai",
+		CalibrationMarker: "auto-generated reply by CodeRabbit",
+	}
+	gh := newFakeGitHub()
+	sha := "abcdef1234567890"
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey("o/private", 1022)] = pull
+	walkthrough := ghapi.IssueComment{ID: 900,
+		Body:      corpusMessage(t, "coderabbit/summary-only-free-plan.md"),
+		CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour)}
+	walkthrough.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/private", 1022)] = []ghapi.IssueComment{walkthrough}
+
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.Account.BlockedUntil = &blocked
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	rep, err := svc.Feedback(context.Background(), "o/private", 1022)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.PrimaryUnavailable {
+		t.Fatal("a summary-only head must report primary_review_unavailable so agents stop waiting on it")
+	}
+	if !strings.Contains(rep.PrimaryUnavailableReason, "summary") {
+		t.Errorf("the reason must say why, got %q", rep.PrimaryUnavailableReason)
+	}
+	// The primary counts as delivered, so the agent is never told to hold the
+	// head for it while an unrelated account block ticks down.
+	if !rep.ReviewedBy["coderabbitai[bot]"] {
+		t.Fatalf("the primary must read as delivered, got %#v", rep.ReviewedBy)
+	}
+}

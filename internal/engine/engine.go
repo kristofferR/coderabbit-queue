@@ -191,7 +191,23 @@ func ReviewSkippedHead(obs Observation, p Policy, head string) bool {
 // skipped this head outright. Both collapse to the same decision: stop waiting
 // on a review that cannot arrive and let the co-reviewers resolve the round.
 func PrimaryReviewUnavailable(obs Observation, p Policy, head string) bool {
-	return SummaryOnlyPlan(obs, p) || ReviewSkippedHead(obs, p, head)
+	return PrimaryUnavailableReason(obs, p, head) != ""
+}
+
+// PrimaryUnavailableReason names WHY no primary review is coming, for surfacing
+// to agents. Without it an agent sees only a pending reviewer and reasons about
+// account quota that cannot apply — waiting, and holding the head, for a review
+// that will never arrive. Empty when a review is still expected.
+func PrimaryUnavailableReason(obs Observation, p Policy, head string) string {
+	// The skip is the more specific and more actionable of the two: it names a
+	// fixable cause (narrow the PR) and binds to this head only.
+	if ReviewSkippedHead(obs, p, head) {
+		return "skipped the review for this head"
+	}
+	if SummaryOnlyPlan(obs, p) {
+		return "plan produces a summary only, never a review"
+	}
+	return ""
 }
 
 // notBefore mirrors v2: GitHub timestamps are second-granular, so a bot

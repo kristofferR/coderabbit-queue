@@ -505,6 +505,13 @@ co-reviewers, and the skip is surfaced as a `major` finding so the PR actually g
 refusal binds to the SHA the notice names, so splitting the PR yields a head crq fires normally
 again.
 
+Both cases set `primary_review_unavailable` in `crq feedback --json`, with a
+`primary_review_unavailable_reason` naming which. That flag is load-bearing for agents: without it
+they see a pending reviewer, reason about the account-quota window, and "hold the head until
+CodeRabbit lands" — on a repo where it never lands, so the PR never pushes and never converges. crq
+also stops consulting the account block for such a round: no deadline extension, no poll slowdown to
+the block window, and no log line about a limit that cannot apply to it.
+
 **Bot-specific quirks crq handles for you.** Macroscope never resolves a thread; it *edits* its own
 comment to append `✅ Resolved in <sha>` (or `No longer relevant as of <sha>`), so crq treats that
 edit as the resolution and drops the finding. Bugbot re-reports the same bug in a fresh thread after

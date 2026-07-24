@@ -106,6 +106,13 @@ in: NN minutes") and Codex demonstrably reviews the PR, the loop degrades to Cod
 instead of waiting the window out, and the pump posts the co-reviewer triggers for blocked rounds
 while keeping the CodeRabbit review queued. Disable with `CRQ_RL_CO_DEGRADE=0` (default on).
 
+`.primary_review_unavailable` (with `.primary_review_unavailable_reason`) means the configured
+reviewer will NOT review this head at all — its plan only summarizes, or it skipped the head. When
+true: do not hold the head for it, do not wait for it, and IGNORE the account-quota window entirely
+(`crq status` may show the account blocked; that block is fleet state and cannot apply to a round
+that never spends quota). The round is resolved by the co-reviewers alone, so treat
+`.reviewed_by` for the primary as already delivered and act on `.findings` immediately.
+
 Skipped reviews: CodeRabbit may refuse a head outright (`Review skipped` — too many files, no usage
 credits). That notice embeds the rate-limit marker but is NOT a timed block: nothing clears by
 waiting. crq treats it as "no primary review is coming for this head", converges on the co-reviewers,

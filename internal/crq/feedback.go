@@ -36,6 +36,13 @@ type FeedbackReport struct {
 	// normalized login. Informational only — the Verdict never gates
 	// convergence or changes exit codes.
 	CoReviewers map[string]CoReviewerStatus `json:"co_reviewers,omitempty"`
+	// PrimaryUnavailable reports that the configured reviewer will not review
+	// this head at all (its plan only summarizes, or it skipped the head), with
+	// PrimaryUnavailableReason saying which. The co-reviewers alone resolve the
+	// round: do NOT hold the head for the primary, and ignore the account-quota
+	// window entirely — it cannot apply to a round that never spends quota.
+	PrimaryUnavailable       bool   `json:"primary_review_unavailable,omitempty"`
+	PrimaryUnavailableReason string `json:"primary_review_unavailable_reason,omitempty"`
 }
 
 // CoReviewerStatus is one co-reviewer's observed state for the current head.
@@ -100,6 +107,10 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	completion := engine.Completion(completionRound, obs.eng, s.policy())
 	report.ReviewedBy = completion.ReviewedBy
 	report.CoReviewers = coReviewerStatuses(s.cfg, obs.eng)
+	if why := engine.PrimaryUnavailableReason(obs.eng, s.policy(), head); why != "" {
+		report.PrimaryUnavailable = true
+		report.PrimaryUnavailableReason = s.cfg.Bot + " " + why
+	}
 
 	// extractBots is the broader set whose findings we surface — a superset that
 	// includes Codex — so a bot that reviews without being required (and would
@@ -449,6 +460,12 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 				// With ANOTHER required bot still pending, the hold-head branch
 				// below applies instead: pushing would restart its checks.
 				report.Reason = "codex findings during a coderabbit rate-limit window; fix, push, and loop again — the coderabbit review stays queued and fires when the window opens"
+			} else if report.PrimaryUnavailable {
+				// Only co-reviewers are outstanding: naming them (and the fact that
+				// the primary is out of the picture) stops the agent inferring it
+				// must wait on the primary or on an account-quota window.
+				report.Reason = "hold current head for the remaining co-reviewers only — " +
+					report.PrimaryUnavailableReason + ", so nothing here waits on it or on the account quota"
 			} else {
 				// A required reviewer is still pending (e.g. Codex posted a finding
 				// before CodeRabbit reviewed). Return the findings to work on, but leave
@@ -497,9 +514,16 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		poll := s.cfg.PollInterval
 		var blockedUntil *time.Time
 		now := s.clock()
-		if st, _, lerr := s.store.Load(ctx); lerr == nil {
-			if until, ok := st.AccountBlockedUntil(repo, pr, head, now); ok {
-				blockedUntil = &until
+		// A round the primary will never review neither spends the account
+		// quota nor waits on it. Consulting the block would extend this round's
+		// deadline, slow its poll to the block window, and narrate a limit that
+		// has nothing to do with it — while the co-reviewers it IS waiting for
+		// answer in minutes. Leave blockedUntil nil so none of that applies.
+		if !report.PrimaryUnavailable {
+			if st, _, lerr := s.store.Load(ctx); lerr == nil {
+				if until, ok := st.AccountBlockedUntil(repo, pr, head, now); ok {
+					blockedUntil = &until
+				}
 			}
 		}
 		// A degraded round waits for Codex, not for the window: keep the normal
