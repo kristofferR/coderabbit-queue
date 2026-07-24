@@ -577,3 +577,58 @@ func TestCoReplayAlwaysModePostsWithFireAndHealsAfterFailure(t *testing.T) {
 		t.Fatalf("no repost after the heal, got %d", got)
 	}
 }
+
+// --- 8. the summary-only co-review wait must be satisfiable ------------------
+
+// TestCoReplaySummaryOnlyWaitAcceptsExistingAnswer reproduces a repeatable
+// 20-minute timeout hit while dogfooding krisHQ#1021.
+//
+// On a summary-only PR there is no CodeRabbit review to anchor the co-review
+// wait on, and crq posts no trigger because the co-reviewer auto-reviews. The
+// anchor therefore fell through to "now", i.e. the moment crq happened to look
+// — which lands AFTER the co-reviewer's existing answer for this head. The wait
+// could then never be satisfied: the bot had already spoken and would not speak
+// again for an unchanged head, so every round timed out identically.
+//
+// The floor must be when the HEAD appeared, not when crq noticed it.
+func TestCoReplaySummaryOnlyWaitAcceptsExistingAnswer(t *testing.T) {
+	base := time.Date(2026, 7, 25, 9, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = append(cfg.RequiredBots, dialect.CodexBotLogin)
+	})
+	repo, pr, sha := "o/private", 1021, "23179e9aa1234567"
+	f.openPull(repo, pr, sha)
+	// The head was pushed well before this round is observed.
+	f.setCommitDate(sha, base.Add(-30*time.Minute))
+
+	// CodeRabbit's Free-plan walkthrough: no review is ever coming.
+	f.botComment(repo, pr, 900, corpusMessage(t, "coderabbit/summary-only-free-plan.md"), base.Add(-25*time.Minute))
+	// Codex auto-reviewed and found nothing, before crq looked. Its clean
+	// summary names no SHA (the legacy shape), so the round's evidence floor is
+	// the ONLY thing that can bind it to this head — which is precisely why a
+	// floor set at observation time strands it.
+	f.codexComment(repo, pr, 901, corpusMessage(t, "codex/clean-summary-legacy.md"), base.Add(-20*time.Minute))
+
+	f.enqueue(repo, pr)
+	f.pump()
+
+	// crq must not have asked CodeRabbit for anything.
+	if got := f.reviewsPosted(repo, pr); got != 0 {
+		t.Fatalf("a summary-only round must never post the review command, got %d", got)
+	}
+	rep, err := f.svc.Feedback(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.PrimaryUnavailable {
+		t.Fatalf("precondition: the round must read as primary-unavailable, got %+v", rep)
+	}
+	// The answer that already exists must satisfy the round rather than being
+	// stranded below a floor set at observation time.
+	if !rep.ReviewedBy[dialect.CodexBotLogin] {
+		t.Fatalf("the co-reviewer's existing answer for this head must count: %#v", rep.ReviewedBy)
+	}
+	if !rep.Converged {
+		t.Fatalf("the round must converge instead of waiting out the deadline: %+v", rep)
+	}
+}

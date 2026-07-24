@@ -1013,11 +1013,17 @@ func (s *Service) fireCoReviewWait(ctx context.Context, round Round, obs engine.
 	if s.cfg.DryRun {
 		return result, nil
 	}
-	// The anchor is the wait's evidence floor. Prefer an adopted trigger
-	// command's time; with no command (auto-review) fall back to the primary
-	// bot's head review — a SHA-less legacy clean summary posted after either
-	// must count, or an answer that already exists is hidden until the deadline.
+	// The anchor is the wait's evidence floor, so it must be when this HEAD
+	// appeared — not when crq happened to notice it. Defaulting to now was a
+	// repeatable 20-minute timeout on a primary-unavailable round: with no
+	// CodeRabbit review to anchor on and no trigger posted (the co-reviewer
+	// auto-reviews), the floor landed after the co-reviewer's existing answer
+	// for this head, so the wait could never be satisfied and the bot had no
+	// reason to speak again. The candidates below only narrow it further.
 	anchor := now
+	if !obs.HeadAt.IsZero() {
+		anchor = obs.HeadAt
+	}
 	for _, rv := range obs.Reviews {
 		if isConfiguredBotLogin(s.cfg.Bot, rv.Bot) && rv.Commit != "" && strings.HasPrefix(rv.Commit, round.Head) &&
 			!rv.SubmittedAt.IsZero() && rv.SubmittedAt.Before(anchor) {

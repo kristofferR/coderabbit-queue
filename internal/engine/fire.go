@@ -71,6 +71,26 @@ func requiredBot(p Policy, login string) bool {
 	return false
 }
 
+// selfHealAnchor is what a selfheal trigger measures its grace against: the
+// round's fire.
+//
+// neverFires supplies the fallback for a round that will not get one — a
+// summary-only or skipped head resolves without crq ever posting the primary
+// command, so a fire-only anchor left those rounds permanently ineligible for
+// the trigger that could rescue them. It is deliberately NOT used on a round
+// that is about to fire: there the head commit is typically old, and treating
+// that as elapsed grace would post the trigger in the same breath as the fire,
+// before the bot has had any chance to review this round at all.
+func selfHealAnchor(r state.Round, obs Observation, neverFires bool) time.Time {
+	if at := roundCutoff(r); !at.IsZero() {
+		return at
+	}
+	if neverFires {
+		return obs.HeadAt
+	}
+	return time.Time{}
+}
+
 // decideCoPosts collects the co-reviewer logins whose trigger crq should post
 // while firing this round. Fire-time posting is the always-mode path; a
 // selfheal trigger anchors on the fire and so never posts before it.
@@ -265,13 +285,14 @@ func newestCommand(commands []CommandSeen) *CommandSeen {
 func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, primaryUnavailable bool) FireDecision {
 	var post []string
 	wait := false
+	anchor := selfHealAnchor(r, obs, primaryUnavailable)
 	for _, cp := range p.coReviewers() {
 		co := obs.co(cp.Login)
 		gates := requiredBot(p, cp.Login) || co.AutoActive || primaryUnavailable
 		if !gates || coReviewedHead(obs, cp.Login) {
 			continue
 		}
-		if DecideCoPost(r, obs, cp, len(co.Commands) > 0, time.Time{}, now) {
+		if DecideCoPost(r, obs, cp, len(co.Commands) > 0, anchor, now) {
 			post = append(post, cp.Login)
 			continue
 		}
