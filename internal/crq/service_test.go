@@ -73,10 +73,24 @@ func (f *fakeGitHub) ListCheckRuns(_ context.Context, _ string, ref string) ([]g
 	if err := f.checkRunErrs[ref]; err != nil {
 		return nil, err
 	}
+	if runs, ok := f.checkRuns[ref]; ok {
+		return append([]ghapi.CheckRun(nil), runs...), nil
+	}
+	// Prefix fallback (tests seed short SHAs, observe asks with the full one),
+	// but only when exactly one key matches: returning from a map range picked
+	// an arbitrary entry whenever two refs prefixed each other.
+	var match []ghapi.CheckRun
+	found := 0
 	for key, runs := range f.checkRuns {
-		if strings.HasPrefix(ref, key) || strings.HasPrefix(key, ref) {
-			return append([]ghapi.CheckRun(nil), runs...), nil
+		if key == "" || ref == "" {
+			continue
 		}
+		if strings.HasPrefix(ref, key) || strings.HasPrefix(key, ref) {
+			match, found = runs, found+1
+		}
+	}
+	if found == 1 {
+		return append([]ghapi.CheckRun(nil), match...), nil
 	}
 	return nil, nil
 }
@@ -583,15 +597,13 @@ func TestRenewLeaderRespectsLiveLease(t *testing.T) {
 // with Codex's historical default trigger: post at fire time exactly when it
 // is configured-required (parseCoBots' codex rule).
 func codexCoBots(requiredBots []string) []CoBotConfig {
-	trigger := engine.TriggerNever
-	if dialect.HasCodexBot(requiredBots) {
-		trigger = engine.TriggerAlways
+	// Derived from the production parser so the command, grace, and the
+	// required→always mapping cannot drift from what crq actually does.
+	co, err := parseCoBots(map[string]string{"CRQ_COBOTS": "codex"}, requiredBots)
+	if err != nil {
+		panic("parseCoBots codex: " + err.Error())
 	}
-	return []CoBotConfig{{
-		Login: dialect.CodexBotLogin, Name: "codex", Command: "@codex review",
-		Trigger: trigger, Required: dialect.HasCodexBot(requiredBots),
-		SelfHealGrace: 10 * time.Minute,
-	}}
+	return co
 }
 
 func firingConfig() Config {

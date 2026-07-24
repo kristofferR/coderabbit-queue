@@ -656,10 +656,19 @@ func TestListCheckRunsEnvelopePagination(t *testing.T) {
 // envelope instead of failing or double-charging the REST quota.
 func TestListCheckRunsRidesETagCache(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "test-token")
-	var calls int32
+	var calls, conditional int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if atomic.AddInt32(&calls, 1) > 1 && r.Header.Get("If-None-Match") == `"v1"` {
+		n := atomic.AddInt32(&calls, 1)
+		if r.Header.Get("If-None-Match") == `"v1"` {
+			atomic.AddInt32(&conditional, 1)
 			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		// A second unconditional request means the ETag was not replayed. Fail
+		// loudly instead of serving 200 again, which let the old assertion
+		// (2 calls, same payload) pass even when caching had regressed.
+		if n > 1 {
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("ETag", `"v1"`)
@@ -687,5 +696,8 @@ func TestListCheckRunsRidesETagCache(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 2 {
 		t.Fatalf("expected 2 HTTP calls (200 then 304), got %d", got)
+	}
+	if got := atomic.LoadInt32(&conditional); got != 1 {
+		t.Fatalf("the second call must carry If-None-Match, got %d conditional requests", got)
 	}
 }

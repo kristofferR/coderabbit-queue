@@ -371,9 +371,11 @@ func TestCommandHasCompletionReply(t *testing.T) {
 	}
 }
 
-// TestDecideCodexPost is the Codex trigger-post decision matrix: crq posts its Codex
-// command only for a configured-required Codex that does not auto-review and has
-// not already been asked (evidence, an existing command, or a recorded id).
+// TestDecideCodexPost is the Codex trigger-post decision matrix. Posting is now
+// governed by CoReviewerPolicy.Trigger, not by RequiredBots membership — these
+// cases run under the always-mode policy withCodex builds, and assert the
+// mode-independent guards: no auto-review, no live command, no recorded id, and
+// no existing head evidence.
 func TestDecideCodexPost(t *testing.T) {
 	codexReq := Policy{
 		Bot:          "coderabbitai[bot]",

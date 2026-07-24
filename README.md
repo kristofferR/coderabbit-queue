@@ -432,6 +432,11 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_COBOT_<NAME>_CMD` | `@codex review` / `bugbot run` / `@macroscope-app review` | that bot's trigger comment; empty forces `never` |
 | `CRQ_COBOT_<NAME>_GRACE` | `10m` | how long a `selfheal` trigger waits for the bot to show up on its own before nudging |
 | `CRQ_RL_CO_DEGRADE` | on | while CodeRabbit is rate-limited, run co-reviewer-only rounds instead of waiting the window out; set `0` to disable (legacy alias: `CRQ_RL_CODEX_DEGRADE`) |
+
+The pre-co-reviewer Codex variables are still read as legacy aliases, so existing configs keep
+working: `CRQ_CODEX_CMD` is an alias of `CRQ_COBOT_CODEX_CMD` (the per-bot key wins when both are
+set) and `CRQ_RL_CODEX_DEGRADE` an alias of `CRQ_RL_CO_DEGRADE`. Prefer the `CRQ_COBOT_*` names in
+new configuration.
 | `CRQ_FEEDBACK_BOTS` | required bots + enabled co-reviewers | bots whose findings are surfaced — a superset of required bots, so co-reviewer findings show up without gating convergence on repos where those bots aren't installed |
 | `CRQ_TZ` | `UTC` | dashboard display timezone (IANA name, e.g. `Europe/Oslo`) |
 | `CRQ_MIN_INTERVAL` | `90s` | minimum time between fired reviews |
@@ -522,8 +527,8 @@ one per push.
 but only *summarizes* private ones — CodeRabbit posts its walkthrough, tags it `🎁 Summarized by
 CodeRabbit Free`, and never submits a review, however often it is asked. crq reads that notice and
 runs the co-reviewers alone on those PRs: it posts no `@coderabbitai review`, takes no fire slot,
-spends no account quota or pacing interval, and converges the round on Codex's review instead of
-waiting out a review that cannot arrive. Every enabled co-reviewer gates such a round — they are its
+spends no account quota or pacing interval, and converges the round on whichever enabled
+co-reviewers actually respond — the completion gate keys on login, not on Codex. Every enabled co-reviewer gates such a round — they are its
 only reviewers — while a configured-but-absent bot still can't wedge it. There is nothing to
 configure and nothing to reset: upgrade to Pro and crq starts firing CodeRabbit again on the next
 observation.

@@ -360,3 +360,64 @@ func TestNormalizeFoldsLegacyCodex(t *testing.T) {
 		t.Fatalf("round-trip lost bugbot entry: %+v", back)
 	}
 }
+
+// TestClearCoClaimPrunesTheEntry covers setCo's empty() branch — the subtlest
+// path in this file: it must delete the key, nil the map when it was the last
+// entry, and zero the legacy Codex mirror. A regression that kept an all-zero
+// entry would leave "cobots" in every serialized round and, worse, leave a
+// stale legacy claim visible to old binaries.
+func TestClearCoClaimPrunesTheEntry(t *testing.T) {
+	var r Round
+	r.ClaimCo(dialect.CodexBotLogin, t0)
+	if r.CodexClaimedAt == nil || len(r.CoBots) != 1 {
+		t.Fatalf("precondition: claim must be recorded, got %+v", r)
+	}
+	r.ClearCoClaim(dialect.CodexBotLogin)
+	if r.CoBots != nil {
+		t.Fatalf("the last empty entry must prune the map, got %#v", r.CoBots)
+	}
+	if r.CodexClaimedAt != nil {
+		t.Fatalf("clearing must zero the legacy mirror, got %v", r.CodexClaimedAt)
+	}
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "cobots") {
+		t.Fatalf("a pruned map must not serialize: %s", data)
+	}
+	// Clearing one bot must not disturb another's entry.
+	var two Round
+	two.SetCoCommand("cursor[bot]", 7, t0)
+	two.ClaimCo(dialect.CodexBotLogin, t0)
+	two.ClearCoClaim(dialect.CodexBotLogin)
+	if got := two.Co("cursor[bot]").CommandID; got != 7 {
+		t.Fatalf("clearing codex disturbed bugbot's entry: %d", got)
+	}
+}
+
+// TestNormalizeFoldClearsAStaleMirror pins the direction foldLegacyCodex's doc
+// claims but nothing asserted: legacy fields are authoritative BOTH ways, so an
+// old binary that zeroed them must clear the mirror rather than leave crq
+// acting on a command that no longer exists. Also covers the archive fold.
+func TestNormalizeFoldClearsAStaleMirror(t *testing.T) {
+	var r Round
+	r.Repo, r.PR, r.Head, r.Phase = "owner/repo", 1, "abcdef123", PhaseFired
+	r.SetCoCommand(dialect.CodexBotLogin, 11, t0)
+	// Simulate an old binary clearing only the legacy fields it knows about.
+	r.CodexCommandID, r.CodexCommandedAt, r.CodexClaimedAt = 0, nil, nil
+
+	s := New()
+	s.Rounds[Key(r.Repo, r.PR)] = r
+	archived := r
+	archived.PR = 2
+	s.Archive = append(s.Archive, archived)
+	s.Normalize(t0)
+
+	if got := s.Round("owner/repo", 1).Co(dialect.CodexBotLogin).CommandID; got != 0 {
+		t.Fatalf("an emptied legacy set must clear the mirror, got command %d", got)
+	}
+	if got := s.Archive[0].Co(dialect.CodexBotLogin).CommandID; got != 0 {
+		t.Fatalf("the archive must be folded too, got command %d", got)
+	}
+}

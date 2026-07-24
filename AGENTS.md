@@ -82,9 +82,12 @@ One flow drives both the daemon and the loop:
    carries the raw reviews/comments so `Feedback` parses findings from the same
    fetch. Built once per decision.
 2. **decide** (`internal/engine`) — pure. `DecideFire` consolidates every fire
-   guard in order (open → head readable → head current → phase eligible → slot
-   free → account quota → min interval → not already reviewed → adopt/post);
-   nothing else may post the review command. `Progress` transitions a
+   guard in order: open → head readable → head current → phase eligible →
+   **primary review unavailable** → slot free → **already reviewed** → account
+   quota → min interval → adopt/post. The two bold steps resolve BEFORE the
+   slot and quota gates on purpose: neither spends CodeRabbit quota, so an
+   unrelated PR's block or in-flight review must not delay them. Nothing else
+   may post the review command. `Progress` transitions a
    fired/reviewing round. `Completion` answers convergence.
 3. **apply** (`crq/service.go`) — the only effects executor: CAS state writes +
    `PostIssueComment`. `DryRun` short-circuits apply into "report, write nothing".

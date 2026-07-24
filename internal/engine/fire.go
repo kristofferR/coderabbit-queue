@@ -167,14 +167,7 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 	// Adopt the newest already-posted command instead of posting a duplicate.
 	// observe() has already applied the adoption cutoffs (LastAttemptAt,
 	// force-push, already-answered).
-	var newest *CommandSeen
-	for i := range obs.Commands {
-		c := obs.Commands[i]
-		if newest == nil || c.CreatedAt.After(newest.CreatedAt) {
-			newest = &c
-		}
-	}
-	if newest != nil {
+	if newest := newestCommand(obs.Commands); newest != nil {
 		at := newest.CreatedAt
 		if at.IsZero() {
 			at = newest.UpdatedAt

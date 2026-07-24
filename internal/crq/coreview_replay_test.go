@@ -23,20 +23,24 @@ const (
 	macroLogin  = dialect.MacroscopeLogin
 )
 
-// defaultCoBots mirrors LoadConfig's defaults for the three known bots.
-func defaultCoBots() []CoBotConfig {
-	return []CoBotConfig{
-		{Login: dialect.CodexBotLogin, Name: "codex", Command: "@codex review", Trigger: engine.TriggerNever, SelfHealGrace: 10 * time.Minute},
-		{Login: bugbotLogin, Name: "bugbot", Command: "bugbot run", Trigger: engine.TriggerSelfHeal, SelfHealGrace: 10 * time.Minute},
-		{Login: macroLogin, Name: "macroscope", Command: "@macroscope-app review", Trigger: engine.TriggerSelfHeal, SelfHealGrace: 10 * time.Minute},
+// defaultCoBots returns the production defaults by running the real parser on
+// an empty environment. Duplicating the defaults here let them drift silently:
+// a new co-reviewer, or a changed trigger default, would leave replay coverage
+// asserting a world that no longer exists.
+func defaultCoBots(t *testing.T) []CoBotConfig {
+	t.Helper()
+	co, err := parseCoBots(map[string]string{}, nil)
+	if err != nil {
+		t.Fatalf("parseCoBots defaults: %v", err)
 	}
+	return co
 }
 
 func newCoReplayFixture(t *testing.T, base time.Time, mutate func(*Config)) *replayFixture {
 	t.Helper()
 	clk := newReplayClock(base)
 	cfg := replayConfig()
-	cfg.CoBots = defaultCoBots()
+	cfg.CoBots = defaultCoBots(t)
 	cfg.FeedbackBots = unionBots(cfg.RequiredBots, []string{dialect.CodexBotLogin, bugbotLogin, macroLogin})
 	if mutate != nil {
 		mutate(&cfg)
@@ -58,6 +62,25 @@ func requireBugbot(cfg *Config) {
 			cfg.CoBots[i].Required = true
 		}
 	}
+}
+
+// macroscopeSettled appends Macroscope's settled marker to a finding body,
+// taking the wording from the golden corpus rather than a literal — this
+// file's invariant is that a reword which breaks the classifier breaks the
+// replay too, and a hardcoded marker would silently survive one.
+func macroscopeSettled(t *testing.T, body, sha string) string {
+	t.Helper()
+	settled := corpusMessage(t, "macroscope/inline-finding-resolved.md")
+	marker := dialect.MacroscopeResolvedInSHA(settled)
+	if marker == "" {
+		t.Fatal("corpus resolved-finding no longer carries a settled marker")
+	}
+	idx := strings.Index(settled, "✅")
+	if idx < 0 {
+		t.Fatal("corpus resolved-finding no longer uses the ✅ settled form")
+	}
+	line := strings.SplitN(settled[idx:], "\n", 2)[0]
+	return body + "\n\n" + strings.Replace(line, marker, sha, 1)
 }
 
 // corpusCheckRun loads one captured check-run object from the dialect corpus.
@@ -301,7 +324,7 @@ func TestCoReplayMacroscopeResolvedEditSettlesFinding(t *testing.T) {
 	// clears naturally (thread rebuttal machinery untouched: nothing surfaces
 	// from these single-comment threads).
 	f.threadsGraphQL([]map[string]any{
-		threadNode("PRRT_1", false, "macroscopeapp", "preview/handlers.ts", 57, 901, "<!-- MURMUR_IGNORE -->\n"+open+"\n\n✅ Resolved in "+sha, base.Add(-time.Minute)),
+		threadNode("PRRT_1", false, "macroscopeapp", "preview/handlers.ts", 57, 901, macroscopeSettled(t, open, sha), base.Add(-time.Minute)),
 		threadNode("PRRT_2", false, "macroscopeapp", "Layers/ProjectionPipeline.ts", 1554, 902, resolved, base.Add(-4*time.Minute)),
 		threadNode("PRRT_3", false, "macroscopeapp", "home/homeThreadList.ts", 105, 903, noLonger, base.Add(-4*time.Minute)),
 	})

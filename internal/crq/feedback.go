@@ -1204,11 +1204,6 @@ func dedupeFindings(in []dialect.Finding, suppressPromptAt, settledStableIDs map
 	return out
 }
 
-// skipAppliesToHead reports whether a "Review skipped" notice concerns the
-// head under review. The refusal is per-head and narrowing the PR is the fix,
-// so a skip of an EARLIER head must not keep surfacing: Loop treats findings as
-// blocking before it enqueues, which would stop the replacement head from ever
-// being submitted — the repair would permanently disable the reviewer.
 // skipPredatesHead reports whether a skip notice was posted before the current
 // head existed. A notice naming no commit cannot be bound by SHA, so it falls
 // back to the same head-commit cutoff every other issue comment uses — without
@@ -1222,6 +1217,11 @@ func skipPredatesHead(comment ghapi.IssueComment, headCutoff func() time.Time) b
 	return !cutoff.IsZero() && comment.CreatedAt.Before(cutoff)
 }
 
+// skipAppliesToHead reports whether a "Review skipped" notice concerns the
+// head under review. The refusal is per-head and narrowing the PR is the fix,
+// so a skip of an EARLIER head must not keep surfacing: Loop treats findings as
+// blocking before it enqueues, which would stop the replacement head from ever
+// being submitted — the repair would permanently disable the reviewer.
 func skipAppliesToHead(body, head string) bool {
 	skipped := dialect.ReviewSkippedHeadSHA(body)
 	if skipped == "" || head == "" {

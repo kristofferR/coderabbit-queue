@@ -123,8 +123,8 @@ Summary-only plans: on a private repo under a Free CodeRabbit plan the bot posts
 never a line-by-line review ("Summarized by CodeRabbit Free … upgrade … for a comprehensive
 line-by-line review"). crq reads that notice and runs the co-reviewers alone there — no
 `@coderabbitai review` is posted, no fire slot or account quota is spent, and the round converges on
-Codex's review instead of hanging on one that cannot arrive. Public repos get Pro-grade reviews for
-free and are unaffected. Nothing to configure: upgrade the plan and crq resumes firing CodeRabbit on
+the enabled co-reviewers' evidence instead of hanging on a review that cannot
+arrive. Public repos get Pro-grade reviews for free and are unaffected. Nothing to configure: upgrade the plan and crq resumes firing CodeRabbit on
 the next observation.
 
 Resolve addressed threads on GitHub (crq keys off GitHub resolution state; a finding keeps
