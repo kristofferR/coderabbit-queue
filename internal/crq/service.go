@@ -30,6 +30,7 @@ type GitHubAPI interface {
 	ListReviewComments(context.Context, string, int) ([]ghapi.ReviewComment, error)
 	ListIssueReactions(context.Context, string, int) ([]ghapi.Reaction, error)
 	ListCommentReactions(context.Context, string, int64) ([]ghapi.Reaction, error)
+	ListCheckRuns(context.Context, string, string) ([]ghapi.CheckRun, error)
 	PostIssueComment(context.Context, string, int, string) (ghapi.IssueComment, error)
 	DeleteIssueComment(context.Context, string, int64) error
 	CreateIssue(context.Context, string, string, string) (ghapi.Issue, error)

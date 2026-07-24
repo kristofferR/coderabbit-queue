@@ -25,6 +25,8 @@ type fakeGitHub struct {
 	reviewComments  map[string][]ghapi.ReviewComment
 	issueReactions  map[string][]ghapi.Reaction
 	reactions       map[int64][]ghapi.Reaction
+	checkRuns       map[string][]ghapi.CheckRun // key: ref (short or full sha)
+	checkRunErrs    map[string]error
 	posted          []string
 	deleted         []int64
 	commentID       int64
@@ -60,6 +62,32 @@ func newFakeGitHub() *fakeGitHub {
 }
 
 func fakeKey(repo string, pr int) string { return QueueKey(repo, pr) }
+
+// ListCheckRuns serves the runs stored under the requested ref, tolerating a
+// stored short-SHA key for a full-SHA request and vice versa (observe fetches
+// by the pull's full head SHA).
+func (f *fakeGitHub) ListCheckRuns(_ context.Context, _ string, ref string) ([]ghapi.CheckRun, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.checkRunErrs[ref]; err != nil {
+		return nil, err
+	}
+	for key, runs := range f.checkRuns {
+		if strings.HasPrefix(ref, key) || strings.HasPrefix(key, ref) {
+			return append([]ghapi.CheckRun(nil), runs...), nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *fakeGitHub) setCheckRuns(ref string, runs ...ghapi.CheckRun) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.checkRuns == nil {
+		f.checkRuns = map[string][]ghapi.CheckRun{}
+	}
+	f.checkRuns[ref] = runs
+}
 
 func (f *fakeGitHub) GetPull(_ context.Context, repo string, pr int) (ghapi.Pull, error) {
 	f.mu.Lock()
