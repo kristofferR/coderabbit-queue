@@ -14,6 +14,15 @@ import (
 // runs count as evidence/activity alongside reviews and clean summaries
 // because Bugbot's clean rounds exist ONLY as a check run.
 
+// roundCutoff is the round-window floor: the fire time (UTC), or zero when the
+// round has not fired.
+func roundCutoff(r state.Round) time.Time {
+	if r.FiredAt != nil {
+		return r.FiredAt.UTC()
+	}
+	return time.Time{}
+}
+
 // roundCoCommandID reads the trigger comment recorded for login this round,
 // falling back to the legacy Codex fields for rounds built directly (tests)
 // rather than loaded through state.Normalize's fold.
@@ -38,15 +47,11 @@ func roundCoCommandedAt(r state.Round, login string) *time.Time {
 }
 
 // eventConcerns reports whether a classified event concerns the co-reviewer
-// login: by the classifier's For attribution when present, otherwise by
-// author. A For-less co-command is attributed to Codex — the only bot whose
-// commands existed before For did (migration shim for hand-built events).
+// login: by the classifier's For attribution when present, otherwise by author
+// (a bot's own comments carry it even when For was not set).
 func eventConcerns(ev dialect.BotEvent, login string) bool {
 	if ev.For != "" {
 		return sameBot(ev.For, login)
-	}
-	if ev.Kind == dialect.EvCoCommand {
-		return dialect.IsCodexBot(login)
 	}
 	return sameBot(ev.Bot, login)
 }

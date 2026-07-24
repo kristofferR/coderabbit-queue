@@ -71,16 +71,16 @@ func TestGoldenClassification(t *testing.T) {
 		// must stay actionable (a substring match dropped four real findings).
 		{file: "coderabbit/thread-ack-also-applies.md", nonActionable: true},
 		{file: "coderabbit/finding-with-also-applies-trailer.md"},
-		{file: "codex/clean-summary-legacy.md", codexClean: true, noAction: true, nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCodexClean},
-		{file: "codex/clean-summary-tada.md", codexClean: true, noAction: true, nonActionable: true, reviewedSHA: "4d9e8bca82", author: "chatgpt-codex-connector[bot]", wantKind: EvCodexClean},
-		{file: "codex/usage-limit.md", codexUsageLimit: true, nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCodexUsageLimit},
+		{file: "codex/clean-summary-legacy.md", codexClean: true, noAction: true, nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCoClean},
+		{file: "codex/clean-summary-tada.md", codexClean: true, noAction: true, nonActionable: true, reviewedSHA: "4d9e8bca82", author: "chatgpt-codex-connector[bot]", wantKind: EvCoClean},
+		{file: "codex/usage-limit.md", codexUsageLimit: true, nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCoUnable},
 		// Codex's "create an environment" platform ad, posted as a thread reply —
 		// never a finding, never a rebuttal.
-		{file: "codex/environment-notice.md", nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCodexNotice},
-		{file: "codex/review-command.md", author: "kristofferR", wantKind: EvCodexCommand},
+		{file: "codex/environment-notice.md", nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCoNotice},
+		{file: "codex/review-command.md", author: "kristofferR", wantKind: EvCoCommand},
 	}
 	base := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
-	classifier := Classifier{CodeRabbit: goldenCR, Bot: "coderabbitai[bot]", ReviewCommand: "@coderabbitai review", CodexCommand: "@codex review"}
+	classifier := Classifier{CodeRabbit: goldenCR, Bot: "coderabbitai[bot]", ReviewCommand: "@coderabbitai review", CoReviewers: KnownCoReviewers()}
 	for _, tc := range cases {
 		t.Run(tc.file, func(t *testing.T) {
 			body := readGolden(t, tc.file)

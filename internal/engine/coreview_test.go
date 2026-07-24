@@ -188,21 +188,26 @@ func TestDecideFireMultiBotPostCo(t *testing.T) {
 	head := "abcdef123"
 	queued := state.Round{Repo: "o/r", PR: 1, Head: head, Phase: state.PhaseQueued}
 	p := Policy{Bot: "coderabbitai[bot]",
-		RequiredBots:          []string{"coderabbitai[bot]", dialect.CodexBotLogin, bugbotLogin},
-		RateLimitCodexDegrade: true,
+		RequiredBots:       []string{"coderabbitai[bot]", dialect.CodexBotLogin, bugbotLogin},
+		RateLimitCoDegrade: true,
 		CoReviewers: []CoReviewerPolicy{
 			{Login: dialect.CodexBotLogin, Command: "@codex review", Trigger: TriggerAlways},
 			{Login: bugbotLogin, Command: "bugbot run", Trigger: TriggerAlways},
 		}}
 	free := Global{SlotFree: true}
 
+	hasLogin := func(logins []string, want string) bool {
+		for _, l := range logins {
+			if dialect.NormalizeBotName(l) == dialect.NormalizeBotName(want) {
+				return true
+			}
+		}
+		return false
+	}
 	wantBoth := func(t *testing.T, d FireDecision) {
 		t.Helper()
-		if len(d.PostCo) != 2 || !hasCodexLogin(d.PostCo) {
+		if len(d.PostCo) != 2 || !hasLogin(d.PostCo, dialect.CodexBotLogin) || !hasLogin(d.PostCo, bugbotLogin) {
 			t.Fatalf("PostCo = %v, want codex+bugbot", d.PostCo)
-		}
-		if !d.PostCodex {
-			t.Fatal("PostCodex mirror must be set while codex is in PostCo")
 		}
 	}
 

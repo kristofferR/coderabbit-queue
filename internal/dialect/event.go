@@ -35,15 +35,6 @@ const (
 	EvCoVerdict                 // Macroscope approvability verdict (informational only)
 )
 
-// Deprecated: Codex-named aliases for the generic co-reviewer kinds, kept
-// while engine/crq migrate. In-memory only — never persisted.
-const (
-	EvCodexCommand    = EvCoCommand
-	EvCodexClean      = EvCoClean
-	EvCodexUsageLimit = EvCoUnable
-	EvCodexNotice     = EvCoNotice
-)
-
 // BotEvent is one classified issue comment. CreatedAt orders command↔reply
 // pairing; UpdatedAt matters because CodeRabbit edits its top summary and its
 // rate-limit comment in place.
@@ -93,30 +84,12 @@ func (e BotEvent) ObservedTime() time.Time {
 // Classifier classifies issue comments into BotEvents. Bot is the configured
 // CodeRabbit login; ReviewCommand is the exact trigger comment body;
 // CoReviewers are the enabled co-reviewer entries with their config-resolved
-// trigger commands (a nil slice falls back to the CodexCommand shim).
+// trigger commands (empty: no co-reviewer classification at all).
 type Classifier struct {
 	CodeRabbit    CodeRabbit
 	Bot           string
 	ReviewCommand string
 	CoReviewers   []CoReviewer
-	// CodexCommand is the exact Codex trigger comment body ("" disables
-	// Codex-command matching).
-	//
-	// Deprecated: shim for callers that predate CoReviewers — when CoReviewers
-	// is nil, Classify synthesizes the Codex registry entry from this field.
-	CodexCommand string
-}
-
-// coReviewers resolves the co-reviewer set: the explicit list when set,
-// otherwise the legacy Codex-only shim (preserving that Codex comments
-// classify even with command matching disabled).
-func (c Classifier) coReviewers() []CoReviewer {
-	if c.CoReviewers != nil {
-		return c.CoReviewers
-	}
-	codex, _ := CoReviewerByName("codex")
-	codex.Command = strings.TrimSpace(c.CodexCommand)
-	return []CoReviewer{codex}
 }
 
 // Classify maps one issue comment to its BotEvent. Unrecognized comments
@@ -130,15 +103,15 @@ func (c Classifier) Classify(author, body string, id int64, createdAt, updatedAt
 		ev.Kind = EvCommand
 		return ev
 	}
-	coReviewers := c.coReviewers()
-	for _, co := range coReviewers {
+
+	for _, co := range c.CoReviewers {
 		if co.matchesCommand(trimmed) && !co.Is(author) {
 			ev.Kind = EvCoCommand
 			ev.For = co.Login
 			return ev
 		}
 	}
-	for _, co := range coReviewers {
+	for _, co := range c.CoReviewers {
 		if !co.Is(author) {
 			continue
 		}

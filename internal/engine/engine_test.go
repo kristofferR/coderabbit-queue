@@ -184,7 +184,7 @@ func TestInflightTimeoutCarriesCooldown(t *testing.T) {
 func TestReviewingRoundDeadlineBoundsCoReviewWait(t *testing.T) {
 	codexReq := policy
 	codexReq.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
-	codexReq.CodexCommand = "@codex review"
+	codexReq = withCodex(codexReq, "@codex review")
 
 	reviewing := func() state.Round {
 		r := firedRound(t, "abcdef123")
@@ -371,14 +371,14 @@ func TestCommandHasCompletionReply(t *testing.T) {
 	}
 }
 
-// TestDecideCodexPost is the PostCodex decision matrix: crq posts its Codex
+// TestDecideCodexPost is the Codex trigger-post decision matrix: crq posts its Codex
 // command only for a configured-required Codex that does not auto-review and has
 // not already been asked (evidence, an existing command, or a recorded id).
 func TestDecideCodexPost(t *testing.T) {
 	codexReq := Policy{
 		Bot:          "coderabbitai[bot]",
 		RequiredBots: []string{"coderabbitai[bot]", dialect.CodexBotLogin},
-		CodexCommand: "@codex review",
+		CoReviewers:  []CoReviewerPolicy{{Login: dialect.CodexBotLogin, Command: "@codex review", Trigger: TriggerAlways}},
 	}
 	head := "abcdef123"
 	base := Observation{Head: head, Open: true}
@@ -393,7 +393,7 @@ func TestDecideCodexPost(t *testing.T) {
 		want           bool
 	}{
 		{name: "required, no auto, first fire", round: state.Round{Head: head}, obs: base, policy: codexReq, want: true},
-		{name: "auto-active never posts", round: state.Round{Head: head}, obs: Observation{Head: head, Open: true, CodexAutoActive: true}, policy: codexReq, want: false},
+		{name: "auto-active never posts", round: state.Round{Head: head}, obs: Observation{Head: head, Open: true, Co: codexSeen(CoSeen{AutoActive: true})}, policy: codexReq, want: false},
 		{name: "already reviewed head", round: state.Round{Head: head}, obs: Observation{Head: head, Open: true, Reviews: []ReviewSeen{codexReviewHead}}, policy: codexReq, want: false},
 		{name: "command already present", round: state.Round{Head: head}, obs: base, policy: codexReq, commandPresent: true, want: false},
 		{name: "not required", round: state.Round{Head: head}, obs: base, policy: policy, want: false},
@@ -402,7 +402,7 @@ func TestDecideCodexPost(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := DecideCodexPost(tc.round, tc.obs, tc.policy, tc.commandPresent); got != tc.want {
+			if got := DecideCoPost(tc.round, tc.obs, codexCP(tc.policy), tc.commandPresent, time.Time{}, time.Time{}); got != tc.want {
 				t.Fatalf("DecideCodexPost = %v, want %v", got, tc.want)
 			}
 		})
@@ -417,10 +417,10 @@ func TestCodexAutoActive(t *testing.T) {
 		return ReviewSeen{Bot: dialect.CodexBotLogin, Commit: "abcdef1234567890", SubmittedAt: at}
 	}
 	codexCommand := func(at time.Time) dialect.BotEvent {
-		return dialect.BotEvent{Kind: dialect.EvCodexCommand, Bot: "kristofferR", CommentID: 1, CreatedAt: at, UpdatedAt: at}
+		return dialect.BotEvent{Kind: dialect.EvCoCommand, Bot: "kristofferR", For: dialect.CodexBotLogin, CommentID: 1, CreatedAt: at, UpdatedAt: at}
 	}
 	codexClean := func(at time.Time) dialect.BotEvent {
-		return dialect.BotEvent{Kind: dialect.EvCodexClean, Bot: dialect.CodexBotLogin, SHA: "abcdef1234", CommentID: 2, CreatedAt: at, UpdatedAt: at}
+		return dialect.BotEvent{Kind: dialect.EvCoClean, Bot: dialect.CodexBotLogin, SHA: "abcdef1234", CommentID: 2, CreatedAt: at, UpdatedAt: at}
 	}
 	t1 := t0.Add(time.Hour)
 
@@ -459,8 +459,8 @@ func TestCodexAutoActive(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := CodexAutoActive(tc.obs); got != tc.want {
-				t.Fatalf("CodexAutoActive = %v, want %v", got, tc.want)
+			if got := CoAutoActive(tc.obs, dialect.CodexBotLogin); got != tc.want {
+				t.Fatalf("CoAutoActive(codex) = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -476,7 +476,7 @@ func TestDecideFireCodexDedupe(t *testing.T) {
 	queued := state.Round{Repo: "owner/repo", PR: 448, Head: head, Phase: state.PhaseQueued, Seq: 1}
 	codexReq := policy
 	codexReq.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
-	codexReq.CodexCommand = "@codex review"
+	codexReq = withCodex(codexReq, "@codex review")
 
 	crReviewed := ReviewSeen{Bot: "coderabbitai", Commit: "abcdef1234567890", SubmittedAt: now}
 	codexReviewed := ReviewSeen{Bot: dialect.CodexBotLogin, Commit: "abcdef1234567890", SubmittedAt: now}
@@ -484,18 +484,18 @@ func TestDecideFireCodexDedupe(t *testing.T) {
 	// CodeRabbit reviewed the head; Codex required with no evidence and crq may
 	// post → command Codex alone.
 	obs := Observation{Head: head, Open: true, Reviews: []ReviewSeen{crReviewed}}
-	if d := DecideFire(free, queued, obs, now, codexReq); d.Verdict != FireCodexOnly {
+	if d := DecideFire(free, queued, obs, now, codexReq); d.Verdict != FireCoOnly {
 		t.Fatalf("coderabbit-reviewed head with a gating codex must command codex, got %+v", d)
 	}
 	// Same, but Codex auto-reviews: crq must not post; wait for its own review,
 	// bounded (FireCoReviewWait) rather than left queued with no deadline.
-	autoObs := Observation{Head: head, Open: true, CodexAutoActive: true, Reviews: []ReviewSeen{crReviewed}}
+	autoObs := Observation{Head: head, Open: true, Co: codexSeen(CoSeen{AutoActive: true}), Reviews: []ReviewSeen{crReviewed}}
 	if d := DecideFire(free, queued, autoObs, now, codexReq); d.Verdict != FireCoReviewWait {
 		t.Fatalf("auto-active codex must wait (bounded), not dedupe, got %+v", d)
 	}
 	// A live `@codex review` command already on the PR: crq must not repost it;
 	// wait for its answer, bounded.
-	cmdObs := Observation{Head: head, Open: true, Reviews: []ReviewSeen{crReviewed}, CodexCommands: []CommandSeen{{ID: 55, CreatedAt: now}}}
+	cmdObs := Observation{Head: head, Open: true, Reviews: []ReviewSeen{crReviewed}, Co: codexSeen(CoSeen{Commands: []CommandSeen{{ID: 55, CreatedAt: now}}})}
 	if d := DecideFire(free, queued, cmdObs, now, codexReq); d.Verdict != FireCoReviewWait {
 		t.Fatalf("an outstanding codex command must wait (bounded), got %+v", d)
 	}
@@ -512,7 +512,7 @@ func TestDecideFireCodexDedupe(t *testing.T) {
 	// obtain a Codex review, so it must dedupe rather than wedge the round waiting
 	// forever — the feedback gate surfaces Codex as still pending.
 	noCmd := codexReq
-	noCmd.CodexCommand = ""
+	noCmd = withCodex(noCmd, "")
 	if d := DecideFire(free, queued, obs, now, noCmd); d.Verdict != FireDedupe {
 		t.Fatalf("a required-but-uncommandable codex must dedupe, not wedge, got %+v", d)
 	}
@@ -523,27 +523,30 @@ func TestDecideFireCodexDedupe(t *testing.T) {
 // disengages that dynamic gate, and a configured-required Codex is left gating
 // regardless of the usage limit.
 func TestDynamicCodexGate(t *testing.T) {
+	// Codex is enabled (wanted) but NOT required: the gate must come from
+	// observed participation, not configuration.
+	codexEnabled := withCodex(policy, "@codex review")
 	r := firedRound(t, "abcdef123")
 	cutoff := r.FiredAt.UTC()
 	crReview := ReviewSeen{Bot: "coderabbitai[bot]", Commit: "abcdef1234567890", SubmittedAt: cutoff.Add(time.Minute)}
 	codexReview := ReviewSeen{Bot: dialect.CodexBotLogin, Commit: "abcdef1234567890", SubmittedAt: cutoff.Add(time.Minute)}
-	usageLimit := dialect.BotEvent{Kind: dialect.EvCodexUsageLimit, Bot: dialect.CodexBotLogin, CommentID: 700,
+	usageLimit := dialect.BotEvent{Kind: dialect.EvCoUnable, Bot: dialect.CodexBotLogin, CommentID: 700,
 		CreatedAt: cutoff.Add(30 * time.Second), UpdatedAt: cutoff.Add(30 * time.Second)}
 
 	// Codex auto-reviews the PR but hasn't reviewed the head yet: the dynamic gate
 	// holds even though only CodeRabbit is configured-required.
-	held := Observation{Head: "abcdef123", Open: true, CodexAutoActive: true, Reviews: []ReviewSeen{crReview}}
-	if got := Completion(r, held, policy); got.Done {
+	held := Observation{Head: "abcdef123", Open: true, Co: codexSeen(CoSeen{AutoActive: true}), Reviews: []ReviewSeen{crReview}}
+	if got := Completion(r, held, codexEnabled); got.Done {
 		t.Fatalf("an active Codex must gate the round until it reviews the head: %+v", got)
 	}
 	// Once Codex reviews the head, it converges.
 	held.Reviews = append(held.Reviews, codexReview)
-	if got := Completion(r, held, policy); !got.Done {
+	if got := Completion(r, held, codexEnabled); !got.Done {
 		t.Fatalf("the dynamic gate must converge once Codex reviews the head: %+v", got)
 	}
 	// A usage-limit notice disengages the DYNAMIC gate: CodeRabbit alone converges.
-	limited := Observation{Head: "abcdef123", Open: true, CodexAutoActive: true, Reviews: []ReviewSeen{crReview}, Events: []dialect.BotEvent{usageLimit}}
-	if got := Completion(r, limited, policy); !got.Done {
+	limited := Observation{Head: "abcdef123", Open: true, Co: codexSeen(CoSeen{AutoActive: true}), Reviews: []ReviewSeen{crReview}, Events: []dialect.BotEvent{usageLimit}}
+	if got := Completion(r, limited, codexEnabled); !got.Done {
 		t.Fatalf("a Codex usage limit must disengage the dynamic gate: %+v", got)
 	}
 	// The configured-required gate is unchanged by a usage limit: it still waits.
@@ -556,12 +559,15 @@ func TestDynamicCodexGate(t *testing.T) {
 
 // TestCodexGatesCleanSummary ports the codexInactiveOrThumbed rules.
 func TestCodexGatesCleanSummary(t *testing.T) {
+	// Codex is enabled (wanted) but NOT required: the gate must come from
+	// observed participation, not configuration.
+	codexEnabled := withCodex(policy, "@codex review")
 	r := firedRound(t, "abcdef123")
 	noAction := dialect.BotEvent{Kind: dialect.EvNoAction, Bot: "coderabbitai[bot]", CommentID: 2000,
 		CreatedAt: t0.Add(30 * time.Second), UpdatedAt: t0.Add(30 * time.Second)}
 
 	// Codex inactive: the clean summary converges alone.
-	if got := Completion(r, Observation{Head: "abcdef123", Open: true, Events: []dialect.BotEvent{noAction}}, policy); !got.Done {
+	if got := Completion(r, Observation{Head: "abcdef123", Open: true, Events: []dialect.BotEvent{noAction}}, codexEnabled); !got.Done {
 		t.Fatalf("codex-inactive clean summary must converge: %+v", got)
 	}
 
@@ -570,13 +576,13 @@ func TestCodexGatesCleanSummary(t *testing.T) {
 	codexComment := dialect.BotEvent{Kind: dialect.EvOther, Bot: dialect.CodexBotLogin, CommentID: 2001,
 		CreatedAt: t0.Add(20 * time.Second), UpdatedAt: t0.Add(20 * time.Second)}
 	obs := Observation{Head: "abcdef123", Open: true, Events: []dialect.BotEvent{noAction, codexComment}}
-	if got := Completion(r, obs, policy); got.Done {
+	if got := Completion(r, obs, codexEnabled); got.Done {
 		t.Fatalf("active codex without review must block: %+v", got)
 	}
 
 	// A thumbs-up unblocks it.
 	obs.CodexThumbsUp = true
-	if got := Completion(r, obs, policy); !got.Done {
+	if got := Completion(r, obs, codexEnabled); !got.Done {
 		t.Fatalf("codex thumbs-up must unblock: %+v", got)
 	}
 
@@ -584,7 +590,7 @@ func TestCodexGatesCleanSummary(t *testing.T) {
 	// Codex gates the round, flips its ReviewedBy too.
 	gated := policy
 	gated.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
-	codexClean := dialect.BotEvent{Kind: dialect.EvCodexClean, Bot: dialect.CodexBotLogin, SHA: "abcdef1234",
+	codexClean := dialect.BotEvent{Kind: dialect.EvCoClean, Bot: dialect.CodexBotLogin, SHA: "abcdef1234",
 		CommentID: 2002, CreatedAt: t0.Add(40 * time.Second), UpdatedAt: t0.Add(40 * time.Second)}
 	got := Completion(r, Observation{Head: "abcdef123", Open: true, Events: []dialect.BotEvent{noAction, codexClean}}, gated)
 	if !got.Done {
@@ -599,7 +605,7 @@ func TestCodexGatesCleanSummary(t *testing.T) {
 func TestCodexResolutionBypassesAccountBlock(t *testing.T) {
 	gated := policy
 	gated.RequiredBots = []string{policy.Bot, dialect.CodexBotLogin}
-	gated.CodexCommand = "@codex review"
+	gated = withCodex(gated, "@codex review")
 	now := t0.Add(10 * time.Minute)
 	blocked := now.Add(30 * time.Minute)
 	last := now.Add(-time.Second)
@@ -609,7 +615,7 @@ func TestCodexResolutionBypassesAccountBlock(t *testing.T) {
 	obs := Observation{Head: "abcdef123", Open: true,
 		Reviews: []ReviewSeen{{Bot: policy.Bot, ReviewID: 1, Commit: "abcdef1234567890", SubmittedAt: now}}}
 
-	if d := DecideFire(g, queued, obs, now, gated); d.Verdict != FireCodexOnly {
+	if d := DecideFire(g, queued, obs, now, gated); d.Verdict != FireCoOnly {
 		t.Fatalf("blocked account must not delay a codex-only fire, got %+v", d)
 	}
 	// Codex satisfied → plain dedupe, also unblocked.
@@ -645,10 +651,10 @@ func TestCodexOnlyEligible(t *testing.T) {
 	now := t0.Add(5 * time.Minute)
 	blocked := now.Add(25 * time.Minute)
 	expired := now.Add(-time.Minute)
-	usageLimit := dialect.BotEvent{Kind: dialect.EvCodexUsageLimit, Bot: dialect.CodexBotLogin, CommentID: 700,
+	usageLimit := dialect.BotEvent{Kind: dialect.EvCoUnable, Bot: dialect.CodexBotLogin, CommentID: 700,
 		CreatedAt: r.FiredAt.Add(30 * time.Second), UpdatedAt: r.FiredAt.Add(30 * time.Second)}
 
-	active := Observation{Head: "abcdef123", Open: true, CodexActiveThisRound: true}
+	active := Observation{Head: "abcdef123", Open: true, Co: codexSeen(CoSeen{ActiveThisRound: true})}
 	if CodexOnlyEligible(r, active, nil, now) {
 		t.Fatal("no block must not degrade")
 	}
@@ -660,15 +666,15 @@ func TestCodexOnlyEligible(t *testing.T) {
 	}
 	// Auto-activity alone predicts evidence; it does not qualify until Codex
 	// actually responds to this head/round.
-	auto := Observation{Head: "abcdef123", Open: true, CodexAutoActive: true}
+	auto := Observation{Head: "abcdef123", Open: true, Co: codexSeen(CoSeen{AutoActive: true})}
 	if CodexOnlyEligible(r, auto, &blocked, now) {
 		t.Fatal("auto-activity without current evidence must not degrade")
 	}
-	configOnly := Observation{Head: "abcdef123", Open: true, CodexCommands: []CommandSeen{{ID: 55, CreatedAt: now}}}
+	configOnly := Observation{Head: "abcdef123", Open: true, Co: codexSeen(CoSeen{Commands: []CommandSeen{{ID: 55, CreatedAt: now}}})}
 	if CodexOnlyEligible(r, configOnly, &blocked, now) {
 		t.Fatal("a live command without observed codex evidence must not degrade")
 	}
-	limited := Observation{Head: "abcdef123", Open: true, CodexActiveThisRound: true, Events: []dialect.BotEvent{usageLimit}}
+	limited := Observation{Head: "abcdef123", Open: true, Co: codexSeen(CoSeen{ActiveThisRound: true}), Events: []dialect.BotEvent{usageLimit}}
 	if CodexOnlyEligible(r, limited, &blocked, now) {
 		t.Fatal("a codex usage limit since the fire must disengage the degrade")
 	}
@@ -730,15 +736,15 @@ func TestDecideFireBlockedCodexDeferred(t *testing.T) {
 
 	degrade := policy
 	degrade.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
-	degrade.CodexCommand = "@codex review"
-	degrade.RateLimitCodexDegrade = true
+	degrade = withCodex(degrade, "@codex review")
+	degrade.RateLimitCoDegrade = true
 
-	if d := DecideFire(g, queued, open, now, degrade); d.Verdict != FireCodexDeferred {
+	if d := DecideFire(g, queued, open, now, degrade); d.Verdict != FireCoDeferred {
 		t.Fatalf("blocked + degrade + postable codex must defer to codex, got %+v", d)
 	}
 	// Flag off → today's behavior.
 	off := degrade
-	off.RateLimitCodexDegrade = false
+	off.RateLimitCoDegrade = false
 	if d := DecideFire(g, queued, open, now, off); d.Verdict != FireNo {
 		t.Fatalf("degrade off must stay FireNo blocked, got %+v", d)
 	}
@@ -750,22 +756,23 @@ func TestDecideFireBlockedCodexDeferred(t *testing.T) {
 	}
 	// A live command on the PR is adopted as this round's Codex anchor rather
 	// than re-posted or left unrecorded.
-	cmdObs := Observation{Head: head, Open: true, CodexCommands: []CommandSeen{{ID: 55, CreatedAt: now}}}
-	if d := DecideFire(g, queued, cmdObs, now, degrade); d.Verdict != FireCodexDeferred ||
-		d.AdoptCommandID != 55 || !d.AdoptAt.Equal(now) || d.PostCodex {
+	cmdObs := Observation{Head: head, Open: true, Co: codexSeen(CoSeen{Commands: []CommandSeen{{ID: 55, CreatedAt: now}}})}
+	if d := DecideFire(g, queued, cmdObs, now, degrade); d.Verdict != FireCoDeferred ||
+		d.AdoptCo[dialect.CodexBotLogin].ID != 55 ||
+		!d.AdoptCo[dialect.CodexBotLogin].CreatedAt.Equal(now) || codexPosted(d) {
 		t.Fatalf("a live codex command must be adopted without re-posting, got %+v", d)
 	}
 	// Auto-active Codex reviews unprompted → nothing to post; blocked FireNo.
-	autoObs := Observation{Head: head, Open: true, CodexAutoActive: true}
+	autoObs := Observation{Head: head, Open: true, Co: codexSeen(CoSeen{AutoActive: true})}
 	if d := DecideFire(g, queued, autoObs, now, degrade); d.Verdict != FireNo {
 		t.Fatalf("auto-active codex must not be commanded, got %+v", d)
 	}
 	// Unblocked → the normal fire path is untouched.
-	if d := DecideFire(Global{SlotFree: true}, queued, open, now, degrade); d.Verdict != FirePost || !d.PostCodex {
+	if d := DecideFire(Global{SlotFree: true}, queued, open, now, degrade); d.Verdict != FirePost || !codexPosted(d) {
 		t.Fatalf("unblocked fire must stay FirePost with codex, got %+v", d)
 	}
 	// A busy fire slot defers to Codex the same way — Codex needs no slot.
-	if d := DecideFire(Global{SlotFree: false}, queued, open, now, degrade); d.Verdict != FireCodexDeferred {
+	if d := DecideFire(Global{SlotFree: false}, queued, open, now, degrade); d.Verdict != FireCoDeferred {
 		t.Fatalf("slot-busy + degrade + postable codex must defer to codex, got %+v", d)
 	}
 	if d := DecideFire(Global{SlotFree: false}, queued, open, now, off); d.Verdict != FireNo {
@@ -781,7 +788,7 @@ func TestCodexOnlyEligibleUnfiredRound(t *testing.T) {
 	queued := state.Round{Repo: "owner/repo", PR: 448, Head: "abcdef123", Phase: state.PhaseQueued, Seq: 1}
 	// A round-window flag computed from a zero cutoff (an old SHA-less review)
 	// must not qualify an unfired, uncommanded round.
-	stale := Observation{Head: "abcdef123", Open: true, CodexActiveThisRound: true}
+	stale := Observation{Head: "abcdef123", Open: true, Co: codexSeen(CoSeen{ActiveThisRound: true})}
 	if CodexOnlyEligible(queued, stale, &blocked, now) {
 		t.Fatal("stale round-window evidence must not defer an unfired round")
 	}
@@ -790,13 +797,13 @@ func TestCodexOnlyEligibleUnfiredRound(t *testing.T) {
 	if !CodexOnlyEligible(queued, headReviewed, &blocked, now) {
 		t.Fatal("a codex review of the current head must defer an unfired round")
 	}
-	auto := Observation{Head: "abcdef123", Open: true, CodexAutoActive: true}
+	auto := Observation{Head: "abcdef123", Open: true, Co: codexSeen(CoSeen{AutoActive: true})}
 	if CodexOnlyEligible(queued, auto, &blocked, now) {
 		t.Fatal("auto-activity without current evidence must not defer an unfired round")
 	}
 	cleanAt := now.Add(-time.Minute)
-	cleanHead := Observation{Head: "abcdef123", Open: true, CodexAutoActive: true,
-		Events: []dialect.BotEvent{{Kind: dialect.EvCodexClean, Bot: dialect.CodexBotLogin,
+	cleanHead := Observation{Head: "abcdef123", Open: true, Co: codexSeen(CoSeen{AutoActive: true}),
+		Events: []dialect.BotEvent{{Kind: dialect.EvCoClean, Bot: dialect.CodexBotLogin,
 			SHA: "abcdef1234567890", CommentID: 601, CreatedAt: cleanAt, UpdatedAt: cleanAt}}}
 	if !CodexOnlyEligible(queued, cleanHead, &blocked, now) {
 		t.Fatal("a clean codex summary naming the current head must defer an unfired round")
@@ -808,8 +815,8 @@ func TestCodexOnlyEligibleUnfiredRound(t *testing.T) {
 	commanded := queued
 	commanded.CodexCommandID = 77
 	commanded.CodexCommandedAt = &commandedAt
-	answered := Observation{Head: "abcdef123", Open: true, CodexActiveThisRound: true,
-		Events: []dialect.BotEvent{{Kind: dialect.EvCodexUsageLimit, Bot: dialect.CodexBotLogin,
+	answered := Observation{Head: "abcdef123", Open: true, Co: codexSeen(CoSeen{ActiveThisRound: true}),
+		Events: []dialect.BotEvent{{Kind: dialect.EvCoUnable, Bot: dialect.CodexBotLogin,
 			CommentID: 600, CreatedAt: commandedAt.Add(-time.Hour), UpdatedAt: commandedAt.Add(-time.Hour)}}}
 	if !CodexOnlyEligible(commanded, answered, &blocked, now) {
 		t.Fatal("command-bound activity must defer a commanded unfired round despite an old usage-limit notice")
@@ -827,7 +834,7 @@ func TestCompletionBindsPreFireCodexAnswer(t *testing.T) {
 	gated := policy
 	gated.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
 	crReview := ReviewSeen{Bot: "coderabbitai[bot]", Commit: "abcdef1234567890", SubmittedAt: r.FiredAt.Add(time.Minute)}
-	cleanBeforeFire := dialect.BotEvent{Kind: dialect.EvCodexClean, Bot: dialect.CodexBotLogin, CommentID: 900,
+	cleanBeforeFire := dialect.BotEvent{Kind: dialect.EvCoClean, Bot: dialect.CodexBotLogin, CommentID: 900,
 		CreatedAt: commandedAt.Add(2 * time.Minute), UpdatedAt: commandedAt.Add(2 * time.Minute)}
 
 	obs := Observation{Head: "abcdef123", Open: true, Reviews: []ReviewSeen{crReview},
@@ -843,4 +850,45 @@ func TestCompletionBindsPreFireCodexAnswer(t *testing.T) {
 	if got := Completion(r, obs, gated); got.Done {
 		t.Fatalf("evidence older than the codex command must not count: %+v", got)
 	}
+}
+
+// --- Codex migration helpers ------------------------------------------------
+// The pre-registry Codex tests below were written against Policy.CodexCommand
+// and the Observation.Codex* fields. Those shims are gone: Codex is now one
+// registry entry like any other co-reviewer, so these helpers express the same
+// setup through CoReviewers / Observation.Co and the rules under test are
+// unchanged.
+
+// withCodex gives p the single Codex co-reviewer entry the legacy tests
+// assumed: crq posts its trigger at fire time (the historical
+// "configured-required Codex that does not auto-review" behavior).
+func withCodex(p Policy, command string) Policy {
+	p.CoReviewers = []CoReviewerPolicy{{Login: dialect.CodexBotLogin, Command: command, Trigger: TriggerAlways}}
+	return p
+}
+
+// codexSeen builds an Observation.Co map holding just Codex's slice.
+func codexSeen(c CoSeen) map[string]CoSeen {
+	return map[string]CoSeen{dialect.NormalizeBotName(dialect.CodexBotLogin): c}
+}
+
+// codexPosted reports whether the decision asks the apply layer to post the
+// Codex trigger (the old FireDecision.PostCodex mirror).
+func codexPosted(d FireDecision) bool {
+	for _, login := range d.PostCo {
+		if dialect.IsCodexBot(login) {
+			return true
+		}
+	}
+	return false
+}
+
+// codexCP extracts p's Codex co-reviewer policy (zero-command entry if absent).
+func codexCP(p Policy) CoReviewerPolicy {
+	for _, cp := range p.CoReviewers {
+		if dialect.IsCodexBot(cp.Login) {
+			return cp
+		}
+	}
+	return CoReviewerPolicy{Login: dialect.CodexBotLogin}
 }

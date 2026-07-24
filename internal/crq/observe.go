@@ -79,7 +79,6 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 		CodeRabbit:    s.cr,
 		Bot:           s.cfg.Bot,
 		ReviewCommand: s.cfg.ReviewCommand,
-		CodexCommand:  s.cfg.CodexCommand,
 		CoReviewers:   s.classifierCoReviewers(),
 	}
 	for _, c := range comments {
@@ -143,11 +142,6 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 	// Co-reviewer activity is derived from the same snapshot: whether each bot
 	// reviews the PR unprompted (drives the fire decision) and whether it
 	// participates in the current round (drives the dynamic completion gate).
-	// The legacy Codex fields stay populated for not-yet-migrated readers.
-	o.eng.CodexAutoActive = engine.CodexAutoActive(o.eng)
-	if round != nil {
-		o.eng.CodexActiveThisRound = engine.CodexActiveThisRound(*round, o.eng)
-	}
 	if len(s.cfg.CoBots) > 0 {
 		o.eng.Co = map[string]engine.CoSeen{}
 		for _, cb := range s.cfg.CoBots {
@@ -171,7 +165,6 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 			return observation{}, err
 		}
 		o.eng.Commands = cr
-		o.eng.CodexCommands = co[dialect.NormalizeBotName(dialect.CodexBotLogin)]
 		for key, cmds := range co {
 			if entry, ok := o.eng.Co[key]; ok {
 				entry.Commands = cmds
@@ -183,12 +176,8 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 }
 
 // classifierCoReviewers resolves the enabled registry entries with their
-// config-resolved trigger commands. nil (no parsed CoBots) leaves the
-// Classifier on its legacy Codex shim.
+// config-resolved trigger commands.
 func (s *Service) classifierCoReviewers() []dialect.CoReviewer {
-	if len(s.cfg.CoBots) == 0 {
-		return nil
-	}
 	out := make([]dialect.CoReviewer, 0, len(s.cfg.CoBots))
 	for _, cb := range s.cfg.CoBots {
 		co, ok := dialect.CoReviewerByName(cb.Name)
@@ -245,7 +234,7 @@ func (s *Service) codexRelevant(obs engine.Observation) bool {
 		}
 	}
 	for _, ev := range obs.Events {
-		if ev.Kind == dialect.EvCodexClean || dialect.IsCodexBot(ev.Bot) {
+		if ev.Kind == dialect.EvCoClean || dialect.IsCodexBot(ev.Bot) {
 			return true
 		}
 	}
@@ -324,18 +313,9 @@ func (s *Service) reviewCommands(ctx context.Context, repo string, pr int, obs e
 
 // coCommandBodies maps each triggerable co-reviewer (normalized login) to the
 // comment bodies that count as its trigger: the config-resolved command plus
-// the registry's alternate spellings (`bugbot run` / `cursor review`). With no
-// parsed CoBots the legacy rule applies: Codex's exact command, and only when
-// Codex gates the round — only a configured-required Codex is ever fired.
+// the registry's alternate spellings (`bugbot run` / `cursor review`).
 func (s *Service) coCommandBodies() map[string][]string {
 	out := map[string][]string{}
-	if len(s.cfg.CoBots) == 0 {
-		codexCommand := strings.TrimSpace(s.cfg.CodexCommand)
-		if codexCommand != "" && dialect.HasCodexBot(s.cfg.RequiredBots) {
-			out[dialect.NormalizeBotName(dialect.CodexBotLogin)] = []string{codexCommand}
-		}
-		return out
-	}
 	for _, cb := range s.cfg.CoBots {
 		var bodies []string
 		add := func(body string) {

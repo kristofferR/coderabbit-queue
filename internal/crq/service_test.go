@@ -579,6 +579,21 @@ func TestRenewLeaderRespectsLiveLease(t *testing.T) {
 	}
 }
 
+// codexCoBots builds the single Codex co-reviewer entry these tests assume,
+// with Codex's historical default trigger: post at fire time exactly when it
+// is configured-required (parseCoBots' codex rule).
+func codexCoBots(requiredBots []string) []CoBotConfig {
+	trigger := engine.TriggerNever
+	if dialect.HasCodexBot(requiredBots) {
+		trigger = engine.TriggerAlways
+	}
+	return []CoBotConfig{{
+		Login: dialect.CodexBotLogin, Name: "codex", Command: "@codex review",
+		Trigger: trigger, Required: dialect.HasCodexBot(requiredBots),
+		SelfHealGrace: 10 * time.Minute,
+	}}
+}
+
 func firingConfig() Config {
 	return Config{
 		GateRepo:            "owner/gate",
@@ -1933,8 +1948,9 @@ func TestRefreshQuotaPreservesBlockOnInconclusiveProbe(t *testing.T) {
 func TestLoopDegradesToCodexOnlyOnRateLimit(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
-	cfg.RateLimitCodexDegrade = true
+	cfg.RateLimitCoDegrade = true
 	cfg.FeedbackBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots) // Codex enabled as a co-reviewer
 	gh := newFakeGitHub()
 	head := "a0646f010"
 	pull := ghapi.Pull{State: "open"}
@@ -1987,8 +2003,9 @@ func TestLoopDegradesToCodexOnlyOnRateLimit(t *testing.T) {
 func TestFeedbackDefersCleanAutoCodexWithDefaultRequiredBots(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
-	cfg.RateLimitCodexDegrade = true
+	cfg.RateLimitCoDegrade = true
 	cfg.FeedbackBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots) // Codex enabled as a co-reviewer
 	gh := newFakeGitHub()
 	pull := ghapi.Pull{State: "open"}
 	pull.Head.SHA = "abcdef1234567890"
@@ -2028,10 +2045,10 @@ func TestFeedbackDefersCleanAutoCodexWithDefaultRequiredBots(t *testing.T) {
 func TestLoopDeferredCodexCleanExitsZeroNotConverged(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
-	cfg.RateLimitCodexDegrade = true
+	cfg.RateLimitCoDegrade = true
 	cfg.RequiredBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
 	cfg.FeedbackBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
-	cfg.CodexCommand = "@codex review"
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
 	cfg.SettleWindow = 0
 	gh := newFakeGitHub()
 	pull := ghapi.Pull{State: "open"}
@@ -2077,9 +2094,9 @@ func TestLoopDeferredCodexCleanExitsZeroNotConverged(t *testing.T) {
 func TestPumpPostsCodexDeferredDuringBlockThenFiresCodeRabbit(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
-	cfg.RateLimitCodexDegrade = true
+	cfg.RateLimitCoDegrade = true
 	cfg.RequiredBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
-	cfg.CodexCommand = "@codex review"
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
 	gh := newFakeGitHub()
 	pull := ghapi.Pull{State: "open"}
 	pull.Head.SHA = "abcdef1234567890"
@@ -2147,9 +2164,9 @@ func TestPumpPostsCodexDeferredDuringBlockThenFiresCodeRabbit(t *testing.T) {
 func TestPumpScansPastBlockedRoundWithCodexAlreadyRequested(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
-	cfg.RateLimitCodexDegrade = true
+	cfg.RateLimitCoDegrade = true
 	cfg.RequiredBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
-	cfg.CodexCommand = "@codex review"
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
 	gh := newFakeGitHub()
 	for _, target := range []struct {
 		repo string
@@ -2202,9 +2219,9 @@ func TestPumpScansPastBlockedRoundWithCodexAlreadyRequested(t *testing.T) {
 func TestPumpAdoptsExistingCodexCommandDuringBlock(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
-	cfg.RateLimitCodexDegrade = true
+	cfg.RateLimitCoDegrade = true
 	cfg.RequiredBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
-	cfg.CodexCommand = "@codex review"
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
 	gh := newFakeGitHub()
 	headTime := time.Now().UTC().Add(-2 * time.Minute)
 	pull := ghapi.Pull{State: "open"}
@@ -2214,7 +2231,7 @@ func TestPumpAdoptsExistingCodexCommandDuringBlock(t *testing.T) {
 	commit.Committer.Date = headTime
 	gh.commits[pull.Head.SHA] = commit
 	commandAt := headTime.Add(time.Minute)
-	command := ghapi.IssueComment{ID: 702, Body: cfg.CodexCommand, CreatedAt: commandAt, UpdatedAt: commandAt}
+	command := ghapi.IssueComment{ID: 702, Body: cfg.CoBots[0].Command, CreatedAt: commandAt, UpdatedAt: commandAt}
 	command.User.Login = "kristofferR"
 	gh.comments[fakeKey("o/carrier", 94)] = []ghapi.IssueComment{command}
 	gh.graphQL = noForcePush
@@ -2252,12 +2269,12 @@ func TestPumpAdoptsExistingCodexCommandDuringBlock(t *testing.T) {
 	}
 }
 
-func TestFireCodexDeferredAdoptionHonorsDryRunAndActiveClaim(t *testing.T) {
+func TestFireCoDeferredAdoptionHonorsDryRunAndActiveClaim(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
-	cfg.RateLimitCodexDegrade = true
+	cfg.RateLimitCoDegrade = true
 	cfg.RequiredBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
-	cfg.CodexCommand = "@codex review"
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
 	gh := newFakeGitHub()
 	store := NewMemoryStore(cfg)
 	now := time.Now().UTC()

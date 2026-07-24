@@ -248,7 +248,7 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	}
 	now = s.clock()
 	// No early blocked/min-interval return here: DecideFire owns those gates and
-	// deliberately resolves the quota-free verdicts (dedupe, FireCodexOnly,
+	// deliberately resolves the quota-free verdicts (dedupe, FireCoOnly,
 	// FireCoReviewWait) before them, so an account block from another PR does not
 	// delay resolutions that spend no CodeRabbit quota. mapFireNo still reports
 	// "blocked"/"min_interval" for real fires; observing while blocked costs
@@ -272,7 +272,7 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	// scan a bounded number of following queued rounds for a postable defer
 	// (each costs one observation; ETag caching keeps it cheap).
 	accountBlocked := global.BlockedUntil != nil && global.BlockedUntil.After(now)
-	if s.cfg.RateLimitCodexDegrade && decision.Verdict == engine.FireNo &&
+	if s.cfg.RateLimitCoDegrade && decision.Verdict == engine.FireNo &&
 		(accountBlocked || !global.SlotFree) {
 		scanned := 0
 		policy := s.policy()
@@ -801,9 +801,6 @@ func (s *Service) coCommandFor(login string) string {
 		if dialect.NormalizeBotName(cb.Login) == dialect.NormalizeBotName(login) {
 			return cb.Command
 		}
-	}
-	if dialect.IsCodexBot(login) {
-		return s.cfg.CodexCommand
 	}
 	return ""
 }

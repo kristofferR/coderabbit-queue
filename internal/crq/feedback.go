@@ -282,7 +282,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// quota block qualifies — a round's own awaiting_retry cooldown also
 	// covers non-quota retries (post failures, timeouts) that must keep their
 	// normal retry handling.
-	if s.cfg.RateLimitCodexDegrade && !report.Converged && st.Account.BlockedUntil != nil {
+	if s.cfg.RateLimitCoDegrade && !report.Converged && st.Account.BlockedUntil != nil {
 		until := st.Account.BlockedUntil.UTC()
 		if until.After(now) && engine.CodexOnlyEligible(completionRound, obs.eng, &until, now) {
 			report.CodeRabbitDeferred = true

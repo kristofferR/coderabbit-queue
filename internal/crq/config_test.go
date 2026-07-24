@@ -250,9 +250,7 @@ func TestLoadConfigCoBotsDefaults(t *testing.T) {
 	if codex.Trigger != engine.TriggerNever || codex.Command != "@codex review" || codex.Required {
 		t.Fatalf("codex defaults wrong: %+v", codex)
 	}
-	if cfg.CodexCommand != "@codex review" {
-		t.Fatalf("CodexCommand mirror = %q", cfg.CodexCommand)
-	}
+
 	bugbot, _ := coBotByName(cfg, "bugbot")
 	if bugbot.Trigger != engine.TriggerSelfHeal || bugbot.Command != "bugbot run" || bugbot.SelfHealGrace != 10*time.Minute {
 		t.Fatalf("bugbot defaults wrong: %+v", bugbot)
@@ -292,9 +290,7 @@ func TestLoadConfigCoBotsExplicitEmptyDisablesAll(t *testing.T) {
 	if len(cfg.CoBots) != 0 {
 		t.Fatalf("CRQ_COBOTS=\"\" must disable all co-bots, got %#v", cfg.CoBots)
 	}
-	if cfg.CodexCommand != "" {
-		t.Fatalf("CodexCommand must be empty with codex disabled, got %q", cfg.CodexCommand)
-	}
+
 	if len(cfg.FeedbackBots) != 1 || cfg.FeedbackBots[0] != "coderabbitai[bot]" {
 		t.Fatalf("FeedbackBots must collapse to the required set: %#v", cfg.FeedbackBots)
 	}
@@ -364,8 +360,8 @@ func TestLoadConfigCoBotCmdAliasesAndOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 	codex, _ := coBotByName(cfg, "codex")
-	if codex.Command != "@codex ship it" || cfg.CodexCommand != "@codex ship it" {
-		t.Fatalf("CRQ_CODEX_CMD alias not honored: %+v / %q", codex, cfg.CodexCommand)
+	if codex.Command != "@codex ship it" {
+		t.Fatalf("CRQ_CODEX_CMD alias not honored: %+v", codex)
 	}
 	bugbot, _ := coBotByName(cfg, "bugbot")
 	if bugbot.Trigger != engine.TriggerAlways {
@@ -399,7 +395,7 @@ func TestLoadConfigRLCoDegradeAlias(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.RateLimitCodexDegrade {
+	if cfg.RateLimitCoDegrade {
 		t.Fatal("CRQ_RL_CO_DEGRADE=0 must disable the degrade")
 	}
 
@@ -409,7 +405,7 @@ func TestLoadConfigRLCoDegradeAlias(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.RateLimitCodexDegrade {
+	if cfg.RateLimitCoDegrade {
 		t.Fatal("legacy CRQ_RL_CODEX_DEGRADE=0 must still disable the degrade")
 	}
 }

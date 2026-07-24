@@ -101,18 +101,15 @@ func issueBody(st State, cfg Config) (string, error) {
 	return crqstate.IssueBody(st, cfg.storeConfig())
 }
 
-// policy assembles the engine Policy from config. With no parsed CoBots
-// (hand-built Configs in tests), CoReviewers stays nil so the engine falls
-// back to its legacy Codex synthesis from CodexCommand/RequiredBots.
+// policy assembles the engine Policy from config.
 func (s *Service) policy() engine.Policy {
 	p := engine.Policy{
-		Bot:                   s.cfg.Bot,
-		RequiredBots:          s.cfg.RequiredBots,
-		CodexCommand:          s.cfg.CodexCommand,
-		MinInterval:           s.cfg.MinInterval,
-		InflightTimeout:       s.cfg.InflightTimeout,
-		RateLimitFallback:     s.cfg.RateLimitFallback,
-		RateLimitCodexDegrade: s.cfg.RateLimitCodexDegrade,
+		Bot:                s.cfg.Bot,
+		RequiredBots:       s.cfg.RequiredBots,
+		MinInterval:        s.cfg.MinInterval,
+		InflightTimeout:    s.cfg.InflightTimeout,
+		RateLimitFallback:  s.cfg.RateLimitFallback,
+		RateLimitCoDegrade: s.cfg.RateLimitCoDegrade,
 	}
 	for _, cb := range s.cfg.CoBots {
 		p.CoReviewers = append(p.CoReviewers, engine.CoReviewerPolicy{

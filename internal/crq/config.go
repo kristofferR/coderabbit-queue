@@ -42,13 +42,7 @@ type Config struct {
 	// CoBots are the enabled co-reviewer bots (CRQ_COBOTS + per-bot
 	// CRQ_COBOT_<NAME>_* keys). An entry exists for every wanted or required
 	// co-reviewer; required ones are already folded into RequiredBots.
-	CoBots []CoBotConfig
-	// CodexCommand is the Codex review trigger crq posts when Codex gates a round
-	// and does not auto-review. Empty disables all Codex firing.
-	//
-	// Deprecated: derived from the codex CoBots entry (CRQ_COBOT_CODEX_CMD,
-	// alias CRQ_CODEX_CMD) for callers that predate CoBots.
-	CodexCommand      string
+	CoBots            []CoBotConfig
 	RateLimitCommand  string
 	RateLimitMarker   string
 	CalibrationMarker string
@@ -77,10 +71,10 @@ type Config struct {
 	// CodeRabbit review following its comment shells) is caught by crq instead
 	// of by a human re-checking the PR. 0 disables.
 	SettleWindow time.Duration
-	// RateLimitCodexDegrade degrades an account-blocked round to Codex-only
-	// (return Codex findings promptly, keep CodeRabbit queued for the window)
-	// instead of waiting the block out. CRQ_RL_CODEX_DEGRADE, default on.
-	RateLimitCodexDegrade bool
+	// RateLimitCoDegrade degrades an account-blocked round to co-reviewers only
+	// (return their findings promptly, keep CodeRabbit queued for the window)
+	// instead of waiting the block out. CRQ_RL_CO_DEGRADE, default on.
+	RateLimitCoDegrade bool
 }
 
 func LoadConfig() (Config, error) {
@@ -122,12 +116,8 @@ func LoadConfig() (Config, error) {
 	// Enabled co-reviewers surface findings without gating: their logins join
 	// the feedback set unless CRQ_FEEDBACK_BOTS overrides explicitly.
 	coLogins := make([]string, 0, len(coBots))
-	codexCommand := ""
 	for _, cb := range coBots {
 		coLogins = append(coLogins, cb.Login)
-		if cb.Name == "codex" {
-			codexCommand = cb.Command
-		}
 	}
 	cfg := Config{
 		GateRepo:            env["CRQ_REPO"],
@@ -144,7 +134,6 @@ func LoadConfig() (Config, error) {
 		CoBots:              coBots,
 		FeedbackBots:        listEnv(env, "CRQ_FEEDBACK_BOTS", strings.Join(unionBots(requiredBots, coLogins), ",")),
 		ReviewCommand:       stringEnv(env, "CRQ_REVIEW_CMD", "@coderabbitai review"),
-		CodexCommand:        codexCommand,
 		RateLimitCommand:    stringEnv(env, "CRQ_RATELIMIT_CMD", dialect.DefaultRateLimitCommand),
 		RateLimitMarker:     stringEnv(env, "CRQ_RL_MARKER", dialect.DefaultRateLimitMarker),
 		CalibrationMarker:   stringEnv(env, "CRQ_CAL_REPLY_MARKER", "auto-generated reply by CodeRabbit"),
@@ -167,7 +156,7 @@ func LoadConfig() (Config, error) {
 		FeedbackWaitTimeout: durationEnv(env, "CRQ_FEEDBACK_WAIT_TIMEOUT", 20*time.Minute),
 		SettleWindow:        durationEnv(env, "CRQ_SETTLE", 90*time.Second),
 
-		RateLimitCodexDegrade: stringEnv(env, "CRQ_RL_CO_DEGRADE", stringEnv(env, "CRQ_RL_CODEX_DEGRADE", "1")) != "0",
+		RateLimitCoDegrade: stringEnv(env, "CRQ_RL_CO_DEGRADE", stringEnv(env, "CRQ_RL_CODEX_DEGRADE", "1")) != "0",
 	}
 	if len(cfg.Scope) == 0 && cfg.GateRepo != "" {
 		cfg.Scope = []string{ownerOf(cfg.GateRepo)}

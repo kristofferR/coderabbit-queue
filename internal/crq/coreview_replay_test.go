@@ -36,7 +36,6 @@ func newCoReplayFixture(t *testing.T, base time.Time, mutate func(*Config)) *rep
 	t.Helper()
 	clk := newReplayClock(base)
 	cfg := replayConfig()
-	cfg.CodexCommand = "@codex review"
 	cfg.CoBots = defaultCoBots()
 	cfg.FeedbackBots = unionBots(cfg.RequiredBots, []string{dialect.CodexBotLogin, bugbotLogin, macroLogin})
 	if mutate != nil {

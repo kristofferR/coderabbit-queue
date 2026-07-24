@@ -25,18 +25,10 @@ const (
 	FireDrop                            // PR closed/merged — abandon the round
 )
 
-// Deprecated: Codex-named aliases for the generic co-reviewer verdicts, kept
-// while crq migrates.
-const (
-	FireCodexOnly     = FireCoOnly
-	FireCodexDeferred = FireCoDeferred
-)
-
 type FireDecision struct {
 	Verdict FireVerdict
 	Reason  string
-	// Adopt fields identify the existing command comment (FireAdopt), or the
-	// adopted Codex command on the legacy FireCoDeferred adopt path.
+	// Adopt fields identify the existing command comment (FireAdopt).
 	AdoptCommandID int64
 	AdoptAt        time.Time
 	// PostCo lists the co-reviewer logins whose trigger commands the apply
@@ -46,10 +38,6 @@ type FireDecision struct {
 	// AdoptCo identifies live co-reviewer trigger comments to record as this
 	// round's command anchors instead of posting duplicates (FireCoDeferred).
 	AdoptCo map[string]CommandSeen
-	// PostCodex mirrors "Codex ∈ PostCo".
-	//
-	// Deprecated: consume PostCo instead.
-	PostCodex bool
 }
 
 // Global is the cross-PR state a fire decision needs.
@@ -59,15 +47,8 @@ type Global struct {
 	LastFired    *time.Time // global pacing anchor
 }
 
-// coReviewers resolves the effective co-reviewer policies: the explicit list
-// when set, otherwise the one synthesized Codex entry (trigger always iff
-// configured-required) that preserves the pre-registry behavior.
-func (p Policy) coReviewers() []CoReviewerPolicy {
-	if p.CoReviewers != nil {
-		return p.CoReviewers
-	}
-	return []CoReviewerPolicy{codexPolicy(p)}
-}
+// coReviewers resolves the effective co-reviewer policies.
+func (p Policy) coReviewers() []CoReviewerPolicy { return p.CoReviewers }
 
 // CoReviewerPolicies exposes the effective co-reviewer list to the apply
 // layer (self-heal sweeps, trigger posting), which shares DecideCoPost with
@@ -101,15 +82,6 @@ func decideCoPosts(r state.Round, obs Observation, p Policy, now time.Time) []st
 		}
 	}
 	return out
-}
-
-func hasCodexLogin(logins []string) bool {
-	for _, login := range logins {
-		if dialect.IsCodexBot(login) {
-			return true
-		}
-	}
-	return false
 }
 
 // DecideFire consolidates v2's scattered fire guards, in order: PR open →
@@ -207,9 +179,9 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 		if at.IsZero() {
 			at = newest.UpdatedAt
 		}
-		return FireDecision{Verdict: FireAdopt, Reason: "review command already posted", AdoptCommandID: newest.ID, AdoptAt: at, PostCo: postCo, PostCodex: hasCodexLogin(postCo)}
+		return FireDecision{Verdict: FireAdopt, Reason: "review command already posted", AdoptCommandID: newest.ID, AdoptAt: at, PostCo: postCo}
 	}
-	return FireDecision{Verdict: FirePost, PostCo: postCo, PostCodex: hasCodexLogin(postCo)}
+	return FireDecision{Verdict: FirePost, PostCo: postCo}
 }
 
 // decideCoDeferred starts or adopts the co-reviewer half of a round while
@@ -219,7 +191,7 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 // post. The legacy Adopt fields mirror the Codex entry for pre-migration
 // consumers.
 func decideCoDeferred(r state.Round, obs Observation, p Policy, now time.Time, reason string) (FireDecision, bool) {
-	if !p.RateLimitCodexDegrade {
+	if !p.RateLimitCoDegrade {
 		return FireDecision{}, false
 	}
 	var post []string
@@ -245,7 +217,7 @@ func decideCoDeferred(r state.Round, obs Observation, p Policy, now time.Time, r
 	if len(post) == 0 && len(adopt) == 0 {
 		return FireDecision{}, false
 	}
-	d := FireDecision{Verdict: FireCoDeferred, PostCo: post, PostCodex: hasCodexLogin(post)}
+	d := FireDecision{Verdict: FireCoDeferred, PostCo: post}
 	if len(adopt) > 0 {
 		d.AdoptCo = adopt
 	}
@@ -256,14 +228,6 @@ func decideCoDeferred(r state.Round, obs Observation, p Policy, now time.Time, r
 		d.Reason = reason + "; requesting co-review now, coderabbit deferred"
 	default:
 		d.Reason = reason + "; adopting existing co-review command, coderabbit deferred"
-	}
-	if cmd, ok := adopt[dialect.CodexBotLogin]; ok {
-		at := cmd.CreatedAt
-		if at.IsZero() {
-			at = cmd.UpdatedAt
-		}
-		d.AdoptCommandID = cmd.ID
-		d.AdoptAt = at
 	}
 	return d, true
 }
@@ -321,7 +285,7 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, summ
 		delivered = "coderabbit plan is summary-only"
 	}
 	if len(post) > 0 {
-		return FireDecision{Verdict: FireCoOnly, Reason: delivered + "; co-review still required", PostCo: post, PostCodex: hasCodexLogin(post)}
+		return FireDecision{Verdict: FireCoOnly, Reason: delivered + "; co-review still required", PostCo: post}
 	}
 	if wait {
 		return FireDecision{Verdict: FireCoReviewWait, Reason: "awaiting co-review"}

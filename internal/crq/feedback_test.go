@@ -979,6 +979,7 @@ func TestFeedbackDoesNotUseNoActionCompletionWhileCodexRequiredWithoutThumbsUp(t
 		Bot:          "coderabbitai[bot]",
 		RequiredBots: []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
 	}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots) // Codex enabled as a co-reviewer
 	gh := newFakeGitHub()
 	var pull ghapi.Pull
 	pull.State = "open"
@@ -1093,6 +1094,7 @@ func TestFeedbackMarksRequiredCodexCleanReviewSummaryReviewed(t *testing.T) {
 		Bot:          "coderabbitai[bot]",
 		RequiredBots: []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
 	}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots) // Codex enabled as a co-reviewer
 	gh := newFakeGitHub()
 	var pull ghapi.Pull
 	pull.State = "open"
@@ -1496,6 +1498,7 @@ func TestLoopResumesAwaitingFeedbackWithoutRefiring(t *testing.T) {
 		FeedbackWaitTimeout: time.Minute,
 		FiredMax:            500,
 	}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots) // Codex enabled as a co-reviewer
 	gh := newFakeGitHub()
 	var pull ghapi.Pull
 	pull.State = "open"

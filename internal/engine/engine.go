@@ -43,11 +43,8 @@ func (cp CoReviewerPolicy) selfHealGrace() time.Duration {
 type Policy struct {
 	Bot          string   // configured CodeRabbit login
 	RequiredBots []string // bots that gate round completion
-	CodexCommand string   // Codex review trigger crq posts ("" disables Codex firing)
 
 	// CoReviewers are the enabled co-reviewer bots with their trigger stances.
-	// When nil, the legacy Codex fields above synthesize the one entry
-	// (Trigger always iff Codex is in RequiredBots) — see codexPolicy.
 	CoReviewers []CoReviewerPolicy
 
 	MinInterval       time.Duration // global pacing between fires
@@ -55,10 +52,10 @@ type Policy struct {
 	RateLimitFallback time.Duration // block window when "available in" is unparseable
 	RetryBackoff      time.Duration // cooldown after a non-rate-limit retry (timeout, failure)
 
-	// RateLimitCodexDegrade lets an account-blocked round degrade to a
-	// Codex-only round (post the Codex command now, keep CodeRabbit queued
-	// for the window) instead of waiting the block out. CRQ_RL_CODEX_DEGRADE.
-	RateLimitCodexDegrade bool
+	// RateLimitCoDegrade lets an account-blocked round degrade to a
+	// co-reviewer-only round (post the triggers now, keep CodeRabbit queued
+	// for the window) instead of waiting the block out. CRQ_RL_CO_DEGRADE.
+	RateLimitCoDegrade bool
 }
 
 func (p Policy) rateLimitFallback() time.Duration {
@@ -129,29 +126,16 @@ type Observation struct {
 	Events  []dialect.BotEvent
 	// Commands are adoptable trigger comments (cutoff-filtered by observe).
 	Commands []CommandSeen
-	// CodexCommands are adoptable Codex trigger comments present for the head
-	// (cutoff-filtered by observe like Commands). A non-empty list means a live
-	// `@codex review` already exists, so crq must not post a duplicate.
-	CodexCommands []CommandSeen
 	// Reacted reports a configured-bot reaction on the round's fired command.
 	Reacted bool
 	// CodexThumbsUp reports a current Codex +1 on the PR or the fired command
 	// (pre-fetched only when a Codex-gated completion needs it).
 	CodexThumbsUp bool
-	// CodexAutoActive reports that Codex reviews this PR on its own: it has a
-	// review or clean summary that no `@codex review` command preceded. When
-	// true, crq never posts the Codex command — Codex will review unprompted.
-	CodexAutoActive bool
-	// CodexActiveThisRound reports Codex activity bound to the current round (a
-	// head review, a round-window comment/clean summary, or a thumbs-up). It
-	// drives the dynamic completion gate when Codex is not configured-required.
-	CodexActiveThisRound bool
 
 	// Checks are the head's classified co-reviewer check runs.
 	Checks []CheckSeen
 	// Co carries each co-reviewer's per-bot observation slice, keyed by
-	// normalized login. The legacy Codex* fields above remain the fallback for
-	// callers that predate the map — see Observation.co.
+	// normalized login.
 	Co map[string]CoSeen
 }
 
@@ -159,17 +143,9 @@ type Observation struct {
 // (trigger adoption at fire time shares the engine's view of live commands).
 func (o Observation) CoSeenFor(login string) CoSeen { return o.co(login) }
 
-// co returns login's observation slice, falling back to the legacy Codex
-// fields when the map has no entry (engine tests and pre-migration callers
-// still populate those directly).
+// co returns login's observation slice (zero value when unobserved).
 func (o Observation) co(login string) CoSeen {
-	if c, ok := o.Co[dialect.NormalizeBotName(login)]; ok {
-		return c
-	}
-	if dialect.IsCodexBot(login) {
-		return CoSeen{Commands: o.CodexCommands, AutoActive: o.CodexAutoActive, ActiveThisRound: o.CodexActiveThisRound}
-	}
-	return CoSeen{}
+	return o.Co[dialect.NormalizeBotName(login)]
 }
 
 // SummaryOnlyPlan reports whether the configured bot has declared a

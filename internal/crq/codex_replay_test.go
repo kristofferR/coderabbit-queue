@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
@@ -17,6 +18,9 @@ import (
 
 // codexLogin is the canonical Codex app login, owned by internal/dialect.
 const codexLogin = dialect.CodexBotLogin
+
+// codexReviewCommand is the trigger these replays configure for Codex.
+const codexReviewCommand = "@codex review"
 
 // codexClean renders the tada clean-summary corpus with a chosen reviewed SHA,
 // so the replay shares one source of truth with the classifier golden corpus. A
@@ -39,10 +43,20 @@ func newCodexReplayFixture(t *testing.T, base time.Time, mutate func(*Config)) *
 	t.Helper()
 	clk := newReplayClock(base)
 	cfg := replayConfig()
-	cfg.CodexCommand = "@codex review"
 	if mutate != nil {
 		mutate(&cfg)
 	}
+	// Codex keeps its historical default: crq posts the trigger at fire time
+	// exactly when Codex is configured-required (parseCoBots' codex rule).
+	trigger := engine.TriggerNever
+	if dialect.HasCodexBot(cfg.RequiredBots) {
+		trigger = engine.TriggerAlways
+	}
+	cfg.CoBots = []CoBotConfig{{
+		Login: codexLogin, Name: "codex", Command: codexReviewCommand,
+		Trigger: trigger, Required: dialect.HasCodexBot(cfg.RequiredBots),
+		SelfHealGrace: 10 * time.Minute,
+	}}
 	gh := newFakeGitHub()
 	gh.now = clk.now
 	store := NewMemoryStore(cfg)
@@ -76,7 +90,7 @@ func (f *replayFixture) codexReview(repo string, pr int, id int64, commitSHA str
 func (f *replayFixture) codexPosted(repo string, pr int) int {
 	f.gh.mu.Lock()
 	defer f.gh.mu.Unlock()
-	want := QueueKey(repo, pr) + ":" + f.cfg.CodexCommand
+	want := QueueKey(repo, pr) + ":" + codexReviewCommand
 	n := 0
 	for _, p := range f.gh.posted {
 		if p == want {
@@ -309,7 +323,7 @@ func TestCodexReplayCoReviewWaitBoundsSilentCodex(t *testing.T) {
 	// CodeRabbit already reviewed this head (clean), and a `@codex review` command
 	// is already on the PR awaiting Codex's answer.
 	f.botReview(repo, pr, 500, head, base.Add(-time.Minute))
-	f.humanComment(repo, pr, 600, f.cfg.CodexCommand, base.Add(-30*time.Second))
+	f.humanComment(repo, pr, 600, codexReviewCommand, base.Add(-30*time.Second))
 
 	f.enqueue(repo, pr)
 	if res := f.pump(); res.Action != "waiting" {
@@ -389,10 +403,10 @@ func TestObserveScopesShellFilterToCodeRabbit(t *testing.T) {
 	}
 }
 
-// TestFireCodexOnlyPostFailureParks pins fix #3: when the Codex-only post fails,
+// TestFireCoOnlyPostFailureParks pins fix #3: when the Codex-only post fails,
 // the round parks in awaiting_retry with a cooldown instead of re-posting on the
 // very next pump.
-func TestFireCodexOnlyPostFailureParks(t *testing.T) {
+func TestFireCoOnlyPostFailureParks(t *testing.T) {
 	base := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	f := newCodexReplayFixture(t, base, func(cfg *Config) {
 		cfg.RequiredBots = []string{cfg.Bot, codexLogin}
@@ -400,7 +414,7 @@ func TestFireCodexOnlyPostFailureParks(t *testing.T) {
 	repo, pr, head := "o/r", 12, "aaaabbbbccccdddd"
 	f.openPull(repo, pr, head)
 	f.setCommitDate(head, base.Add(-time.Hour))
-	// CodeRabbit already reviewed the head → DecideFire returns FireCodexOnly.
+	// CodeRabbit already reviewed the head → DecideFire returns FireCoOnly.
 	f.botReview(repo, pr, 500, head, base.Add(-time.Minute))
 	// The Codex command post fails.
 	f.gh.mu.Lock()
@@ -485,12 +499,15 @@ func TestSelfHealCodexClaimPreventsDoublePost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Erase the live command from the observation so DecideCodexPost wants to
-	// post (models the failed-initial-post world the finding describes).
-	obs.eng.CodexCommands = nil
+	// Erase the live command from the observation so the trigger decision wants
+	// to post (models the failed-initial-post world the finding describes).
+	if co, ok := obs.eng.Co[dialect.NormalizeBotName(codexLogin)]; ok {
+		co.Commands = nil
+		obs.eng.Co[dialect.NormalizeBotName(codexLogin)] = co
+	}
 	events := obs.eng.Events[:0]
 	for _, ev := range obs.eng.Events {
-		if ev.Kind != dialect.EvCodexCommand {
+		if ev.Kind != dialect.EvCoCommand {
 			events = append(events, ev)
 		}
 	}
@@ -558,7 +575,7 @@ func TestCoReviewWaitCountsPrePumpLegacySummary(t *testing.T) {
 	// CodeRabbit reviewed the head; a human posted @codex review 5 minutes ago;
 	// Codex answered with the LEGACY (SHA-less) clean summary 2 minutes ago.
 	f.botReview(repo, pr, 500, head, base.Add(-10*time.Minute))
-	f.humanComment(repo, pr, 600, f.cfg.CodexCommand, base.Add(-5*time.Minute))
+	f.humanComment(repo, pr, 600, codexReviewCommand, base.Add(-5*time.Minute))
 	f.codexComment(repo, pr, 601, corpusMessage(t, "codex/clean-summary-legacy.md"), base.Add(-2*time.Minute))
 
 	f.enqueue(repo, pr)
@@ -647,7 +664,7 @@ func TestCodexReplayIgnoresAnsweredCommandForNewHead(t *testing.T) {
 	// so that command clears the cutoff and only the answered-review guard rejects it.
 	f.setCommitDate(head, base.Add(-2*time.Hour))
 	// Previous head's history: a `@codex review` command Codex already answered.
-	f.humanComment(repo, pr, 600, f.cfg.CodexCommand, base.Add(-time.Hour))
+	f.humanComment(repo, pr, 600, codexReviewCommand, base.Add(-time.Hour))
 	f.codexReview(repo, pr, 400, oldHead, base.Add(-30*time.Minute))
 
 	f.enqueue(repo, pr)
@@ -681,7 +698,7 @@ func TestCodexReplayAdoptRecordsExistingCodexCommand(t *testing.T) {
 	// The Codex command is posted BEFORE the CodeRabbit command crq will adopt, so a
 	// self-heal scan anchored on the fire time would miss it and repost.
 	const codexCmdID = 601
-	f.humanComment(repo, pr, codexCmdID, f.cfg.CodexCommand, base.Add(-2*time.Minute))
+	f.humanComment(repo, pr, codexCmdID, codexReviewCommand, base.Add(-2*time.Minute))
 	f.humanComment(repo, pr, 602, f.cfg.ReviewCommand, base.Add(-time.Minute))
 
 	f.enqueue(repo, pr)
