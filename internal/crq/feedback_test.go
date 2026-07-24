@@ -1968,3 +1968,61 @@ func TestThreadRebuttalSurfacesContestedResolvedThreads(t *testing.T) {
 		t.Fatalf("unresolved threads are handled by threadFindings, got %#v", got)
 	}
 }
+
+// TestFeedbackSurfacesSkippedReviewDespiteRateLimitMarker pins an ordering trap
+// that bit the first implementation: CodeRabbit's "Review skipped" notice embeds
+// its rate-limit marker, and the "an account-quota notice is never a finding"
+// guard therefore swallowed it. The round then converged with the primary
+// reviewer marked done and NOTHING telling the agent the review never happened —
+// a silently absent reviewer, which is worse than a loud one.
+func TestFeedbackSurfacesSkippedReviewDespiteRateLimitMarker(t *testing.T) {
+	cfg := Config{
+		Bot:               "coderabbitai[bot]",
+		RequiredBots:      []string{"coderabbitai[bot]"},
+		FeedbackBots:      []string{"coderabbitai[bot]"},
+		RateLimitMarker:   "rate limited by coderabbit.ai",
+		CalibrationMarker: "auto-generated reply by CodeRabbit",
+	}
+	body := corpusMessage(t, "coderabbit/review-skipped-too-many-files.md")
+	probe := dialect.CodeRabbit{RateLimitMarker: cfg.RateLimitMarker, CalibrationMarker: cfg.CalibrationMarker}
+	if !probe.IsRateLimited(body) {
+		t.Fatal("precondition: the skip notice must still carry the rate-limit marker")
+	}
+
+	gh := newFakeGitHub()
+	sha := "56150a0423a243224b03f355c3a3ba6941011b5b"
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey("o/repo", 214)] = pull
+	skip := ghapi.IssueComment{ID: 5074197614, Body: body,
+		CreatedAt: time.Now().UTC().Add(-time.Hour), UpdatedAt: time.Now().UTC().Add(-time.Minute)}
+	skip.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/repo", 214)] = []ghapi.IssueComment{skip}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	rep, err := svc.Feedback(context.Background(), "o/repo", 214)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var skipFinding *dialect.Finding
+	for i := range rep.Findings {
+		if rep.Findings[i].CommentID == 5074197614 {
+			skipFinding = &rep.Findings[i]
+		}
+	}
+	if skipFinding == nil {
+		t.Fatalf("the skipped-review notice must surface as actionable work, got %#v", rep.Findings)
+	}
+	if skipFinding.Severity != "major" {
+		t.Errorf("severity = %q, want major", skipFinding.Severity)
+	}
+	if !strings.Contains(skipFinding.Title, "Too many files") {
+		t.Errorf("the finding must carry CodeRabbit's own reason, got %q", skipFinding.Title)
+	}
+	// Findings block convergence, so the loop reports work rather than a false pass.
+	if rep.Converged {
+		t.Error("a skipped review with an open finding must not report converged")
+	}
+}

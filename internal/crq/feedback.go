@@ -233,6 +233,28 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		if !dialect.InBots(extractBots, comment.User.Login) {
 			continue
 		}
+		if s.cr.IsReviewSkipped(comment.Body) && s.isConfiguredBot(comment.User.Login) {
+			// Checked BEFORE the rate-limit guard below: the skip notice embeds
+			// the rate-limit marker, so that guard would drop it and the round
+			// would converge with a silently absent primary reviewer — worse than
+			// a loud one. The review did not happen and never will for this head,
+			// so surface it as work: narrow the PR to get a review.
+			reason := dialect.ReviewSkippedReason(comment.Body)
+			if reason == "" {
+				reason = "CodeRabbit skipped the review for this head."
+			}
+			report.Findings = append(report.Findings, dialect.Finding{
+				Bot:       comment.User.Login,
+				Severity:  "major",
+				Title:     "CodeRabbit skipped this review — narrow the PR to get one: " + reason,
+				Body:      strings.TrimSpace(dialect.CompactReviewBody(comment.Body)),
+				CommentID: comment.ID,
+				URL:       comment.URL,
+				Source:    "issue_comment",
+				CreatedAt: comment.CreatedAt,
+			})
+			continue
+		}
 		if s.cr.IsRateLimited(comment.Body) {
 			continue // an account-quota notice is never a finding
 		}
@@ -244,27 +266,6 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 			continue
 		}
 		if s.isConfiguredBot(comment.User.Login) {
-			// A "Review skipped" notice is the one configured-bot comment that IS
-			// actionable: the review did not happen and never will for this head,
-			// so the round converges on the co-reviewers alone. Without surfacing
-			// it the agent silently loses its primary reviewer and never learns
-			// the PR needs narrowing.
-			if s.cr.IsReviewSkipped(comment.Body) {
-				reason := dialect.ReviewSkippedReason(comment.Body)
-				if reason == "" {
-					reason = "CodeRabbit skipped the review for this head."
-				}
-				report.Findings = append(report.Findings, dialect.Finding{
-					Bot:       comment.User.Login,
-					Severity:  "major",
-					Title:     "CodeRabbit skipped this review — narrow the PR to get one: " + reason,
-					Body:      strings.TrimSpace(comment.Body),
-					CommentID: comment.ID,
-					URL:       comment.URL,
-					Source:    "issue_comment",
-					CreatedAt: comment.CreatedAt,
-				})
-			}
 			continue
 		}
 		if dialect.IsNonActionableText(comment.Body) {
