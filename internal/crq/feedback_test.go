@@ -2028,14 +2028,14 @@ func TestFeedbackSurfacesSkippedReviewDespiteRateLimitMarker(t *testing.T) {
 	}
 }
 
-// TestLoopIgnoresAccountBlockWhenPrimaryWillNotReview pins the rule that stopped
+// TestAccountBlockIgnoredWhenPrimaryWillNotReview pins the rule that stopped
 // agents reasoning about CodeRabbit on repos it never reviews. On a summary-only
 // round the account block is meaningless: it must not extend the wait deadline,
 // must not slow the poll to the block window, and must not be narrated. Agents
 // were reading that narration and concluding "hold the head until CodeRabbit
 // lands" — on a repo where CodeRabbit never lands, i.e. never push, never
 // converge.
-func TestLoopIgnoresAccountBlockWhenPrimaryWillNotReview(t *testing.T) {
+func TestAccountBlockIgnoredWhenPrimaryWillNotReview(t *testing.T) {
 	now := time.Now().UTC()
 	blocked := now.Add(42 * time.Minute)
 	deadline := now.Add(5 * time.Minute)

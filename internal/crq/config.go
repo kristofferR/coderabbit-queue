@@ -3,6 +3,7 @@ package crq
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -105,7 +106,10 @@ func LoadConfig() (Config, error) {
 	host, _ := os.Hostname()
 	bot := stringEnv(env, "CRQ_BOT", "coderabbitai[bot]")
 	requiredBots := listEnv(env, "CRQ_REQUIRED_BOTS", bot)
-	coBots := parseCoBots(env, requiredBots)
+	coBots, err := parseCoBots(env, requiredBots)
+	if err != nil {
+		return Config{}, err
+	}
 	// A required co-reviewer gates convergence via RequiredBots membership —
 	// that list stays the single source of required-ness.
 	for _, cb := range coBots {
@@ -290,12 +294,27 @@ type CoBotConfig struct {
 // legacy alias of CRQ_COBOT_CODEX_CMD. Bugbot/Macroscope default to
 // `selfheal` — they auto-review pushes, so crq only nudges one that went
 // silent on a head it should have covered.
-func parseCoBots(env map[string]string, requiredBots []string) []CoBotConfig {
+func parseCoBots(env map[string]string, requiredBots []string) ([]CoBotConfig, error) {
 	enabled := map[string]bool{}
+	var unknown []string
 	for _, item := range splitList(stringEnvAllowEmpty(env, "CRQ_COBOTS", "codex,bugbot,macroscope")) {
-		if co, ok := dialect.CoReviewerByName(item); ok {
-			enabled[co.Name] = true
+		co, ok := dialect.CoReviewerByName(item)
+		if !ok {
+			// Refuse rather than skip: silently dropping a typo disables the
+			// co-reviewer the operator asked for, and the symptom (a bot that
+			// never runs) looks nothing like its cause.
+			unknown = append(unknown, item)
+			continue
 		}
+		enabled[co.Name] = true
+	}
+	if len(unknown) > 0 {
+		known := make([]string, 0, 3)
+		for _, co := range dialect.KnownCoReviewers() {
+			known = append(known, co.Name)
+		}
+		return nil, fmt.Errorf("CRQ_COBOTS: unknown co-reviewer %s (known: %s)",
+			strings.Join(unknown, ", "), strings.Join(known, ", "))
 	}
 	requiredSet := map[string]bool{}
 	for _, bot := range requiredBots {
@@ -339,7 +358,7 @@ func parseCoBots(env map[string]string, requiredBots []string) []CoBotConfig {
 			SelfHealGrace: durationEnv(env, "CRQ_COBOT_"+key+"_GRACE", 10*time.Minute),
 		})
 	}
-	return out
+	return out, nil
 }
 
 // splitList splits a comma-separated list, dropping blanks (an all-blank or

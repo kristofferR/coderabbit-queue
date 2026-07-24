@@ -3,6 +3,7 @@ package crq
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -407,5 +408,22 @@ func TestLoadConfigRLCoDegradeAlias(t *testing.T) {
 	}
 	if cfg.RateLimitCoDegrade {
 		t.Fatal("legacy CRQ_RL_CODEX_DEGRADE=0 must still disable the degrade")
+	}
+}
+
+func TestLoadConfigRejectsUnknownCoBot(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_REQUIRED_BOTS", "")
+	t.Setenv("CRQ_COBOTS", "codex,buugbot")
+
+	// Silently skipping a typo disabled the co-reviewer the operator asked for,
+	// and the symptom — a bot that simply never runs — looks nothing like a
+	// misspelling, so this fails loudly instead.
+	_, err := LoadConfig()
+	if err == nil {
+		t.Fatal("a misspelled co-reviewer must fail configuration, not be dropped")
+	}
+	if !strings.Contains(err.Error(), "buugbot") || !strings.Contains(err.Error(), "bugbot") {
+		t.Fatalf("the error must name the typo and the known bots, got %v", err)
 	}
 }

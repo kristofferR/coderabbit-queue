@@ -358,21 +358,6 @@ func quotaFreeVerdict(v engine.FireVerdict) bool {
 	return false
 }
 
-// anyCoUncommanded reports whether some triggerable co-reviewer has no
-// command recorded on the round yet — the cheap pre-filter for the deferred
-// scan above (a round with every trigger already posted cannot defer again).
-func anyCoUncommanded(r Round, p engine.Policy) bool {
-	for _, cp := range p.CoReviewerPolicies() {
-		if strings.TrimSpace(cp.Command) == "" {
-			continue
-		}
-		if r.Co(cp.Login).CommandID == 0 && !(dialect.IsCodexBot(cp.Login) && r.CodexCommandID != 0) {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *Service) global(st State, now time.Time) engine.Global {
 	return engine.Global{
 		SlotFree:     st.SlotRound() == nil,
@@ -1053,7 +1038,15 @@ func (s *Service) fireCoReviewWait(ctx context.Context, round Round, obs engine.
 		}
 		at := commandCreatedAt(cmds, id, now)
 		adopts = append(adopts, adoptCmd{login: cp.Login, id: id, at: at})
-		anchor = at
+		// The anchor is the round's evidence FLOOR, so it takes the earliest
+		// candidate. Overwriting it per co-reviewer both discarded the primary
+		// head-review floor above and left whichever policy config happened to
+		// list last — so with Codex commanded at 10:00 and Bugbot at 10:30 a
+		// SHA-less Codex clean summary at 10:05 fell below the floor and was
+		// ignored, exactly the loss this anchor exists to prevent.
+		if at.Before(anchor) {
+			anchor = at
+		}
 	}
 	changed := false
 	updated, err := s.store.Update(ctx, func(st *State) error {
@@ -1713,6 +1706,9 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 	enqueued := false
 	var lastLog time.Time
 	var lastFeedbackCheck time.Time
+	// primaryUnavailable is refreshed by each feedback pass and gates the
+	// quota-free bypass, so the common round pays for one observation per tick.
+	var primaryUnavailable bool
 	feedbackCheckEvery := queuedFeedbackCheckEvery(s.cfg.PollInterval)
 	for {
 		if s.cfg.WaitTimeout > 0 && s.clock().Sub(start) > s.cfg.WaitTimeout {
@@ -1770,6 +1766,7 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 				return PumpResult{}, 1, err
 			}
 			lastFeedbackCheck = time.Now()
+			primaryUnavailable = report.PrimaryUnavailable
 			// Return current-head findings immediately, plus a delayed review
 			// attached to the previous commit when it actually arrived after this
 			// round was queued. The latter is real new feedback, not the old carried
@@ -1806,14 +1803,24 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 		// is pure latency on a round whose co-reviewers are ready to run now.
 		// Resolve THIS PR's round directly instead of waiting for the global pump
 		// to select it.
-		result, handled, err := s.advanceQuotaFree(ctx, repo, pr)
-		if err != nil {
-			return PumpResult{}, 1, err
+		// Only attempt the bypass when the last feedback pass said the primary
+		// will not review this head. Running it unconditionally observed the PR
+		// in full and then let Pump observe the very same PR again a few lines
+		// later — two round trips per tick on the hot polling loop, for a
+		// bypass that applies to a small minority of rounds.
+		result, handled := PumpResult{}, false
+		if primaryUnavailable {
+			var aerr error
+			result, handled, aerr = s.advanceQuotaFree(ctx, repo, pr)
+			if aerr != nil {
+				return PumpResult{}, 1, aerr
+			}
 		}
 		if !handled {
-			result, err = s.Pump(ctx)
-			if err != nil {
-				return PumpResult{}, 1, err
+			var perr error
+			result, perr = s.Pump(ctx)
+			if perr != nil {
+				return PumpResult{}, 1, perr
 			}
 		}
 		state, _, err := s.store.Load(ctx)

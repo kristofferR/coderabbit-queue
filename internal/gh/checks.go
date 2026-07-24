@@ -45,13 +45,13 @@ func (g *GitHub) ListCheckRuns(ctx context.Context, repo, ref string) ([]CheckRu
 			return nil, err
 		}
 		if resp.StatusCode == http.StatusNotFound {
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
 			return nil, ErrNotFound
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return nil, &APIError{Method: http.MethodGet, URL: next, Status: resp.StatusCode, Body: string(b)}
 		}
 		var envelope struct {
@@ -59,7 +59,7 @@ func (g *GitHub) ListCheckRuns(ctx context.Context, repo, ref string) ([]CheckRu
 		}
 		decodeErr := json.NewDecoder(resp.Body).Decode(&envelope)
 		link := resp.Header.Get("Link")
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if decodeErr != nil {
 			return nil, decodeErr
 		}

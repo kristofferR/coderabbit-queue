@@ -199,8 +199,13 @@ func coReviewedHead(obs Observation, login string) bool {
 // CodexActiveThisRound.)
 func CoActiveThisRound(r state.Round, obs Observation, login string) bool {
 	cutoff := coCutoff(r, login)
-	return coReviewedRound(r, obs, login, cutoff) || coCommentedRound(obs, login, cutoff) ||
-		coVerdictSince(obs, login, cutoff) || coCheckAny(obs, login)
+	if coReviewedRound(r, obs, login, cutoff) || coCommentedRound(obs, login, cutoff) ||
+		coVerdictSince(obs, login, cutoff) || coCheckAny(obs, login) {
+		return true
+	}
+	// Codex's thumbs-up quirk is applied here so callers never branch on a bot
+	// identity themselves — engine owns which bots have quirks.
+	return dialect.IsCodexBot(login) && obs.CodexThumbsUp
 }
 
 // coVerdictSince reports a per-round verdict comment (Macroscope's

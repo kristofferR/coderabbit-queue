@@ -156,12 +156,7 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 		for _, cb := range s.cfg.CoBots {
 			seen := engine.CoSeen{AutoActive: engine.CoAutoActive(o.eng, cb.Login)}
 			if round != nil {
-				if dialect.IsCodexBot(cb.Login) {
-					// Codex's thumbs-up quirk counts as round participation.
-					seen.ActiveThisRound = engine.CodexActiveThisRound(*round, o.eng)
-				} else {
-					seen.ActiveThisRound = engine.CoActiveThisRound(*round, o.eng, cb.Login)
-				}
+				seen.ActiveThisRound = engine.CoActiveThisRound(*round, o.eng, cb.Login)
 			}
 			o.eng.Co[dialect.NormalizeBotName(cb.Login)] = seen
 		}
