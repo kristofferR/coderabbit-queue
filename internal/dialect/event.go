@@ -53,10 +53,16 @@ type BotEvent struct {
 	CommentID int64
 	CreatedAt time.Time
 	UpdatedAt time.Time
-	AutoReply bool       // body carries the auto-reply (calibration) marker
-	Window    *time.Time // EvRateLimited: parsed "available in" deadline
-	Remaining *int       // EvRateLimited: parsed remaining reviews
-	SHA       string     // EvCoClean: reviewed-commit sha, "" if absent
+	AutoReply bool // body carries the auto-reply (calibration) marker
+	// SummaryOnly reports that this configured-bot comment declares a
+	// summary-and-walkthrough-only plan (CodeRabbit Free on a private repo).
+	// It is a property of the ACCOUNT, not of any round, so it rides alongside
+	// the dominant Kind rather than competing with it — a rate-limit notice or
+	// an in-progress summary must still classify as itself.
+	SummaryOnly bool
+	Window      *time.Time // EvRateLimited: parsed "available in" deadline
+	Remaining   *int       // EvRateLimited: parsed remaining reviews
+	SHA         string     // EvCoClean: reviewed-commit sha, "" if absent
 	// For is the canonical co-reviewer login the event concerns: the commanded
 	// bot for EvCoCommand, the authoring bot for a co-reviewer's own comments.
 	// "" for primary-bot and human events.
@@ -149,6 +155,7 @@ func (c Classifier) Classify(author, body string, id int64, createdAt, updatedAt
 		return ev
 	}
 	ev.AutoReply = c.CodeRabbit.IsAutoReply(body)
+	ev.SummaryOnly = c.CodeRabbit.IsSummaryOnlyPlan(body)
 	switch {
 	case c.CodeRabbit.IsRateLimited(body):
 		ev.Kind = EvRateLimited

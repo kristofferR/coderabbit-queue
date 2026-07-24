@@ -459,6 +459,16 @@ its review too. A Codex usage-limit notice releases that dynamic gate so an exha
 stall rounds it volunteered for; an explicitly required Codex is still bounded only by the normal
 feedback deadline.
 
+**Summary-only plans (CodeRabbit Free on private repos):** a Free plan reviews public repos in full
+but only *summarizes* private ones — CodeRabbit posts its walkthrough, tags it `🎁 Summarized by
+CodeRabbit Free`, and never submits a review, however often it is asked. crq reads that notice and
+runs the co-reviewers alone on those PRs: it posts no `@coderabbitai review`, takes no fire slot,
+spends no account quota or pacing interval, and converges the round on Codex's review instead of
+waiting out a review that cannot arrive. Every enabled co-reviewer gates such a round — they are its
+only reviewers — while a configured-but-absent bot still can't wedge it. There is nothing to
+configure and nothing to reset: upgrade to Pro and crq starts firing CodeRabbit again on the next
+observation.
+
 **Multiple orgs:** CodeRabbit's quota is per-org, so PRs in different orgs draw from *different*
 buckets. Run a separate gate (its own `CRQ_REPO`) per org rather than mixing them — otherwise you'd
 serialize reviews that don't actually compete.

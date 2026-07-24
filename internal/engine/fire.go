@@ -133,6 +133,15 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 		}
 		return FireDecision{Verdict: FireNo, Reason: reason}
 	}
+	// The configured bot's plan produces a walkthrough only — no review of this
+	// head is coming, ever. Resolve the round on the co-reviewers alone, before
+	// the slot / account-quota / pacing gates: none of them should delay (or be
+	// spent on) a review that cannot happen. coAwareDedupe posts the triggers
+	// crq may, waits bounded for a co-bot that answers on its own, and dedupes
+	// only when there is no co-reviewer to ask.
+	if SummaryOnlyPlan(obs, p) {
+		return coAwareDedupe(r, obs, p, now, true)
+	}
 	reviewedHead := false
 	for _, review := range obs.Reviews {
 		if sameBot(review.Bot, p.Bot) && review.Commit != "" && strings.HasPrefix(review.Commit, obs.Head) {
@@ -164,7 +173,7 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 	// only co-reviewer triggers, a co-review wait posts nothing), so an account
 	// block from another PR must not delay them.
 	if reviewedHead {
-		return coAwareDedupe(r, obs, p, now)
+		return coAwareDedupe(r, obs, p, now, false)
 	}
 	if g.BlockedUntil != nil && g.BlockedUntil.After(now) {
 		// Degrade instead of stalling: the block only gates CodeRabbit quota,
@@ -270,7 +279,9 @@ func newestCommand(commands []CommandSeen) *CommandSeen {
 	return newest
 }
 
-// coAwareDedupe resolves what to do when CodeRabbit already reviewed the head.
+// coAwareDedupe resolves what to do when CodeRabbit has delivered everything it
+// is ever going to for this head — either it already reviewed the head, or
+// (summaryOnly) its plan will never produce a review at all.
 // If no gating co-reviewer is still outstanding, the round is genuinely done
 // (FireDedupe). If a required-or-auto-active co-bot has no review of this head
 // yet, the round is not done: post the triggers crq may (FireCoOnly). When crq
@@ -284,12 +295,16 @@ func newestCommand(commands []CommandSeen) *CommandSeen {
 // it as still pending rather than the round wedging in an un-timed fire loop.
 // Completion counts the existing CodeRabbit review, so a FireCoOnly round
 // waits on the co-reviewers alone.
-func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time) FireDecision {
+//
+// Under summaryOnly every ENABLED co-reviewer gates, not just the required or
+// auto-active ones: they are the round's only reviewers, so a co-bot crq would
+// otherwise treat as optional is the difference between a review and none.
+func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, summaryOnly bool) FireDecision {
 	var post []string
 	wait := false
 	for _, cp := range p.coReviewers() {
 		co := obs.co(cp.Login)
-		gates := requiredBot(p, cp.Login) || co.AutoActive
+		gates := requiredBot(p, cp.Login) || co.AutoActive || summaryOnly
 		if !gates || coReviewedHead(obs, cp.Login) {
 			continue
 		}
@@ -301,11 +316,18 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time) Fire
 			wait = true
 		}
 	}
+	delivered := "coderabbit reviewed head"
+	if summaryOnly {
+		delivered = "coderabbit plan is summary-only"
+	}
 	if len(post) > 0 {
-		return FireDecision{Verdict: FireCoOnly, Reason: "coderabbit reviewed head; co-review still required", PostCo: post, PostCodex: hasCodexLogin(post)}
+		return FireDecision{Verdict: FireCoOnly, Reason: delivered + "; co-review still required", PostCo: post, PostCodex: hasCodexLogin(post)}
 	}
 	if wait {
 		return FireDecision{Verdict: FireCoReviewWait, Reason: "awaiting co-review"}
+	}
+	if summaryOnly {
+		return FireDecision{Verdict: FireDedupe, Reason: delivered + "; no co-review outstanding"}
 	}
 	return FireDecision{Verdict: FireDedupe, Reason: "bot already reviewed head"}
 }

@@ -39,6 +39,7 @@ func TestGoldenClassification(t *testing.T) {
 		completionReply bool
 		autoReply       bool
 		noAction        bool
+		summaryOnly     bool
 		codexClean      bool
 		codexUsageLimit bool
 		nonActionable   bool
@@ -60,6 +61,10 @@ func TestGoldenClassification(t *testing.T) {
 		{file: "coderabbit/review-failed.md", failed: true},
 		{file: "coderabbit/reviews-paused.md", paused: true},
 		{file: "coderabbit/no-actionable-comments.md", noAction: true},
+		// CodeRabbit Free on a private repo: the walkthrough IS the whole
+		// output — no review object ever follows, so crq must run the
+		// co-reviewers alone rather than firing (and waiting on) CodeRabbit.
+		{file: "coderabbit/summary-only-free-plan.md", summaryOnly: true},
 		{file: "coderabbit/already-reviewed.md", alreadyDone: true, autoReply: true},
 		{file: "coderabbit/completion-reply.md", completionReply: true, autoReply: true},
 		// The standalone trailer is an ack; a real finding CARRYING the trailer
@@ -92,6 +97,7 @@ func TestGoldenClassification(t *testing.T) {
 				{"IsCompletionReply", goldenCR.IsCompletionReply(body), tc.completionReply},
 				{"IsAutoReply", goldenCR.IsAutoReply(body), tc.autoReply},
 				{"IsNoActionReviewCompletion", IsNoActionReviewCompletion(body), tc.noAction},
+				{"IsSummaryOnlyPlan", goldenCR.IsSummaryOnlyPlan(body), tc.summaryOnly},
 				{"IsCodexNoActionReviewCompletion", IsCodexNoActionReviewCompletion(body), tc.codexClean},
 				{"IsCodexUsageLimit", IsCodexUsageLimit(body), tc.codexUsageLimit},
 				{"IsNonActionableText", IsNonActionableText(body), tc.nonActionable},
@@ -115,6 +121,13 @@ func TestGoldenClassification(t *testing.T) {
 			if tc.wantKind != EvOther {
 				if got := classifier.Classify(tc.author, body, 1, base, base).Kind; got != tc.wantKind {
 					t.Errorf("Classify kind = %v, want %v", got, tc.wantKind)
+				}
+			}
+			// SummaryOnly rides alongside the dominant kind, so it is asserted
+			// on the classified event rather than through wantKind.
+			if strings.HasPrefix(tc.file, "coderabbit/") {
+				if got := classifier.Classify("coderabbitai[bot]", body, 1, base, base).SummaryOnly; got != tc.summaryOnly {
+					t.Errorf("Classify SummaryOnly = %v, want %v", got, tc.summaryOnly)
 				}
 			}
 		})

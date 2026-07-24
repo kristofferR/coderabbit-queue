@@ -172,6 +172,25 @@ func (o Observation) co(login string) CoSeen {
 	return CoSeen{}
 }
 
+// SummaryOnlyPlan reports whether the configured bot has declared a
+// summary-and-walkthrough-only plan on this PR (CodeRabbit Free on a private
+// repo — the dialect owns the wording). It means the bot will NEVER submit a
+// review here however often it is asked, so the round has exactly one honest
+// resolution: run the co-reviewers and let them decide it.
+//
+// The declaration is an account fact, not a round fact: it lives in the top
+// summary CodeRabbit edits in place, so no cutoff applies and any occurrence
+// counts. It also self-heals — upgrade the plan and the notice stops shipping,
+// so crq resumes firing on the next observation with no state to reset.
+func SummaryOnlyPlan(obs Observation, p Policy) bool {
+	for _, ev := range obs.Events {
+		if ev.SummaryOnly && sameBot(ev.Bot, p.Bot) {
+			return true
+		}
+	}
+	return false
+}
+
 // notBefore mirrors v2: GitHub timestamps are second-granular, so a bot
 // completion in the same second as the trigger must still count.
 func notBefore(t, baseline time.Time) bool { return !t.Before(baseline) }

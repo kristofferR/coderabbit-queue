@@ -246,3 +246,110 @@ func TestDecideFireMultiBotPostCo(t *testing.T) {
 		t.Fatalf("verdict = %v, want FireDedupe for a wanted-only silent bot", d.Verdict)
 	}
 }
+
+// TestSummaryOnlyPlanRunsCoReviewersAlone pins the CodeRabbit-Free-on-a-private-repo
+// contract: the bot ships a walkthrough and NO review object, ever. crq must never
+// spend a fire (or a slot, or account quota, or pacing) on that review, must fall
+// back to the co-reviewers as the round's only reviewers, and must let the round
+// converge on them instead of hanging on a review that cannot arrive.
+func TestSummaryOnlyPlanRunsCoReviewersAlone(t *testing.T) {
+	now := time.Date(2026, 7, 24, 20, 0, 0, 0, time.UTC)
+	head := "abcdef123"
+	codex := dialect.CodexBotLogin
+	queued := state.Round{Repo: "o/r", PR: 1021, Head: head, Phase: state.PhaseQueued}
+	free := Global{SlotFree: true}
+
+	// Codex enabled and triggerable, but NOT required and not auto-active: the
+	// case that only summary-only promotes into a gating reviewer.
+	p := Policy{
+		Bot:          "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]"},
+		MinInterval:  90 * time.Second,
+		CoReviewers:  []CoReviewerPolicy{{Login: codex, Command: "@codex review", Trigger: TriggerAlways}},
+	}
+	// The walkthrough carries the plan notice alongside its own kind.
+	notice := dialect.BotEvent{
+		Kind: dialect.EvOther, Bot: "coderabbitai[bot]", CommentID: 7,
+		CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour), SummaryOnly: true,
+	}
+	obs := func(events []dialect.BotEvent, reviews []ReviewSeen, co CoSeen) Observation {
+		return Observation{Head: head, Open: true, Events: events, Reviews: reviews,
+			Co: map[string]CoSeen{dialect.NormalizeBotName(codex): co}}
+	}
+	codexAtHead := []ReviewSeen{{Bot: codex, Commit: "abcdef1234567890", SubmittedAt: now.Add(-30 * time.Minute)}}
+
+	t.Run("fires codex instead of coderabbit", func(t *testing.T) {
+		d := DecideFire(free, queued, obs([]dialect.BotEvent{notice}, nil, CoSeen{}), now, p)
+		if d.Verdict != FireCoOnly {
+			t.Fatalf("verdict = %v (%s), want FireCoOnly", d.Verdict, d.Reason)
+		}
+		if len(d.PostCo) != 1 || !dialect.IsCodexBot(d.PostCo[0]) {
+			t.Fatalf("PostCo = %v, want codex only", d.PostCo)
+		}
+	})
+
+	t.Run("without the notice the same round fires coderabbit", func(t *testing.T) {
+		d := DecideFire(free, queued, obs(nil, nil, CoSeen{}), now, p)
+		if d.Verdict != FirePost {
+			t.Fatalf("verdict = %v, want FirePost", d.Verdict)
+		}
+	})
+
+	// The resolution costs no CodeRabbit quota, so neither a busy slot nor an
+	// account block from another PR may delay or divert it.
+	t.Run("bypasses the slot and account-block gates", func(t *testing.T) {
+		blocked := now.Add(time.Hour)
+		for name, g := range map[string]Global{
+			"slot busy":       {SlotFree: false},
+			"account blocked": {SlotFree: true, BlockedUntil: &blocked},
+			"pacing":          {SlotFree: true, LastFired: &now},
+		} {
+			d := DecideFire(g, queued, obs([]dialect.BotEvent{notice}, nil, CoSeen{}), now, p)
+			if d.Verdict != FireCoOnly {
+				t.Errorf("%s: verdict = %v (%s), want FireCoOnly", name, d.Verdict, d.Reason)
+			}
+		}
+	})
+
+	t.Run("waits bounded for an auto-reviewing codex", func(t *testing.T) {
+		d := DecideFire(free, queued, obs([]dialect.BotEvent{notice}, nil, CoSeen{AutoActive: true}), now, p)
+		if d.Verdict != FireCoReviewWait {
+			t.Fatalf("verdict = %v (%s), want FireCoReviewWait", d.Verdict, d.Reason)
+		}
+		if len(d.PostCo) != 0 {
+			t.Fatalf("PostCo = %v, want no post for an auto-reviewing bot", d.PostCo)
+		}
+	})
+
+	t.Run("dedupes when no co-reviewer can be asked", func(t *testing.T) {
+		inert := p
+		inert.CoReviewers = []CoReviewerPolicy{{Login: codex, Trigger: TriggerNever}}
+		d := DecideFire(free, queued, obs([]dialect.BotEvent{notice}, nil, CoSeen{}), now, inert)
+		if d.Verdict != FireDedupe {
+			t.Fatalf("verdict = %v (%s), want FireDedupe", d.Verdict, d.Reason)
+		}
+	})
+
+	// Completion: the round may resolve without ever firing, so the never-fired
+	// round is the one that has to converge.
+	t.Run("unfired round converges on the codex review", func(t *testing.T) {
+		st := Completion(queued, obs([]dialect.BotEvent{notice}, codexAtHead, CoSeen{AutoActive: true}), p)
+		if !st.Done {
+			t.Fatalf("Done = false, want true (reviewedBy = %v)", st.ReviewedBy)
+		}
+	})
+
+	t.Run("does not converge while codex is still silent", func(t *testing.T) {
+		st := Completion(queued, obs([]dialect.BotEvent{notice}, nil, CoSeen{AutoActive: true}), p)
+		if st.Done {
+			t.Fatalf("Done = true, want false while codex has not answered (reviewedBy = %v)", st.ReviewedBy)
+		}
+	})
+
+	t.Run("without the notice coderabbit still gates", func(t *testing.T) {
+		st := Completion(queued, obs(nil, codexAtHead, CoSeen{AutoActive: true}), p)
+		if st.Done {
+			t.Fatalf("Done = true, want false: coderabbit has not reviewed (reviewedBy = %v)", st.ReviewedBy)
+		}
+	})
+}

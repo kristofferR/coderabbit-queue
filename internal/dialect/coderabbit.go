@@ -102,6 +102,23 @@ func (d CodeRabbit) IsReviewAlreadyDone(body string) bool {
 	return !d.IsRateLimited(l)
 }
 
+// IsSummaryOnlyPlan reports whether a CodeRabbit comment declares that the
+// account's plan produces a high-level summary and walkthrough ONLY, with no
+// line-by-line review. CodeRabbit ships this notice on private repositories
+// under the Free plan; public repositories get Pro-grade reviews for free and
+// carry "**Plan**: Pro" instead, so the notice is exactly the "CodeRabbit will
+// never submit a review of this PR" signal — no repo-visibility lookup needed.
+//
+// Both anchors are statements about THIS account ("Summarized by CodeRabbit
+// Free", "on the Free plan"), never generic marketing copy: a false positive
+// would stop crq firing CodeRabbit on a PR it could really review.
+func (d CodeRabbit) IsSummaryOnlyPlan(body string) bool {
+	l := strings.ToLower(body)
+	return strings.Contains(l, "summarized by coderabbit free") ||
+		(strings.Contains(l, "on the free plan") &&
+			strings.Contains(l, "high-level summary and a walkthrough"))
+}
+
 // IsReviewInProgress reports whether body is CodeRabbit's editable top-summary
 // state for a review that has started but has not finished. CodeRabbit can post
 // a "Review finished" command reply before this summary leaves the processing

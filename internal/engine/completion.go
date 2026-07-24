@@ -48,6 +48,7 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 	if r.FiredAt != nil {
 		cutoff = r.FiredAt.UTC()
 	}
+	summaryOnly := SummaryOnlyPlan(obs, p)
 
 	// Dynamic co-reviewer gate: a fired round that a co-bot participates in —
 	// reviewing the PR on its own (AutoActive) or acting this round
@@ -56,7 +57,13 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 	// (Codex's usage-limit exhaustion) disengages this gate (the bot cannot
 	// finish this round); configured-required bots are left to the wait
 	// deadline as before.
-	if r.FiredAt != nil {
+	//
+	// A summary-only round need not have fired to engage this gate: CodeRabbit
+	// cannot review, so crq resolves the round without ever posting its command
+	// and FiredAt stays nil while the co-reviewers do all of the work. The gate
+	// still keys on observed participation, never on mere configuration — an
+	// enabled-but-absent co-bot must not wedge a round nothing else will finish.
+	if r.FiredAt != nil || summaryOnly {
 		for _, cp := range p.coReviewers() {
 			if requiredBot(p, cp.Login) {
 				continue
@@ -136,6 +143,18 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 				markReviewed(reviewedBy, ev.Bot)
 			}
 		}
+	}
+
+	// 3b. Summary-only plan: the walkthrough IS CodeRabbit's entire output for
+	// this PR — no review object will ever follow, however often it is asked.
+	// Waiting for one wedges the round until the in-flight timeout re-fires it,
+	// forever. Count the bot as having delivered once every gating co-reviewer
+	// is satisfied, exactly as the clean-review summary does above; unlike that
+	// path it needs no fire, since the round can resolve without crq ever
+	// posting the review command.
+	if summaryOnly && needsBotReview(reviewedBy, p.Bot) &&
+		coReviewersSatisfied(r, obs, p, cutoff, reviewedBy) {
+		markReviewed(reviewedBy, p.Bot)
 	}
 
 	// 4. Completion-reply fallback.
