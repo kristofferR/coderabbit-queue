@@ -2421,3 +2421,82 @@ func TestPumpRescuesSummaryOnlyRoundBehindBlockedQueue(t *testing.T) {
 		t.Fatalf("a summary-only round must not take the fire slot, got %#v", st.FireSlot)
 	}
 }
+
+// TestWaitResolvesSummaryOnlyWithoutTheQueue pins the architectural rule the
+// dogfood exposed: a summary-only round is NOT a queue citizen. The Seq FIFO and
+// the FireSlot exist solely to serialize CodeRabbit's account-wide review limit,
+// and a CodeRabbit-Free private repo never produces a review at all — so neither
+// an account block, nor another PR holding the slot, may delay it. Its
+// co-reviewers are ready now; the loop must run them now.
+//
+// The starvation is staged at its worst: another PR HOLDS the fire slot, so Pump
+// short-circuits on the slot holder and never reaches the FIFO or its bounded
+// rescue scan at all. Only the direct quota-free path can resolve this round.
+func TestWaitResolvesSummaryOnlyWithoutTheQueue(t *testing.T) {
+	cfg := firingConfig()
+	cfg.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
+	cfg.FeedbackBots = cfg.RequiredBots
+	cfg.PollInterval = 10 * time.Millisecond
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+
+	// Another PR holds the fire slot: every Pump pass returns after progressing
+	// it, so the FIFO below is never consulted.
+	frontPull := ghapi.Pull{State: "open"}
+	frontPull.Head.SHA = "1111111111111111"
+	gh.pulls[fakeKey("o/front", 10)] = frontPull
+
+	sha := "2222222222222222"
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey("o/private", 20)] = pull
+	walkthrough := ghapi.IssueComment{
+		ID:        900,
+		Body:      corpusMessage(t, "coderabbit/summary-only-free-plan.md"),
+		CreatedAt: now.Add(-time.Minute),
+		UpdatedAt: now.Add(-time.Minute),
+	}
+	walkthrough.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/private", 20)] = []ghapi.IssueComment{walkthrough}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+
+	seedRound(t, store, cfg, "o/front", 10, "111111111", PhaseFired, now.Add(-time.Minute), 500)
+	blockedUntil := now.Add(45 * time.Minute)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.Account.BlockedUntil = &blockedUntil
+		st.FireSlot = &FireSlot{Key: QueueKey("o/front", 10), Token: "seedtok", Since: now.Add(-time.Minute)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A bounded context turns the pre-fix behavior (spin until the block clears)
+	// into a prompt failure instead of a hung test.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	res, code, err := svc.Wait(ctx, "o/private", 20)
+	if err != nil {
+		t.Fatalf("the summary-only round must resolve without the queue, got err=%v res=%#v", err, res)
+	}
+	if code == 2 {
+		t.Fatalf("the summary-only round must not wait out the account block, got %#v code=%d", res, code)
+	}
+	st, _, _ := store.Load(context.Background())
+	if r := st.Round("o/private", 20); r == nil || r.Phase == PhaseQueued {
+		t.Fatalf("the summary-only round must leave the queue, got %#v", r)
+	}
+	for _, p := range gh.posted {
+		if strings.Contains(p, cfg.ReviewCommand) {
+			t.Fatalf("summary-only must never post the CodeRabbit command, posted=%v", gh.posted)
+		}
+	}
+	// The other PR keeps the slot — resolving ours never touched it.
+	if st.FireSlot == nil || st.FireSlot.Key != QueueKey("o/front", 10) {
+		t.Fatalf("the front PR must keep the fire slot, got %#v", st.FireSlot)
+	}
+}

@@ -312,6 +312,43 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	return result, nil
 }
 
+// advanceQuotaFree resolves ONE PR's round directly, bypassing the account-wide
+// FIFO, when its verdict spends no CodeRabbit quota. It is the loop's escape
+// hatch from a queue it does not belong in: a summary-only round has no review
+// coming from CodeRabbit ever, so neither the fire slot, the global pacing
+// interval, nor an account block has any authority over it — the only thing it
+// waits for is its own co-reviewers.
+//
+// handled is false when the round is gone, not fire-eligible, or its verdict
+// would spend quota; the caller then falls back to the normal global pump.
+func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (PumpResult, bool, error) {
+	now := s.clock()
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return PumpResult{}, false, err
+	}
+	round := st.Round(repo, pr)
+	if round == nil || !round.FireEligible(now) {
+		return PumpResult{}, false, nil
+	}
+	obs, err := s.observe(ctx, repo, pr, round, now)
+	if err != nil {
+		return PumpResult{}, false, err
+	}
+	d := engine.DecideFire(s.global(st, now), *round, obs.eng, now, s.policy())
+	if !quotaFreeVerdict(d.Verdict) {
+		return PumpResult{}, false, nil
+	}
+	res, err := s.applyFire(ctx, *round, obs.eng, d, now)
+	if err != nil {
+		return PumpResult{}, false, err
+	}
+	if s.log != nil {
+		s.log.Printf("%s#%d resolved without the review queue: %s", repo, pr, d.Reason)
+	}
+	return res, true, nil
+}
+
 // quotaFreeVerdict reports whether a fire verdict can be applied while another
 // PR holds the slot or the account is blocked: none of these post
 // `@coderabbitai review`, reserve the FireSlot, or spend account quota.
@@ -1763,9 +1800,23 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 				return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: report.Head, Reason: "codex answered; coderabbit deferred"}, 3, nil
 			}
 		}
-		result, err := s.Pump(ctx)
+		// A round that spends no CodeRabbit quota is not a queue citizen. The Seq
+		// FIFO and the FireSlot exist for exactly one purpose: serializing
+		// CodeRabbit's account-wide review limit. A summary-only plan (CodeRabbit
+		// Free on a private repo) never produces a review at all, so parking it
+		// behind other PRs — or behind an account block that cannot apply to it —
+		// is pure latency on a round whose co-reviewers are ready to run now.
+		// Resolve THIS PR's round directly instead of waiting for the global pump
+		// to select it.
+		result, handled, err := s.advanceQuotaFree(ctx, repo, pr)
 		if err != nil {
 			return PumpResult{}, 1, err
+		}
+		if !handled {
+			result, err = s.Pump(ctx)
+			if err != nil {
+				return PumpResult{}, 1, err
+			}
 		}
 		state, _, err := s.store.Load(ctx)
 		if err != nil {
