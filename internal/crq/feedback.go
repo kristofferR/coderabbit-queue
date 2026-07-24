@@ -106,7 +106,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	}
 	completion := engine.Completion(completionRound, obs.eng, s.policy())
 	report.ReviewedBy = completion.ReviewedBy
-	report.CoReviewers = coReviewerStatuses(s.cfg, obs.eng)
+	report.CoReviewers = coReviewerStatuses(s.cfg, obs.eng, anchorCutoff)
 	if why := engine.PrimaryUnavailableReason(obs.eng, s.policy(), head); why != "" {
 		report.PrimaryUnavailable = true
 		report.PrimaryUnavailableReason = s.cfg.Bot + " " + why
@@ -156,7 +156,25 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	}
 
 	suppressPromptAt := map[string]bool{}
+	// Bugbot re-reports one BUGBOT_BUG_ID across several threads. Dedupe alone
+	// collapses only what is emitted together, so resolving the emitted thread
+	// simply promotes a sibling on the next poll and the "single" finding
+	// resurfaces until every duplicate is resolved by hand. Collect the stable
+	// ids settled in ANY thread first and suppress the whole family.
+	settledStableIDs := map[string]bool{}
 	if threads, err := s.reviewThreads(ctx, repo, pr); err == nil {
+		for _, thread := range threads {
+			if !thread.IsResolved && !thread.IsOutdated {
+				continue
+			}
+			for _, c := range thread.Comments.Nodes {
+				if co, ok := dialect.CoReviewerByName(c.Author.Login); ok && co.FindingDedupeKey != nil {
+					if stable, ok := co.FindingDedupeKey(c.Body); ok {
+						settledStableIDs[dialect.NormalizeBotName(c.Author.Login)+"|"+stable] = true
+					}
+				}
+			}
+		}
 		for _, thread := range threads {
 			report.Findings = append(report.Findings, threadFindings(thread, extractBots)...)
 			// A resolved/outdated inline thread emits no finding, but CodeRabbit's
@@ -188,6 +206,14 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		}
 		for _, comment := range comments {
 			if !dialect.InBots(extractBots, comment.User.Login) {
+				continue
+			}
+			// The GraphQL path drops findings the bot settled by EDITING its own
+			// comment (Macroscope's "✅ Resolved in <sha>"). This fallback must
+			// apply the same registry hook, or under it the resolved finding
+			// stays actionable indefinitely and convergence never comes.
+			if co, ok := dialect.CoReviewerByName(comment.User.Login); ok &&
+				co.ResolvedInSHA != nil && co.ResolvedInSHA(comment.Body) != "" {
 				continue
 			}
 			commit := dialect.ShortOID(firstNonEmpty(comment.CommitID, comment.OriginalCommitID))
@@ -244,7 +270,8 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		if !dialect.InBots(extractBots, comment.User.Login) {
 			continue
 		}
-		if s.cr.IsReviewSkipped(comment.Body) && s.isConfiguredBot(comment.User.Login) {
+		if s.cr.IsReviewSkipped(comment.Body) && s.isConfiguredBot(comment.User.Login) &&
+			skipAppliesToHead(comment.Body, head) {
 			// Checked BEFORE the rate-limit guard below: the skip notice embeds
 			// the rate-limit marker, so that guard would drop it and the round
 			// would converge with a silently absent primary reviewer — worse than
@@ -297,7 +324,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		})
 	}
 
-	report.Findings = dedupeFindings(report.Findings, suppressPromptAt)
+	report.Findings = dedupeFindings(report.Findings, suppressPromptAt, settledStableIDs)
 	sort.Slice(report.Findings, func(i, j int) bool {
 		if dialect.RankSeverity(report.Findings[i].Severity) != dialect.RankSeverity(report.Findings[j].Severity) {
 			return dialect.RankSeverity(report.Findings[i].Severity) > dialect.RankSeverity(report.Findings[j].Severity)
@@ -1110,7 +1137,7 @@ func promptSuppressKeys(thread reviewThread, bots map[string]struct{}) []string 
 	return keys
 }
 
-func dedupeFindings(in []dialect.Finding, suppressPromptAt map[string]bool) []dialect.Finding {
+func dedupeFindings(in []dialect.Finding, suppressPromptAt, settledStableIDs map[string]bool) []dialect.Finding {
 	seen := map[string]bool{}
 	structuredAtLocation := map[string]bool{}
 	for _, finding := range in {
@@ -1137,6 +1164,9 @@ func dedupeFindings(in []dialect.Finding, suppressPromptAt map[string]bool) []di
 		// push must collapse to one finding.
 		if co, ok := dialect.CoReviewerByName(finding.Bot); ok && co.FindingDedupeKey != nil {
 			if stable, ok := co.FindingDedupeKey(finding.Body); ok {
+				if settledStableIDs[dialect.NormalizeBotName(finding.Bot)+"|"+stable] {
+					continue // settled in some thread — every sibling is settled
+				}
 				key = dialect.NormalizeBotName(finding.Bot) + "|" + stable
 			}
 		}
@@ -1151,10 +1181,23 @@ func dedupeFindings(in []dialect.Finding, suppressPromptAt map[string]bool) []di
 	return out
 }
 
+// skipAppliesToHead reports whether a "Review skipped" notice concerns the
+// head under review. The refusal is per-head and narrowing the PR is the fix,
+// so a skip of an EARLIER head must not keep surfacing: Loop treats findings as
+// blocking before it enqueues, which would stop the replacement head from ever
+// being submitted — the repair would permanently disable the reviewer.
+func skipAppliesToHead(body, head string) bool {
+	skipped := dialect.ReviewSkippedHeadSHA(body)
+	if skipped == "" || head == "" {
+		return true // names no commit: read conservatively as current
+	}
+	return dialect.SHAPrefixMatch(skipped, head)
+}
+
 // coReviewerStatuses summarizes each enabled co-reviewer's observed state for
 // the current head: head review evidence, check-run state, and Macroscope's
 // approvability verdict. Informational only — nothing here gates convergence.
-func coReviewerStatuses(cfg Config, obs engine.Observation) map[string]CoReviewerStatus {
+func coReviewerStatuses(cfg Config, obs engine.Observation, since time.Time) map[string]CoReviewerStatus {
 	if len(cfg.CoBots) == 0 {
 		return nil
 	}
@@ -1189,6 +1232,12 @@ func coReviewerStatuses(cfg Config, obs engine.Observation) map[string]CoReviewe
 		var latest time.Time
 		for _, ev := range obs.Events {
 			if ev.Kind != dialect.EvCoVerdict || ev.Approved == nil {
+				continue
+			}
+			// Verdicts are documented as current-head state. Between a push and
+			// the bot's new verdict the newest comment on the PR describes the
+			// PREVIOUS head, so anything older than this round is not reported.
+			if !since.IsZero() && ev.ObservedTime().Before(since) {
 				continue
 			}
 			if dialect.NormalizeBotName(firstNonEmpty(ev.For, ev.Bot)) != key {

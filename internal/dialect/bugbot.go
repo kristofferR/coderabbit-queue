@@ -69,15 +69,23 @@ func CleanBugbotCommentText(text string) string {
 // ClassifyBugbotCheck classifies one check run owned by the "cursor" app.
 // Only the check named "Cursor Bugbot" is its review: clean rounds conclude
 // `success` with "no issues found" in the summary, findings rounds conclude
-// `neutral` (verified live). Classification never reads the conclusion —
-// summary wording decides clean, so a conclusion-vocabulary change degrades to
-// CheckDone (findings still gate via threads) instead of misreading clean.
+// `neutral` (verified live). Clean-ness is decided by summary wording, not by
+// the conclusion, so a conclusion-vocabulary change degrades to CheckDone
+// (findings still gate via threads) instead of misreading clean.
+//
+// A run that terminated WITHOUT delivering a review (failure, cancelled,
+// timed_out) is still status "completed", so it must be rejected explicitly:
+// counting it as a finished review lets a round converge with no findings
+// even though Bugbot never actually reviewed the code.
 func ClassifyBugbotCheck(name, title, summary, status, conclusion string) CheckVerdict {
 	if name != bugbotCheckName {
 		return CheckUnrelated
 	}
 	if !strings.EqualFold(status, "completed") {
 		return CheckInProgress
+	}
+	if checkRunFailed(conclusion) {
+		return CheckFailed
 	}
 	if strings.Contains(NormalizeReviewText(summary), "no issues found") ||
 		strings.Contains(NormalizeReviewText(title), "no issues found") {

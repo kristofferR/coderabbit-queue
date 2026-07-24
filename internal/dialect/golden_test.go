@@ -396,10 +396,13 @@ func TestGoldenCheckRuns(t *testing.T) {
 		{"bugbot/check-in-progress.json", BugbotLogin, CheckInProgress},
 		{"macroscope/check-correctness-clean.json", MacroscopeLogin, CheckDoneClean},
 		{"macroscope/check-correctness-issues.json", MacroscopeLogin, CheckDone},
-		// Approvability is informational: its checks never read as clean.
-		{"macroscope/check-approvability-approved.json", MacroscopeLogin, CheckDone},
-		{"macroscope/check-approvability-not-eligible.json", MacroscopeLogin, CheckDone},
-		{"macroscope/check-custom.json", MacroscopeLogin, CheckDone},
+		// Only the Correctness Check is Macroscope's REVIEW. Approvability and
+		// repo-custom checks routinely complete first, so counting them as a
+		// finished review would let the round converge while correctness is
+		// still running — they are auxiliary: participation, never completion.
+		{"macroscope/check-approvability-approved.json", MacroscopeLogin, CheckAuxiliary},
+		{"macroscope/check-approvability-not-eligible.json", MacroscopeLogin, CheckAuxiliary},
+		{"macroscope/check-custom.json", MacroscopeLogin, CheckAuxiliary},
 	}
 	for _, tc := range cases {
 		t.Run(tc.file, func(t *testing.T) {
@@ -453,5 +456,45 @@ func TestGoldenReviewSkipped(t *testing.T) {
 		if goldenCR.IsReviewSkipped(prose) {
 			t.Errorf("prose must not classify as skipped: %q", prose)
 		}
+	}
+}
+
+// TestCheckRunsThatAreNotReviewEvidence pins the two ways a check run can be
+// present and completed without meaning "this bot reviewed the code". Both were
+// reported by Codex on the co-reviewer PR: counting either as completion lets a
+// round converge with no findings while the real review is still running (or
+// never ran at all).
+func TestCheckRunsThatAreNotReviewEvidence(t *testing.T) {
+	cases := []struct {
+		name       string
+		check      string
+		status     string
+		conclusion string
+		want       CheckVerdict
+	}{
+		// A crashed review is still status "completed".
+		{"bugbot failure", bugbotCheckName, "completed", "failure", CheckFailed},
+		{"bugbot cancelled", bugbotCheckName, "completed", "cancelled", CheckFailed},
+		{"bugbot timed out", bugbotCheckName, "completed", "timed_out", CheckFailed},
+		// The good paths must keep working.
+		{"bugbot findings", bugbotCheckName, "completed", "neutral", CheckDone},
+		{"bugbot running", bugbotCheckName, "in_progress", "", CheckInProgress},
+		// Macroscope's non-correctness checks are auxiliary whatever they conclude.
+		{"macroscope approvability", "Macroscope - Approvability Check", "completed", "success", CheckAuxiliary},
+		{"macroscope custom", "Macroscope - Effect Service Conventions", "completed", "failure", CheckAuxiliary},
+		{"macroscope correctness failed", macroscopeCorrectnessCheck, "completed", "failure", CheckFailed},
+		{"macroscope correctness done", macroscopeCorrectnessCheck, "completed", "neutral", CheckDone},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			slug := "cursor"
+			if strings.HasPrefix(tc.check, macroscopeCheckPrefix) {
+				slug = "macroscopeapp"
+			}
+			_, got := ClassifyCheckRun(slug, tc.check, "", "", tc.status, tc.conclusion)
+			if got != tc.want {
+				t.Fatalf("verdict = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

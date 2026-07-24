@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
@@ -28,10 +29,10 @@ func TestDedupeSuppressesResolvedThreadPromptDuplicate(t *testing.T) {
 		{Bot: "coderabbitai", Path: "internal/x.go", Line: 10, Title: "dup", Body: "do x", Source: "review_prompt"},
 	}
 	suppress := map[string]bool{"coderabbitai|internal/x.go|10": true}
-	if got := dedupeFindings(findings, suppress); len(got) != 0 {
+	if got := dedupeFindings(findings, suppress, nil); len(got) != 0 {
 		t.Fatalf("expected the prompt duplicate at a resolved-thread location to be suppressed, got %#v", got)
 	}
-	if got := dedupeFindings(findings, nil); len(got) != 1 {
+	if got := dedupeFindings(findings, nil, nil); len(got) != 1 {
 		t.Fatalf("expected the prompt finding to survive when not suppressed, got %#v", got)
 	}
 }
@@ -1219,7 +1220,7 @@ func TestDedupeFindingsDropsNonActionableBotArtifacts(t *testing.T) {
 		{Bot: "coderabbitai", Title: "Past review finding", Body: "The previously flagged issue is now fixed. No further action is needed.", Source: "review_body"},
 		{Bot: "coderabbitai", Title: "Biometric flow", Body: "Worth confirming this is the intended UX.", Source: "review_body"},
 	}
-	if got := dedupeFindings(findings, nil); len(got) != 0 {
+	if got := dedupeFindings(findings, nil, nil); len(got) != 0 {
 		t.Fatalf("expected non-actionable bot artifacts to be dropped, got %#v", got)
 	}
 }
@@ -2093,5 +2094,76 @@ func TestLoopIgnoresAccountBlockWhenPrimaryWillNotReview(t *testing.T) {
 	// head for it while an unrelated account block ticks down.
 	if !rep.ReviewedBy["coderabbitai[bot]"] {
 		t.Fatalf("the primary must read as delivered, got %#v", rep.ReviewedBy)
+	}
+}
+
+// TestSkippedFindingBindsToTheSkippedHead: the skip is a per-head refusal whose
+// fix is narrowing the PR. Loop treats findings as blocking BEFORE it enqueues,
+// so a skip of an earlier head that keeps surfacing would stop the narrowed
+// replacement head from ever being submitted — the repair would permanently
+// disable the reviewer it was meant to restore.
+func TestSkippedFindingBindsToTheSkippedHead(t *testing.T) {
+	skipBody := corpusMessage(t, "coderabbit/review-skipped-too-many-files.md")
+	skippedSHA := "56150a0423a243224b03f355c3a3ba6941011b5b"
+
+	if !skipAppliesToHead(skipBody, skippedSHA[:9]) {
+		t.Error("the skipped head itself must still surface the notice")
+	}
+	if skipAppliesToHead(skipBody, "abcdef123") {
+		t.Error("a narrowed replacement head must not inherit the old skip")
+	}
+	// A notice naming no commit is read conservatively as current.
+	if !skipAppliesToHead("> ## Review skipped\n>\n> No commits to review.", "abcdef123") {
+		t.Error("a SHA-less skip must bind to the observed head")
+	}
+}
+
+// TestCoReviewerVerdictScopedToRound: co_reviewers[].verdict is documented as
+// current-head state. Between a push and Macroscope's new Approvability comment
+// the newest verdict on the PR describes the PREVIOUS head, and reporting it
+// would misstate the current one.
+func TestCoReviewerVerdictScopedToRound(t *testing.T) {
+	cfg := Config{Bot: "coderabbitai[bot]", CoBots: []CoBotConfig{
+		{Login: dialect.MacroscopeLogin, Name: "macroscope"},
+	}}
+	firedAt := time.Now().UTC()
+	approved := true
+	stale := dialect.BotEvent{Kind: dialect.EvCoVerdict, Bot: dialect.MacroscopeLogin,
+		For: dialect.MacroscopeLogin, Approved: &approved, CommentID: 1,
+		CreatedAt: firedAt.Add(-time.Hour), UpdatedAt: firedAt.Add(-time.Hour)}
+	obs := engine.Observation{Head: "abcdef123", Open: true, Events: []dialect.BotEvent{stale}}
+
+	key := dialect.NormalizeBotName(dialect.MacroscopeLogin)
+	if got := coReviewerStatuses(cfg, obs, firedAt)[key].Verdict; got != "" {
+		t.Fatalf("a verdict from the previous head must not be reported, got %q", got)
+	}
+	// The same verdict inside the round is reported normally.
+	if got := coReviewerStatuses(cfg, obs, firedAt.Add(-2*time.Hour))[key].Verdict; got != "approved" {
+		t.Fatalf("an in-round verdict must be reported, got %q", got)
+	}
+}
+
+// TestBugbotStableIDSettledInAnySiblingThread: Bugbot re-reports one
+// BUGBOT_BUG_ID across several threads after each push. Deduplication alone
+// collapses only the findings emitted together, so resolving the emitted thread
+// promotes a sibling on the next poll and the "single" finding resurfaces —
+// blocking convergence until every duplicate is resolved by hand.
+func TestBugbotStableIDSettledInAnySiblingThread(t *testing.T) {
+	body := corpusMessage(t, "bugbot/inline-finding-high.md")
+	stable, ok := dialect.BugbotFindingDedupeKey(body)
+	if !ok {
+		t.Fatal("precondition: the corpus finding must carry a BUGBOT_BUG_ID")
+	}
+	findings := []dialect.Finding{
+		{Bot: dialect.BugbotLogin, Path: "a.ts", Line: 1, Title: "dup", Body: body, ThreadID: "PRRT_2", Source: "review_thread"},
+	}
+	// Nothing settled yet: the surviving sibling is still actionable.
+	if got := dedupeFindings(findings, nil, nil); len(got) != 1 {
+		t.Fatalf("an unsettled bug must surface, got %d", len(got))
+	}
+	// The same bug resolved in ANOTHER thread settles the whole family.
+	settled := map[string]bool{dialect.NormalizeBotName(dialect.BugbotLogin) + "|" + stable: true}
+	if got := dedupeFindings(findings, nil, settled); len(got) != 0 {
+		t.Fatalf("a bug settled in a sibling thread must not resurface, got %#v", got)
 	}
 }

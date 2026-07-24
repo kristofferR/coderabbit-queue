@@ -86,18 +86,31 @@ func ClassifyMacroscopeComment(body string) CoEvent {
 // ClassifyMacroscopeCheck classifies one check run owned by the
 // "macroscopeapp" app. Any "Macroscope - <Name>" check is Macroscope's (repos
 // add custom ones whose output titles can be garbled — classify by name prefix
-// only, never title), but only the Correctness Check may read as clean, via
-// its "No issues identified" title/summary.
+// only, never title).
+//
+// Only the Correctness Check is Macroscope's REVIEW. It publishes Approvability
+// and repo-defined custom checks beside it, and those routinely complete first;
+// treating them as completion evidence lets the round converge while the
+// correctness review is still running and its findings have not landed. They
+// are auxiliary: participation, never completion.
 func ClassifyMacroscopeCheck(name, title, summary, status, conclusion string) CheckVerdict {
 	if !strings.HasPrefix(name, macroscopeCheckPrefix) {
 		return CheckUnrelated
 	}
+	if name != macroscopeCorrectnessCheck {
+		if !strings.EqualFold(status, "completed") {
+			return CheckInProgress
+		}
+		return CheckAuxiliary
+	}
 	if !strings.EqualFold(status, "completed") {
 		return CheckInProgress
 	}
-	if name == macroscopeCorrectnessCheck &&
-		(strings.Contains(NormalizeReviewText(title), "no issues identified") ||
-			strings.Contains(NormalizeReviewText(summary), "no issues identified")) {
+	if checkRunFailed(conclusion) {
+		return CheckFailed
+	}
+	if strings.Contains(NormalizeReviewText(title), "no issues identified") ||
+		strings.Contains(NormalizeReviewText(summary), "no issues identified") {
 		return CheckDoneClean
 	}
 	return CheckDone

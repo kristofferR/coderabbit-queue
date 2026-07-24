@@ -1,5 +1,7 @@
 package dialect
 
+import "strings"
+
 // A co-reviewer is a review bot that is not the configured primary reviewer
 // and does not spend CodeRabbit account quota: Codex, Cursor Bugbot,
 // Macroscope. This file is the static registry of the co-reviewers crq knows —
@@ -7,14 +9,36 @@ package dialect
 // wording helpers in its own file, corpus files, and golden rows; engine/state/
 // crq consume only the registry's structure, never the wording.
 
+// checkRunFailed reports whether a completed check run's conclusion means the
+// run did not produce a review. GitHub reports these alongside status
+// "completed", so status alone cannot distinguish a finished review from a
+// crashed one.
+func checkRunFailed(conclusion string) bool {
+	switch strings.ToLower(strings.TrimSpace(conclusion)) {
+	case "failure", "cancelled", "canceled", "timed_out", "action_required", "stale":
+		return true
+	}
+	return false
+}
+
 // CheckVerdict classifies one check run for co-reviewer evidence purposes.
 type CheckVerdict int
 
 const (
 	CheckUnrelated  CheckVerdict = iota // not this bot's review check
 	CheckInProgress                     // review still running — evidence it is active, not done
-	CheckDone                           // review finished (findings, if any, gate via threads)
-	CheckDoneClean                      // review finished and explicitly found nothing
+	// CheckAuxiliary is one of this bot's checks that is NOT its review verdict
+	// (Macroscope publishes Approvability and repo-custom checks beside its
+	// Correctness Check). It proves participation, never completion: counting
+	// it as a review lets a round converge while the real review is still
+	// running and its findings have not landed.
+	CheckAuxiliary
+	// CheckFailed is a review run that terminated without producing a review
+	// (conclusion failure/cancelled/timed_out/action_required). The bot tried
+	// and did not deliver, so it is activity but never review evidence.
+	CheckFailed
+	CheckDone      // review finished (findings, if any, gate via threads)
+	CheckDoneClean // review finished and explicitly found nothing
 )
 
 // CoEvent is the classification a co-reviewer gives one of its own issue

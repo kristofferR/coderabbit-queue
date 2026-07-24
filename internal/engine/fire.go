@@ -278,7 +278,11 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, prim
 			post = append(post, cp.Login)
 			continue
 		}
-		if co.AutoActive || len(co.Commands) > 0 || roundCoCommandID(r, cp.Login) != 0 {
+		// ActiveThisRound covers the case crq cannot post for: a check already
+		// running on this head. Without it the round dedupes to completed while
+		// the co-review is still in flight, discarding the findings it is about
+		// to publish.
+		if co.AutoActive || co.ActiveThisRound || len(co.Commands) > 0 || roundCoCommandID(r, cp.Login) != 0 {
 			wait = true
 		}
 	}

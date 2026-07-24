@@ -82,11 +82,18 @@ func coChecks(obs Observation, login string) []CheckSeen {
 	return out
 }
 
-// coCheckAny reports whether ANY check run of login's exists for the head,
-// including an in-progress one — a running check will deliver evidence, so
-// posting a trigger alongside it would double-review.
+// coCheckAny reports whether a check run of login's is engaged with this head:
+// running, auxiliary, or finished. Posting a trigger alongside one would
+// double-review. A FAILED run is deliberately excluded — the bot tried and did
+// not deliver, so a self-heal trigger is exactly the right response to it, and
+// the round's recorded command id still bounds crq to one post.
 func coCheckAny(obs Observation, login string) bool {
-	return len(coChecks(obs, login)) > 0
+	for _, c := range coChecks(obs, login) {
+		if c.Verdict != dialect.CheckFailed {
+			return true
+		}
+	}
+	return false
 }
 
 // coCheckReviewedAt reports the newest COMPLETED check verdict for the head
