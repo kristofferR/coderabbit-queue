@@ -11,8 +11,8 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
 `gh ← {state, crq}`. The engine does no I/O by construction.
 
 - `internal/dialect/` — ALL bot-text knowledge, zero deps. CodeRabbit/Codex
-  completion, rate-limit, paused, in-progress, failed, summary-only-plan and
-  clean-review classifiers; finding parsers; the decline-reply verdict
+  completion, rate-limit, paused, in-progress, failed, summary-only-plan,
+  review-skipped and clean-review classifiers; finding parsers; the decline-reply verdict
   classifiers (`IsReviewFindingWithdrawn`/`IsReviewFindingRetained`) that let
   crq read a bot's rebuttal to a declined finding; SHA/severity vocabulary; the
   `Finding` type (frozen JSON tags); the typed `BotEvent`/`Classifier`. Also the

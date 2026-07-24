@@ -358,3 +358,97 @@ func TestSummaryOnlyPlanRunsCoReviewersAlone(t *testing.T) {
 		}
 	})
 }
+
+// skippedEvent builds the classified "Review skipped" notice for a head.
+func skippedEvent(sha string, at time.Time) dialect.BotEvent {
+	return dialect.BotEvent{
+		Kind: dialect.EvSkipped, Bot: "coderabbitai[bot]", SHA: sha,
+		CommentID: 7000, CreatedAt: at, UpdatedAt: at,
+	}
+}
+
+// TestReviewSkippedNeverBlocksTheAccount is the load-bearing rule behind the
+// "Review skipped" support: the notice ships WITH CodeRabbit's rate-limit
+// marker, but it is a refusal of one head, not a timed account block. If
+// Progress ever treats it as a rate limit it fabricates a window that never
+// clears — crq re-fires the same oversized PR forever and, far worse, parks the
+// ACCOUNT-wide quota so every other PR in the fleet stalls behind one bad PR.
+func TestReviewSkippedNeverBlocksTheAccount(t *testing.T) {
+	fired := time.Date(2026, 7, 24, 20, 0, 0, 0, time.UTC)
+	head := "56150a042"
+	round := state.Round{Repo: "o/r", PR: 214, Head: head, Phase: state.PhaseFired, FiredAt: &fired}
+	p := Policy{Bot: "coderabbitai[bot]", RequiredBots: []string{"coderabbitai[bot]"}}
+	obs := Observation{Head: head, Open: true,
+		Events: []dialect.BotEvent{skippedEvent("56150a0423a243224b03f355c3a3ba6941011b5b", fired.Add(time.Minute))}}
+
+	tr := Progress(round, state.AccountQuota{}, obs, fired.Add(2*time.Minute), p)
+	if tr.Blocked != nil {
+		t.Fatalf("a skipped review must never record an account block, got %+v", tr.Blocked)
+	}
+	if tr.Outcome == OutRetry {
+		t.Fatalf("a skipped review must not park the round for retry — waiting changes nothing: %+v", tr)
+	}
+	// With no co-reviewer left outstanding the round is finished, not wedged.
+	if tr.Outcome != OutComplete {
+		t.Fatalf("outcome = %v, want OutComplete", tr.Outcome)
+	}
+}
+
+// TestReviewSkippedBindsToItsHead: the refusal is per-head. Splitting the PR
+// produces a new head CodeRabbit may well review, so a skip naming an older
+// commit must not suppress the new one — otherwise fixing the problem would
+// permanently disable the primary reviewer for that PR.
+func TestReviewSkippedBindsToItsHead(t *testing.T) {
+	p := Policy{Bot: "coderabbitai[bot]", RequiredBots: []string{"coderabbitai[bot]"}}
+	at := time.Date(2026, 7, 24, 20, 0, 0, 0, time.UTC)
+	skipped := skippedEvent("56150a0423a243224b03f355c3a3ba6941011b5b", at)
+
+	sameHead := Observation{Head: "56150a042", Open: true, Events: []dialect.BotEvent{skipped}}
+	if !PrimaryReviewUnavailable(sameHead, p, sameHead.Head) {
+		t.Fatal("the skipped head must read as unreviewable")
+	}
+	newHead := Observation{Head: "abcdef123", Open: true, Events: []dialect.BotEvent{skipped}}
+	if PrimaryReviewUnavailable(newHead, p, newHead.Head) {
+		t.Fatal("a skip of an older head must not suppress CodeRabbit on the reworked head")
+	}
+	// A SHA-less skip is read conservatively: it binds to whatever head is observed.
+	noSHA := Observation{Head: "abcdef123", Open: true, Events: []dialect.BotEvent{skippedEvent("", at)}}
+	if !PrimaryReviewUnavailable(noSHA, p, noSHA.Head) {
+		t.Fatal("a SHA-less skip must bind to the observed head")
+	}
+	// Another bot's skip is not the configured reviewer's problem.
+	other := skippedEvent("56150a0423a243224b03f355c3a3ba6941011b5b", at)
+	other.Bot = "someone-else[bot]"
+	foreign := Observation{Head: "56150a042", Open: true, Events: []dialect.BotEvent{other}}
+	if PrimaryReviewUnavailable(foreign, p, foreign.Head) {
+		t.Fatal("only the configured bot's skip counts")
+	}
+}
+
+// TestReviewSkippedRunsCoReviewersInsteadOfFiring: the round must resolve on the
+// co-reviewers rather than spending a fire on a review that cannot happen.
+func TestReviewSkippedRunsCoReviewersInsteadOfFiring(t *testing.T) {
+	now := time.Date(2026, 7, 24, 20, 0, 0, 0, time.UTC)
+	head := "56150a042"
+	queued := state.Round{Repo: "o/r", PR: 214, Head: head, Phase: state.PhaseQueued}
+	p := Policy{Bot: "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]", dialect.CodexBotLogin},
+		CoReviewers:  []CoReviewerPolicy{{Login: dialect.CodexBotLogin, Command: "@codex review", Trigger: TriggerAlways}}}
+	obs := Observation{Head: head, Open: true,
+		Events: []dialect.BotEvent{skippedEvent("56150a0423a243224b03f355c3a3ba6941011b5b", now)}}
+
+	// Even with a free slot and no block, crq must not fire CodeRabbit.
+	d := DecideFire(Global{SlotFree: true}, queued, obs, now, p)
+	if d.Verdict == FirePost || d.Verdict == FireAdopt {
+		t.Fatalf("crq must never fire CodeRabbit at a head it already skipped: %+v", d)
+	}
+	if d.Verdict != FireCoOnly || len(d.PostCo) != 1 {
+		t.Fatalf("verdict = %v PostCo = %v, want FireCoOnly asking codex", d.Verdict, d.PostCo)
+	}
+	// And it must still resolve while the account is blocked — the block has no
+	// authority over a round that will never spend the quota.
+	blocked := now.Add(time.Hour)
+	if d := DecideFire(Global{SlotFree: true, BlockedUntil: &blocked}, queued, obs, now, p); d.Verdict != FireCoOnly {
+		t.Fatalf("a blocked account must not delay a skipped round: %+v", d)
+	}
+}

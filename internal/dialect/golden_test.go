@@ -36,6 +36,7 @@ func TestGoldenClassification(t *testing.T) {
 		inProgress      bool
 		failed          bool
 		alreadyDone     bool
+		reviewSkipped   bool
 		completionReply bool
 		autoReply       bool
 		noAction        bool
@@ -65,6 +66,12 @@ func TestGoldenClassification(t *testing.T) {
 		// output — no review object ever follows, so crq must run the
 		// co-reviewers alone rather than firing (and waiting on) CodeRabbit.
 		{file: "coderabbit/summary-only-free-plan.md", summaryOnly: true},
+		// "Review skipped": CodeRabbit refused this head outright. It ships WITH
+		// the rate-limit marker embedded, so it must classify as EvSkipped and
+		// NOT as a rate limit — otherwise crq fabricates a window that never
+		// clears, re-fires forever, and blocks the whole account's quota.
+		{file: "coderabbit/review-skipped-too-many-files.md", reviewSkipped: true, rateLimited: true,
+			author: "coderabbitai[bot]", wantKind: EvSkipped},
 		{file: "coderabbit/already-reviewed.md", alreadyDone: true, autoReply: true},
 		{file: "coderabbit/completion-reply.md", completionReply: true, autoReply: true},
 		// The standalone trailer is an ack; a real finding CARRYING the trailer
@@ -98,6 +105,7 @@ func TestGoldenClassification(t *testing.T) {
 				{"IsAutoReply", goldenCR.IsAutoReply(body), tc.autoReply},
 				{"IsNoActionReviewCompletion", IsNoActionReviewCompletion(body), tc.noAction},
 				{"IsSummaryOnlyPlan", goldenCR.IsSummaryOnlyPlan(body), tc.summaryOnly},
+				{"IsReviewSkipped", goldenCR.IsReviewSkipped(body), tc.reviewSkipped},
 				{"IsCodexNoActionReviewCompletion", IsCodexNoActionReviewCompletion(body), tc.codexClean},
 				{"IsCodexUsageLimit", IsCodexUsageLimit(body), tc.codexUsageLimit},
 				{"IsNonActionableText", IsNonActionableText(body), tc.nonActionable},
@@ -412,5 +420,38 @@ func TestGoldenCheckRuns(t *testing.T) {
 	// Another cursor-app check that is not the Bugbot review stays unrelated.
 	if login, verdict := ClassifyCheckRun("cursor", "Cursor Something Else", "", "", "completed", "success"); login != "" || verdict != CheckUnrelated {
 		t.Errorf("non-review cursor check classified as %q,%v", login, verdict)
+	}
+}
+
+// TestGoldenReviewSkipped pins the parts of the "Review skipped" notice crq
+// acts on: the head it binds to (so a reworked PR fires again) and the reason
+// it surfaces to the agent (so the PR actually gets narrowed).
+func TestGoldenReviewSkipped(t *testing.T) {
+	body := readGolden(t, "coderabbit/review-skipped-too-many-files.md")
+
+	if got := ReviewSkippedHeadSHA(body); got != "56150a0423a243224b03f355c3a3ba6941011b5b" {
+		t.Errorf("ReviewSkippedHeadSHA = %q", got)
+	}
+	if got := ReviewSkippedReason(body); !strings.Contains(got, "Too many files") {
+		t.Errorf("ReviewSkippedReason = %q, want the file-count reason", got)
+	}
+	// The skip must never be mistaken for a timed block: no window parses, so
+	// treating it as a rate limit would invent a fallback that never clears.
+	if at := ParseAvailableIn(body, time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)); at != nil {
+		t.Errorf("ParseAvailableIn = %v, want none (a skip has no window)", at)
+	}
+	// A normal rate limit must NOT read as a skip.
+	if got := goldenCR.IsReviewSkipped(readGolden(t, "coderabbit/rate-limit-fair-usage.md")); got {
+		t.Error("a real rate-limit notice must not classify as a skipped review")
+	}
+	// Nor may ordinary prose mentioning the words trip it — a false positive
+	// stops crq firing CodeRabbit on a PR it could really review.
+	for _, prose := range []string{
+		"The review skipped nothing important.",
+		"> Some files had their review skipped for brevity.",
+	} {
+		if goldenCR.IsReviewSkipped(prose) {
+			t.Errorf("prose must not classify as skipped: %q", prose)
+		}
 	}
 }

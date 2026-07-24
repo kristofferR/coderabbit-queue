@@ -106,6 +106,12 @@ in: NN minutes") and Codex demonstrably reviews the PR, the loop degrades to Cod
 instead of waiting the window out, and the pump posts the co-reviewer triggers for blocked rounds
 while keeping the CodeRabbit review queued. Disable with `CRQ_RL_CO_DEGRADE=0` (default on).
 
+Skipped reviews: CodeRabbit may refuse a head outright (`Review skipped` — too many files, no usage
+credits). That notice embeds the rate-limit marker but is NOT a timed block: nothing clears by
+waiting. crq treats it as "no primary review is coming for this head", converges on the co-reviewers,
+never records an account block, and returns the skip as a `major` finding telling you to narrow the
+PR. It binds to the SHA it names, so a split PR is reviewed normally.
+
 Summary-only plans: on a private repo under a Free CodeRabbit plan the bot posts a walkthrough and
 never a line-by-line review ("Summarized by CodeRabbit Free … upgrade … for a comprehensive
 line-by-line review"). crq reads that notice and runs the co-reviewers alone there — no

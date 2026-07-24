@@ -167,6 +167,33 @@ func SummaryOnlyPlan(obs Observation, p Policy) bool {
 	return false
 }
 
+// ReviewSkippedHead reports whether the configured bot explicitly SKIPPED this
+// head — too many files, no usage credits, an unsupported diff. Unlike a rate
+// limit there is no window after which it clears: re-firing the same head buys
+// the same refusal forever. Unlike a summary-only plan it is per-head, so it
+// binds to the SHA the notice names and a reworked head (a split PR) fires
+// normally again. A notice naming no SHA binds to whatever head is observed,
+// which is the conservative reading for an in-place-edited comment.
+func ReviewSkippedHead(obs Observation, p Policy, head string) bool {
+	for _, ev := range obs.Events {
+		if ev.Kind != dialect.EvSkipped || !sameBot(ev.Bot, p.Bot) {
+			continue
+		}
+		if ev.SHA == "" || head == "" || dialect.SHAPrefixMatch(ev.SHA, head) {
+			return true
+		}
+	}
+	return false
+}
+
+// PrimaryReviewUnavailable reports that the configured bot will not produce a
+// review for this head however long crq waits — its plan only summarizes, or it
+// skipped this head outright. Both collapse to the same decision: stop waiting
+// on a review that cannot arrive and let the co-reviewers resolve the round.
+func PrimaryReviewUnavailable(obs Observation, p Policy, head string) bool {
+	return SummaryOnlyPlan(obs, p) || ReviewSkippedHead(obs, p, head)
+}
+
 // notBefore mirrors v2: GitHub timestamps are second-granular, so a bot
 // completion in the same second as the trigger must still count.
 func notBefore(t, baseline time.Time) bool { return !t.Before(baseline) }

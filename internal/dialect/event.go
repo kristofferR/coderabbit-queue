@@ -28,6 +28,7 @@ const (
 	EvInProgress                // editable top summary: review still processing
 	EvFailed                    // editable top summary: review failed
 	EvAlreadyReviewed           // "does not re-review already reviewed commits" claim
+	EvSkipped                   // "Review skipped": the bot refused this head outright
 	EvNoAction                  // CodeRabbit clean-review summary (no actionable comments)
 	EvCoClean                   // co-reviewer clean-summary issue comment
 	EvCoUnable                  // co-reviewer cannot finish this round (Codex usage limits)
@@ -130,6 +131,14 @@ func (c Classifier) Classify(author, body string, id int64, createdAt, updatedAt
 	ev.AutoReply = c.CodeRabbit.IsAutoReply(body)
 	ev.SummaryOnly = c.CodeRabbit.IsSummaryOnlyPlan(body)
 	switch {
+	case c.CodeRabbit.IsReviewSkipped(body):
+		// Ordered BEFORE the rate limit deliberately: the skip notice ships with
+		// the rate-limit marker embedded, but it is a refusal of THIS head, not
+		// a timed account block. Classifying it as a rate limit fabricates a
+		// window that never clears — crq would re-fire forever and block the
+		// whole account's quota on one oversized PR.
+		ev.Kind = EvSkipped
+		ev.SHA = ReviewSkippedHeadSHA(body)
 	case c.CodeRabbit.IsRateLimited(body):
 		ev.Kind = EvRateLimited
 		ev.Window = ParseAvailableIn(body, updatedAt)

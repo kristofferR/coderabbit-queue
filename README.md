@@ -495,6 +495,16 @@ this per bot under `co_reviewers`:
 `check_state` is `clean`, `issues`, `in_progress` or `unknown`. Macroscope's approvability `verdict`
 is **informational only** — it never gates convergence and never changes an exit code.
 
+**Skipped reviews.** CodeRabbit sometimes refuses a head outright — too many files for the plan's
+limit, no usage credits, an unsupported diff — with a `Review skipped` callout. That notice ships
+with CodeRabbit's *rate-limit marker embedded*, so a naive reading files it as a rate limit: crq
+would invent a retry window that never clears, re-fire the same PR forever, and park the
+**account-wide** quota so every other PR in the fleet stalls behind one oversized diff. crq
+classifies it as its own state instead — no account block, no retry loop. The round resolves on the
+co-reviewers, and the skip is surfaced as a `major` finding so the PR actually gets narrowed. The
+refusal binds to the SHA the notice names, so splitting the PR yields a head crq fires normally
+again.
+
 **Bot-specific quirks crq handles for you.** Macroscope never resolves a thread; it *edits* its own
 comment to append `✅ Resolved in <sha>` (or `No longer relevant as of <sha>`), so crq treats that
 edit as the resolution and drops the finding. Bugbot re-reports the same bug in a fresh thread after

@@ -119,6 +119,56 @@ func (d CodeRabbit) IsSummaryOnlyPlan(body string) bool {
 			strings.Contains(l, "high-level summary and a walkthrough"))
 }
 
+var (
+	// reviewSkippedRE matches CodeRabbit's "Review skipped" callout heading.
+	// Anchored to the heading (optionally inside a blockquote callout) rather
+	// than matched as loose prose: a false positive stops crq firing CodeRabbit
+	// on a PR it could really review.
+	reviewSkippedRE = regexp.MustCompile(`(?mi)^\s*>?\s*#{1,4}\s*review skipped\s*$`)
+	// reviewSkippedHeadRE captures the head SHA a skip was evaluated against,
+	// from "Reviewing files that changed ... between <base> and <head>.".
+	reviewSkippedHeadRE = regexp.MustCompile(`(?i)between\s+[0-9a-f]{7,40}\s+and\s+([0-9a-f]{7,40})`)
+	// reviewSkippedReasonRE captures the human-readable reason CodeRabbit gives
+	// under the heading (the first non-empty, non-heading callout line).
+	reviewSkippedReasonRE = regexp.MustCompile(`(?mi)^\s*>\s*(?:##+\s*)?([A-Z][^\n]*?[.!])\s*$`)
+)
+
+// IsReviewSkipped reports whether body is CodeRabbit's "Review skipped" notice:
+// it declined to review this head outright (too many files, no usage credits,
+// an unsupported diff). This is NOT a rate limit even though the notice carries
+// the rate-limit marker — there is no window after which it clears, so waiting
+// and re-firing produce the same refusal forever while poisoning the
+// account-wide quota with a fabricated block. Treat it as "no CodeRabbit review
+// is coming for this head" and let the co-reviewers decide the round.
+func (d CodeRabbit) IsReviewSkipped(body string) bool {
+	return reviewSkippedRE.MatchString(body)
+}
+
+// ReviewSkippedHeadSHA returns the head commit the skip was evaluated against,
+// or "" when the notice names none. The refusal is per-head — splitting the PR
+// produces a new head that CodeRabbit may well review — so binding to this SHA
+// is what lets the next head fire normally.
+func ReviewSkippedHeadSHA(body string) string {
+	if match := reviewSkippedHeadRE.FindStringSubmatch(body); len(match) == 2 {
+		return strings.ToLower(match[1])
+	}
+	return ""
+}
+
+// ReviewSkippedReason returns the first explanatory sentence CodeRabbit gives
+// for skipping ("Too many files!", "This PR contains 119 files, ..."), for
+// surfacing to the agent as actionable work. Empty when none parses.
+func ReviewSkippedReason(body string) string {
+	for _, line := range reviewSkippedReasonRE.FindAllStringSubmatch(body, -1) {
+		text := strings.TrimSpace(line[1])
+		if text == "" || strings.EqualFold(text, "Review skipped") {
+			continue
+		}
+		return text
+	}
+	return ""
+}
+
 // IsReviewInProgress reports whether body is CodeRabbit's editable top-summary
 // state for a review that has started but has not finished. CodeRabbit can post
 // a "Review finished" command reply before this summary leaves the processing

@@ -105,13 +105,13 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 		}
 		return FireDecision{Verdict: FireNo, Reason: reason}
 	}
-	// The configured bot's plan produces a walkthrough only — no review of this
-	// head is coming, ever. Resolve the round on the co-reviewers alone, before
-	// the slot / account-quota / pacing gates: none of them should delay (or be
-	// spent on) a review that cannot happen. coAwareDedupe posts the triggers
-	// crq may, waits bounded for a co-bot that answers on its own, and dedupes
-	// only when there is no co-reviewer to ask.
-	if SummaryOnlyPlan(obs, p) {
+	// No review of this head is coming from the configured bot, ever — its plan
+	// produces a walkthrough only, or it skipped this head outright. Resolve the
+	// round on the co-reviewers alone, before the slot / account-quota / pacing
+	// gates: none of them should delay (or be spent on) a review that cannot
+	// happen. coAwareDedupe posts the triggers crq may, waits bounded for a
+	// co-bot that answers on its own, and dedupes when there is none to ask.
+	if PrimaryReviewUnavailable(obs, p, obs.Head) {
 		return coAwareDedupe(r, obs, p, now, true)
 	}
 	reviewedHead := false
@@ -243,9 +243,10 @@ func newestCommand(commands []CommandSeen) *CommandSeen {
 	return newest
 }
 
-// coAwareDedupe resolves what to do when CodeRabbit has delivered everything it
-// is ever going to for this head — either it already reviewed the head, or
-// (summaryOnly) its plan will never produce a review at all.
+// coAwareDedupe resolves what to do when the primary bot has delivered
+// everything it is ever going to for this head — either it already reviewed the
+// head, or (primaryUnavailable) no review is coming: its plan only summarizes,
+// or it skipped this head outright.
 // If no gating co-reviewer is still outstanding, the round is genuinely done
 // (FireDedupe). If a required-or-auto-active co-bot has no review of this head
 // yet, the round is not done: post the triggers crq may (FireCoOnly). When crq
@@ -260,15 +261,16 @@ func newestCommand(commands []CommandSeen) *CommandSeen {
 // Completion counts the existing CodeRabbit review, so a FireCoOnly round
 // waits on the co-reviewers alone.
 //
-// Under summaryOnly every ENABLED co-reviewer gates, not just the required or
-// auto-active ones: they are the round's only reviewers, so a co-bot crq would
-// otherwise treat as optional is the difference between a review and none.
-func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, summaryOnly bool) FireDecision {
+// Under primaryUnavailable every ENABLED co-reviewer gates, not just the
+// required or auto-active ones: they are the round's only reviewers, so a
+// co-bot crq would otherwise treat as optional is the difference between a
+// review and none.
+func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, primaryUnavailable bool) FireDecision {
 	var post []string
 	wait := false
 	for _, cp := range p.coReviewers() {
 		co := obs.co(cp.Login)
-		gates := requiredBot(p, cp.Login) || co.AutoActive || summaryOnly
+		gates := requiredBot(p, cp.Login) || co.AutoActive || primaryUnavailable
 		if !gates || coReviewedHead(obs, cp.Login) {
 			continue
 		}
@@ -280,9 +282,9 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, summ
 			wait = true
 		}
 	}
-	delivered := "coderabbit reviewed head"
-	if summaryOnly {
-		delivered = "coderabbit plan is summary-only"
+	delivered := "primary reviewed head"
+	if primaryUnavailable {
+		delivered = "primary review unavailable for this head"
 	}
 	if len(post) > 0 {
 		return FireDecision{Verdict: FireCoOnly, Reason: delivered + "; co-review still required", PostCo: post}
@@ -290,7 +292,7 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, summ
 	if wait {
 		return FireDecision{Verdict: FireCoReviewWait, Reason: "awaiting co-review"}
 	}
-	if summaryOnly {
+	if primaryUnavailable {
 		return FireDecision{Verdict: FireDedupe, Reason: delivered + "; no co-review outstanding"}
 	}
 	return FireDecision{Verdict: FireDedupe, Reason: "bot already reviewed head"}
