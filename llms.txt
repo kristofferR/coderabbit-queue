@@ -64,10 +64,25 @@ crq loop OWNER/REPO PR_NUMBER > crq-feedback.json
 rc=$?
 ```
 
-`crq loop` queues the PR and triggers CodeRabbit when the account can spend a review. If Codex is in
-`CRQ_REQUIRED_BOTS`, crq also posts `CRQ_CODEX_CMD` (default `@codex review`) in the same fire step —
-never when Codex auto-reviews the PR on its own. A Codex that joins a round uninvited gates that
-round's convergence dynamically (its usage-limit notice releases the dynamic gate). If a bot reports
+`crq loop` queues the PR and triggers CodeRabbit when the account can spend a review. Alongside it
+crq runs its **co-reviewers** — Codex, Cursor Bugbot and Macroscope (`CRQ_COBOTS`, all enabled by
+default). None of them spends CodeRabbit quota or takes the fire slot. Each has a trigger mode
+(`CRQ_COBOT_<NAME>_TRIGGER`): `always` posts its command in the same fire step, `selfheal` (the
+Bugbot/Macroscope default) only nudges a bot that reviews on its own but missed the head past
+`CRQ_COBOT_<NAME>_GRACE`, and `never` posts nothing. crq never triggers a bot that auto-reviews, has
+already reviewed the head, or has a check run in flight. A co-reviewer that joins a round uninvited
+gates that round's convergence dynamically (an exhaustion notice such as Codex's usage limit, or a
+check run reporting the bot cannot review the commit, releases the dynamic gate); one listed in
+`CRQ_REQUIRED_BOTS` always gates.
+
+Bugbot and Macroscope report through **check runs** as well as comments — a clean Bugbot round posts
+nothing at all on the timeline, so its `Cursor Bugbot` check IS the evidence crq converges on.
+`.co_reviewers[<bot>]` reports each one's `reviewed` / `check_state`
+(`clean|issues|in_progress|failed|unable|unknown` — `failed` is a crashed run crq re-triggers,
+`unable` a bot that reported it cannot review this commit at all, which crq stops waiting for and
+never re-triggers) / `verdict`. Macroscope's approvability `verdict`
+(`approved|needs_human_review`) is informational only: it never gates convergence and never changes
+an exit code. If a bot reports
 actionable findings first, it emits them immediately while leaving the queued round alive. Fix and
 validate locally and resolve or decline each addressed thread immediately. While any required bot's
 `.reviewed_by` value is false, do not commit or push — unless `.coderabbit_deferred` is true and all
@@ -91,8 +106,30 @@ Exit codes:
 
 Rate-limit degrade: when CodeRabbit is rate-limited ("Review limit reached … Next review available
 in: NN minutes") and Codex demonstrably reviews the PR, the loop degrades to Codex-only rounds
-instead of waiting the window out, and the pump posts `CRQ_CODEX_CMD` for blocked rounds while
-keeping the CodeRabbit review queued. Disable with `CRQ_RL_CODEX_DEGRADE=0` (default on).
+instead of waiting the window out, and the pump posts the co-reviewer triggers for blocked rounds
+while keeping the CodeRabbit review queued. Disable with `CRQ_RL_CO_DEGRADE=0` (default on).
+
+`.primary_review_unavailable` (with `.primary_review_unavailable_reason`) means the configured
+reviewer will NOT review this head at all — its plan only summarizes, or it skipped the head. When
+true: do not hold the head for it, do not wait for it, and IGNORE the account-quota window entirely
+(`crq status` may show the account blocked; that block is fleet state and cannot apply to a round
+that never spends quota). The round is resolved by the co-reviewers alone, so treat
+`.reviewed_by` for the primary as already delivered and act on `.findings` immediately.
+
+Skipped reviews: CodeRabbit may refuse a head outright (`Review skipped` — too many files, no usage
+credits). That notice embeds the rate-limit marker but is NOT a timed block: nothing clears by
+waiting. crq treats it as "no primary review is coming for this head", converges on the co-reviewers,
+never records an account block, and returns the skip as a `major` `source: "review_skipped"` finding
+telling you to narrow the PR — the one finding with no thread to resolve, since only changing the PR
+addresses it. It binds to the SHA it names, so a split PR is reviewed normally.
+
+Summary-only plans: on a private repo under a Free CodeRabbit plan the bot posts a walkthrough and
+never a line-by-line review ("Summarized by CodeRabbit Free … upgrade … for a comprehensive
+line-by-line review"). crq reads that notice and runs the co-reviewers alone there — no
+`@coderabbitai review` is posted, no fire slot or account quota is spent, and the round converges on
+the enabled co-reviewers' evidence instead of hanging on a review that cannot
+arrive. Public repos get Pro-grade reviews for free and are unaffected. Nothing to configure: upgrade the plan and crq resumes firing CodeRabbit on
+the next observation.
 
 Resolve addressed threads on GitHub (crq keys off GitHub resolution state; a finding keeps
 reappearing until its thread is resolved there):

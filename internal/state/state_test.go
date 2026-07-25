@@ -1,9 +1,13 @@
 package state
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 )
 
 var t0 = time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
@@ -264,5 +268,185 @@ func TestArchiveBounded(t *testing.T) {
 	}
 	if len(s.Archive) != ArchiveMax {
 		t.Fatalf("archive = %d, want %d", len(s.Archive), ArchiveMax)
+	}
+}
+
+// TestCoBotKeyMatchesDialect pins state's local login normalization (and the
+// Codex fold key) to dialect's, since state stays stdlib-only by design.
+func TestCoBotKeyMatchesDialect(t *testing.T) {
+	if got := coBotKey(dialect.CodexBotLogin); got != codexCoBotKey {
+		t.Fatalf("coBotKey(CodexBotLogin) = %q, want %q", got, codexCoBotKey)
+	}
+	if got := coBotKey("cursor[bot]"); got != dialect.NormalizeBotName("cursor[bot]") {
+		t.Fatalf("coBotKey = %q, want dialect normalization %q", got, dialect.NormalizeBotName("cursor[bot]"))
+	}
+}
+
+// TestCoBotsDualWrite: Codex writes through the accessors must mirror into the
+// legacy per-round fields (old binaries read codex_command_id from the shared
+// state ref); other bots live only in the map.
+func TestCoBotsDualWrite(t *testing.T) {
+	var r Round
+	r.ClaimCo(dialect.CodexBotLogin, t0)
+	if r.CodexClaimedAt == nil || !r.CodexClaimedAt.Equal(t0) {
+		t.Fatalf("ClaimCo did not mirror into CodexClaimedAt: %+v", r)
+	}
+	r.SetCoCommand(dialect.CodexBotLogin, 42, t0.Add(time.Second))
+	if r.CodexCommandID != 42 || r.CodexCommandedAt == nil || r.CodexClaimedAt != nil {
+		t.Fatalf("SetCoCommand did not mirror legacy fields: %+v", r)
+	}
+	if co := r.Co("chatgpt-codex-connector"); co.CommandID != 42 || co.ClaimedAt != nil {
+		t.Fatalf("map entry = %+v, want command 42, no claim", co)
+	}
+
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"codex_command_id":42`, `"cobots"`, `"chatgpt-codex-connector"`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("marshaled round missing %s: %s", want, data)
+		}
+	}
+
+	var other Round
+	other.SetCoCommand("cursor[bot]", 7, t0)
+	if other.CodexCommandID != 0 || other.CodexCommandedAt != nil {
+		t.Fatalf("bugbot write leaked into legacy Codex fields: %+v", other)
+	}
+	if co := other.Co("cursor"); co.CommandID != 7 {
+		t.Fatalf("Co(cursor) = %+v, want command 7", co)
+	}
+}
+
+// TestNormalizeFoldsLegacyCodex: a round written by an old binary (legacy
+// fields only) gains its CoBots mirror on load, and legacy values win over a
+// stale mirror (old binaries only write the legacy fields).
+func TestNormalizeFoldsLegacyCodex(t *testing.T) {
+	payload := `{"v":3,"rounds":{"owner/repo#1":{"repo":"owner/repo","pr":1,"head":"abcdef123",` +
+		`"seq":1,"phase":"fired","enqueued_at":"2026-07-17T12:00:00Z",` +
+		`"codex_command_id":11,"codex_commanded_at":"2026-07-17T12:01:00Z"}}}`
+	var s State
+	if err := json.Unmarshal([]byte(payload), &s); err != nil {
+		t.Fatal(err)
+	}
+	s.Normalize(t0)
+	r := s.Round("owner/repo", 1)
+	co := r.Co(dialect.CodexBotLogin)
+	if co.CommandID != 11 || co.CommandedAt == nil {
+		t.Fatalf("fold produced %+v, want command 11", co)
+	}
+
+	// Stale mirror: an old binary moved the legacy command on; fold overwrites.
+	stale := *r
+	stale.CoBots = map[string]CoBotRound{codexCoBotKey: {CommandID: 5}}
+	stale.foldLegacyCodex()
+	if got := stale.Co(dialect.CodexBotLogin).CommandID; got != 11 {
+		t.Fatalf("fold kept stale mirror %d, want legacy 11", got)
+	}
+
+	// CoBots-only rounds (new bots) survive a marshal/unmarshal round-trip.
+	var b Round
+	b.SetCoCommand("cursor[bot]", 9, t0)
+	data, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Round
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if got := back.Co("cursor[bot]").CommandID; got != 9 {
+		t.Fatalf("round-trip lost bugbot entry: %+v", back)
+	}
+}
+
+// TestClearCoClaimPrunesTheEntry covers setCo's empty() branch — the subtlest
+// path in this file: it must delete the key, nil the map when it was the last
+// entry, and zero the legacy Codex mirror. A regression that kept an all-zero
+// entry would leave "cobots" in every serialized round and, worse, leave a
+// stale legacy claim visible to old binaries.
+func TestClearCoClaimPrunesTheEntry(t *testing.T) {
+	var r Round
+	r.ClaimCo(dialect.CodexBotLogin, t0)
+	if r.CodexClaimedAt == nil || len(r.CoBots) != 1 {
+		t.Fatalf("precondition: claim must be recorded, got %+v", r)
+	}
+	r.ClearCoClaim(dialect.CodexBotLogin)
+	if r.CoBots != nil {
+		t.Fatalf("the last empty entry must prune the map, got %#v", r.CoBots)
+	}
+	if r.CodexClaimedAt != nil {
+		t.Fatalf("clearing must zero the legacy mirror, got %v", r.CodexClaimedAt)
+	}
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "cobots") {
+		t.Fatalf("a pruned map must not serialize: %s", data)
+	}
+	// Clearing one bot must not disturb another's entry.
+	var two Round
+	two.SetCoCommand("cursor[bot]", 7, t0)
+	two.ClaimCo(dialect.CodexBotLogin, t0)
+	two.ClearCoClaim(dialect.CodexBotLogin)
+	if got := two.Co("cursor[bot]").CommandID; got != 7 {
+		t.Fatalf("clearing codex disturbed bugbot's entry: %d", got)
+	}
+}
+
+// TestNormalizeFoldClearsAStaleMirror pins the direction foldLegacyCodex's doc
+// claims but nothing asserted: legacy fields are authoritative BOTH ways, so an
+// old binary that zeroed them must clear the mirror rather than leave crq
+// acting on a command that no longer exists. Also covers the archive fold.
+func TestNormalizeFoldClearsAStaleMirror(t *testing.T) {
+	var r Round
+	r.Repo, r.PR, r.Head, r.Phase = "owner/repo", 1, "abcdef123", PhaseFired
+	r.SetCoCommand(dialect.CodexBotLogin, 11, t0)
+	// Simulate an old binary clearing only the legacy fields it knows about.
+	r.CodexCommandID, r.CodexCommandedAt, r.CodexClaimedAt = 0, nil, nil
+
+	s := New()
+	s.Rounds[Key(r.Repo, r.PR)] = r
+	archived := r
+	archived.PR = 2
+	s.Archive = append(s.Archive, archived)
+	s.Normalize(t0)
+
+	if got := s.Round("owner/repo", 1).Co(dialect.CodexBotLogin).CommandID; got != 0 {
+		t.Fatalf("an emptied legacy set must clear the mirror, got command %d", got)
+	}
+	if got := s.Archive[0].Co(dialect.CodexBotLogin).CommandID; got != 0 {
+		t.Fatalf("the archive must be folded too, got command %d", got)
+	}
+}
+
+// TestRequestedRoundsExcludesCoOnly pins what the "Recently requested" table
+// means: rounds for which crq actually asked the primary reviewer. A
+// co-reviewer-only round carries a FiredAt because that anchors its evidence
+// floor, not because a review was requested — and on a CodeRabbit-Free private
+// repo every push produced one, which crowded the real request history off the
+// end of the cap.
+func TestRequestedRoundsExcludesCoOnly(t *testing.T) {
+	s := New()
+	fired := t0.Add(time.Minute)
+
+	requested := Round{Repo: "o/public", PR: 1, Head: "aaaaaaaa1", Seq: 1, Phase: PhaseCompleted, FiredAt: &fired}
+	s.Rounds[Key(requested.Repo, requested.PR)] = requested
+	coOnly := Round{Repo: "o/private", PR: 2, Head: "bbbbbbbb2", Seq: 2, Phase: PhaseCompleted, FiredAt: &fired, CoOnly: true}
+	s.Rounds[Key(coOnly.Repo, coOnly.PR)] = coOnly
+	archivedCoOnly := coOnly
+	archivedCoOnly.PR = 3
+	s.Archive = append(s.Archive, archivedCoOnly)
+
+	got := requestedRounds(s)
+	if len(got) != 1 || got[0].Repo != "o/public" {
+		t.Fatalf("only genuinely requested reviews belong in the table, got %+v", got)
+	}
+	// The round itself is untouched — it is still the dedup marker and still
+	// carries its evidence anchor.
+	if r := s.Round("o/private", 2); r == nil || r.FiredAt == nil || !r.CoOnly {
+		t.Fatalf("a co-only round must keep its anchor and marker, got %+v", r)
 	}
 }

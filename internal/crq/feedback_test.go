@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
@@ -28,10 +29,10 @@ func TestDedupeSuppressesResolvedThreadPromptDuplicate(t *testing.T) {
 		{Bot: "coderabbitai", Path: "internal/x.go", Line: 10, Title: "dup", Body: "do x", Source: "review_prompt"},
 	}
 	suppress := map[string]bool{"coderabbitai|internal/x.go|10": true}
-	if got := dedupeFindings(findings, suppress); len(got) != 0 {
+	if got := dedupeFindings(findings, suppress, nil); len(got) != 0 {
 		t.Fatalf("expected the prompt duplicate at a resolved-thread location to be suppressed, got %#v", got)
 	}
-	if got := dedupeFindings(findings, nil); len(got) != 1 {
+	if got := dedupeFindings(findings, nil, nil); len(got) != 1 {
 		t.Fatalf("expected the prompt finding to survive when not suppressed, got %#v", got)
 	}
 }
@@ -399,7 +400,7 @@ func TestFeedbackSurfacesCodexEvenWhenNotRequired(t *testing.T) {
 	cfg := Config{
 		Bot:          "coderabbitai[bot]",
 		RequiredBots: []string{"coderabbitai[bot]"},
-		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, extraFeedbackBots),
+		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, []string{dialect.CodexBotLogin}),
 	}
 	gh := newFakeGitHub()
 	sha := "abcdef1234567890"
@@ -637,7 +638,7 @@ func TestFeedbackSurfacesBodyFindingsFromSupersededCommit(t *testing.T) {
 	cfg := Config{
 		Bot:          "coderabbitai[bot]",
 		RequiredBots: []string{"coderabbitai[bot]"},
-		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, extraFeedbackBots),
+		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, []string{dialect.CodexBotLogin}),
 	}
 	gh := newFakeGitHub()
 	head := "9999999999999999"
@@ -692,7 +693,7 @@ func TestFeedbackNewerHeadReviewSupersedesOldBodyFindings(t *testing.T) {
 	cfg := Config{
 		Bot:          "coderabbitai[bot]",
 		RequiredBots: []string{"coderabbitai[bot]"},
-		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, extraFeedbackBots),
+		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, []string{dialect.CodexBotLogin}),
 	}
 	gh := newFakeGitHub()
 	head := "9999999999999999"
@@ -732,7 +733,7 @@ func TestFeedbackCurrentRoundDoesNotResurfacePreRoundBodyFindings(t *testing.T) 
 	cfg := Config{
 		Bot:          "coderabbitai[bot]",
 		RequiredBots: []string{"coderabbitai[bot]"},
-		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, extraFeedbackBots),
+		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, []string{dialect.CodexBotLogin}),
 	}
 	gh := newFakeGitHub()
 	head := "9999999999999999"
@@ -780,7 +781,7 @@ func TestFeedbackCurrentCodeRabbitRoundKeepsLatestCodexBodyFinding(t *testing.T)
 	cfg := Config{
 		Bot:          "coderabbitai[bot]",
 		RequiredBots: []string{"coderabbitai[bot]"},
-		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, extraFeedbackBots),
+		FeedbackBots: unionBots([]string{"coderabbitai[bot]"}, []string{dialect.CodexBotLogin}),
 	}
 	gh := newFakeGitHub()
 	head := "850772b68de27efabc7ec5eeda30bb5ea138eb29"
@@ -979,6 +980,7 @@ func TestFeedbackDoesNotUseNoActionCompletionWhileCodexRequiredWithoutThumbsUp(t
 		Bot:          "coderabbitai[bot]",
 		RequiredBots: []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
 	}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots) // Codex enabled as a co-reviewer
 	gh := newFakeGitHub()
 	var pull ghapi.Pull
 	pull.State = "open"
@@ -1093,6 +1095,7 @@ func TestFeedbackMarksRequiredCodexCleanReviewSummaryReviewed(t *testing.T) {
 		Bot:          "coderabbitai[bot]",
 		RequiredBots: []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"},
 	}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots) // Codex enabled as a co-reviewer
 	gh := newFakeGitHub()
 	var pull ghapi.Pull
 	pull.State = "open"
@@ -1217,7 +1220,7 @@ func TestDedupeFindingsDropsNonActionableBotArtifacts(t *testing.T) {
 		{Bot: "coderabbitai", Title: "Past review finding", Body: "The previously flagged issue is now fixed. No further action is needed.", Source: "review_body"},
 		{Bot: "coderabbitai", Title: "Biometric flow", Body: "Worth confirming this is the intended UX.", Source: "review_body"},
 	}
-	if got := dedupeFindings(findings, nil); len(got) != 0 {
+	if got := dedupeFindings(findings, nil, nil); len(got) != 0 {
 		t.Fatalf("expected non-actionable bot artifacts to be dropped, got %#v", got)
 	}
 }
@@ -1496,6 +1499,7 @@ func TestLoopResumesAwaitingFeedbackWithoutRefiring(t *testing.T) {
 		FeedbackWaitTimeout: time.Minute,
 		FiredMax:            500,
 	}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots) // Codex enabled as a co-reviewer
 	gh := newFakeGitHub()
 	var pull ghapi.Pull
 	pull.State = "open"
@@ -1965,3 +1969,225 @@ func TestThreadRebuttalSurfacesContestedResolvedThreads(t *testing.T) {
 		t.Fatalf("unresolved threads are handled by threadFindings, got %#v", got)
 	}
 }
+
+// TestFeedbackSurfacesSkippedReviewDespiteRateLimitMarker pins an ordering trap
+// that bit the first implementation: CodeRabbit's "Review skipped" notice embeds
+// its rate-limit marker, and the "an account-quota notice is never a finding"
+// guard therefore swallowed it. The round then converged with the primary
+// reviewer marked done and NOTHING telling the agent the review never happened —
+// a silently absent reviewer, which is worse than a loud one.
+func TestFeedbackSurfacesSkippedReviewDespiteRateLimitMarker(t *testing.T) {
+	cfg := Config{
+		Bot:               "coderabbitai[bot]",
+		RequiredBots:      []string{"coderabbitai[bot]"},
+		FeedbackBots:      []string{"coderabbitai[bot]"},
+		RateLimitMarker:   "rate limited by coderabbit.ai",
+		CalibrationMarker: "auto-generated reply by CodeRabbit",
+	}
+	body := corpusMessage(t, "coderabbit/review-skipped-too-many-files.md")
+	probe := dialect.CodeRabbit{RateLimitMarker: cfg.RateLimitMarker, CalibrationMarker: cfg.CalibrationMarker}
+	if !probe.IsRateLimited(body) {
+		t.Fatal("precondition: the skip notice must still carry the rate-limit marker")
+	}
+
+	gh := newFakeGitHub()
+	sha := "56150a0423a243224b03f355c3a3ba6941011b5b"
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey("o/repo", 214)] = pull
+	skip := ghapi.IssueComment{ID: 5074197614, Body: body,
+		CreatedAt: time.Now().UTC().Add(-time.Hour), UpdatedAt: time.Now().UTC().Add(-time.Minute)}
+	skip.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/repo", 214)] = []ghapi.IssueComment{skip}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	rep, err := svc.Feedback(context.Background(), "o/repo", 214)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var skipFinding *dialect.Finding
+	for i := range rep.Findings {
+		if rep.Findings[i].CommentID == 5074197614 {
+			skipFinding = &rep.Findings[i]
+		}
+	}
+	if skipFinding == nil {
+		t.Fatalf("the skipped-review notice must surface as actionable work, got %#v", rep.Findings)
+	}
+	if skipFinding.Severity != "major" {
+		t.Errorf("severity = %q, want major", skipFinding.Severity)
+	}
+	if !strings.Contains(skipFinding.Title, "Too many files") {
+		t.Errorf("the finding must carry CodeRabbit's own reason, got %q", skipFinding.Title)
+	}
+	// Findings block convergence, so the loop reports work rather than a false pass.
+	if rep.Converged {
+		t.Error("a skipped review with an open finding must not report converged")
+	}
+}
+
+// TestAccountBlockIgnoredWhenPrimaryWillNotReview pins the rule that stopped
+// agents reasoning about CodeRabbit on repos it never reviews. On a summary-only
+// round the account block is meaningless: it must not extend the wait deadline,
+// must not slow the poll to the block window, and must not be narrated. Agents
+// were reading that narration and concluding "hold the head until CodeRabbit
+// lands" — on a repo where CodeRabbit never lands, i.e. never push, never
+// converge.
+func TestAccountBlockIgnoredWhenPrimaryWillNotReview(t *testing.T) {
+	now := time.Now().UTC()
+	blocked := now.Add(42 * time.Minute)
+	deadline := now.Add(5 * time.Minute)
+
+	// The block must not buy a summary-only round any extra deadline...
+	if got := extendDeadlineForBlock(deadline, nil, now, 20*time.Minute); !got.Equal(deadline) {
+		t.Fatalf("a nil block must leave the deadline alone, got %v", got)
+	}
+	// ...whereas a round that genuinely awaits CodeRabbit still gets it.
+	if got := extendDeadlineForBlock(deadline, &blocked, now, 20*time.Minute); !got.After(deadline) {
+		t.Fatalf("a real block must still extend a round that waits on it, got %v", got)
+	}
+	// And the poll must stay fast rather than sliding to the block window.
+	if got := blockedPollInterval(blocked, now, time.Second); got < time.Minute {
+		t.Fatalf("precondition: a real block slows the poll, got %v", got)
+	}
+
+	cfg := Config{
+		Bot:               "coderabbitai[bot]",
+		RequiredBots:      []string{"coderabbitai[bot]"},
+		FeedbackBots:      []string{"coderabbitai[bot]"},
+		RateLimitMarker:   "rate limited by coderabbit.ai",
+		CalibrationMarker: "auto-generated reply by CodeRabbit",
+	}
+	gh := newFakeGitHub()
+	sha := "abcdef1234567890"
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey("o/private", 1022)] = pull
+	walkthrough := ghapi.IssueComment{ID: 900,
+		Body:      corpusMessage(t, "coderabbit/summary-only-free-plan.md"),
+		CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour)}
+	walkthrough.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/private", 1022)] = []ghapi.IssueComment{walkthrough}
+
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.Account.BlockedUntil = &blocked
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	rep, err := svc.Feedback(context.Background(), "o/private", 1022)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.PrimaryUnavailable {
+		t.Fatal("a summary-only head must report primary_review_unavailable so agents stop waiting on it")
+	}
+	if !strings.Contains(rep.PrimaryUnavailableReason, "summary") {
+		t.Errorf("the reason must say why, got %q", rep.PrimaryUnavailableReason)
+	}
+	// The primary counts as delivered, so the agent is never told to hold the
+	// head for it while an unrelated account block ticks down.
+	if !rep.ReviewedBy["coderabbitai[bot]"] {
+		t.Fatalf("the primary must read as delivered, got %#v", rep.ReviewedBy)
+	}
+}
+
+// TestSkippedFindingBindsToTheSkippedHead: the skip is a per-head refusal whose
+// fix is narrowing the PR. Loop treats findings as blocking BEFORE it enqueues,
+// so a skip of an earlier head that keeps surfacing would stop the narrowed
+// replacement head from ever being submitted — the repair would permanently
+// disable the reviewer it was meant to restore.
+func TestSkippedFindingBindsToTheSkippedHead(t *testing.T) {
+	skipBody := corpusMessage(t, "coderabbit/review-skipped-too-many-files.md")
+	skippedSHA := "56150a0423a243224b03f355c3a3ba6941011b5b"
+
+	if !skipAppliesToHead(skipBody, skippedSHA[:9]) {
+		t.Error("the skipped head itself must still surface the notice")
+	}
+	if skipAppliesToHead(skipBody, "abcdef123") {
+		t.Error("a narrowed replacement head must not inherit the old skip")
+	}
+	// A notice naming no commit is read conservatively as current.
+	if !skipAppliesToHead("> ## Review skipped\n>\n> No commits to review.", "abcdef123") {
+		t.Error("a SHA-less skip must bind to the observed head")
+	}
+}
+
+// TestCoReviewerVerdictScopedToRound: co_reviewers[].verdict is documented as
+// current-head state. Between a push and Macroscope's new Approvability comment
+// the newest verdict on the PR describes the PREVIOUS head, and reporting it
+// would misstate the current one.
+func TestCoReviewerVerdictScopedToRound(t *testing.T) {
+	cfg := Config{Bot: "coderabbitai[bot]", CoBots: []CoBotConfig{
+		{Login: dialect.MacroscopeLogin, Name: "macroscope"},
+	}}
+	firedAt := time.Now().UTC()
+	approved := true
+	stale := dialect.BotEvent{Kind: dialect.EvCoVerdict, Bot: dialect.MacroscopeLogin,
+		For: dialect.MacroscopeLogin, Approved: &approved, CommentID: 1,
+		CreatedAt: firedAt.Add(-time.Hour), UpdatedAt: firedAt.Add(-time.Hour)}
+	obs := engine.Observation{Head: "abcdef123", Open: true, Events: []dialect.BotEvent{stale}}
+
+	key := dialect.NormalizeBotName(dialect.MacroscopeLogin)
+	if got := coReviewerStatuses(cfg, obs, firedAt)[key].Verdict; got != "" {
+		t.Fatalf("a verdict from the previous head must not be reported, got %q", got)
+	}
+	// The same verdict inside the round is reported normally.
+	if got := coReviewerStatuses(cfg, obs, firedAt.Add(-2*time.Hour))[key].Verdict; got != "approved" {
+		t.Fatalf("an in-round verdict must be reported, got %q", got)
+	}
+}
+
+// TestBugbotStableIDSettledInAnySiblingThread: Bugbot re-reports one
+// BUGBOT_BUG_ID across several threads after each push. Deduplication alone
+// collapses only the findings emitted together, so resolving the emitted thread
+// promotes a sibling on the next poll and the "single" finding resurfaces —
+// blocking convergence until every duplicate is resolved by hand.
+func TestBugbotStableIDSettledInAnySiblingThread(t *testing.T) {
+	body := corpusMessage(t, "bugbot/inline-finding-high.md")
+	stable, ok := dialect.BugbotFindingDedupeKey(body)
+	if !ok {
+		t.Fatal("precondition: the corpus finding must carry a BUGBOT_BUG_ID")
+	}
+	findings := []dialect.Finding{
+		{Bot: dialect.BugbotLogin, Path: "a.ts", Line: 1, Title: "dup", Body: body, ThreadID: "PRRT_2", Source: "review_thread"},
+	}
+	// Nothing settled yet: the surviving sibling is still actionable.
+	if got := dedupeFindings(findings, nil, nil); len(got) != 1 {
+		t.Fatalf("an unsettled bug must surface, got %d", len(got))
+	}
+	// The same bug resolved in ANOTHER thread settles the whole family.
+	settled := map[string]bool{dialect.NormalizeBotName(dialect.BugbotLogin) + "|" + stable: true}
+	if got := dedupeFindings(findings, nil, settled); len(got) != 0 {
+		t.Fatalf("a bug settled in a sibling thread must not resurface, got %#v", got)
+	}
+}
+
+// TestExcludeSkipNoticeIsTargeted: the pre-review drain exempts exactly the
+// thread-less skip notice, which cannot be resolved and would otherwise stop
+// the co-review round it is meant to inform. Real unresolved findings on the
+// same head must still hold it, as on any other PR — an earlier version
+// bypassed every blocking finding whenever the primary was unavailable.
+func TestExcludeSkipNoticeIsTargeted(t *testing.T) {
+	skip := dialect.Finding{Severity: "major", Source: skipNoticeSource,
+		Title: "some-reviewer skipped this review — narrow the PR to get one: Too many files!"}
+	blocking := dialect.Finding{Severity: "major", Source: "review_thread",
+		Title: "Nil deref in the retry path", ThreadID: "PRRT_x"}
+
+	if got := excludeSkipNotice([]dialect.Finding{skip}); len(got) != 0 {
+		t.Fatalf("the skip notice must not hold the round, got %+v", got)
+	}
+	got := excludeSkipNotice([]dialect.Finding{skip, blocking})
+	if len(got) != 1 || got[0].ThreadID != "PRRT_x" {
+		t.Fatalf("a genuine finding must still hold the head, got %+v", got)
+	}
+}
+
+// Which occurrences of a stable id count as settled is decided by the head each
+// one names, not by this filter — see
+// TestCoReplayBugbotSiblingSettlementUsesHead, which drives the real threads.

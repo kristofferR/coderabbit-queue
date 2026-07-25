@@ -598,3 +598,106 @@ func TestRequestPagedFollowsLinksThroughETagCache(t *testing.T) {
 		t.Fatalf("expected 4 upstream requests (2 fresh + 2 revalidations), got %d", got)
 	}
 }
+
+// TestListCheckRunsEnvelopePagination: the check-runs endpoint wraps pages in
+// a {total_count, check_runs} envelope; the loop must follow Link headers,
+// concatenate pages, and surface a missing ref as ErrNotFound.
+func TestListCheckRunsEnvelopePagination(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "test-token")
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/commits/gone/"):
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+		case r.URL.Query().Get("page") == "2":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"total_count":3,"check_runs":[{"id":3,"name":"Macroscope - Correctness Check","status":"completed","conclusion":"neutral","app":{"slug":"macroscopeapp"},"output":{"title":"1 issue identified (5 code objects reviewed).","summary":""}}]}`))
+		default:
+			w.Header().Set("Link", `<`+srvURL+r.URL.Path+`?per_page=100&page=2>; rel="next"`)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"total_count":3,"check_runs":[{"id":1,"name":"Cursor Bugbot","status":"completed","conclusion":"success","app":{"slug":"cursor"},"output":{"title":"Bugbot Review","summary":"no issues found!"}},{"id":2,"name":"CI","status":"in_progress","conclusion":null,"completed_at":null,"app":{"slug":"github-actions"}}]}`))
+		}
+	}))
+	defer srv.Close()
+	srvURL = srv.URL
+
+	g := &GitHub{
+		token:       "test-token",
+		httpClient:  srv.Client(),
+		apiBase:     srv.URL,
+		maxRetries:  2,
+		maxWait:     time.Second,
+		backoffBase: time.Millisecond,
+	}
+	runs, err := g.ListCheckRuns(context.Background(), "o/r", "abc123")
+	if err != nil {
+		t.Fatalf("ListCheckRuns: %v", err)
+	}
+	if len(runs) != 3 || runs[0].ID != 1 || runs[2].ID != 3 {
+		t.Fatalf("expected 3 runs across pages, got %+v", runs)
+	}
+	if runs[0].App.Slug != "cursor" || runs[0].Output.Summary != "no issues found!" {
+		t.Fatalf("run fields not decoded: %+v", runs[0])
+	}
+	if !runs[1].CompletedAt.IsZero() || runs[1].Conclusion != "" {
+		t.Fatalf("null conclusion/completed_at must decode to zero values: %+v", runs[1])
+	}
+	if runs[2].Name != "Macroscope - Correctness Check" {
+		t.Fatalf("page 2 not appended: %+v", runs[2])
+	}
+
+	if _, err := g.ListCheckRuns(context.Background(), "o/r", "gone"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing ref must map to ErrNotFound, got %v", err)
+	}
+}
+
+// TestListCheckRunsRidesETagCache: a 304 revalidation must replay the cached
+// envelope instead of failing or double-charging the REST quota.
+func TestListCheckRunsRidesETagCache(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "test-token")
+	var calls, conditional int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if r.Header.Get("If-None-Match") == `"v1"` {
+			atomic.AddInt32(&conditional, 1)
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		// A second unconditional request means the ETag was not replayed. Fail
+		// loudly instead of serving 200 again, which let the old assertion
+		// (2 calls, same payload) pass even when caching had regressed.
+		if n > 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"id":9,"name":"Cursor Bugbot","status":"in_progress","app":{"slug":"cursor"}}]}`))
+	}))
+	defer srv.Close()
+
+	g := &GitHub{
+		token:       "test-token",
+		httpClient:  srv.Client(),
+		apiBase:     srv.URL,
+		maxRetries:  2,
+		maxWait:     time.Second,
+		backoffBase: time.Millisecond,
+	}
+	for i := 0; i < 2; i++ {
+		runs, err := g.ListCheckRuns(context.Background(), "o/r", "abc123")
+		if err != nil {
+			t.Fatalf("ListCheckRuns pass %d: %v", i, err)
+		}
+		if len(runs) != 1 || runs[0].ID != 9 {
+			t.Fatalf("pass %d: got %+v", i, runs)
+		}
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected 2 HTTP calls (200 then 304), got %d", got)
+	}
+	if got := atomic.LoadInt32(&conditional); got != 1 {
+		t.Fatalf("the second call must carry If-None-Match, got %d conditional requests", got)
+	}
+}

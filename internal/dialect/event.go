@@ -10,22 +10,30 @@ import (
 // over the completion marker it may also contain (a rate-limited reply must
 // never converge a round), and the already-reviewed ack is only reported when
 // the body is not itself a rate limit.
+//
+// Co-reviewer kinds are generic — the bot's identity travels as data
+// (BotEvent.For), never as a per-bot kind, so the engine's rules stay
+// bot-shape-generic ("participated", "clean at SHA", "cannot finish", "was
+// commanded") without enumerating bots. Kind values are in-memory only (never
+// persisted), so renumbering between versions is safe.
 type EventKind int
 
 const (
 	EvOther           EventKind = iota
 	EvCommand                   // the review trigger command, posted by a human/agent
-	EvCodexCommand              // the Codex review trigger command, posted by a human/agent
+	EvCoCommand                 // a co-reviewer's trigger command, posted by a human/agent
 	EvCompletion                // "Review finished." auto-reply (and not rate-limited)
 	EvRateLimited               // CodeRabbit account-quota notice
 	EvPaused                    // "Reviews paused" auto-pause notice
 	EvInProgress                // editable top summary: review still processing
 	EvFailed                    // editable top summary: review failed
 	EvAlreadyReviewed           // "does not re-review already reviewed commits" claim
+	EvSkipped                   // "Review skipped": the bot refused this head outright
 	EvNoAction                  // CodeRabbit clean-review summary (no actionable comments)
-	EvCodexClean                // Codex clean-summary issue comment
-	EvCodexUsageLimit           // Codex "usage limits for code reviews" exhaustion notice
-	EvCodexNotice               // other non-actionable Codex notice (acks, lgtm)
+	EvCoClean                   // co-reviewer clean-summary issue comment
+	EvCoUnable                  // co-reviewer cannot finish this round (Codex usage limits)
+	EvCoNotice                  // other non-actionable co-reviewer notice (acks)
+	EvCoVerdict                 // Macroscope approvability verdict (informational only)
 )
 
 // BotEvent is one classified issue comment. CreatedAt orders command↔reply
@@ -37,10 +45,22 @@ type BotEvent struct {
 	CommentID int64
 	CreatedAt time.Time
 	UpdatedAt time.Time
-	AutoReply bool       // body carries the auto-reply (calibration) marker
-	Window    *time.Time // EvRateLimited: parsed "available in" deadline
-	Remaining *int       // EvRateLimited: parsed remaining reviews
-	SHA       string     // EvCodexClean: reviewed-commit sha, "" if absent
+	AutoReply bool // body carries the auto-reply (calibration) marker
+	// SummaryOnly reports that this configured-bot comment declares a
+	// summary-and-walkthrough-only plan (CodeRabbit Free on a private repo).
+	// It is a property of the ACCOUNT, not of any round, so it rides alongside
+	// the dominant Kind rather than competing with it — a rate-limit notice or
+	// an in-progress summary must still classify as itself.
+	SummaryOnly bool
+	Window      *time.Time // EvRateLimited: parsed "available in" deadline
+	Remaining   *int       // EvRateLimited: parsed remaining reviews
+	SHA         string     // EvCoClean: reviewed-commit sha, "" if absent
+	// For is the canonical co-reviewer login the event concerns: the commanded
+	// bot for EvCoCommand, the authoring bot for a co-reviewer's own comments.
+	// "" for primary-bot and human events.
+	For string
+	// Approved is the EvCoVerdict approvability verdict.
+	Approved *bool
 }
 
 // PairTime is the timestamp used for command↔reply pairing (CreatedAt, with
@@ -63,13 +83,14 @@ func (e BotEvent) ObservedTime() time.Time {
 }
 
 // Classifier classifies issue comments into BotEvents. Bot is the configured
-// CodeRabbit login; ReviewCommand is the exact trigger comment body; CodexCommand
-// is the exact Codex trigger comment body ("" disables Codex-command matching).
+// CodeRabbit login; ReviewCommand is the exact trigger comment body;
+// CoReviewers are the enabled co-reviewer entries with their config-resolved
+// trigger commands (empty: no co-reviewer classification at all).
 type Classifier struct {
 	CodeRabbit    CodeRabbit
 	Bot           string
 	ReviewCommand string
-	CodexCommand  string
+	CoReviewers   []CoReviewer
 }
 
 // Classify maps one issue comment to its BotEvent. Unrecognized comments
@@ -83,22 +104,24 @@ func (c Classifier) Classify(author, body string, id int64, createdAt, updatedAt
 		ev.Kind = EvCommand
 		return ev
 	}
-	if codexCmd := strings.TrimSpace(c.CodexCommand); codexCmd != "" && trimmed == codexCmd && !IsCodexBot(author) {
-		ev.Kind = EvCodexCommand
-		return ev
+
+	for _, co := range c.CoReviewers {
+		if co.matchesCommand(trimmed) && !co.Is(author) {
+			ev.Kind = EvCoCommand
+			ev.For = co.Login
+			return ev
+		}
 	}
-	if IsCodexBot(author) {
-		switch {
-		case IsCodexNoActionReviewCompletion(body):
-			ev.Kind = EvCodexClean
-			ev.SHA = CodexReviewedCommitSHA(body)
-		case IsCodexUsageLimit(body):
-			// The usage-limit exhaustion notice is distinct from other Codex acks:
-			// the dynamic completion gate reads it to stop waiting on a Codex that
-			// cannot finish this round.
-			ev.Kind = EvCodexUsageLimit
-		case IsNonActionableText(body):
-			ev.Kind = EvCodexNotice
+	for _, co := range c.CoReviewers {
+		if !co.Is(author) {
+			continue
+		}
+		ev.For = co.Login
+		if co.ClassifyComment != nil {
+			coEv := co.ClassifyComment(body)
+			ev.Kind = coEv.Kind
+			ev.SHA = coEv.SHA
+			ev.Approved = coEv.Approved
 		}
 		return ev
 	}
@@ -106,7 +129,16 @@ func (c Classifier) Classify(author, body string, id int64, createdAt, updatedAt
 		return ev
 	}
 	ev.AutoReply = c.CodeRabbit.IsAutoReply(body)
+	ev.SummaryOnly = c.CodeRabbit.IsSummaryOnlyPlan(body)
 	switch {
+	case c.CodeRabbit.IsReviewSkipped(body):
+		// Ordered BEFORE the rate limit deliberately: the skip notice ships with
+		// the rate-limit marker embedded, but it is a refusal of THIS head, not
+		// a timed account block. Classifying it as a rate limit fabricates a
+		// window that never clears — crq would re-fire forever and block the
+		// whole account's quota on one oversized PR.
+		ev.Kind = EvSkipped
+		ev.SHA = ReviewSkippedHeadSHA(body)
 	case c.CodeRabbit.IsRateLimited(body):
 		ev.Kind = EvRateLimited
 		ev.Window = ParseAvailableIn(body, updatedAt)

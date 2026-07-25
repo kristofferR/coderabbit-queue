@@ -67,17 +67,23 @@ func firedAtOf(r Round) time.Time {
 	return r.EnqueuedAt
 }
 
-// requestedRounds gathers every round that has fired (active or archived) for
-// the "Recently requested" table, newest first, capped.
+// requestedRounds gathers every round for which crq actually REQUESTED a review
+// (active or archived) for the "Recently requested" table, newest first, capped.
+//
+// CoOnly rounds are excluded: they carry a FiredAt because it anchors their
+// evidence floor, but crq never asked the primary reviewer for anything. Listing
+// them crowded the table with repos that cannot use the queue at all — on a
+// CodeRabbit-Free private repo every push produced a row for a review that was
+// never requested, pushing the real history off the end of the cap.
 func requestedRounds(st State) []Round {
 	var out []Round
 	for _, r := range st.Rounds {
-		if r.FiredAt != nil {
+		if r.FiredAt != nil && !r.CoOnly {
 			out = append(out, r)
 		}
 	}
 	for _, r := range st.Archive {
-		if r.FiredAt != nil {
+		if r.FiredAt != nil && !r.CoOnly {
 			out = append(out, r)
 		}
 	}
@@ -86,6 +92,34 @@ func requestedRounds(st State) []Round {
 		out = out[:20]
 	}
 	return out
+}
+
+// coBotMarks renders a round's co-reviewer trigger bookkeeping for the
+// feedback-wait row: ✓ = trigger posted/adopted, ⏳ = post claimed but not
+// yet recorded. Empty (byte-identical row) when the round tracks no co-bots.
+func coBotMarks(r Round) string {
+	if len(r.CoBots) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(r.CoBots))
+	for name := range r.CoBots {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		c := r.CoBots[name]
+		switch {
+		case c.CommandID != 0:
+			parts = append(parts, name+" ✓")
+		case c.ClaimedAt != nil:
+			parts = append(parts, name+" ⏳")
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " · triggers: " + strings.Join(parts, ", ")
 }
 
 // RenderDashboard renders the human-facing dashboard for v3 state: rounds by
@@ -134,6 +168,9 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	} else {
 		fmt.Fprintf(&b, "| **CodeRabbit quota** | ✅ not currently blocked |\n")
 	}
+	if cfg.CoReviewers != "" {
+		fmt.Fprintf(&b, "| **Co-reviewers** | %s |\n", cfg.CoReviewers)
+	}
 	fmt.Fprintf(&b, "| **Last review fired** | %s |\n", fmtStamp(st.LastFired, loc))
 	if slot != nil {
 		fmt.Fprintf(&b, "| **In flight** | [%s#%d](https://github.com/%s/pull/%d) · fired %s · `%s` |\n",
@@ -143,8 +180,8 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	}
 	if len(reviewing) > 0 {
 		r := reviewing[0]
-		fmt.Fprintf(&b, "| **Feedback wait** | [%s#%d](https://github.com/%s/pull/%d) · `%s` · deadline %s |\n",
-			r.Repo, r.PR, r.Repo, r.PR, r.Head, fmtStamp(r.WaitDeadline, loc))
+		fmt.Fprintf(&b, "| **Feedback wait** | [%s#%d](https://github.com/%s/pull/%d) · `%s` · deadline %s%s |\n",
+			r.Repo, r.PR, r.Repo, r.PR, r.Head, fmtStamp(r.WaitDeadline, loc), coBotMarks(r))
 	} else {
 		fmt.Fprintf(&b, "| **Feedback wait** | — |\n")
 	}

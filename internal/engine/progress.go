@@ -69,8 +69,21 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 	// with NO primary review is deliberately left to the fall-through (KeepWaiting):
 	// the loop bounds and times out its own wait (exit 2), so an expired deadline
 	// never resets or re-fires the same head.
-	if r.Phase == state.PhaseReviewing && r.WaitDeadline != nil && !now.Before(r.WaitDeadline.UTC()) && primaryReviewedHead(r, obs, p) {
-		return Transition{Outcome: OutComplete, Reason: "co-review wait elapsed; primary review stands"}
+	//
+	// The one round that fall-through cannot serve is a primary-UNAVAILABLE one:
+	// no primary review is ever coming (a summary-only plan, or a skipped
+	// review), so the condition above can never become true, and under
+	// `autoreview` there is no Loop to enforce the deadline either. Such a round
+	// would sit in `reviewing` forever — and because the daemon sweeps only the
+	// OLDEST reviewing round per pump, it would also starve every reviewing round
+	// behind it. Its deadline is the only thing that can end it.
+	if r.Phase == state.PhaseReviewing && r.WaitDeadline != nil && !now.Before(r.WaitDeadline.UTC()) {
+		if primaryReviewedHead(r, obs, p) {
+			return Transition{Outcome: OutComplete, Reason: "co-review wait elapsed; primary review stands"}
+		}
+		if PrimaryReviewUnavailable(obs, p, r.Head) {
+			return Transition{Outcome: OutComplete, Reason: "co-review wait elapsed; no primary review is coming for this head"}
+		}
 	}
 
 	// An "already reviewed" ack is only trusted alongside real review

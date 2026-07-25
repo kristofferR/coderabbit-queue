@@ -3,7 +3,12 @@ package crq
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
 )
 
 func TestLoadConfigDefaultsToCodeRabbitRequiredBot(t *testing.T) {
@@ -215,5 +220,210 @@ func TestAuthorSetNormalizesCaseAndBotSuffix(t *testing.T) {
 	set := authorSet("Dependabot[bot], renovate ,")
 	if len(set) != 2 || !set["dependabot"] || !set["renovate"] {
 		t.Fatalf("expected normalized {dependabot, renovate}, got %#v", set)
+	}
+}
+
+func coBotByName(cfg Config, name string) (CoBotConfig, bool) {
+	for _, cb := range cfg.CoBots {
+		if cb.Name == name {
+			return cb, true
+		}
+	}
+	return CoBotConfig{}, false
+}
+
+func TestLoadConfigCoBotsDefaults(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	for _, key := range []string{"CRQ_REQUIRED_BOTS", "CRQ_FEEDBACK_BOTS", "CRQ_COBOTS", "CRQ_CODEX_CMD"} {
+		t.Setenv(key, "")
+	}
+	os.Unsetenv("CRQ_COBOTS") // "" would disable all; the default is all known
+	os.Unsetenv("CRQ_CODEX_CMD")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.CoBots) != 3 {
+		t.Fatalf("default CoBots = %#v, want codex+bugbot+macroscope", cfg.CoBots)
+	}
+	codex, _ := coBotByName(cfg, "codex")
+	if codex.Trigger != engine.TriggerNever || codex.Command != "@codex review" || codex.Required {
+		t.Fatalf("codex defaults wrong: %+v", codex)
+	}
+
+	bugbot, _ := coBotByName(cfg, "bugbot")
+	if bugbot.Trigger != engine.TriggerSelfHeal || bugbot.Command != "bugbot run" || bugbot.SelfHealGrace != 10*time.Minute {
+		t.Fatalf("bugbot defaults wrong: %+v", bugbot)
+	}
+	macro, _ := coBotByName(cfg, "macroscope")
+	if macro.Trigger != engine.TriggerSelfHeal || macro.Command != "@macroscope-app review" {
+		t.Fatalf("macroscope defaults wrong: %+v", macro)
+	}
+	// Wanted co-reviewers surface findings: their logins join FeedbackBots.
+	for _, want := range []string{"cursor[bot]", "macroscopeapp[bot]", dialect.CodexBotLogin} {
+		found := false
+		for _, b := range cfg.FeedbackBots {
+			if b == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("FeedbackBots missing %s: %#v", want, cfg.FeedbackBots)
+		}
+	}
+	// Wanted-only bots never fold into RequiredBots.
+	if len(cfg.RequiredBots) != 1 {
+		t.Fatalf("RequiredBots must stay CodeRabbit-only by default: %#v", cfg.RequiredBots)
+	}
+}
+
+func TestLoadConfigCoBotsExplicitEmptyDisablesAll(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_REQUIRED_BOTS", "")
+	t.Setenv("CRQ_FEEDBACK_BOTS", "")
+	t.Setenv("CRQ_COBOTS", "")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.CoBots) != 0 {
+		t.Fatalf("CRQ_COBOTS=\"\" must disable all co-bots, got %#v", cfg.CoBots)
+	}
+
+	if len(cfg.FeedbackBots) != 1 || cfg.FeedbackBots[0] != "coderabbitai[bot]" {
+		t.Fatalf("FeedbackBots must collapse to the required set: %#v", cfg.FeedbackBots)
+	}
+}
+
+func TestLoadConfigCoBotRequiredFoldsIntoRequiredBots(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_REQUIRED_BOTS", "")
+	t.Setenv("CRQ_COBOTS", "") // even disabled, required forces the entry
+	t.Setenv("CRQ_COBOT_BUGBOT_REQUIRED", "1")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bugbot, ok := coBotByName(cfg, "bugbot")
+	if !ok || !bugbot.Required {
+		t.Fatalf("required bugbot must be enabled: %#v", cfg.CoBots)
+	}
+	found := false
+	for _, b := range cfg.RequiredBots {
+		if b == "cursor[bot]" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("required co-bot must fold into RequiredBots: %#v", cfg.RequiredBots)
+	}
+	// Required-ness does not change Bugbot's selfheal default (it auto-reviews).
+	if bugbot.Trigger != engine.TriggerSelfHeal {
+		t.Fatalf("bugbot trigger = %v, want selfheal", bugbot.Trigger)
+	}
+}
+
+func TestLoadConfigRequiredBotsListingEnablesCoBot(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_REQUIRED_BOTS", "coderabbitai[bot],"+dialect.CodexBotLogin)
+	t.Setenv("CRQ_COBOTS", "bugbot")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	codex, ok := coBotByName(cfg, "codex")
+	if !ok || !codex.Required {
+		t.Fatalf("codex listed in CRQ_REQUIRED_BOTS must be required+enabled: %#v", cfg.CoBots)
+	}
+	// A configured-required Codex keeps today's fire-time trigger.
+	if codex.Trigger != engine.TriggerAlways {
+		t.Fatalf("required codex trigger = %v, want always", codex.Trigger)
+	}
+	if _, ok := coBotByName(cfg, "macroscope"); ok {
+		t.Fatalf("macroscope not in CRQ_COBOTS and not required must be absent: %#v", cfg.CoBots)
+	}
+}
+
+func TestLoadConfigCoBotCmdAliasesAndOverrides(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_REQUIRED_BOTS", "")
+	t.Setenv("CRQ_CODEX_CMD", "@codex ship it")
+	t.Setenv("CRQ_COBOT_BUGBOT_TRIGGER", "always")
+	t.Setenv("CRQ_COBOT_MACROSCOPE_CMD", "")
+	t.Setenv("CRQ_COBOT_MACROSCOPE_GRACE", "5m")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	codex, _ := coBotByName(cfg, "codex")
+	if codex.Command != "@codex ship it" {
+		t.Fatalf("CRQ_CODEX_CMD alias not honored: %+v", codex)
+	}
+	bugbot, _ := coBotByName(cfg, "bugbot")
+	if bugbot.Trigger != engine.TriggerAlways {
+		t.Fatalf("bugbot trigger override not honored: %+v", bugbot)
+	}
+	macro, _ := coBotByName(cfg, "macroscope")
+	if macro.Command != "" || macro.Trigger != engine.TriggerNever {
+		t.Fatalf("an empty command must force trigger never: %+v", macro)
+	}
+	if macro.SelfHealGrace != 5*time.Minute {
+		t.Fatalf("grace override not honored: %+v", macro)
+	}
+
+	// The per-bot key wins over the legacy alias.
+	t.Setenv("CRQ_COBOT_CODEX_CMD", "@codex review please")
+	cfg, err = LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	codex, _ = coBotByName(cfg, "codex")
+	if codex.Command != "@codex review please" {
+		t.Fatalf("CRQ_COBOT_CODEX_CMD must win over CRQ_CODEX_CMD: %+v", codex)
+	}
+}
+
+func TestLoadConfigRLCoDegradeAlias(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+
+	t.Setenv("CRQ_RL_CO_DEGRADE", "0")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RateLimitCoDegrade {
+		t.Fatal("CRQ_RL_CO_DEGRADE=0 must disable the degrade")
+	}
+
+	os.Unsetenv("CRQ_RL_CO_DEGRADE")
+	t.Setenv("CRQ_RL_CODEX_DEGRADE", "0")
+	cfg, err = LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RateLimitCoDegrade {
+		t.Fatal("legacy CRQ_RL_CODEX_DEGRADE=0 must still disable the degrade")
+	}
+}
+
+func TestLoadConfigRejectsUnknownCoBot(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_REQUIRED_BOTS", "")
+	t.Setenv("CRQ_COBOTS", "codex,buugbot")
+
+	// Silently skipping a typo disabled the co-reviewer the operator asked for,
+	// and the symptom — a bot that simply never runs — looks nothing like a
+	// misspelling, so this fails loudly instead.
+	_, err := LoadConfig()
+	if err == nil {
+		t.Fatal("a misspelled co-reviewer must fail configuration, not be dropped")
+	}
+	if !strings.Contains(err.Error(), "buugbot") || !strings.Contains(err.Error(), "bugbot") {
+		t.Fatalf("the error must name the typo and the known bots, got %v", err)
 	}
 }

@@ -25,6 +25,9 @@ type fakeGitHub struct {
 	reviewComments  map[string][]ghapi.ReviewComment
 	issueReactions  map[string][]ghapi.Reaction
 	reactions       map[int64][]ghapi.Reaction
+	checkRuns       map[string][]ghapi.CheckRun // key: ref (short or full sha)
+	checkRunErrs    map[string]error
+	postBodyErrs    map[string]error // body → error (selective trigger-post failures)
 	posted          []string
 	deleted         []int64
 	commentID       int64
@@ -60,6 +63,46 @@ func newFakeGitHub() *fakeGitHub {
 }
 
 func fakeKey(repo string, pr int) string { return QueueKey(repo, pr) }
+
+// ListCheckRuns serves the runs stored under the requested ref, tolerating a
+// stored short-SHA key for a full-SHA request and vice versa (observe fetches
+// by the pull's full head SHA).
+func (f *fakeGitHub) ListCheckRuns(_ context.Context, _ string, ref string) ([]ghapi.CheckRun, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.checkRunErrs[ref]; err != nil {
+		return nil, err
+	}
+	if runs, ok := f.checkRuns[ref]; ok {
+		return append([]ghapi.CheckRun(nil), runs...), nil
+	}
+	// Prefix fallback (tests seed short SHAs, observe asks with the full one),
+	// but only when exactly one key matches: returning from a map range picked
+	// an arbitrary entry whenever two refs prefixed each other.
+	var match []ghapi.CheckRun
+	found := 0
+	for key, runs := range f.checkRuns {
+		if key == "" || ref == "" {
+			continue
+		}
+		if strings.HasPrefix(ref, key) || strings.HasPrefix(key, ref) {
+			match, found = runs, found+1
+		}
+	}
+	if found == 1 {
+		return append([]ghapi.CheckRun(nil), match...), nil
+	}
+	return nil, nil
+}
+
+func (f *fakeGitHub) setCheckRuns(ref string, runs ...ghapi.CheckRun) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.checkRuns == nil {
+		f.checkRuns = map[string][]ghapi.CheckRun{}
+	}
+	f.checkRuns[ref] = runs
+}
 
 func (f *fakeGitHub) GetPull(_ context.Context, repo string, pr int) (ghapi.Pull, error) {
 	f.mu.Lock()
@@ -114,6 +157,9 @@ func (f *fakeGitHub) PostIssueComment(_ context.Context, repo string, pr int, bo
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.postErrs[fakeKey(repo, pr)]; err != nil {
+		return ghapi.IssueComment{}, err
+	}
+	if err := f.postBodyErrs[body]; err != nil {
 		return ghapi.IssueComment{}, err
 	}
 	f.commentID++
@@ -545,6 +591,19 @@ func TestRenewLeaderRespectsLiveLease(t *testing.T) {
 	if _, held, _ := svc.renewLeader(ctx, "ownerB", "tokB"); held {
 		t.Fatal("B must not steal a live lease")
 	}
+}
+
+// codexCoBots builds the single Codex co-reviewer entry these tests assume,
+// with Codex's historical default trigger: post at fire time exactly when it
+// is configured-required (parseCoBots' codex rule).
+func codexCoBots(requiredBots []string) []CoBotConfig {
+	// Derived from the production parser so the command, grace, and the
+	// required→always mapping cannot drift from what crq actually does.
+	co, err := parseCoBots(map[string]string{"CRQ_COBOTS": "codex"}, requiredBots)
+	if err != nil {
+		panic("parseCoBots codex: " + err.Error())
+	}
+	return co
 }
 
 func firingConfig() Config {
@@ -1298,7 +1357,7 @@ func TestRecordFireResetsRecordedAcrossRetry(t *testing.T) {
 	cfg := firingConfig()
 	svc := NewService(cfg, newFakeGitHub(), retryNoChangeStore{cfg: cfg}, nil)
 	round := Round{Repo: "owner/repo", PR: 12, Head: "abcdef123"}
-	_, err := svc.recordFire(context.Background(), round, "token", 1, 0, time.Now().UTC(), time.Now().UTC())
+	_, err := svc.recordFire(context.Background(), round, "token", 1, nil, time.Now().UTC(), time.Now().UTC())
 	if !errors.Is(err, ErrNoChange) {
 		t.Fatalf("expected no-change after retry lost the fire slot, got %v", err)
 	}
@@ -1901,8 +1960,9 @@ func TestRefreshQuotaPreservesBlockOnInconclusiveProbe(t *testing.T) {
 func TestLoopDegradesToCodexOnlyOnRateLimit(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
-	cfg.RateLimitCodexDegrade = true
+	cfg.RateLimitCoDegrade = true
 	cfg.FeedbackBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots) // Codex enabled as a co-reviewer
 	gh := newFakeGitHub()
 	head := "a0646f010"
 	pull := ghapi.Pull{State: "open"}
@@ -1955,8 +2015,9 @@ func TestLoopDegradesToCodexOnlyOnRateLimit(t *testing.T) {
 func TestFeedbackDefersCleanAutoCodexWithDefaultRequiredBots(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
-	cfg.RateLimitCodexDegrade = true
+	cfg.RateLimitCoDegrade = true
 	cfg.FeedbackBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots) // Codex enabled as a co-reviewer
 	gh := newFakeGitHub()
 	pull := ghapi.Pull{State: "open"}
 	pull.Head.SHA = "abcdef1234567890"
@@ -1996,10 +2057,10 @@ func TestFeedbackDefersCleanAutoCodexWithDefaultRequiredBots(t *testing.T) {
 func TestLoopDeferredCodexCleanExitsZeroNotConverged(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
-	cfg.RateLimitCodexDegrade = true
+	cfg.RateLimitCoDegrade = true
 	cfg.RequiredBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
 	cfg.FeedbackBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
-	cfg.CodexCommand = "@codex review"
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
 	cfg.SettleWindow = 0
 	gh := newFakeGitHub()
 	pull := ghapi.Pull{State: "open"}
@@ -2045,9 +2106,9 @@ func TestLoopDeferredCodexCleanExitsZeroNotConverged(t *testing.T) {
 func TestPumpPostsCodexDeferredDuringBlockThenFiresCodeRabbit(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
-	cfg.RateLimitCodexDegrade = true
+	cfg.RateLimitCoDegrade = true
 	cfg.RequiredBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
-	cfg.CodexCommand = "@codex review"
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
 	gh := newFakeGitHub()
 	pull := ghapi.Pull{State: "open"}
 	pull.Head.SHA = "abcdef1234567890"
@@ -2115,9 +2176,9 @@ func TestPumpPostsCodexDeferredDuringBlockThenFiresCodeRabbit(t *testing.T) {
 func TestPumpScansPastBlockedRoundWithCodexAlreadyRequested(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
-	cfg.RateLimitCodexDegrade = true
+	cfg.RateLimitCoDegrade = true
 	cfg.RequiredBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
-	cfg.CodexCommand = "@codex review"
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
 	gh := newFakeGitHub()
 	for _, target := range []struct {
 		repo string
@@ -2170,9 +2231,9 @@ func TestPumpScansPastBlockedRoundWithCodexAlreadyRequested(t *testing.T) {
 func TestPumpAdoptsExistingCodexCommandDuringBlock(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
-	cfg.RateLimitCodexDegrade = true
+	cfg.RateLimitCoDegrade = true
 	cfg.RequiredBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
-	cfg.CodexCommand = "@codex review"
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
 	gh := newFakeGitHub()
 	headTime := time.Now().UTC().Add(-2 * time.Minute)
 	pull := ghapi.Pull{State: "open"}
@@ -2182,7 +2243,7 @@ func TestPumpAdoptsExistingCodexCommandDuringBlock(t *testing.T) {
 	commit.Committer.Date = headTime
 	gh.commits[pull.Head.SHA] = commit
 	commandAt := headTime.Add(time.Minute)
-	command := ghapi.IssueComment{ID: 702, Body: cfg.CodexCommand, CreatedAt: commandAt, UpdatedAt: commandAt}
+	command := ghapi.IssueComment{ID: 702, Body: cfg.CoBots[0].Command, CreatedAt: commandAt, UpdatedAt: commandAt}
 	command.User.Login = "kristofferR"
 	gh.comments[fakeKey("o/carrier", 94)] = []ghapi.IssueComment{command}
 	gh.graphQL = noForcePush
@@ -2220,12 +2281,12 @@ func TestPumpAdoptsExistingCodexCommandDuringBlock(t *testing.T) {
 	}
 }
 
-func TestFireCodexDeferredAdoptionHonorsDryRunAndActiveClaim(t *testing.T) {
+func TestFireCoDeferredAdoptionHonorsDryRunAndActiveClaim(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
-	cfg.RateLimitCodexDegrade = true
+	cfg.RateLimitCoDegrade = true
 	cfg.RequiredBots = []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
-	cfg.CodexCommand = "@codex review"
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
 	gh := newFakeGitHub()
 	store := NewMemoryStore(cfg)
 	now := time.Now().UTC()
@@ -2238,7 +2299,7 @@ func TestFireCodexDeferredAdoptionHonorsDryRunAndActiveClaim(t *testing.T) {
 	round := *st.Round("o/carrier", 95)
 
 	svc.cfg.DryRun = true
-	res, err := svc.fireCodexDeferred(ctx, round, 703, now.Add(-time.Minute), "dry run adopt", now)
+	res, err := svc.fireCoDeferred(ctx, round, engine.FireDecision{Verdict: engine.FireCoDeferred, Reason: "dry run adopt", AdoptCo: map[string]engine.CommandSeen{dialect.CodexBotLogin: {ID: 703, CreatedAt: now.Add(-time.Minute)}}}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2259,7 +2320,7 @@ func TestFireCodexDeferredAdoptionHonorsDryRunAndActiveClaim(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	res, err = svc.fireCodexDeferred(ctx, round, 703, now.Add(-time.Minute), "claimed adopt", now)
+	res, err = svc.fireCoDeferred(ctx, round, engine.FireDecision{Verdict: engine.FireCoDeferred, Reason: "claimed adopt", AdoptCo: map[string]engine.CommandSeen{dialect.CodexBotLogin: {ID: 703, CreatedAt: now.Add(-time.Minute)}}}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2271,8 +2332,8 @@ func TestFireCodexDeferredAdoptionHonorsDryRunAndActiveClaim(t *testing.T) {
 		t.Fatalf("the active claim must remain untouched, got %#v", got)
 	}
 
-	staleNow := now.Add(codexClaimTTL + time.Second)
-	res, err = svc.fireCodexDeferred(ctx, round, 703, now.Add(-time.Minute), "stale claim adopt", staleNow)
+	staleNow := now.Add(triggerClaimTTL + time.Second)
+	res, err = svc.fireCoDeferred(ctx, round, engine.FireDecision{Verdict: engine.FireCoDeferred, Reason: "stale claim adopt", AdoptCo: map[string]engine.CommandSeen{dialect.CodexBotLogin: {ID: 703, CreatedAt: now.Add(-time.Minute)}}}, staleNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2282,5 +2343,172 @@ func TestFireCodexDeferredAdoptionHonorsDryRunAndActiveClaim(t *testing.T) {
 	st, _, _ = store.Load(ctx)
 	if got := st.Round("o/carrier", 95); got == nil || got.CodexCommandID != 703 || got.CodexClaimedAt != nil {
 		t.Fatalf("the recovered adoption must replace the stale claim, got %#v", got)
+	}
+}
+
+// TestPumpRescuesSummaryOnlyRoundBehindBlockedQueue pins a starvation bug found
+// by dogfooding on a private CodeRabbit-Free repo. A summary-only round needs no
+// CodeRabbit quota and no fire slot — no review is ever coming from CodeRabbit —
+// yet it sat queued behind a rate-limited round from another PR. Pump's bounded
+// rescue scan DID observe it and DID compute its verdict, then threw the verdict
+// away because it only accepted FireCoDeferred, leaving the round queued with an
+// empty note while its Codex review went unused.
+func TestPumpRescuesSummaryOnlyRoundBehindBlockedQueue(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
+	cfg.FeedbackBots = cfg.RequiredBots
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+
+	// Front of the queue: another PR, blocked, whose Codex trigger is already
+	// posted — so it yields FireNo and nothing more can be done for it.
+	frontSHA := "1111111111111111"
+	frontPull := ghapi.Pull{State: "open"}
+	frontPull.Head.SHA = frontSHA
+	gh.pulls[fakeKey("o/front", 10)] = frontPull
+
+	// Behind it: a summary-only PR. CodeRabbit posted only its Free-plan
+	// walkthrough, which is the whole review it will ever produce.
+	backSHA := "2222222222222222"
+	backPull := ghapi.Pull{State: "open"}
+	backPull.Head.SHA = backSHA
+	gh.pulls[fakeKey("o/back", 20)] = backPull
+	walkthrough := ghapi.IssueComment{
+		ID:        900,
+		Body:      corpusMessage(t, "coderabbit/summary-only-free-plan.md"),
+		CreatedAt: now.Add(-time.Minute),
+		UpdatedAt: now.Add(-time.Minute),
+	}
+	walkthrough.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/back", 20)] = []ghapi.IssueComment{walkthrough}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+
+	if _, err := svc.Enqueue(ctx, "o/front", 10); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Enqueue(ctx, "o/back", 20); err != nil {
+		t.Fatal(err)
+	}
+	blockedUntil := now.Add(30 * time.Minute)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Account.BlockedUntil = &blockedUntil
+		// The front round has already asked Codex, so the degrade has nothing
+		// left to post for it and it can only report FireNo while blocked.
+		r := st.Round("o/front", 10)
+		r.SetCoCommand(dialect.CodexBotLogin, 701, now.Add(-2*time.Minute))
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The blocked front round must not swallow the pump: the summary-only round
+	// behind it gets resolved instead of staying queued.
+	if res.Repo != "o/back" || res.PR != 20 {
+		t.Fatalf("the summary-only round behind the block must be rescued, got %#v", res)
+	}
+	st, _, _ := store.Load(ctx)
+	back := st.Round("o/back", 20)
+	if back == nil || back.Phase == PhaseQueued {
+		t.Fatalf("the summary-only round must leave the queue, got %#v", back)
+	}
+	// Whatever the resolution, it must never have spent CodeRabbit quota: no
+	// `@coderabbitai review` posted and no fire slot taken.
+	for _, p := range gh.posted {
+		if strings.Contains(p, cfg.ReviewCommand) {
+			t.Fatalf("a summary-only round must never post the CodeRabbit command, posted=%v", gh.posted)
+		}
+	}
+	if st.FireSlot != nil {
+		t.Fatalf("a summary-only round must not take the fire slot, got %#v", st.FireSlot)
+	}
+}
+
+// TestWaitResolvesSummaryOnlyWithoutTheQueue pins the architectural rule the
+// dogfood exposed: a summary-only round is NOT a queue citizen. The Seq FIFO and
+// the FireSlot exist solely to serialize CodeRabbit's account-wide review limit,
+// and a CodeRabbit-Free private repo never produces a review at all — so neither
+// an account block, nor another PR holding the slot, may delay it. Its
+// co-reviewers are ready now; the loop must run them now.
+//
+// The starvation is staged at its worst: another PR HOLDS the fire slot, so Pump
+// short-circuits on the slot holder and never reaches the FIFO or its bounded
+// rescue scan at all. Only the direct quota-free path can resolve this round.
+func TestWaitResolvesSummaryOnlyWithoutTheQueue(t *testing.T) {
+	cfg := firingConfig()
+	cfg.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
+	cfg.FeedbackBots = cfg.RequiredBots
+	cfg.PollInterval = 10 * time.Millisecond
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+
+	// Another PR holds the fire slot: every Pump pass returns after progressing
+	// it, so the FIFO below is never consulted.
+	frontPull := ghapi.Pull{State: "open"}
+	frontPull.Head.SHA = "1111111111111111"
+	gh.pulls[fakeKey("o/front", 10)] = frontPull
+
+	sha := "2222222222222222"
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey("o/private", 20)] = pull
+	walkthrough := ghapi.IssueComment{
+		ID:        900,
+		Body:      corpusMessage(t, "coderabbit/summary-only-free-plan.md"),
+		CreatedAt: now.Add(-time.Minute),
+		UpdatedAt: now.Add(-time.Minute),
+	}
+	walkthrough.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/private", 20)] = []ghapi.IssueComment{walkthrough}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+
+	seedRound(t, store, cfg, "o/front", 10, "111111111", PhaseFired, now.Add(-time.Minute), 500)
+	blockedUntil := now.Add(45 * time.Minute)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.Account.BlockedUntil = &blockedUntil
+		st.FireSlot = &FireSlot{Key: QueueKey("o/front", 10), Token: "seedtok", Since: now.Add(-time.Minute)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A bounded context turns the pre-fix behavior (spin until the block clears)
+	// into a prompt failure instead of a hung test.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	res, code, err := svc.Wait(ctx, "o/private", 20)
+	if err != nil {
+		t.Fatalf("the summary-only round must resolve without the queue, got err=%v res=%#v", err, res)
+	}
+	if code == 2 {
+		t.Fatalf("the summary-only round must not wait out the account block, got %#v code=%d", res, code)
+	}
+	st, _, _ := store.Load(context.Background())
+	if r := st.Round("o/private", 20); r == nil || r.Phase == PhaseQueued {
+		t.Fatalf("the summary-only round must leave the queue, got %#v", r)
+	}
+	for _, p := range gh.posted {
+		if strings.Contains(p, cfg.ReviewCommand) {
+			t.Fatalf("summary-only must never post the CodeRabbit command, posted=%v", gh.posted)
+		}
+	}
+	// The other PR keeps the slot — resolving ours never touched it.
+	if st.FireSlot == nil || st.FireSlot.Key != QueueKey("o/front", 10) {
+		t.Fatalf("the front PR must keep the fire slot, got %#v", st.FireSlot)
 	}
 }

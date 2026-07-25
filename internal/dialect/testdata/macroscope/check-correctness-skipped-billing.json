@@ -1,0 +1,12 @@
+{
+  "name": "Macroscope - Correctness Check",
+  "status": "completed",
+  "conclusion": "skipped",
+  "output": {
+    "title": "Review skipped — billing issue",
+    "summary": "Macroscope did not review this commit due to a billing issue (e.g. usage limit reached or an unpaid invoice). A workspace admin can check the billing status in Macroscope Settings -> Billing. Feel free to reach out to us at support@macroscope.com"
+  },
+  "app": {
+    "slug": "macroscopeapp"
+  }
+}

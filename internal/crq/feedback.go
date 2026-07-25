@@ -32,6 +32,31 @@ type FeedbackReport struct {
 	// DeferredUntil. Converged stays false until it does.
 	CodeRabbitDeferred bool       `json:"coderabbit_deferred,omitempty"`
 	DeferredUntil      *time.Time `json:"coderabbit_deferred_until,omitempty"`
+	// CoReviewers is each enabled co-reviewer's per-head status, keyed by
+	// normalized login. Informational only — the Verdict never gates
+	// convergence or changes exit codes.
+	CoReviewers map[string]CoReviewerStatus `json:"co_reviewers,omitempty"`
+	// PrimaryUnavailable reports that the configured reviewer will not review
+	// this head at all (its plan only summarizes, or it skipped the head), with
+	// PrimaryUnavailableReason saying which. The co-reviewers alone resolve the
+	// round: do NOT hold the head for the primary, and ignore the account-quota
+	// window entirely — it cannot apply to a round that never spends quota.
+	PrimaryUnavailable       bool   `json:"primary_review_unavailable,omitempty"`
+	PrimaryUnavailableReason string `json:"primary_review_unavailable_reason,omitempty"`
+}
+
+// CoReviewerStatus is one co-reviewer's observed state for the current head.
+type CoReviewerStatus struct {
+	// Reviewed reports head review evidence: a review, a SHA-matched clean
+	// summary, or a completed check run.
+	Reviewed bool `json:"reviewed"`
+	// CheckState summarizes the bot's check runs for the head:
+	// clean | issues | in_progress | failed (the run crashed) | unable (the bot
+	// reported it cannot review this commit at all) | unknown (no check observed).
+	CheckState string `json:"check_state,omitempty"`
+	// Verdict is Macroscope's approvability verdict when one was posted:
+	// approved | needs_human_review.
+	Verdict string `json:"verdict,omitempty"`
 }
 
 func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackReport, error) {
@@ -82,6 +107,18 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	}
 	completion := engine.Completion(completionRound, obs.eng, s.policy())
 	report.ReviewedBy = completion.ReviewedBy
+	verdictCutoff := anchorCutoff
+	if verdictCutoff.IsZero() {
+		// Not fired yet (queued behind another PR): without a fire anchor the
+		// newest verdict on the PR describes the PREVIOUS head. Bound it by the
+		// head commit instead of reporting stale state as current.
+		verdictCutoff = obs.eng.HeadAt
+	}
+	report.CoReviewers = coReviewerStatuses(s.cfg, obs.eng, verdictCutoff)
+	if why := engine.PrimaryUnavailableReason(obs.eng, s.policy(), head); why != "" {
+		report.PrimaryUnavailable = true
+		report.PrimaryUnavailableReason = s.cfg.Bot + " " + why
+	}
 
 	// extractBots is the broader set whose findings we surface — a superset that
 	// includes Codex — so a bot that reviews without being required (and would
@@ -127,7 +164,62 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	}
 
 	suppressPromptAt := map[string]bool{}
+	// Bugbot re-reports one BUGBOT_BUG_ID across several threads. Dedupe alone
+	// collapses only what is emitted together, so resolving the emitted thread
+	// simply promotes a sibling on the next poll and the "single" finding
+	// resurfaces until every duplicate is resolved by hand. Collect the stable
+	// ids settled in ANY thread first and suppress the whole family.
+	settledStableIDs := map[string]bool{}
 	if threads, err := s.reviewThreads(ctx, repo, pr); err == nil {
+		// A stable id can appear in both settled and open threads, and the two
+		// readings pull opposite ways: an open thread may be a genuine re-report
+		// after a regression, or merely a leftover duplicate of the one just
+		// resolved. A blanket "open wins" resurrected settled findings whenever a
+		// duplicate sibling lingered; a blanket "settled wins" buried real
+		// re-reports. Comment timestamps cannot separate them either — resolving
+		// a thread does not restamp its comment, so the settled occurrence stays
+		// older than a sibling reported minutes before it and every duplicate
+		// reads as a regression.
+		//
+		// The commit each occurrence names is what actually distinguishes them:
+		// Bugbot stamps every finding with the SHA it reviewed. A regression is
+		// re-reported ON THE CURRENT HEAD; a leftover duplicate names an older
+		// one. So the family is settled unless it is open at the head and NOT
+		// settled at the head — the second half is what keeps three same-head
+		// siblings from resurrecting each other as one is resolved.
+		openAtHead := map[string]bool{}
+		settledAtHead := map[string]bool{}
+		anySettled := map[string]bool{}
+		for _, thread := range threads {
+			settled := thread.IsResolved || thread.IsOutdated
+			for _, c := range thread.Comments.Nodes {
+				co, ok := dialect.CoReviewerByName(c.Author.Login)
+				if !ok || co.FindingDedupeKey == nil {
+					continue
+				}
+				stable, ok := co.FindingDedupeKey(c.Body)
+				if !ok {
+					continue
+				}
+				key := dialect.NormalizeBotName(c.Author.Login) + "|" + stable
+				atHead := false
+				if co.ReviewedCommitSHA != nil && head != "" {
+					atHead = dialect.SHAPrefixMatch(co.ReviewedCommitSHA(c.Body), head)
+				}
+				switch {
+				case settled:
+					anySettled[key] = true
+					settledAtHead[key] = settledAtHead[key] || atHead
+				default:
+					openAtHead[key] = openAtHead[key] || atHead
+				}
+			}
+		}
+		for key := range anySettled {
+			if !openAtHead[key] || settledAtHead[key] {
+				settledStableIDs[key] = true
+			}
+		}
 		for _, thread := range threads {
 			report.Findings = append(report.Findings, threadFindings(thread, extractBots)...)
 			// A resolved/outdated inline thread emits no finding, but CodeRabbit's
@@ -161,6 +253,14 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 			if !dialect.InBots(extractBots, comment.User.Login) {
 				continue
 			}
+			// The GraphQL path drops findings the bot settled by EDITING its own
+			// comment (Macroscope's "✅ Resolved in <sha>"). This fallback must
+			// apply the same registry hook, or under it the resolved finding
+			// stays actionable indefinitely and convergence never comes.
+			if co, ok := dialect.CoReviewerByName(comment.User.Login); ok &&
+				co.ResolvedInSHA != nil && co.ResolvedInSHA(comment.Body) != "" {
+				continue
+			}
 			commit := dialect.ShortOID(firstNonEmpty(comment.CommitID, comment.OriginalCommitID))
 			if head != "" && commit != "" && commit != head {
 				continue
@@ -189,6 +289,12 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	headCutoff := time.Time{}
 	headCutoffLoaded := false
 	headCutoffOf := func() time.Time {
+		// observe() is the single place that asks GitHub what happened on this
+		// PR, and it already resolved the head commit date; only fall back to a
+		// second fetch when it could not.
+		if !obs.eng.HeadAt.IsZero() {
+			return obs.eng.HeadAt
+		}
 		if !headCutoffLoaded {
 			headCutoffLoaded = true
 			if pull.Head.SHA != "" {
@@ -199,17 +305,64 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		}
 		return headCutoff
 	}
+	// Classified co-reviewer events (clean summaries, verdicts, notices,
+	// trigger commands, unable notices) are completion/participation signals,
+	// not actionable findings — index them by comment id so the loop below
+	// skips them (the same pattern as the Codex clean-summary skip, which the
+	// classifier now owns generically).
+	coEventKinds := map[int64]dialect.EventKind{}
+	for _, ev := range obs.eng.Events {
+		switch ev.Kind {
+		case dialect.EvCoClean, dialect.EvCoUnable, dialect.EvCoNotice, dialect.EvCoVerdict, dialect.EvCoCommand:
+			coEventKinds[ev.CommentID] = ev.Kind
+		}
+	}
 	for _, comment := range obs.comments {
 		if !dialect.InBots(extractBots, comment.User.Login) {
+			continue
+		}
+		if s.cr.IsReviewSkipped(comment.Body) && s.isConfiguredBot(comment.User.Login) &&
+			skipAppliesToHead(comment.Body, head) &&
+			!skipPredatesHead(comment, headCutoffOf) {
+			// Checked BEFORE the rate-limit guard below: the skip notice embeds
+			// the rate-limit marker, so that guard would drop it and the round
+			// would converge with a silently absent primary reviewer — worse than
+			// a loud one. The review did not happen and never will for this head,
+			// so surface it as work: narrow the PR to get a review.
+			// The reviewer's own name, not a hardcoded one: the primary bot is
+			// configurable (CRQ_BOT), so naming CodeRabbit here mislabels the
+			// notice on every repo pointed at a different reviewer.
+			who := dialect.NormalizeBotName(comment.User.Login)
+			reason := dialect.ReviewSkippedReason(comment.Body)
+			if reason == "" {
+				reason = who + " skipped the review for this head."
+			}
+			report.Findings = append(report.Findings, dialect.Finding{
+				Bot: comment.User.Login,
+				// Bound to the head so Loop's pre-enqueue blocking check treats
+				// it as work for THIS head rather than a reason never to start:
+				// returning exit 10 here short-circuited waitToFire, so the
+				// co-reviewers that are supposed to resolve a skipped round
+				// never ran at all.
+				Commit:    head,
+				Severity:  "major",
+				Title:     who + " skipped this review — narrow the PR to get one: " + reason,
+				Body:      strings.TrimSpace(dialect.CompactReviewBody(comment.Body)),
+				CommentID: comment.ID,
+				URL:       comment.URL,
+				Source:    skipNoticeSource,
+				CreatedAt: comment.CreatedAt,
+			})
 			continue
 		}
 		if s.cr.IsRateLimited(comment.Body) {
 			continue // an account-quota notice is never a finding
 		}
-		// Codex clean-review summaries and every configured-bot issue comment are
-		// completion signals, not actionable findings: engine.Completion already
-		// folded them into ReviewedBy, so they are never surfaced here.
-		if dialect.IsCodexBot(comment.User.Login) && dialect.IsCodexNoActionReviewCompletion(comment.Body) {
+		// Co-reviewer clean summaries/verdicts/notices and every configured-bot
+		// issue comment are completion signals, not actionable findings:
+		// engine.Completion already folded them into ReviewedBy, so they are
+		// never surfaced here.
+		if _, ok := coEventKinds[comment.ID]; ok {
 			continue
 		}
 		if s.isConfiguredBot(comment.User.Login) {
@@ -233,7 +386,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		})
 	}
 
-	report.Findings = dedupeFindings(report.Findings, suppressPromptAt)
+	report.Findings = dedupeFindings(report.Findings, suppressPromptAt, settledStableIDs)
 	sort.Slice(report.Findings, func(i, j int) bool {
 		if dialect.RankSeverity(report.Findings[i].Severity) != dialect.RankSeverity(report.Findings[j].Severity) {
 			return dialect.RankSeverity(report.Findings[i].Severity) > dialect.RankSeverity(report.Findings[j].Severity)
@@ -251,7 +404,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// quota block qualifies — a round's own awaiting_retry cooldown also
 	// covers non-quota retries (post failures, timeouts) that must keep their
 	// normal retry handling.
-	if s.cfg.RateLimitCodexDegrade && !report.Converged && st.Account.BlockedUntil != nil {
+	if s.cfg.RateLimitCoDegrade && !report.Converged && st.Account.BlockedUntil != nil {
 		until := st.Account.BlockedUntil.UTC()
 		if until.After(now) && engine.CodexOnlyEligible(completionRound, obs.eng, &until, now) {
 			report.CodeRabbitDeferred = true
@@ -306,7 +459,14 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 					}
 					return report, 1, feedbackErr
 				}
-				blocking := engine.BlockingFindings(report.Findings, head)
+				// The guard exists to stop a NEW review round starting while
+				// earlier findings are open. The skip notice is the one finding
+				// that must not hold it: it has no thread to resolve, so
+				// returning here short-circuited waitToFire forever and the
+				// co-reviewers meant to resolve a skipped round never ran.
+				// Exempt exactly that notice — real unresolved findings on a
+				// summary-only PR still hold the head, as on any other.
+				blocking := excludeSkipNotice(engine.BlockingFindings(report.Findings, head))
 				if len(blocking) > 0 {
 					report.Findings = blocking
 					report.Status = "feedback"
@@ -396,6 +556,12 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 				// With ANOTHER required bot still pending, the hold-head branch
 				// below applies instead: pushing would restart its checks.
 				report.Reason = "codex findings during a coderabbit rate-limit window; fix, push, and loop again — the coderabbit review stays queued and fires when the window opens"
+			} else if report.PrimaryUnavailable {
+				// Only co-reviewers are outstanding: naming them (and the fact that
+				// the primary is out of the picture) stops the agent inferring it
+				// must wait on the primary or on an account-quota window.
+				report.Reason = "hold current head for the remaining co-reviewers only — " +
+					report.PrimaryUnavailableReason + ", so nothing here waits on it or on the account quota"
 			} else {
 				// A required reviewer is still pending (e.g. Codex posted a finding
 				// before CodeRabbit reviewed). Return the findings to work on, but leave
@@ -444,9 +610,16 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		poll := s.cfg.PollInterval
 		var blockedUntil *time.Time
 		now := s.clock()
-		if st, _, lerr := s.store.Load(ctx); lerr == nil {
-			if until, ok := st.AccountBlockedUntil(repo, pr, head, now); ok {
-				blockedUntil = &until
+		// A round the primary will never review neither spends the account
+		// quota nor waits on it. Consulting the block would extend this round's
+		// deadline, slow its poll to the block window, and narrate a limit that
+		// has nothing to do with it — while the co-reviewers it IS waiting for
+		// answer in minutes. Leave blockedUntil nil so none of that applies.
+		if !report.PrimaryUnavailable {
+			if st, _, lerr := s.store.Load(ctx); lerr == nil {
+				if until, ok := st.AccountBlockedUntil(repo, pr, head, now); ok {
+					blockedUntil = &until
+				}
 			}
 		}
 		// A degraded round waits for Codex, not for the window: keep the normal
@@ -984,6 +1157,14 @@ func threadFindings(thread reviewThread, bots map[string]struct{}) []dialect.Fin
 		if !dialect.InBots(bots, comment.Author.Login) {
 			continue
 		}
+		// A settled-marker edit means the bot considers the finding addressed —
+		// Macroscope never resolves threads, it EDITS the comment ("✅ Resolved
+		// in <sha>" / "No longer relevant as of <sha>"); the edit IS its
+		// resolution, trusted like a thread resolution (no head match required).
+		if co, ok := dialect.CoReviewerByName(comment.Author.Login); ok &&
+			co.ResolvedInSHA != nil && co.ResolvedInSHA(comment.Body) != "" {
+			continue
+		}
 		commit := dialect.ShortOID(comment.Commit.OID)
 		if commit == "" {
 			commit = dialect.ShortOID(comment.OriginalCommit.OID)
@@ -1025,7 +1206,7 @@ func promptSuppressKeys(thread reviewThread, bots map[string]struct{}) []string 
 	return keys
 }
 
-func dedupeFindings(in []dialect.Finding, suppressPromptAt map[string]bool) []dialect.Finding {
+func dedupeFindings(in []dialect.Finding, suppressPromptAt, settledStableIDs map[string]bool) []dialect.Finding {
 	seen := map[string]bool{}
 	structuredAtLocation := map[string]bool{}
 	for _, finding := range in {
@@ -1047,6 +1228,17 @@ func dedupeFindings(in []dialect.Finding, suppressPromptAt map[string]bool) []di
 			}
 		}
 		key := dialect.NormalizeBotName(finding.Bot) + "|" + finding.Path + "|" + strconv.Itoa(finding.Line) + "|" + finding.Title + "|" + finding.Body + "|" + finding.ThreadID
+		// A bot-stable identity marker (Bugbot's BUG_ID) supersedes the
+		// location/title key: the same bug re-reported in a new thread after a
+		// push must collapse to one finding.
+		if co, ok := dialect.CoReviewerByName(finding.Bot); ok && co.FindingDedupeKey != nil {
+			if stable, ok := co.FindingDedupeKey(finding.Body); ok {
+				if settledStableIDs[dialect.NormalizeBotName(finding.Bot)+"|"+stable] {
+					continue // settled in some thread — every sibling is settled
+				}
+				key = dialect.NormalizeBotName(finding.Bot) + "|" + stable
+			}
+		}
 		sum := sha256.Sum256([]byte(key))
 		finding.ID = hex.EncodeToString(sum[:])
 		if seen[finding.ID] {
@@ -1054,6 +1246,138 @@ func dedupeFindings(in []dialect.Finding, suppressPromptAt map[string]bool) []di
 		}
 		seen[finding.ID] = true
 		out = append(out, finding)
+	}
+	return out
+}
+
+// skipNoticeSource marks the synthetic finding Feedback builds from a "Review
+// skipped" notice. It is the only finding with no thread to resolve and no way
+// to be addressed except by changing the PR itself, so it is the one finding
+// the pre-enqueue drain exempts — identified by this source rather than by its
+// own display text, which names whichever bot posted it.
+const skipNoticeSource = "review_skipped"
+
+// excludeSkipNotice drops the synthetic skip finding from a blocking set.
+func excludeSkipNotice(findings []dialect.Finding) []dialect.Finding {
+	out := findings[:0:0]
+	for _, f := range findings {
+		if f.Source == skipNoticeSource {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// skipPredatesHead reports whether a skip notice was posted before the current
+// head existed. A notice naming no commit cannot be bound by SHA, so it falls
+// back to the same head-commit cutoff every other issue comment uses — without
+// it a stale skip keeps surfacing as a blocking, thread-less finding and the
+// loop exits 10 forever without ever waiting for a review.
+func skipPredatesHead(comment ghapi.IssueComment, headCutoff func() time.Time) bool {
+	if dialect.ReviewSkippedHeadSHA(comment.Body) != "" {
+		return false // names its commit: SHA binding already decided this
+	}
+	cutoff := headCutoff()
+	if cutoff.IsZero() {
+		return false
+	}
+	// CodeRabbit produces some skip notices by EDITING its existing top-summary
+	// comment, whose CreatedAt long predates the current head while UpdatedAt is
+	// current. Judging by creation time discarded exactly those, so the finding
+	// vanished while the engine still (correctly) read the primary as
+	// unavailable. Use the later of the two, matching BotEvent.ObservedTime.
+	at := comment.CreatedAt
+	if comment.UpdatedAt.After(at) {
+		at = comment.UpdatedAt
+	}
+	return at.Before(cutoff)
+}
+
+// skipAppliesToHead reports whether a "Review skipped" notice concerns the
+// head under review. The refusal is per-head and narrowing the PR is the fix,
+// so a skip of an EARLIER head must not keep surfacing: Loop treats findings as
+// blocking before it enqueues, which would stop the replacement head from ever
+// being submitted — the repair would permanently disable the reviewer.
+func skipAppliesToHead(body, head string) bool {
+	skipped := dialect.ReviewSkippedHeadSHA(body)
+	if skipped == "" || head == "" {
+		return true // names no commit: read conservatively as current
+	}
+	return dialect.SHAPrefixMatch(skipped, head)
+}
+
+// coReviewerStatuses summarizes each enabled co-reviewer's observed state for
+// the current head: head review evidence, check-run state, and Macroscope's
+// approvability verdict. Informational only — nothing here gates convergence.
+func coReviewerStatuses(cfg Config, obs engine.Observation, since time.Time) map[string]CoReviewerStatus {
+	if len(cfg.CoBots) == 0 {
+		return nil
+	}
+	out := map[string]CoReviewerStatus{}
+	for _, cb := range cfg.CoBots {
+		key := dialect.NormalizeBotName(cb.Login)
+		status := CoReviewerStatus{Reviewed: engine.CoReviewedHead(obs, cb.Login)}
+		inProgress, clean, done, unable, failed := false, false, false, false, false
+		for _, c := range obs.Checks {
+			if dialect.NormalizeBotName(c.Bot) != key {
+				continue
+			}
+			switch c.Verdict {
+			case dialect.CheckInProgress:
+				inProgress = true
+			case dialect.CheckDoneClean:
+				clean = true
+			case dialect.CheckDone:
+				done = true
+			case dialect.CheckUnable:
+				unable = true
+			case dialect.CheckFailed:
+				failed = true
+			}
+		}
+		switch {
+		case inProgress:
+			status.CheckState = "in_progress"
+		case clean:
+			status.CheckState = "clean"
+		case done:
+			status.CheckState = "issues"
+		// A bot that could not review at all (Macroscope's billing-issue skip) or
+		// whose run crashed used to report "unknown", which reads as "nothing has
+		// happened yet" — the operator waits for a review that is never coming
+		// instead of fixing the workspace.
+		case unable:
+			status.CheckState = "unable"
+		case failed:
+			status.CheckState = "failed"
+		default:
+			status.CheckState = "unknown"
+		}
+		var latest time.Time
+		for _, ev := range obs.Events {
+			if ev.Kind != dialect.EvCoVerdict || ev.Approved == nil {
+				continue
+			}
+			// Verdicts are documented as current-head state. Between a push and
+			// the bot's new verdict the newest comment on the PR describes the
+			// PREVIOUS head, so anything older than this round is not reported.
+			if !since.IsZero() && ev.ObservedTime().Before(since) {
+				continue
+			}
+			if dialect.NormalizeBotName(firstNonEmpty(ev.For, ev.Bot)) != key {
+				continue
+			}
+			if at := ev.ObservedTime(); latest.IsZero() || at.After(latest) {
+				latest = at
+				if *ev.Approved {
+					status.Verdict = "approved"
+				} else {
+					status.Verdict = "needs_human_review"
+				}
+			}
+		}
+		out[key] = status
 	}
 	return out
 }

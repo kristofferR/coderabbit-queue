@@ -57,7 +57,27 @@ type Round struct {
 	// CodexCommandID is the `@codex review` comment crq posted/adopted for this
 	// round (0 when Codex was not fired). It suppresses re-posting the Codex
 	// command on a retry of the same head.
+	//
+	// Legacy twin of CoBots["chatgpt-codex-connector"].CommandID: the fleet
+	// shares one state ref across binary versions, so Codex bookkeeping is
+	// dual-written (accessors mirror into these fields, Normalize folds them
+	// back into CoBots) — old binaries must keep seeing codex_command_id.
 	CodexCommandID int64 `json:"codex_command_id,omitempty"`
+
+	// CoBots is the per-round co-reviewer bookkeeping, keyed by normalized
+	// login (no "[bot]" suffix). Bots other than Codex exist only here — old
+	// binaries never fired them, so ignoring the map is correct for them.
+	// Mutate only through Co/SetCoCommand/ClaimCo/ClearCoClaim.
+	CoBots map[string]CoBotRound `json:"cobots,omitempty"`
+
+	// CoOnly marks a round that reached its fired/reviewing state WITHOUT crq
+	// requesting a primary review — a co-reviewer-only trigger, or a bounded
+	// co-review wait. FiredAt does double duty as the evidence-floor anchor and
+	// as "we asked for a review", and those two meanings diverged the moment
+	// co-reviewer-only rounds existed: the dashboard's requested-reviews table
+	// filled with repos crq had never asked CodeRabbit about. Anything counting
+	// CodeRabbit requests must skip these.
+	CoOnly bool `json:"co_only,omitempty"`
 
 	// RetryAt is the earliest time this head may fire again (awaiting_retry).
 	RetryAt *time.Time `json:"retry_at,omitempty"`
@@ -86,6 +106,124 @@ type Round struct {
 	Token  string `json:"token,omitempty"` // reservation token (CAS race detection)
 	ByHost string `json:"by_host,omitempty"`
 	Note   string `json:"note,omitempty"` // human-readable reason for the last transition
+}
+
+// CoBotRound is one co-reviewer's bookkeeping inside a Round: the trigger
+// comment crq posted/adopted for it, and the CAS claim that serializes the
+// pending post (the per-round concurrency guard — co-reviewer fires never
+// take the global FireSlot).
+type CoBotRound struct {
+	CommandID   int64      `json:"command_id,omitempty"`
+	CommandedAt *time.Time `json:"commanded_at,omitempty"`
+	ClaimedAt   *time.Time `json:"claimed_at,omitempty"`
+}
+
+func (c CoBotRound) empty() bool {
+	return c.CommandID == 0 && c.CommandedAt == nil && c.ClaimedAt == nil
+}
+
+// codexCoBotKey is dialect.CodexBotLogin under coBotKey. The literal is
+// repeated here because state stays stdlib-only; state_test pins the two in
+// sync.
+const codexCoBotKey = "chatgpt-codex-connector"
+
+// coBotKey mirrors dialect.NormalizeBotName: CoBots keys carry no "[bot]"
+// suffix regardless of which login spelling the caller observed.
+func coBotKey(login string) string { return strings.TrimSuffix(login, "[bot]") }
+
+// Co returns login's bookkeeping for this round (zero value when none).
+func (r *Round) Co(login string) CoBotRound {
+	return r.CoBots[coBotKey(login)]
+}
+
+// setCo stores login's entry copy-on-write (Rounds are copied by value while
+// the map inside would otherwise be shared) and dual-writes Codex's entry
+// into the legacy fields old binaries read.
+func (r *Round) setCo(login string, c CoBotRound) {
+	key := coBotKey(login)
+	m := make(map[string]CoBotRound, len(r.CoBots)+1)
+	for k, v := range r.CoBots {
+		m[k] = v
+	}
+	if c.empty() {
+		delete(m, key)
+	} else {
+		m[key] = c
+	}
+	if len(m) == 0 {
+		m = nil
+	}
+	r.CoBots = m
+	if key == codexCoBotKey {
+		r.CodexCommandID = c.CommandID
+		r.CodexCommandedAt = c.CommandedAt
+		r.CodexClaimedAt = c.ClaimedAt
+	}
+}
+
+// SetCoCommand records the trigger comment posted/adopted for login this
+// round and releases its claim.
+func (r *Round) SetCoCommand(login string, commandID int64, at time.Time) {
+	c := r.Co(login)
+	c.CommandID = commandID
+	t := at.UTC()
+	c.CommandedAt = &t
+	c.ClaimedAt = nil
+	r.setCo(login, c)
+}
+
+// ClaimCo reserves the pending trigger post for login: CAS-set before the
+// network post so two unserialized sweepers cannot both post the command for
+// the same round. A stale claim (the poster died mid-flight) expires by age
+// and may be re-claimed.
+func (r *Round) ClaimCo(login string, now time.Time) {
+	c := r.Co(login)
+	t := now.UTC()
+	c.ClaimedAt = &t
+	r.setCo(login, c)
+}
+
+// ClearCoClaim releases login's claim without recording a command.
+func (r *Round) ClearCoClaim(login string) {
+	c := r.Co(login)
+	c.ClaimedAt = nil
+	r.setCo(login, c)
+}
+
+// foldLegacyCodex folds the legacy per-round Codex fields into CoBots on
+// load. Every writer keeps the legacy fields current for Codex (old binaries
+// write only them, new ones dual-write), so they are authoritative in BOTH
+// directions: they overwrite the mirror entry, and an empty legacy set clears
+// a stale mirror (a writer zeroed the legacy fields directly).
+func (r *Round) foldLegacyCodex() {
+	r.setCo(codexCoBotKey, CoBotRound{CommandID: r.CodexCommandID, CommandedAt: r.CodexCommandedAt, ClaimedAt: r.CodexClaimedAt})
+}
+
+// inferCoOnly backfills CoOnly for rounds written before the flag existed. The
+// evidence is already in the round: a co-reviewer-only fire recorded one of its
+// OWN trigger comments as the round's CommandID, whereas a real fire records
+// the primary review command — two different comments, so the inference cannot
+// mislabel a genuine request.
+func (r *Round) inferCoOnly() {
+	if r.CoOnly || r.FiredAt == nil {
+		return
+	}
+	// A bounded co-review wait anchors FiredAt without ever posting a command,
+	// so a fire with no CommandID is one by construction: every real fire
+	// records the command it posted or adopted.
+	if r.CommandID == 0 {
+		r.CoOnly = true
+		return
+	}
+	// A co-reviewer-only fire recorded one of its OWN trigger comments as the
+	// round's CommandID; a real fire records the primary review command, a
+	// different comment, so this cannot mislabel a genuine request.
+	for _, c := range r.CoBots {
+		if c.CommandID == r.CommandID {
+			r.CoOnly = true
+			return
+		}
+	}
 }
 
 // FireSlot is the single global in-flight reservation: at most one review
@@ -470,6 +608,15 @@ func (s *State) Normalize(now time.Time) {
 	}
 	if s.FireSlot != nil && s.SlotRound() == nil {
 		s.FireSlot = nil
+	}
+	for key, r := range s.Rounds {
+		r.foldLegacyCodex()
+		r.inferCoOnly()
+		s.Rounds[key] = r
+	}
+	for i := range s.Archive {
+		s.Archive[i].foldLegacyCodex()
+		s.Archive[i].inferCoOnly()
 	}
 	if len(s.Archive) > ArchiveMax {
 		s.Archive = s.Archive[len(s.Archive)-ArchiveMax:]

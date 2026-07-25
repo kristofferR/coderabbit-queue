@@ -3,6 +3,7 @@ package crq
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
@@ -38,9 +40,10 @@ type Config struct {
 	RequiredBots  []string
 	FeedbackBots  []string
 	ReviewCommand string
-	// CodexCommand is the Codex review trigger crq posts when Codex gates a round
-	// and does not auto-review (CRQ_CODEX_CMD). Empty disables all Codex firing.
-	CodexCommand      string
+	// CoBots are the enabled co-reviewer bots (CRQ_COBOTS + per-bot
+	// CRQ_COBOT_<NAME>_* keys). An entry exists for every wanted or required
+	// co-reviewer; required ones are already folded into RequiredBots.
+	CoBots            []CoBotConfig
 	RateLimitCommand  string
 	RateLimitMarker   string
 	CalibrationMarker string
@@ -69,10 +72,10 @@ type Config struct {
 	// CodeRabbit review following its comment shells) is caught by crq instead
 	// of by a human re-checking the PR. 0 disables.
 	SettleWindow time.Duration
-	// RateLimitCodexDegrade degrades an account-blocked round to Codex-only
-	// (return Codex findings promptly, keep CodeRabbit queued for the window)
-	// instead of waiting the block out. CRQ_RL_CODEX_DEGRADE, default on.
-	RateLimitCodexDegrade bool
+	// RateLimitCoDegrade degrades an account-blocked round to co-reviewers only
+	// (return their findings promptly, keep CodeRabbit queued for the window)
+	// instead of waiting the block out. CRQ_RL_CO_DEGRADE, default on.
+	RateLimitCoDegrade bool
 }
 
 func LoadConfig() (Config, error) {
@@ -103,6 +106,23 @@ func LoadConfig() (Config, error) {
 	host, _ := os.Hostname()
 	bot := stringEnv(env, "CRQ_BOT", "coderabbitai[bot]")
 	requiredBots := listEnv(env, "CRQ_REQUIRED_BOTS", bot)
+	coBots, err := parseCoBots(env, requiredBots)
+	if err != nil {
+		return Config{}, err
+	}
+	// A required co-reviewer gates convergence via RequiredBots membership —
+	// that list stays the single source of required-ness.
+	for _, cb := range coBots {
+		if cb.Required {
+			requiredBots = unionBots(requiredBots, []string{cb.Login})
+		}
+	}
+	// Enabled co-reviewers surface findings without gating: their logins join
+	// the feedback set unless CRQ_FEEDBACK_BOTS overrides explicitly.
+	coLogins := make([]string, 0, len(coBots))
+	for _, cb := range coBots {
+		coLogins = append(coLogins, cb.Login)
+	}
 	cfg := Config{
 		GateRepo:            env["CRQ_REPO"],
 		DashboardIssue:      intEnv(env, "CRQ_ISSUE", 0),
@@ -115,9 +135,9 @@ func LoadConfig() (Config, error) {
 		StateRef:            stringEnv(env, "CRQ_STATE_REF", "crq-state-v3"),
 		Bot:                 bot,
 		RequiredBots:        requiredBots,
-		FeedbackBots:        listEnv(env, "CRQ_FEEDBACK_BOTS", strings.Join(unionBots(requiredBots, extraFeedbackBots), ",")),
+		CoBots:              coBots,
+		FeedbackBots:        listEnv(env, "CRQ_FEEDBACK_BOTS", strings.Join(unionBots(requiredBots, coLogins), ",")),
 		ReviewCommand:       stringEnv(env, "CRQ_REVIEW_CMD", "@coderabbitai review"),
-		CodexCommand:        stringEnvAllowEmpty(env, "CRQ_CODEX_CMD", "@codex review"),
 		RateLimitCommand:    stringEnv(env, "CRQ_RATELIMIT_CMD", dialect.DefaultRateLimitCommand),
 		RateLimitMarker:     stringEnv(env, "CRQ_RL_MARKER", dialect.DefaultRateLimitMarker),
 		CalibrationMarker:   stringEnv(env, "CRQ_CAL_REPLY_MARKER", "auto-generated reply by CodeRabbit"),
@@ -140,7 +160,7 @@ func LoadConfig() (Config, error) {
 		FeedbackWaitTimeout: durationEnv(env, "CRQ_FEEDBACK_WAIT_TIMEOUT", 20*time.Minute),
 		SettleWindow:        durationEnv(env, "CRQ_SETTLE", 90*time.Second),
 
-		RateLimitCodexDegrade: env["CRQ_RL_CODEX_DEGRADE"] != "0",
+		RateLimitCoDegrade: stringEnv(env, "CRQ_RL_CO_DEGRADE", stringEnv(env, "CRQ_RL_CODEX_DEGRADE", "1")) != "0",
 	}
 	if len(cfg.Scope) == 0 && cfg.GateRepo != "" {
 		cfg.Scope = []string{ownerOf(cfg.GateRepo)}
@@ -253,14 +273,128 @@ func listEnv(env map[string]string, key, fallback string) []string {
 	return out
 }
 
-// extraFeedbackBots are review bots whose findings crq surfaces on top of the
-// required bots, without gating convergence on them. Codex is the motivating
-// case: it reviews but isn't "required" (crq neither fires nor waits for it), so
-// its findings would otherwise be silently dropped. This is deliberately just
-// Codex — CodeRabbit (or any configured reviewer) already enters the feedback
-// set via RequiredBots, so listing it here too would wrongly surface CodeRabbit
-// findings even when crq is configured for a different reviewer.
-var extraFeedbackBots = []string{dialect.CodexBotLogin}
+// CoBotConfig is one enabled co-reviewer: "wanted" (findings surface, dynamic
+// gate engages when the bot is observed active) unless Required, which gates
+// convergence via RequiredBots membership. Trigger and SelfHealGrace shape
+// when crq may post Command (see engine.DecideCoPost).
+type CoBotConfig struct {
+	Login         string
+	Name          string
+	Command       string
+	Trigger       engine.TriggerMode
+	Required      bool
+	SelfHealGrace time.Duration
+}
+
+// parseCoBots resolves the enabled co-reviewers from CRQ_COBOTS (default all
+// known; explicitly empty disables all) plus the per-bot CRQ_COBOT_<NAME>_*
+// keys. A co-reviewer login listed in CRQ_REQUIRED_BOTS is required+enabled
+// even when CRQ_COBOTS omits it. Codex keeps its historical defaults: trigger
+// `always` iff required (else never), command from CRQ_CODEX_CMD as the
+// legacy alias of CRQ_COBOT_CODEX_CMD. Bugbot/Macroscope default to
+// `selfheal` — they auto-review pushes, so crq only nudges one that went
+// silent on a head it should have covered.
+func parseCoBots(env map[string]string, requiredBots []string) ([]CoBotConfig, error) {
+	enabled := map[string]bool{}
+	var unknown []string
+	for _, item := range splitList(stringEnvAllowEmpty(env, "CRQ_COBOTS", "codex,bugbot,macroscope")) {
+		co, ok := dialect.CoReviewerByName(item)
+		if !ok {
+			// Refuse rather than skip: silently dropping a typo disables the
+			// co-reviewer the operator asked for, and the symptom (a bot that
+			// never runs) looks nothing like its cause.
+			unknown = append(unknown, item)
+			continue
+		}
+		enabled[co.Name] = true
+	}
+	if len(unknown) > 0 {
+		known := make([]string, 0, 3)
+		for _, co := range dialect.KnownCoReviewers() {
+			known = append(known, co.Name)
+		}
+		return nil, fmt.Errorf("CRQ_COBOTS: unknown co-reviewer %s (known: %s)",
+			strings.Join(unknown, ", "), strings.Join(known, ", "))
+	}
+	requiredSet := map[string]bool{}
+	for _, bot := range requiredBots {
+		requiredSet[dialect.NormalizeBotName(strings.TrimSpace(bot))] = true
+	}
+	var out []CoBotConfig
+	for _, co := range dialect.KnownCoReviewers() {
+		key := strings.ToUpper(co.Name)
+		required := boolEnv(env, "CRQ_COBOT_"+key+"_REQUIRED", false) || requiredSet[dialect.NormalizeBotName(co.Login)]
+		if !enabled[co.Name] && !required {
+			continue
+		}
+		// Uniform across bots: the per-bot key wins, then the registry's legacy
+		// alias if it declares one, then its default command. No bot is named
+		// here — the policy travels as registry metadata.
+		command := co.Command
+		if v, ok := env["CRQ_COBOT_"+key+"_CMD"]; ok {
+			command = v
+		} else if co.LegacyCommandEnv != "" {
+			command = stringEnvAllowEmpty(env, co.LegacyCommandEnv, command)
+		}
+		command = strings.TrimSpace(command)
+		trigger := triggerMode(co.DefaultTrigger, engine.TriggerSelfHeal)
+		if required && co.RequiredTrigger != "" {
+			trigger = triggerMode(co.RequiredTrigger, trigger)
+		}
+		switch v := engine.TriggerMode(strings.ToLower(strings.TrimSpace(env["CRQ_COBOT_"+key+"_TRIGGER"]))); v {
+		case engine.TriggerNever, engine.TriggerSelfHeal, engine.TriggerAlways:
+			trigger = v
+		}
+		if command == "" {
+			// No trigger command means crq can never post one, whatever the mode.
+			trigger = engine.TriggerNever
+		}
+		out = append(out, CoBotConfig{
+			Login:         co.Login,
+			Name:          co.Name,
+			Command:       command,
+			Trigger:       trigger,
+			Required:      required,
+			SelfHealGrace: durationEnv(env, "CRQ_COBOT_"+key+"_GRACE", 10*time.Minute),
+		})
+	}
+	return out, nil
+}
+
+// triggerMode converts a registry trigger string to the engine mode, falling
+// back when a bot declares none.
+func triggerMode(name string, fallback engine.TriggerMode) engine.TriggerMode {
+	switch m := engine.TriggerMode(strings.ToLower(strings.TrimSpace(name))); m {
+	case engine.TriggerNever, engine.TriggerSelfHeal, engine.TriggerAlways:
+		return m
+	}
+	return fallback
+}
+
+// splitList splits a comma-separated list, dropping blanks (an all-blank or
+// empty value yields nil — unlike listEnv it never falls back).
+func splitList(value string) []string {
+	var out []string
+	for _, item := range strings.Split(value, ",") {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func boolEnv(env map[string]string, key string, fallback bool) bool {
+	v := strings.TrimSpace(env[key])
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fallback
+	}
+	return b
+}
 
 // unionBots concatenates bot lists, dropping blanks and case-insensitively
 // de-duplicating on the normalized login (so "coderabbitai" and

@@ -426,8 +426,13 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_AUTOREVIEW_SKIP_AUTHORS` | `dependabot[bot]` | PR authors `autoreview` never enqueues (comma-separated; case and `[bot]` suffix don't matter) — set to empty to auto-review bot PRs too; manual `crq review` is unaffected |
 | `CRQ_AUTOREVIEW_SKIP_MARKER` | `<!-- crq:skip-autoreview -->` | exact PR-body marker that suppresses fleet auto-review; set empty to disable; manual `crq loop` is unaffected |
 | `CRQ_REQUIRED_BOTS` | `coderabbitai[bot]` | bots that must review the head for convergence (crq waits for all of them) |
-| `CRQ_CODEX_CMD` | `@codex review` | Codex trigger crq posts alongside the CodeRabbit command when Codex is in `CRQ_REQUIRED_BOTS` and does not auto-review the PR; empty disables Codex firing |
-| `CRQ_FEEDBACK_BOTS` | required bots + `chatgpt-codex-connector[bot]` | bots whose findings are surfaced — a superset of required bots, so Codex reviews show up without gating convergence on repos where Codex isn't installed |
+| `CRQ_COBOTS` | `codex,bugbot,macroscope` | co-reviewers crq surfaces and (optionally) triggers; set empty to disable all |
+| `CRQ_COBOT_<NAME>_REQUIRED` | `0` | make that co-reviewer gate convergence (folds it into `CRQ_REQUIRED_BOTS`); `<NAME>` ∈ `CODEX`, `BUGBOT`, `MACROSCOPE` |
+| `CRQ_COBOT_<NAME>_TRIGGER` | codex: `always` iff required, else `never`; bugbot/macroscope: `selfheal` | when crq posts that bot's command — `never`, `selfheal` (only nudge an active bot that missed the head past its grace), or `always` (post in the fire step) |
+| `CRQ_COBOT_<NAME>_CMD` | `@codex review` / `bugbot run` / `@macroscope-app review` | that bot's trigger comment; empty forces `never` |
+| `CRQ_COBOT_<NAME>_GRACE` | `10m` | how long a `selfheal` trigger waits for the bot to show up on its own before nudging |
+| `CRQ_RL_CO_DEGRADE` | on | while CodeRabbit is rate-limited, run co-reviewer-only rounds instead of waiting the window out; set `0` to disable (legacy alias: `CRQ_RL_CODEX_DEGRADE`) |
+| `CRQ_FEEDBACK_BOTS` | required bots + enabled co-reviewers | bots whose findings are surfaced — a superset of required bots, so co-reviewer findings show up without gating convergence on repos where those bots aren't installed |
 | `CRQ_TZ` | `UTC` | dashboard display timezone (IANA name, e.g. `Europe/Oslo`) |
 | `CRQ_MIN_INTERVAL` | `90s` | minimum time between fired reviews |
 | `CRQ_POLL` | `15s` | how often `crq loop` checks its place in line |
@@ -441,6 +446,11 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_GITHUB_MAX_WAIT` / `CRQ_GITHUB_RETRIES` | `120s` / `6` | GitHub rate-limit / 5xx backoff budget per request |
 | `CRQ_NETWORK_MAX_WAIT` | `0` (no cap) | cap on riding out an internet/GitHub outage (retrying ~every 30s); `0` = keep trying until connectivity returns |
 
+The pre-co-reviewer Codex variables are still read as legacy aliases, so existing configs keep
+working: `CRQ_CODEX_CMD` is an alias of `CRQ_COBOT_CODEX_CMD` (the per-bot key wins when both are
+set) and `CRQ_RL_CODEX_DEGRADE` an alias of `CRQ_RL_CO_DEGRADE`. Prefer the `CRQ_COBOT_*` names in
+new configuration.
+
 **Other review bots:** crq isn't CodeRabbit-specific. Point `CRQ_BOT`, `CRQ_REVIEW_CMD`,
 `CRQ_RATELIMIT_CMD`, and `CRQ_RL_MARKER` at any bot with a similar command surface.
 
@@ -450,14 +460,82 @@ them coming!`. crq recognizes that text as a successful, non-actionable review. 
 before it satisfies the Codex gate; otherwise the clean summary is simply ignored rather than emitted
 as a false finding.
 
-**Codex firing and auto-detection:** when Codex is in `CRQ_REQUIRED_BOTS`, crq posts `CRQ_CODEX_CMD`
-in the same fire step as the CodeRabbit command — unless it detects Codex auto-review on the PR (any
-Codex review that no `@codex review` command preceded), in which case it never posts and simply waits
-for Codex's own review. Conversely, when Codex is *not* required but joins a round on its own (an
-actionable comment or review mid-round), the round gates on Codex dynamically: convergence waits for
-its review too. A Codex usage-limit notice releases that dynamic gate so an exhausted Codex can't
-stall rounds it volunteered for; an explicitly required Codex is still bounded only by the normal
-feedback deadline.
+Adding a fourth co-reviewer is a contained change: one entry in `dialect.KnownCoReviewers()`, one
+corpus file per message shape under `internal/dialect/testdata/`, and one golden row pinning how it
+classifies. The engine and the orchestration are bot-agnostic — they key on the login and never on
+any bot's wording.
+
+**Co-reviewers (Codex, Cursor Bugbot, Macroscope):** a co-reviewer is a review bot that isn't the
+configured primary and spends no CodeRabbit quota — so its rounds never take the fire slot. All three
+are enabled by default (`CRQ_COBOTS`), which means crq *surfaces their findings* and waits for a bot
+that is demonstrably participating; it does not make them required. Add one to `CRQ_REQUIRED_BOTS`
+(or set `CRQ_COBOT_<NAME>_REQUIRED=1`) to gate convergence on it unconditionally.
+
+Whether crq ever *posts* a bot's trigger is the separate `CRQ_COBOT_<NAME>_TRIGGER` knob. Codex keeps
+its historical behavior — `always` when it is required, so the `@codex review` command goes out in
+the same fire step as the CodeRabbit one. Bugbot and Macroscope default to `selfheal`, because they
+already auto-review every push: crq stays silent unless a bot it has seen working misses the current
+head for longer than `CRQ_COBOT_<NAME>_GRACE`. In every mode crq suppresses the trigger when the bot
+auto-reviews, has already reviewed the head, has a check run in flight, or has a live command on the
+PR — so no bot is ever double-asked.
+
+A co-reviewer that joins a round on its own (an actionable comment, a review, a check run) gates that
+round dynamically: convergence waits for it even though it isn't required. An exhaustion notice — for
+Codex, its usage-limit message — releases that dynamic gate so a bot that cannot finish can't stall a
+round it volunteered for. An explicitly required bot is bounded only by the normal feedback deadline.
+
+**Check runs.** Bugbot and Macroscope publish verdicts as commit check runs, not just comments, and a
+clean Bugbot round posts *nothing* on the timeline — its `Cursor Bugbot` check run is the only
+evidence it ran. crq therefore reads check runs for the head (one extra ETag'd REST call, so repeat
+polls are free 304s) and counts a completed one as that bot's review. `crq feedback --json` reports
+this per bot under `co_reviewers`:
+
+```json
+"co_reviewers": {
+  "cursor": { "reviewed": true, "check_state": "clean" },
+  "macroscopeapp": { "reviewed": true, "check_state": "issues", "verdict": "needs_human_review" }
+}
+```
+
+`check_state` is `clean`, `issues`, `in_progress`, `failed` (the run crashed — crq re-triggers the
+bot), `unable` (the bot reported it cannot review this commit at all, e.g. Macroscope's billing-issue
+skip — crq stops waiting for it and does **not** re-trigger, since no trigger can fix billing) or
+`unknown`. Neither `failed` nor `unable` ever counts as a review. Macroscope's approvability
+`verdict` is **informational only** — it never gates convergence and never changes an exit code.
+
+**Skipped reviews.** CodeRabbit sometimes refuses a head outright — too many files for the plan's
+limit, no usage credits, an unsupported diff — with a `Review skipped` callout. That notice ships
+with CodeRabbit's *rate-limit marker embedded*, so a naive reading files it as a rate limit: crq
+would invent a retry window that never clears, re-fire the same PR forever, and park the
+**account-wide** quota so every other PR in the fleet stalls behind one oversized diff. crq
+classifies it as its own state instead — no account block, no retry loop. The round resolves on the
+co-reviewers, and the skip is surfaced as a `major` finding (`source: "review_skipped"` — the one
+finding with no thread to resolve, since only changing the PR addresses it) so the PR actually gets
+narrowed. The refusal binds to the SHA the notice names, so splitting the PR yields a head crq fires
+normally again.
+
+Both cases set `primary_review_unavailable` in `crq feedback --json`, with a
+`primary_review_unavailable_reason` naming which. That flag is load-bearing for agents: without it
+they see a pending reviewer, reason about the account-quota window, and "hold the head until
+CodeRabbit lands" — on a repo where it never lands, so the PR never pushes and never converges. crq
+also stops consulting the account block for such a round: no deadline extension, no poll slowdown to
+the block window, and no log line about a limit that cannot apply to it.
+
+**Bot-specific quirks crq handles for you.** Macroscope never resolves a thread; it *edits* its own
+comment to append `✅ Resolved in <sha>` (or `No longer relevant as of <sha>`), so crq treats that
+edit as the resolution and drops the finding. Bugbot re-reports the same bug in a fresh thread after
+each push, so crq dedupes on its stable `BUGBOT_BUG_ID` instead of the thread id — one finding, not
+one per push.
+
+**Summary-only plans (CodeRabbit Free on private repos):** a Free plan reviews public repos in full
+but only *summarizes* private ones — CodeRabbit posts its walkthrough, tags it `🎁 Summarized by
+CodeRabbit Free`, and never submits a review, however often it is asked. crq reads that notice and
+runs the co-reviewers alone on those PRs: it posts no `@coderabbitai review`, takes no fire slot,
+spends no account quota or pacing interval, and converges the round on whichever enabled
+co-reviewers actually respond — the completion gate keys on login, not on Codex. Every enabled co-reviewer gates such a round — they are its
+only reviewers — while a configured-but-absent bot still can't wedge it. There is nothing to
+configure and nothing to reset: upgrade to Pro and crq starts firing CodeRabbit again on the next
+observation.
 
 **Multiple orgs:** CodeRabbit's quota is per-org, so PRs in different orgs draw from *different*
 buckets. Run a separate gate (its own `CRQ_REPO`) per org rather than mixing them — otherwise you'd

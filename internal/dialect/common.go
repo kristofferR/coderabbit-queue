@@ -215,7 +215,13 @@ func NormalizeBotName(login string) string {
 
 // ParseReviewBodyFindings extracts every finding representable only in a
 // review's body text: CodeRabbit's failed-to-post/outside-diff detail blocks,
-// its "Prompt for AI agents" block, and Codex's blob-link items.
+// its "Prompt for AI agents" block, and whatever the authoring co-reviewer's
+// registry entry knows how to pull out of a body (Codex's blob-link items).
+//
+// The co-reviewer part dispatches through the registry rather than calling the
+// per-bot parsers directly, so a bot added with a ReviewBodyFindings hook is
+// actually consulted — the hook existed but nothing called it, which would have
+// silently dropped every body-only finding a new co-reviewer reported.
 func ParseReviewBodyFindings(body string, review ReviewMeta, bot string) []Finding {
 	body = strings.TrimSpace(body)
 	if body == "" {
@@ -224,7 +230,9 @@ func ParseReviewBodyFindings(body string, review ReviewMeta, bot string) []Findi
 	clean := StripMarkdownQuote(body)
 	out := ParseDetailedReviewFindings(clean, review, bot)
 	out = append(out, ParsePromptReviewFindings(clean, review, bot)...)
-	out = append(out, ParseCodexReviewFindings(clean, review, bot)...)
+	if co, ok := CoReviewerByName(bot); ok && co.ReviewBodyFindings != nil {
+		out = append(out, co.ReviewBodyFindings(clean, review)...)
+	}
 	return out
 }
 
