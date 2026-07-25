@@ -432,11 +432,6 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_COBOT_<NAME>_CMD` | `@codex review` / `bugbot run` / `@macroscope-app review` | that bot's trigger comment; empty forces `never` |
 | `CRQ_COBOT_<NAME>_GRACE` | `10m` | how long a `selfheal` trigger waits for the bot to show up on its own before nudging |
 | `CRQ_RL_CO_DEGRADE` | on | while CodeRabbit is rate-limited, run co-reviewer-only rounds instead of waiting the window out; set `0` to disable (legacy alias: `CRQ_RL_CODEX_DEGRADE`) |
-
-The pre-co-reviewer Codex variables are still read as legacy aliases, so existing configs keep
-working: `CRQ_CODEX_CMD` is an alias of `CRQ_COBOT_CODEX_CMD` (the per-bot key wins when both are
-set) and `CRQ_RL_CODEX_DEGRADE` an alias of `CRQ_RL_CO_DEGRADE`. Prefer the `CRQ_COBOT_*` names in
-new configuration.
 | `CRQ_FEEDBACK_BOTS` | required bots + enabled co-reviewers | bots whose findings are surfaced — a superset of required bots, so co-reviewer findings show up without gating convergence on repos where those bots aren't installed |
 | `CRQ_TZ` | `UTC` | dashboard display timezone (IANA name, e.g. `Europe/Oslo`) |
 | `CRQ_MIN_INTERVAL` | `90s` | minimum time between fired reviews |
@@ -450,6 +445,11 @@ new configuration.
 | `CRQ_LEADER_TTL` | `3m` | when a crashed `autoreview` leader is considered gone |
 | `CRQ_GITHUB_MAX_WAIT` / `CRQ_GITHUB_RETRIES` | `120s` / `6` | GitHub rate-limit / 5xx backoff budget per request |
 | `CRQ_NETWORK_MAX_WAIT` | `0` (no cap) | cap on riding out an internet/GitHub outage (retrying ~every 30s); `0` = keep trying until connectivity returns |
+
+The pre-co-reviewer Codex variables are still read as legacy aliases, so existing configs keep
+working: `CRQ_CODEX_CMD` is an alias of `CRQ_COBOT_CODEX_CMD` (the per-bot key wins when both are
+set) and `CRQ_RL_CODEX_DEGRADE` an alias of `CRQ_RL_CO_DEGRADE`. Prefer the `CRQ_COBOT_*` names in
+new configuration.
 
 **Other review bots:** crq isn't CodeRabbit-specific. Point `CRQ_BOT`, `CRQ_REVIEW_CMD`,
 `CRQ_RATELIMIT_CMD`, and `CRQ_RL_MARKER` at any bot with a similar command surface.
@@ -497,8 +497,11 @@ this per bot under `co_reviewers`:
 }
 ```
 
-`check_state` is `clean`, `issues`, `in_progress` or `unknown`. Macroscope's approvability `verdict`
-is **informational only** — it never gates convergence and never changes an exit code.
+`check_state` is `clean`, `issues`, `in_progress`, `failed` (the run crashed — crq re-triggers the
+bot), `unable` (the bot reported it cannot review this commit at all, e.g. Macroscope's billing-issue
+skip — crq stops waiting for it and does **not** re-trigger, since no trigger can fix billing) or
+`unknown`. Neither `failed` nor `unable` ever counts as a review. Macroscope's approvability
+`verdict` is **informational only** — it never gates convergence and never changes an exit code.
 
 **Skipped reviews.** CodeRabbit sometimes refuses a head outright — too many files for the plan's
 limit, no usage credits, an unsupported diff — with a `Review skipped` callout. That notice ships

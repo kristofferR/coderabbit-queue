@@ -32,6 +32,10 @@ var (
 	macroscopeResolvedRE = regexp.MustCompile(`(?i)(?:✅\s*Resolved in|No longer relevant as of)\s*\x60?([0-9a-fA-F]{7,40})\x60?`)
 	// macroscopeVerdictRE captures the Approvability verdict text.
 	macroscopeVerdictRE = regexp.MustCompile(`(?i)\*\*Verdict:\*\*\s*([^\n]+)`)
+	// macroscopeErrorRE matches the Correctness Check title Macroscope publishes
+	// when its own run blew up ("Macroscope encountered an error while reviewing
+	// `<sha>`.").
+	macroscopeErrorRE = regexp.MustCompile(`(?i)encountered an error while reviewing`)
 )
 
 func IsMacroscopeBot(login string) bool {
@@ -109,22 +113,44 @@ func ClassifyMacroscopeCheck(name, title, summary, status, conclusion string) Ch
 	if checkRunFailed(conclusion) {
 		return CheckFailed
 	}
-	// Correctness concludes `skipped` for "No code objects were reviewed." —
-	// it ran and had nothing to analyse, which is a clean verdict, not a
-	// non-delivery, and treating it as failed would strand docs-only PRs. But
-	// only THAT skip is clean: another skip cause would otherwise be read as a
-	// delivered review and let a required round converge unreviewed, so an
-	// unrecognised skip falls through to CheckDone, where findings still gate.
-	if strings.EqualFold(strings.TrimSpace(conclusion), "skipped") {
-		if strings.Contains(NormalizeReviewText(title), "no code objects were reviewed") ||
-			strings.Contains(NormalizeReviewText(summary), "no code objects were reviewed") {
-			return CheckDoneClean
-		}
-		return CheckDone
+	// Macroscope reports its own crashes as `neutral`, which is otherwise an
+	// ordinary completed review conclusion (a real "1 issue identified" round
+	// concludes neutral too) — so the title, not the conclusion, is what says
+	// the review did not happen. A nudge is the right response.
+	if macroscopeErrorRE.MatchString(title) {
+		return CheckFailed
 	}
-	if strings.Contains(NormalizeReviewText(title), "no issues identified") ||
-		strings.Contains(NormalizeReviewText(summary), "no issues identified") {
+	// Correctness concludes `skipped` for two very different things, and the
+	// conclusion alone cannot tell them apart:
+	//
+	//   "No code objects were reviewed."  — it ran and had nothing to analyse.
+	//       A clean verdict; failing it would strand docs-only PRs.
+	//   "Review skipped — billing issue"  — the workspace cannot review at all.
+	//       Never review evidence, and re-triggering cannot fix billing, so it
+	//       is CheckUnable (suppress the nudge, disengage the gate).
+	//
+	// Anything else is an unrecognised non-delivery: fail closed with
+	// CheckFailed. Falling through to CheckDone let a skipped run — which has no
+	// threads and so no findings to gate on — mark a required Macroscope as
+	// having reviewed the head, converging the round with no review at all.
+	if strings.EqualFold(strings.TrimSpace(conclusion), "skipped") {
+		switch {
+		case macroscopeSaysAny(title, summary, "no code objects were reviewed"):
+			return CheckDoneClean
+		case macroscopeSaysAny(title, summary, "billing issue"):
+			return CheckUnable
+		}
+		return CheckFailed
+	}
+	if macroscopeSaysAny(title, summary, "no issues identified") {
 		return CheckDoneClean
 	}
 	return CheckDone
+}
+
+// macroscopeSaysAny reports whether a check run's title or summary carries
+// phrase (normalized), the two places Macroscope states a run's outcome.
+func macroscopeSaysAny(title, summary, phrase string) bool {
+	return strings.Contains(NormalizeReviewText(title), phrase) ||
+		strings.Contains(NormalizeReviewText(summary), phrase)
 }

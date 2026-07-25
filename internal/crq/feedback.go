@@ -51,7 +51,8 @@ type CoReviewerStatus struct {
 	// summary, or a completed check run.
 	Reviewed bool `json:"reviewed"`
 	// CheckState summarizes the bot's check runs for the head:
-	// clean | issues | in_progress | unknown (no check observed).
+	// clean | issues | in_progress | failed (the run crashed) | unable (the bot
+	// reported it cannot review this commit at all) | unknown (no check observed).
 	CheckState string `json:"check_state,omitempty"`
 	// Verdict is Macroscope's approvability verdict when one was posted:
 	// approved | needs_human_review.
@@ -171,14 +172,24 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	settledStableIDs := map[string]bool{}
 	if threads, err := s.reviewThreads(ctx, repo, pr); err == nil {
 		// A stable id can appear in both settled and open threads, and the two
-		// readings pull opposite ways: an open thread may be a genuine
-		// re-report after a regression, or merely a leftover duplicate of the
-		// one just resolved. Recency decides — the newest occurrence wins. A
-		// blanket "open wins" resurrected settled findings every time a
+		// readings pull opposite ways: an open thread may be a genuine re-report
+		// after a regression, or merely a leftover duplicate of the one just
+		// resolved. A blanket "open wins" resurrected settled findings whenever a
 		// duplicate sibling lingered; a blanket "settled wins" buried real
-		// re-reports.
-		newestOpen := map[string]time.Time{}
-		newestSettled := map[string]time.Time{}
+		// re-reports. Comment timestamps cannot separate them either — resolving
+		// a thread does not restamp its comment, so the settled occurrence stays
+		// older than a sibling reported minutes before it and every duplicate
+		// reads as a regression.
+		//
+		// The commit each occurrence names is what actually distinguishes them:
+		// Bugbot stamps every finding with the SHA it reviewed. A regression is
+		// re-reported ON THE CURRENT HEAD; a leftover duplicate names an older
+		// one. So the family is settled unless it is open at the head and NOT
+		// settled at the head — the second half is what keeps three same-head
+		// siblings from resurrecting each other as one is resolved.
+		openAtHead := map[string]bool{}
+		settledAtHead := map[string]bool{}
+		anySettled := map[string]bool{}
 		for _, thread := range threads {
 			settled := thread.IsResolved || thread.IsOutdated
 			for _, c := range thread.Comments.Nodes {
@@ -191,17 +202,21 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 					continue
 				}
 				key := dialect.NormalizeBotName(c.Author.Login) + "|" + stable
-				into := newestOpen
-				if settled {
-					into = newestSettled
+				atHead := false
+				if co.ReviewedCommitSHA != nil && head != "" {
+					atHead = dialect.SHAPrefixMatch(co.ReviewedCommitSHA(c.Body), head)
 				}
-				if at, seen := into[key]; !seen || c.CreatedAt.After(at) {
-					into[key] = c.CreatedAt
+				switch {
+				case settled:
+					anySettled[key] = true
+					settledAtHead[key] = settledAtHead[key] || atHead
+				default:
+					openAtHead[key] = openAtHead[key] || atHead
 				}
 			}
 		}
-		for key, at := range newestSettled {
-			if open, ok := newestOpen[key]; !ok || !open.After(at) {
+		for key := range anySettled {
+			if !openAtHead[key] || settledAtHead[key] {
 				settledStableIDs[key] = true
 			}
 		}
@@ -1297,7 +1312,7 @@ func coReviewerStatuses(cfg Config, obs engine.Observation, since time.Time) map
 	for _, cb := range cfg.CoBots {
 		key := dialect.NormalizeBotName(cb.Login)
 		status := CoReviewerStatus{Reviewed: engine.CoReviewedHead(obs, cb.Login)}
-		inProgress, clean, done := false, false, false
+		inProgress, clean, done, unable, failed := false, false, false, false, false
 		for _, c := range obs.Checks {
 			if dialect.NormalizeBotName(c.Bot) != key {
 				continue
@@ -1309,6 +1324,10 @@ func coReviewerStatuses(cfg Config, obs engine.Observation, since time.Time) map
 				clean = true
 			case dialect.CheckDone:
 				done = true
+			case dialect.CheckUnable:
+				unable = true
+			case dialect.CheckFailed:
+				failed = true
 			}
 		}
 		switch {
@@ -1318,6 +1337,14 @@ func coReviewerStatuses(cfg Config, obs engine.Observation, since time.Time) map
 			status.CheckState = "clean"
 		case done:
 			status.CheckState = "issues"
+		// A bot that could not review at all (Macroscope's billing-issue skip) or
+		// whose run crashed used to report "unknown", which reads as "nothing has
+		// happened yet" — the operator waits for a review that is never coming
+		// instead of fixing the workspace.
+		case unable:
+			status.CheckState = "unable"
+		case failed:
+			status.CheckState = "failed"
 		default:
 			status.CheckState = "unknown"
 		}

@@ -43,6 +43,14 @@ const (
 	// (conclusion failure/cancelled/timed_out/action_required). The bot tried
 	// and did not deliver, so it is activity but never review evidence.
 	CheckFailed
+	// CheckUnable is a completed run whose own output says the bot could not
+	// review this commit at all — Macroscope's billing-issue skip. Like
+	// CheckFailed it is never review evidence, but unlike it a re-trigger cannot
+	// help: the run IS the bot's answer. So it suppresses the self-heal trigger
+	// (nudging a billing-blocked workspace every round is pure comment spam) and
+	// disengages the dynamic completion gate, exactly as Codex's usage-limit
+	// notice does on the comment side.
+	CheckUnable
 	CheckDone      // review finished (findings, if any, gate via threads)
 	CheckDoneClean // review finished and explicitly found nothing
 )

@@ -92,6 +92,10 @@ func coChecks(obs Observation, login string) []CheckSeen {
 // treating it as engagement suppressed every trigger while the Correctness
 // Check had not even started, leaving required rounds to time out with no
 // recovery path.
+//
+// CheckUnable is NOT excluded: the bot answered — it cannot review this commit
+// — and a trigger cannot change that answer, so the run suppresses the nudge
+// even though it is not review evidence.
 func coCheckAny(obs Observation, login string) bool {
 	for _, c := range coChecks(obs, login) {
 		switch c.Verdict {
@@ -99,6 +103,19 @@ func coCheckAny(obs Observation, login string) bool {
 			continue
 		}
 		return true
+	}
+	return false
+}
+
+// coCheckUnable reports whether login's own review run on this head says it
+// could not review the commit (Macroscope's billing-issue skip) — the check-run
+// twin of EvCoUnable, and read the same way: the bot cannot finish this round,
+// so the dynamic gate must let go of it rather than wait out the deadline.
+func coCheckUnable(obs Observation, login string) bool {
+	for _, c := range coChecks(obs, login) {
+		if c.Verdict == dialect.CheckUnable {
+			return true
+		}
 	}
 	return false
 }
@@ -362,7 +379,7 @@ func CoOnlyEligible(r state.Round, obs Observation, login string, blockedUntil *
 	if floor.IsZero() {
 		floor = headEvidenceAt
 	}
-	return !coUnableSince(obs, login, floor)
+	return !coUnableSince(obs, login, floor) && !coCheckUnable(obs, login)
 }
 
 // DecideCoPost reports whether crq should post login's trigger command for

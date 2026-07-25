@@ -85,10 +85,26 @@ func selfHealAnchor(r state.Round, obs Observation, neverFires bool) time.Time {
 	if at := roundCutoff(r); !at.IsZero() {
 		return at
 	}
-	if neverFires {
-		return obs.HeadAt
+	if !neverFires {
+		return time.Time{}
 	}
-	return time.Time{}
+	// The grace period asks how long the bot has had to show up on its own, so
+	// the anchor must be when the head APPEARED — and the head commit's own date
+	// is only a lower bound on that. A force-push or branch reset can point a PR
+	// at a commit authored months earlier, which reads as a grace that elapsed
+	// long ago and posts a trigger over an auto-review that has barely started.
+	// The round is the better witness: crq enqueued it when it first saw this
+	// head, so take the later of the two.
+	//
+	// Deliberately NOT applied to obs.HeadAt itself, which is an evidence FLOOR
+	// elsewhere (fireCoReviewWait, SHA-less notices) and must stay a lower bound:
+	// raising it there discards a co-reviewer answer that landed in the seconds
+	// between the push and crq noticing it.
+	anchor := obs.HeadAt
+	if r.Head != "" && r.Head == obs.Head && r.EnqueuedAt.After(anchor) {
+		anchor = r.EnqueuedAt.UTC()
+	}
+	return anchor
 }
 
 // decideCoPosts collects the co-reviewer logins whose trigger crq should post

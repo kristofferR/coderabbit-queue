@@ -408,6 +408,19 @@ func TestGoldenCheckRuns(t *testing.T) {
 		{"bugbot/check-in-progress.json", BugbotLogin, CheckInProgress},
 		{"macroscope/check-correctness-clean.json", MacroscopeLogin, CheckDoneClean},
 		{"macroscope/check-correctness-issues.json", MacroscopeLogin, CheckDone},
+		// `skipped` means two opposite things, so the title decides. Nothing to
+		// analyse is a clean round; a billing-blocked workspace never reviewed at
+		// all and no re-trigger can change that (CheckUnable, not CheckFailed —
+		// nudging it every round would be pure comment spam). The billing capture
+		// is trimmed to the classifier-relevant fields: it comes from a private
+		// repo, and the envelope would publish its name and commits.
+		{"macroscope/check-correctness-skipped-no-code.json", MacroscopeLogin, CheckDoneClean},
+		{"macroscope/check-correctness-skipped-billing.json", MacroscopeLogin, CheckUnable},
+		// `neutral` is an ordinary completed conclusion — a real review with
+		// findings concludes neutral too — so only the error TITLE marks a run
+		// that did not deliver.
+		{"macroscope/check-correctness-neutral-issues.json", MacroscopeLogin, CheckDone},
+		{"macroscope/check-correctness-error.json", MacroscopeLogin, CheckFailed},
 		// Only the Correctness Check is Macroscope's REVIEW. Approvability and
 		// repo-custom checks routinely complete first, so counting them as a
 		// finished review would let the round converge while correctness is
@@ -431,6 +444,14 @@ func TestGoldenCheckRuns(t *testing.T) {
 	// A check from an unrelated app never binds to a co-reviewer.
 	if login, verdict := ClassifyCheckRun("github-actions", "CI", "ok", "", "completed", "success"); login != "" || verdict != CheckUnrelated {
 		t.Errorf("unrelated check classified as %q,%v", login, verdict)
+	}
+	// A skip cause crq has never seen — a new wording, or one Macroscope has yet
+	// to ship — must fail closed. Reading it as a delivered review would mark a
+	// required Macroscope reviewed on a run that produced no threads at all, and
+	// the round would converge having been reviewed by nobody.
+	if _, verdict := ClassifyCheckRun("macroscopeapp", macroscopeCorrectnessCheck,
+		"Review skipped — some future reason", "", "completed", "skipped"); verdict != CheckFailed {
+		t.Errorf("unrecognized skip = %v, want CheckFailed (fail closed)", verdict)
 	}
 	// Another cursor-app check that is not the Bugbot review stays unrelated.
 	if login, verdict := ClassifyCheckRun("cursor", "Cursor Something Else", "", "", "completed", "success"); login != "" || verdict != CheckUnrelated {

@@ -71,13 +71,16 @@ default). None of them spends CodeRabbit quota or takes the fire slot. Each has 
 Bugbot/Macroscope default) only nudges a bot that reviews on its own but missed the head past
 `CRQ_COBOT_<NAME>_GRACE`, and `never` posts nothing. crq never triggers a bot that auto-reviews, has
 already reviewed the head, or has a check run in flight. A co-reviewer that joins a round uninvited
-gates that round's convergence dynamically (an exhaustion notice such as Codex's usage limit
-releases the dynamic gate); one listed in `CRQ_REQUIRED_BOTS` always gates.
+gates that round's convergence dynamically (an exhaustion notice such as Codex's usage limit, or a
+check run reporting the bot cannot review the commit, releases the dynamic gate); one listed in
+`CRQ_REQUIRED_BOTS` always gates.
 
 Bugbot and Macroscope report through **check runs** as well as comments — a clean Bugbot round posts
 nothing at all on the timeline, so its `Cursor Bugbot` check IS the evidence crq converges on.
 `.co_reviewers[<bot>]` reports each one's `reviewed` / `check_state`
-(`clean|issues|in_progress|unknown`) / `verdict`. Macroscope's approvability `verdict`
+(`clean|issues|in_progress|failed|unable|unknown` — `failed` is a crashed run crq re-triggers,
+`unable` a bot that reported it cannot review this commit at all, which crq stops waiting for and
+never re-triggers) / `verdict`. Macroscope's approvability `verdict`
 (`approved|needs_human_review`) is informational only: it never gates convergence and never changes
 an exit code. If a bot reports
 actionable findings first, it emits them immediately while leaving the queued round alive. Fix and

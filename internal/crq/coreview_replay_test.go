@@ -632,3 +632,74 @@ func TestCoReplaySummaryOnlyWaitAcceptsExistingAnswer(t *testing.T) {
 		t.Fatalf("the round must converge instead of waiting out the deadline: %+v", rep)
 	}
 }
+
+// --- 8. Bugbot sibling threads ----------------------------------------------
+
+// bugbotAtSHA rewrites a corpus finding's "for commit <sha>" footer, so the same
+// BUG_ID can be replayed as reported on an earlier head.
+func bugbotAtSHA(t *testing.T, body, sha string) string {
+	t.Helper()
+	old := dialect.BugbotReviewedCommitSHA(body)
+	if old == "" {
+		t.Fatal("precondition: the corpus finding must name the commit it reviewed")
+	}
+	return strings.Replace(body, old, sha, 1)
+}
+
+// TestCoReplayBugbotSiblingSettlementUsesHead: one BUG_ID can sit in a settled
+// thread and an open one at the same time, and the two readings pull opposite
+// ways — a leftover duplicate of the thread just resolved, or a genuine
+// re-report after a regression. Comment timestamps cannot tell them apart:
+// resolving a thread does not restamp its comment, so the settled occurrence
+// stays OLDER than a sibling filed minutes before it and every duplicate reads
+// as a regression. The commit each occurrence names is what decides.
+func TestCoReplayBugbotSiblingSettlementUsesHead(t *testing.T) {
+	base := time.Date(2026, 7, 20, 13, 0, 0, 0, time.UTC)
+	f := newCoReplayFixture(t, base, nil)
+	repo, pr := "o/r", 44
+	finding := corpusMessage(t, "bugbot/inline-finding-high.md")
+	sha := dialect.BugbotReviewedCommitSHA(finding)
+	head := sha[:9]
+	f.openPull(repo, pr, sha)
+	f.setCommitDate(sha, base.Add(-time.Hour))
+	seedRound(t, f.store, f.cfg, repo, pr, head, PhaseReviewing, base.Add(-10*time.Minute), 400)
+	f.botReview(repo, pr, 500, sha, base.Add(-5*time.Minute))
+
+	bugbotFindings := func(t *testing.T) int {
+		t.Helper()
+		rep, err := f.svc.Feedback(f.ctx, repo, pr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, fd := range rep.Findings {
+			if dialect.NormalizeBotName(fd.Bot) == "cursor" {
+				n++
+			}
+		}
+		return n
+	}
+
+	// Two same-head siblings, the OLDER one resolved. The open one is a leftover
+	// duplicate, not a regression — surfacing it forces the user to resolve every
+	// copy by hand, which is the whole reason family suppression exists.
+	f.threadsGraphQL([]map[string]any{
+		threadNode("PRRT_settled", true, "cursor", "projector.ts", 447, 901, finding, base.Add(-9*time.Minute)),
+		threadNode("PRRT_dup", false, "cursor", "projector.ts", 451, 902, finding, base.Add(-8*time.Minute)),
+	})
+	if n := bugbotFindings(t); n != 0 {
+		t.Fatalf("a duplicate of a settled same-head finding must not resurface, got %d", n)
+	}
+
+	// The regression shape: the settled occurrence names an EARLIER commit and
+	// the open one names the head. Bugbot found it again on the current code, so
+	// it must surface even though a thread for that id is resolved.
+	f.threadsGraphQL([]map[string]any{
+		threadNode("PRRT_settled", true, "cursor", "projector.ts", 447, 901,
+			bugbotAtSHA(t, finding, "1111111111111111111111111111111111111111"), base.Add(-9*time.Minute)),
+		threadNode("PRRT_again", false, "cursor", "projector.ts", 451, 902, finding, base.Add(-8*time.Minute)),
+	})
+	if n := bugbotFindings(t); n != 1 {
+		t.Fatalf("a re-report on the current head is a regression and must surface, got %d", n)
+	}
+}

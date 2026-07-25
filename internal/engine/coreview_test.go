@@ -563,3 +563,67 @@ func TestFailedCheckStaysActivityForSelfHeal(t *testing.T) {
 		t.Fatal("an unreadable check must suppress the trigger rather than double-ask a run in flight")
 	}
 }
+
+// TestUnableCheckStopsWaitingWithoutNudging: Macroscope's billing-issue skip is
+// the check-run twin of Codex's usage-limit notice. The bot ANSWERED — it cannot
+// review this commit — so the round must neither count it as reviewed nor keep
+// asking. Reading it as a completed review (the pre-fix behaviour of any
+// unrecognised skip) converged the round having been reviewed by nobody;
+// reading it as a crash posted a trigger every round at a workspace whose
+// billing no trigger can fix.
+func TestUnableCheckStopsWaitingWithoutNudging(t *testing.T) {
+	now := time.Date(2026, 7, 25, 10, 0, 0, 0, time.UTC)
+	head := "abcdef123"
+	fired := now.Add(-time.Hour)
+	round := state.Round{Repo: "o/r", PR: 1, Head: head, Phase: state.PhaseReviewing, FiredAt: &fired}
+	unable := CheckSeen{Bot: macroLogin, Name: "Macroscope - Correctness Check",
+		Verdict: dialect.CheckUnable, CompletedAt: now.Add(-30 * time.Minute)}
+	obs := Observation{Head: head, Open: true,
+		Reviews: []ReviewSeen{{Bot: "coderabbitai[bot]", Commit: head, SubmittedAt: now.Add(-40 * time.Minute)}},
+		Checks:  []CheckSeen{unable},
+		Co:      map[string]CoSeen{dialect.NormalizeBotName(macroLogin): {ActiveThisRound: true}}}
+	p := Policy{Bot: "coderabbitai[bot]", RequiredBots: []string{"coderabbitai[bot]"},
+		CoReviewers: []CoReviewerPolicy{{Login: macroLogin, Command: "@macroscope-app review",
+			Trigger: TriggerSelfHeal, SelfHealGrace: 10 * time.Minute}}}
+
+	// Never review evidence.
+	if c := Completion(round, obs, p); c.ReviewedBy[macroLogin] {
+		t.Fatal("a bot that says it could not review must never count as having reviewed")
+	}
+	// ...but it disengages the dynamic gate, so the primary review completes the
+	// round instead of waiting out the deadline for a review that cannot come.
+	if c := Completion(round, obs, p); !c.Done {
+		t.Fatalf("an unable co-reviewer must not hold the round open: %+v", c.ReviewedBy)
+	}
+	// And no nudge: the run IS the answer.
+	cp := p.CoReviewers[0]
+	if DecideCoPost(round, obs, cp, false, fired, now) {
+		t.Fatal("re-triggering a bot that reported it cannot review is comment spam")
+	}
+}
+
+// TestSelfHealGraceStartsWhenCrqSawTheHead: a force-push can point a PR at a
+// commit authored long ago. Anchoring the grace on that commit's date reads as
+// "elapsed hours ago" and posts a trigger over an auto-review that has barely
+// started, so the round's own enqueue time — when crq first saw this head —
+// wins when it is later.
+func TestSelfHealGraceStartsWhenCrqSawTheHead(t *testing.T) {
+	now := time.Date(2026, 7, 25, 10, 0, 0, 0, time.UTC)
+	head := "abcdef123"
+	// The head commit was authored a month ago; crq saw it one minute ago.
+	obs := Observation{Head: head, Open: true, HeadAt: now.AddDate(0, -1, 0),
+		Events: []dialect.BotEvent{{Kind: dialect.EvOther, Bot: "coderabbitai[bot]", SummaryOnly: true, CommentID: 1}},
+		Co:     map[string]CoSeen{dialect.NormalizeBotName(bugbotLogin): {AutoActive: true}}}
+	round := state.Round{Repo: "o/r", PR: 1, Head: head, Phase: state.PhaseQueued, EnqueuedAt: now.Add(-time.Minute)}
+	p := Policy{Bot: "coderabbitai[bot]", RequiredBots: []string{"coderabbitai[bot]"},
+		CoReviewers: []CoReviewerPolicy{{Login: bugbotLogin, Command: "bugbot run",
+			Trigger: TriggerSelfHeal, SelfHealGrace: 10 * time.Minute}}}
+
+	if d := DecideFire(Global{SlotFree: true}, round, obs, now, p); d.Verdict == FireCoOnly {
+		t.Fatalf("grace must run from when crq saw the head, not the commit's date: %+v", d)
+	}
+	// Once the grace really has elapsed the trigger goes out as before.
+	if d := DecideFire(Global{SlotFree: true}, round, obs, now.Add(11*time.Minute), p); d.Verdict != FireCoOnly {
+		t.Fatalf("self-heal must still fire once the grace elapses: %+v", d)
+	}
+}

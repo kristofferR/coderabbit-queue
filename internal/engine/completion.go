@@ -83,7 +83,8 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 			// check was neither asked for nor waited on, and a clean primary
 			// could converge the round straight past it.
 			if (co.AutoActive || co.ActiveThisRound || commanded || co.ChecksUnknown) &&
-				!coUnableSince(obs, cp.Login, coCutoff(r, cp.Login)) {
+				!coUnableSince(obs, cp.Login, coCutoff(r, cp.Login)) &&
+				!coCheckUnable(obs, cp.Login) {
 				reviewedBy[cp.Login] = false
 			}
 		}

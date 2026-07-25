@@ -2188,28 +2188,6 @@ func TestExcludeSkipNoticeIsTargeted(t *testing.T) {
 	}
 }
 
-// TestBugbotSiblingRecencyDecides: one stable id can appear in both a settled
-// and an open thread, and the two readings pull opposite ways. A blanket
-// "open wins" resurrected findings whenever a duplicate sibling lingered after
-// the emitted thread was resolved; a blanket "settled wins" buried genuine
-// re-reports after a regression. The newest occurrence decides.
-func TestBugbotSiblingRecencyDecides(t *testing.T) {
-	body := corpusMessage(t, "bugbot/inline-finding-high.md")
-	stable, ok := dialect.BugbotFindingDedupeKey(body)
-	if !ok {
-		t.Fatal("precondition: corpus finding must carry a BUGBOT_BUG_ID")
-	}
-	key := dialect.NormalizeBotName(dialect.BugbotLogin) + "|" + stable
-	finding := []dialect.Finding{{Bot: dialect.BugbotLogin, Path: "a.ts", Line: 1,
-		Title: "dup", Body: body, ThreadID: "PRRT_open", Source: "review_thread"}}
-
-	// Settled after the open sibling was filed: the leftover duplicate must not
-	// resurrect the finding.
-	if got := dedupeFindings(finding, nil, map[string]bool{key: true}); len(got) != 0 {
-		t.Fatalf("a stale duplicate must not resurrect a settled bug, got %#v", got)
-	}
-	// Nothing settled: the open occurrence is the finding.
-	if got := dedupeFindings(finding, nil, nil); len(got) != 1 {
-		t.Fatalf("an unsettled bug must surface, got %d", len(got))
-	}
-}
+// Which occurrences of a stable id count as settled is decided by the head each
+// one names, not by this filter — see
+// TestCoReplayBugbotSiblingSettlementUsesHead, which drives the real threads.

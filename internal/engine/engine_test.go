@@ -215,6 +215,21 @@ func TestReviewingRoundDeadlineBoundsCoReviewWait(t *testing.T) {
 	if tr := Progress(reviewing(), state.AccountQuota{}, crAtHead, t0.Add(30*time.Minute), codexReq); tr.Outcome != KeepWaiting {
 		t.Fatalf("before the deadline a co-review wait must keep waiting, got %+v", tr)
 	}
+
+	// The exception to "no primary review → keep waiting": a round whose primary
+	// review is never coming (a summary-only plan, a skipped review). Its
+	// deadline is the ONLY thing that can end it — `autoreview` runs no Loop, and
+	// the primary-reviewed branch above can never become true — so leaving it to
+	// the fall-through wedges it in `reviewing` forever, and with it every
+	// reviewing round behind it (the daemon sweeps only the oldest per pump).
+	summaryOnly := Observation{Head: "abcdef123", Open: true,
+		Events: []dialect.BotEvent{{Kind: dialect.EvOther, Bot: "coderabbitai[bot]", SummaryOnly: true, CommentID: 9}}}
+	if tr := Progress(reviewing(), state.AccountQuota{}, summaryOnly, past, codexReq); tr.Outcome != OutComplete {
+		t.Fatalf("a wait no primary review can ever satisfy must end at its deadline, got %+v", tr)
+	}
+	if tr := Progress(reviewing(), state.AccountQuota{}, summaryOnly, t0.Add(30*time.Minute), codexReq); tr.Outcome == OutComplete {
+		t.Fatalf("before the deadline it must still wait for the co-reviewer, got %+v", tr)
+	}
 }
 
 func TestDecideFireGuards(t *testing.T) {
