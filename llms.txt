@@ -119,8 +119,9 @@ that never spends quota). The round is resolved by the co-reviewers alone, so tr
 Skipped reviews: CodeRabbit may refuse a head outright (`Review skipped` — too many files, no usage
 credits). That notice embeds the rate-limit marker but is NOT a timed block: nothing clears by
 waiting. crq treats it as "no primary review is coming for this head", converges on the co-reviewers,
-never records an account block, and returns the skip as a `major` finding telling you to narrow the
-PR. It binds to the SHA it names, so a split PR is reviewed normally.
+never records an account block, and returns the skip as a `major` `source: "review_skipped"` finding
+telling you to narrow the PR — the one finding with no thread to resolve, since only changing the PR
+addresses it. It binds to the SHA it names, so a split PR is reviewed normally.
 
 Summary-only plans: on a private repo under a Free CodeRabbit plan the bot posts a walkthrough and
 never a line-by-line review ("Summarized by CodeRabbit Free … upgrade … for a comprehensive

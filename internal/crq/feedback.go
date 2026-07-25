@@ -329,9 +329,13 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 			// would converge with a silently absent primary reviewer — worse than
 			// a loud one. The review did not happen and never will for this head,
 			// so surface it as work: narrow the PR to get a review.
+			// The reviewer's own name, not a hardcoded one: the primary bot is
+			// configurable (CRQ_BOT), so naming CodeRabbit here mislabels the
+			// notice on every repo pointed at a different reviewer.
+			who := dialect.NormalizeBotName(comment.User.Login)
 			reason := dialect.ReviewSkippedReason(comment.Body)
 			if reason == "" {
-				reason = "CodeRabbit skipped the review for this head."
+				reason = who + " skipped the review for this head."
 			}
 			report.Findings = append(report.Findings, dialect.Finding{
 				Bot: comment.User.Login,
@@ -342,11 +346,11 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 				// never ran at all.
 				Commit:    head,
 				Severity:  "major",
-				Title:     skipNoticeTitlePrefix + " — narrow the PR to get one: " + reason,
+				Title:     who + " skipped this review — narrow the PR to get one: " + reason,
 				Body:      strings.TrimSpace(dialect.CompactReviewBody(comment.Body)),
 				CommentID: comment.ID,
 				URL:       comment.URL,
-				Source:    "issue_comment",
+				Source:    skipNoticeSource,
 				CreatedAt: comment.CreatedAt,
 			})
 			continue
@@ -1246,16 +1250,18 @@ func dedupeFindings(in []dialect.Finding, suppressPromptAt, settledStableIDs map
 	return out
 }
 
-// skipNoticeTitlePrefix identifies the synthetic finding Feedback builds from a
-// "Review skipped" notice. It is the only finding with no thread to resolve and
-// no way to be addressed except by changing the PR itself.
-const skipNoticeTitlePrefix = "CodeRabbit skipped this review"
+// skipNoticeSource marks the synthetic finding Feedback builds from a "Review
+// skipped" notice. It is the only finding with no thread to resolve and no way
+// to be addressed except by changing the PR itself, so it is the one finding
+// the pre-enqueue drain exempts — identified by this source rather than by its
+// own display text, which names whichever bot posted it.
+const skipNoticeSource = "review_skipped"
 
 // excludeSkipNotice drops the synthetic skip finding from a blocking set.
 func excludeSkipNotice(findings []dialect.Finding) []dialect.Finding {
 	out := findings[:0:0]
 	for _, f := range findings {
-		if strings.HasPrefix(f.Title, skipNoticeTitlePrefix) {
+		if f.Source == skipNoticeSource {
 			continue
 		}
 		out = append(out, f)

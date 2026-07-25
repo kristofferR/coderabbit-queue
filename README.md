@@ -509,9 +509,10 @@ with CodeRabbit's *rate-limit marker embedded*, so a naive reading files it as a
 would invent a retry window that never clears, re-fire the same PR forever, and park the
 **account-wide** quota so every other PR in the fleet stalls behind one oversized diff. crq
 classifies it as its own state instead — no account block, no retry loop. The round resolves on the
-co-reviewers, and the skip is surfaced as a `major` finding so the PR actually gets narrowed. The
-refusal binds to the SHA the notice names, so splitting the PR yields a head crq fires normally
-again.
+co-reviewers, and the skip is surfaced as a `major` finding (`source: "review_skipped"` — the one
+finding with no thread to resolve, since only changing the PR addresses it) so the PR actually gets
+narrowed. The refusal binds to the SHA the notice names, so splitting the PR yields a head crq fires
+normally again.
 
 Both cases set `primary_review_unavailable` in `crq feedback --json`, with a
 `primary_review_unavailable_reason` naming which. That flag is load-bearing for agents: without it

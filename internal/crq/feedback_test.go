@@ -2174,15 +2174,15 @@ func TestBugbotStableIDSettledInAnySiblingThread(t *testing.T) {
 // same head must still hold it, as on any other PR — an earlier version
 // bypassed every blocking finding whenever the primary was unavailable.
 func TestExcludeSkipNoticeIsTargeted(t *testing.T) {
-	skip := dialect.Finding{Bot: "coderabbitai[bot]", Severity: "major",
-		Title: skipNoticeTitlePrefix + " — narrow the PR to get one: Too many files!"}
-	real := dialect.Finding{Bot: dialect.CodexBotLogin, Severity: "major",
+	skip := dialect.Finding{Severity: "major", Source: skipNoticeSource,
+		Title: "some-reviewer skipped this review — narrow the PR to get one: Too many files!"}
+	blocking := dialect.Finding{Severity: "major", Source: "review_thread",
 		Title: "Nil deref in the retry path", ThreadID: "PRRT_x"}
 
 	if got := excludeSkipNotice([]dialect.Finding{skip}); len(got) != 0 {
 		t.Fatalf("the skip notice must not hold the round, got %+v", got)
 	}
-	got := excludeSkipNotice([]dialect.Finding{skip, real})
+	got := excludeSkipNotice([]dialect.Finding{skip, blocking})
 	if len(got) != 1 || got[0].ThreadID != "PRRT_x" {
 		t.Fatalf("a genuine finding must still hold the head, got %+v", got)
 	}

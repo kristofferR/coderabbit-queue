@@ -432,8 +432,8 @@ func TestRequestedRoundsExcludesCoOnly(t *testing.T) {
 	s := New()
 	fired := t0.Add(time.Minute)
 
-	real := Round{Repo: "o/public", PR: 1, Head: "aaaaaaaa1", Seq: 1, Phase: PhaseCompleted, FiredAt: &fired}
-	s.Rounds[Key(real.Repo, real.PR)] = real
+	requested := Round{Repo: "o/public", PR: 1, Head: "aaaaaaaa1", Seq: 1, Phase: PhaseCompleted, FiredAt: &fired}
+	s.Rounds[Key(requested.Repo, requested.PR)] = requested
 	coOnly := Round{Repo: "o/private", PR: 2, Head: "bbbbbbbb2", Seq: 2, Phase: PhaseCompleted, FiredAt: &fired, CoOnly: true}
 	s.Rounds[Key(coOnly.Repo, coOnly.PR)] = coOnly
 	archivedCoOnly := coOnly
