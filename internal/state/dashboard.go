@@ -67,17 +67,23 @@ func firedAtOf(r Round) time.Time {
 	return r.EnqueuedAt
 }
 
-// requestedRounds gathers every round that has fired (active or archived) for
-// the "Recently requested" table, newest first, capped.
+// requestedRounds gathers every round for which crq actually REQUESTED a review
+// (active or archived) for the "Recently requested" table, newest first, capped.
+//
+// CoOnly rounds are excluded: they carry a FiredAt because it anchors their
+// evidence floor, but crq never asked the primary reviewer for anything. Listing
+// them crowded the table with repos that cannot use the queue at all — on a
+// CodeRabbit-Free private repo every push produced a row for a review that was
+// never requested, pushing the real history off the end of the cap.
 func requestedRounds(st State) []Round {
 	var out []Round
 	for _, r := range st.Rounds {
-		if r.FiredAt != nil {
+		if r.FiredAt != nil && !r.CoOnly {
 			out = append(out, r)
 		}
 	}
 	for _, r := range st.Archive {
-		if r.FiredAt != nil {
+		if r.FiredAt != nil && !r.CoOnly {
 			out = append(out, r)
 		}
 	}

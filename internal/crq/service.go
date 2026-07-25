@@ -953,6 +953,7 @@ func (s *Service) fireCoOnly(ctx context.Context, round Round, logins []string, 
 			r.Token = ""
 			dl := firedAt.Add(s.cfg.FeedbackWaitTimeout)
 			r.WaitDeadline = &dl
+			r.CoOnly = true // no primary review was requested for this round
 			st.Warn = ""
 		}
 		for _, p := range posts {
@@ -1065,6 +1066,7 @@ func (s *Service) fireCoReviewWait(ctx context.Context, round Round, obs engine.
 		if err := r.AwaitCoReview(deadline, anchor); err != nil {
 			return err
 		}
+		r.CoOnly = true // waiting on co-reviewers; nothing was asked of the primary
 		// Existing trigger commands are adopted as the round's command anchors
 		// so the self-heal path (which anchors on the round's fire time, later
 		// than a pre-existing command) does not re-post them.

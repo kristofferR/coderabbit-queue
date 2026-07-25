@@ -421,3 +421,32 @@ func TestNormalizeFoldClearsAStaleMirror(t *testing.T) {
 		t.Fatalf("the archive must be folded too, got command %d", got)
 	}
 }
+
+// TestRequestedRoundsExcludesCoOnly pins what the "Recently requested" table
+// means: rounds for which crq actually asked the primary reviewer. A
+// co-reviewer-only round carries a FiredAt because that anchors its evidence
+// floor, not because a review was requested — and on a CodeRabbit-Free private
+// repo every push produced one, which crowded the real request history off the
+// end of the cap.
+func TestRequestedRoundsExcludesCoOnly(t *testing.T) {
+	s := New()
+	fired := t0.Add(time.Minute)
+
+	real := Round{Repo: "o/public", PR: 1, Head: "aaaaaaaa1", Seq: 1, Phase: PhaseCompleted, FiredAt: &fired}
+	s.Rounds[Key(real.Repo, real.PR)] = real
+	coOnly := Round{Repo: "o/private", PR: 2, Head: "bbbbbbbb2", Seq: 2, Phase: PhaseCompleted, FiredAt: &fired, CoOnly: true}
+	s.Rounds[Key(coOnly.Repo, coOnly.PR)] = coOnly
+	archivedCoOnly := coOnly
+	archivedCoOnly.PR = 3
+	s.Archive = append(s.Archive, archivedCoOnly)
+
+	got := requestedRounds(s)
+	if len(got) != 1 || got[0].Repo != "o/public" {
+		t.Fatalf("only genuinely requested reviews belong in the table, got %+v", got)
+	}
+	// The round itself is untouched — it is still the dedup marker and still
+	// carries its evidence anchor.
+	if r := s.Round("o/private", 2); r == nil || r.FiredAt == nil || !r.CoOnly {
+		t.Fatalf("a co-only round must keep its anchor and marker, got %+v", r)
+	}
+}

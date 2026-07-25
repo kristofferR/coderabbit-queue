@@ -70,6 +70,15 @@ type Round struct {
 	// Mutate only through Co/SetCoCommand/ClaimCo/ClearCoClaim.
 	CoBots map[string]CoBotRound `json:"cobots,omitempty"`
 
+	// CoOnly marks a round that reached its fired/reviewing state WITHOUT crq
+	// requesting a primary review — a co-reviewer-only trigger, or a bounded
+	// co-review wait. FiredAt does double duty as the evidence-floor anchor and
+	// as "we asked for a review", and those two meanings diverged the moment
+	// co-reviewer-only rounds existed: the dashboard's requested-reviews table
+	// filled with repos crq had never asked CodeRabbit about. Anything counting
+	// CodeRabbit requests must skip these.
+	CoOnly bool `json:"co_only,omitempty"`
+
 	// RetryAt is the earliest time this head may fire again (awaiting_retry).
 	RetryAt *time.Time `json:"retry_at,omitempty"`
 
