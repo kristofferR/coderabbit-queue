@@ -66,6 +66,17 @@ type CoReviewer struct {
 	// TriggerAliases are alternate command spellings recognized as this bot's
 	// trigger in addition to the (config-resolved) Command.
 	TriggerAliases []string
+	// LegacyCommandEnv is a pre-registry env var still honoured for this bot's
+	// command ("" = none). Carried here so config stays uniform instead of
+	// naming individual bots.
+	LegacyCommandEnv string
+	// DefaultTrigger / RequiredTrigger are this bot's default trigger modes
+	// when it is merely enabled, and when it is configured-required. Plain
+	// strings because dialect has zero dependencies and cannot see
+	// engine.TriggerMode; crq maps them. RequiredTrigger "" means "same as
+	// DefaultTrigger".
+	DefaultTrigger  string
+	RequiredTrigger string
 
 	// ClassifyComment classifies an issue comment authored by this bot.
 	// Kind EvOther means "no special meaning" (may still be actionable text).
@@ -115,6 +126,11 @@ func KnownCoReviewers() []CoReviewer {
 			Login:   CodexBotLogin,
 			Name:    "codex",
 			Command: "@codex review",
+			// Codex predates the registry: its command env var is still read,
+			// and it only ever triggered at fire time when required.
+			LegacyCommandEnv: "CRQ_CODEX_CMD",
+			DefaultTrigger:   "never",
+			RequiredTrigger:  "always",
 			ClassifyComment: func(body string) CoEvent {
 				switch {
 				case IsCodexNoActionReviewCompletion(body):
@@ -140,6 +156,8 @@ func KnownCoReviewers() []CoReviewer {
 			AppSlug:        "cursor",
 			Command:        "bugbot run",
 			TriggerAliases: []string{"bugbot run", "cursor review"},
+			// Auto-reviews every push, so crq only nudges one that went silent.
+			DefaultTrigger: "selfheal",
 			// Bugbot posts no classifiable issue comments: its findings live in
 			// review threads and its clean verdict only in the check run.
 			ClassifyComment:   func(string) CoEvent { return CoEvent{Kind: EvOther} },
@@ -152,6 +170,7 @@ func KnownCoReviewers() []CoReviewer {
 			Name:            "macroscope",
 			AppSlug:         "macroscopeapp",
 			Command:         "@macroscope-app review",
+			DefaultTrigger:  "selfheal",
 			ClassifyComment: ClassifyMacroscopeComment,
 			ClassifyCheck:   ClassifyMacroscopeCheck,
 			ResolvedInSHA:   MacroscopeResolvedInSHA,

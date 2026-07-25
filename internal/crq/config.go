@@ -327,19 +327,19 @@ func parseCoBots(env map[string]string, requiredBots []string) ([]CoBotConfig, e
 		if !enabled[co.Name] && !required {
 			continue
 		}
+		// Uniform across bots: the per-bot key wins, then the registry's legacy
+		// alias if it declares one, then its default command. No bot is named
+		// here — the policy travels as registry metadata.
 		command := co.Command
 		if v, ok := env["CRQ_COBOT_"+key+"_CMD"]; ok {
 			command = v
-		} else if co.Name == "codex" {
-			command = stringEnvAllowEmpty(env, "CRQ_CODEX_CMD", command)
+		} else if co.LegacyCommandEnv != "" {
+			command = stringEnvAllowEmpty(env, co.LegacyCommandEnv, command)
 		}
 		command = strings.TrimSpace(command)
-		trigger := engine.TriggerSelfHeal
-		if co.Name == "codex" {
-			trigger = engine.TriggerNever
-			if required {
-				trigger = engine.TriggerAlways
-			}
+		trigger := triggerMode(co.DefaultTrigger, engine.TriggerSelfHeal)
+		if required && co.RequiredTrigger != "" {
+			trigger = triggerMode(co.RequiredTrigger, trigger)
 		}
 		switch v := engine.TriggerMode(strings.ToLower(strings.TrimSpace(env["CRQ_COBOT_"+key+"_TRIGGER"]))); v {
 		case engine.TriggerNever, engine.TriggerSelfHeal, engine.TriggerAlways:
@@ -359,6 +359,16 @@ func parseCoBots(env map[string]string, requiredBots []string) ([]CoBotConfig, e
 		})
 	}
 	return out, nil
+}
+
+// triggerMode converts a registry trigger string to the engine mode, falling
+// back when a bot declares none.
+func triggerMode(name string, fallback engine.TriggerMode) engine.TriggerMode {
+	switch m := engine.TriggerMode(strings.ToLower(strings.TrimSpace(name))); m {
+	case engine.TriggerNever, engine.TriggerSelfHeal, engine.TriggerAlways:
+		return m
+	}
+	return fallback
 }
 
 // splitList splits a comma-separated list, dropping blanks (an all-blank or
