@@ -141,31 +141,28 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 			break
 		}
 	}
-	if !g.SlotFree {
-		// Co-reviewers need no fire slot: a round parked behind another PR's
-		// in-flight review can start its co-reviewer rounds immediately. The
-		// round stays queued and CodeRabbit fires once the slot frees, with the
-		// recorded command ids preventing duplicate posts. NOT for a head
-		// CodeRabbit already reviewed — that round belongs to the dedupe
-		// resolution below once the slot frees (a queued round a co-bot answers
-		// clean cannot complete, so deferring it here could wedge the wait).
-		if !reviewedHead {
-			if d, ok := decideCoDeferred(r, obs, p, now, "fire slot busy", false); ok {
-				return d
-			}
-		}
-		return FireDecision{Verdict: FireNo, Reason: "fire slot busy"}
-	}
 	// Belt-and-braces live check: even with a fresh round, never fire at a
 	// head the bot has already reviewed (e.g. state was reinitialized). But a
 	// CodeRabbit review does not finish a round that a gating co-reviewer still
 	// must speak on — command (or wait for) it instead of deduping it away.
-	// This resolution runs BEFORE the account-block and pacing gates: none of
-	// its verdicts spend CodeRabbit quota (dedupe completes, FireCoOnly posts
-	// only co-reviewer triggers, a co-review wait posts nothing), so an account
-	// block from another PR must not delay them.
+	//
+	// This resolution runs BEFORE the slot, account-block and pacing gates:
+	// none of its verdicts spend CodeRabbit quota (dedupe completes, FireCoOnly
+	// posts only co-reviewer triggers, a co-review wait posts nothing), so
+	// neither another PR's in-flight review nor an account block may delay a
+	// round whose primary work is already done.
 	if reviewedHead {
 		return coAwareDedupe(r, obs, p, now, false)
+	}
+	if !g.SlotFree {
+		// Co-reviewers need no fire slot: a round parked behind another PR's
+		// in-flight review can start its co-reviewer rounds immediately. The
+		// round stays queued and CodeRabbit fires once the slot frees, with the
+		// recorded command ids preventing duplicate posts.
+		if d, ok := decideCoDeferred(r, obs, p, now, "fire slot busy", false); ok {
+			return d
+		}
+		return FireDecision{Verdict: FireNo, Reason: "fire slot busy"}
 	}
 	if g.BlockedUntil != nil && g.BlockedUntil.After(now) {
 		// Degrade instead of stalling: the block only gates CodeRabbit quota,

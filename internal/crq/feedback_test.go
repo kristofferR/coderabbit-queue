@@ -2167,3 +2167,49 @@ func TestBugbotStableIDSettledInAnySiblingThread(t *testing.T) {
 		t.Fatalf("a bug settled in a sibling thread must not resurface, got %#v", got)
 	}
 }
+
+// TestExcludeSkipNoticeIsTargeted: the pre-review drain exempts exactly the
+// thread-less skip notice, which cannot be resolved and would otherwise stop
+// the co-review round it is meant to inform. Real unresolved findings on the
+// same head must still hold it, as on any other PR — an earlier version
+// bypassed every blocking finding whenever the primary was unavailable.
+func TestExcludeSkipNoticeIsTargeted(t *testing.T) {
+	skip := dialect.Finding{Bot: "coderabbitai[bot]", Severity: "major",
+		Title: skipNoticeTitlePrefix + " — narrow the PR to get one: Too many files!"}
+	real := dialect.Finding{Bot: dialect.CodexBotLogin, Severity: "major",
+		Title: "Nil deref in the retry path", ThreadID: "PRRT_x"}
+
+	if got := excludeSkipNotice([]dialect.Finding{skip}); len(got) != 0 {
+		t.Fatalf("the skip notice must not hold the round, got %+v", got)
+	}
+	got := excludeSkipNotice([]dialect.Finding{skip, real})
+	if len(got) != 1 || got[0].ThreadID != "PRRT_x" {
+		t.Fatalf("a genuine finding must still hold the head, got %+v", got)
+	}
+}
+
+// TestBugbotSiblingRecencyDecides: one stable id can appear in both a settled
+// and an open thread, and the two readings pull opposite ways. A blanket
+// "open wins" resurrected findings whenever a duplicate sibling lingered after
+// the emitted thread was resolved; a blanket "settled wins" buried genuine
+// re-reports after a regression. The newest occurrence decides.
+func TestBugbotSiblingRecencyDecides(t *testing.T) {
+	body := corpusMessage(t, "bugbot/inline-finding-high.md")
+	stable, ok := dialect.BugbotFindingDedupeKey(body)
+	if !ok {
+		t.Fatal("precondition: corpus finding must carry a BUGBOT_BUG_ID")
+	}
+	key := dialect.NormalizeBotName(dialect.BugbotLogin) + "|" + stable
+	finding := []dialect.Finding{{Bot: dialect.BugbotLogin, Path: "a.ts", Line: 1,
+		Title: "dup", Body: body, ThreadID: "PRRT_open", Source: "review_thread"}}
+
+	// Settled after the open sibling was filed: the leftover duplicate must not
+	// resurrect the finding.
+	if got := dedupeFindings(finding, nil, map[string]bool{key: true}); len(got) != 0 {
+		t.Fatalf("a stale duplicate must not resurrect a settled bug, got %#v", got)
+	}
+	// Nothing settled: the open occurrence is the finding.
+	if got := dedupeFindings(finding, nil, nil); len(got) != 1 {
+		t.Fatalf("an unsettled bug must surface, got %d", len(got))
+	}
+}

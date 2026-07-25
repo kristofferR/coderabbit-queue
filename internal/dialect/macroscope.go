@@ -111,9 +111,16 @@ func ClassifyMacroscopeCheck(name, title, summary, status, conclusion string) Ch
 	}
 	// Correctness concludes `skipped` for "No code objects were reviewed." —
 	// it ran and had nothing to analyse, which is a clean verdict, not a
-	// non-delivery. Treating it as failed would strand docs-only PRs.
+	// non-delivery, and treating it as failed would strand docs-only PRs. But
+	// only THAT skip is clean: another skip cause would otherwise be read as a
+	// delivered review and let a required round converge unreviewed, so an
+	// unrecognised skip falls through to CheckDone, where findings still gate.
 	if strings.EqualFold(strings.TrimSpace(conclusion), "skipped") {
-		return CheckDoneClean
+		if strings.Contains(NormalizeReviewText(title), "no code objects were reviewed") ||
+			strings.Contains(NormalizeReviewText(summary), "no code objects were reviewed") {
+			return CheckDoneClean
+		}
+		return CheckDone
 	}
 	if strings.Contains(NormalizeReviewText(title), "no issues identified") ||
 		strings.Contains(NormalizeReviewText(summary), "no issues identified") {

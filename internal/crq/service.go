@@ -48,6 +48,9 @@ type Service struct {
 	// lastParkedSweep rotates sweepParkedClosed's candidate across pumps (see
 	// there); in-memory only, single-writer (the pump caller).
 	lastParkedSweep string
+	// scanOffset rotates the bounded quota-free rescue scan's window so a round
+	// past the first few is not starved forever; in-memory only, same writer.
+	scanOffset int
 	// now overrides the wall clock for the scheduling DECISIONS in the
 	// pump/enqueue/sweep/wait paths (see clock). nil in production; the replay
 	// suite injects a controllable fake so an incident can be re-enacted
@@ -279,9 +282,15 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	// round must be rescued regardless of that flag.
 	accountBlocked := global.BlockedUntil != nil && global.BlockedUntil.After(now)
 	if decision.Verdict == engine.FireNo && (accountBlocked || !global.SlotFree) {
+		// Rotate the window start across pumps. A fixed start meant that when the
+		// three rounds behind the FIFO head all needed CodeRabbit, every pump
+		// observed those same three and stopped — a fourth, quota-free round was
+		// never even looked at until the unrelated block cleared.
+		queued := st.QueuedRounds(now)
 		scanned := 0
 		policy := s.policy()
-		for _, r := range st.QueuedRounds(now) {
+		for i := range queued {
+			r := queued[(i+s.scanOffset)%len(queued)]
 			if r.Repo == next.Repo && r.PR == next.PR {
 				continue
 			}
@@ -305,6 +314,9 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 				continue
 			}
 			return s.applyFire(ctx, round, robs.eng, d, now)
+		}
+		if len(queued) > 0 {
+			s.scanOffset = (s.scanOffset + scanned + 1) % len(queued)
 		}
 	}
 	return result, nil

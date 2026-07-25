@@ -170,7 +170,15 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// ids settled in ANY thread first and suppress the whole family.
 	settledStableIDs := map[string]bool{}
 	if threads, err := s.reviewThreads(ctx, repo, pr); err == nil {
-		openStableIDs := map[string]bool{}
+		// A stable id can appear in both settled and open threads, and the two
+		// readings pull opposite ways: an open thread may be a genuine
+		// re-report after a regression, or merely a leftover duplicate of the
+		// one just resolved. Recency decides — the newest occurrence wins. A
+		// blanket "open wins" resurrected settled findings every time a
+		// duplicate sibling lingered; a blanket "settled wins" buried real
+		// re-reports.
+		newestOpen := map[string]time.Time{}
+		newestSettled := map[string]time.Time{}
 		for _, thread := range threads {
 			settled := thread.IsResolved || thread.IsOutdated
 			for _, c := range thread.Comments.Nodes {
@@ -183,19 +191,19 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 					continue
 				}
 				key := dialect.NormalizeBotName(c.Author.Login) + "|" + stable
+				into := newestOpen
 				if settled {
-					settledStableIDs[key] = true
-				} else {
-					openStableIDs[key] = true
+					into = newestSettled
+				}
+				if at, seen := into[key]; !seen || c.CreatedAt.After(at) {
+					into[key] = c.CreatedAt
 				}
 			}
 		}
-		// reviewThreads spans the PR's whole history, so an old resolved thread
-		// can share an id with a CURRENT re-report — after a regression, or an
-		// incorrect manual resolve. The live occurrence wins: otherwise the loop
-		// converges while the bot has an open finding.
-		for key := range openStableIDs {
-			delete(settledStableIDs, key)
+		for key, at := range newestSettled {
+			if open, ok := newestOpen[key]; !ok || !open.After(at) {
+				settledStableIDs[key] = true
+			}
 		}
 		for _, thread := range threads {
 			report.Findings = append(report.Findings, threadFindings(thread, extractBots)...)
@@ -266,6 +274,12 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	headCutoff := time.Time{}
 	headCutoffLoaded := false
 	headCutoffOf := func() time.Time {
+		// observe() is the single place that asks GitHub what happened on this
+		// PR, and it already resolved the head commit date; only fall back to a
+		// second fetch when it could not.
+		if !obs.eng.HeadAt.IsZero() {
+			return obs.eng.HeadAt
+		}
 		if !headCutoffLoaded {
 			headCutoffLoaded = true
 			if pull.Head.SHA != "" {
@@ -313,7 +327,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 				// never ran at all.
 				Commit:    head,
 				Severity:  "major",
-				Title:     "CodeRabbit skipped this review — narrow the PR to get one: " + reason,
+				Title:     skipNoticeTitlePrefix + " — narrow the PR to get one: " + reason,
 				Body:      strings.TrimSpace(dialect.CompactReviewBody(comment.Body)),
 				CommentID: comment.ID,
 				URL:       comment.URL,
@@ -427,14 +441,14 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 					return report, 1, feedbackErr
 				}
 				// The guard exists to stop a NEW review round starting while
-				// earlier findings are open. When the primary will not review
-				// this head, the co-reviewers are the entire round — and the
-				// skip notice itself is one of these findings, with no thread to
-				// resolve, so returning here short-circuited waitToFire forever
-				// and the co-reviewers never ran at all. Let the round start;
-				// the findings are still reported by the poll below.
-				blocking := engine.BlockingFindings(report.Findings, head)
-				if len(blocking) > 0 && !report.PrimaryUnavailable {
+				// earlier findings are open. The skip notice is the one finding
+				// that must not hold it: it has no thread to resolve, so
+				// returning here short-circuited waitToFire forever and the
+				// co-reviewers meant to resolve a skipped round never ran.
+				// Exempt exactly that notice — real unresolved findings on a
+				// summary-only PR still hold the head, as on any other.
+				blocking := excludeSkipNotice(engine.BlockingFindings(report.Findings, head))
+				if len(blocking) > 0 {
 					report.Findings = blocking
 					report.Status = "feedback"
 					report.Reason = "unresolved findings must be addressed before a new review round"
@@ -1217,6 +1231,23 @@ func dedupeFindings(in []dialect.Finding, suppressPromptAt, settledStableIDs map
 	return out
 }
 
+// skipNoticeTitlePrefix identifies the synthetic finding Feedback builds from a
+// "Review skipped" notice. It is the only finding with no thread to resolve and
+// no way to be addressed except by changing the PR itself.
+const skipNoticeTitlePrefix = "CodeRabbit skipped this review"
+
+// excludeSkipNotice drops the synthetic skip finding from a blocking set.
+func excludeSkipNotice(findings []dialect.Finding) []dialect.Finding {
+	out := findings[:0:0]
+	for _, f := range findings {
+		if strings.HasPrefix(f.Title, skipNoticeTitlePrefix) {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
 // skipPredatesHead reports whether a skip notice was posted before the current
 // head existed. A notice naming no commit cannot be bound by SHA, so it falls
 // back to the same head-commit cutoff every other issue comment uses — without
@@ -1227,7 +1258,19 @@ func skipPredatesHead(comment ghapi.IssueComment, headCutoff func() time.Time) b
 		return false // names its commit: SHA binding already decided this
 	}
 	cutoff := headCutoff()
-	return !cutoff.IsZero() && comment.CreatedAt.Before(cutoff)
+	if cutoff.IsZero() {
+		return false
+	}
+	// CodeRabbit produces some skip notices by EDITING its existing top-summary
+	// comment, whose CreatedAt long predates the current head while UpdatedAt is
+	// current. Judging by creation time discarded exactly those, so the finding
+	// vanished while the engine still (correctly) read the primary as
+	// unavailable. Use the later of the two, matching BotEvent.ObservedTime.
+	at := comment.CreatedAt
+	if comment.UpdatedAt.After(at) {
+		at = comment.UpdatedAt
+	}
+	return at.Before(cutoff)
 }
 
 // skipAppliesToHead reports whether a "Review skipped" notice concerns the

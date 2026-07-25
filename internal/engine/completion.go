@@ -78,7 +78,11 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 			// co-reviewer can report exhaustion BEFORE a deferred CodeRabbit
 			// fire, and anchoring at FiredAt missed it — the round then waited
 			// for a review the bot had already said it could not produce.
-			if (co.AutoActive || co.ActiveThisRound || commanded) &&
+			// ChecksUnknown counts as engagement: suppressing the trigger while
+			// leaving the bot out of reviewedBy meant an unreadable in-flight
+			// check was neither asked for nor waited on, and a clean primary
+			// could converge the round straight past it.
+			if (co.AutoActive || co.ActiveThisRound || commanded || co.ChecksUnknown) &&
 				!coUnableSince(obs, cp.Login, coCutoff(r, cp.Login)) {
 				reviewedBy[cp.Login] = false
 			}
