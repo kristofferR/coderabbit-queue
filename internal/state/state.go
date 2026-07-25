@@ -199,6 +199,33 @@ func (r *Round) foldLegacyCodex() {
 	r.setCo(codexCoBotKey, CoBotRound{CommandID: r.CodexCommandID, CommandedAt: r.CodexCommandedAt, ClaimedAt: r.CodexClaimedAt})
 }
 
+// inferCoOnly backfills CoOnly for rounds written before the flag existed. The
+// evidence is already in the round: a co-reviewer-only fire recorded one of its
+// OWN trigger comments as the round's CommandID, whereas a real fire records
+// the primary review command — two different comments, so the inference cannot
+// mislabel a genuine request.
+func (r *Round) inferCoOnly() {
+	if r.CoOnly || r.FiredAt == nil {
+		return
+	}
+	// A bounded co-review wait anchors FiredAt without ever posting a command,
+	// so a fire with no CommandID is one by construction: every real fire
+	// records the command it posted or adopted.
+	if r.CommandID == 0 {
+		r.CoOnly = true
+		return
+	}
+	// A co-reviewer-only fire recorded one of its OWN trigger comments as the
+	// round's CommandID; a real fire records the primary review command, a
+	// different comment, so this cannot mislabel a genuine request.
+	for _, c := range r.CoBots {
+		if c.CommandID == r.CommandID {
+			r.CoOnly = true
+			return
+		}
+	}
+}
+
 // FireSlot is the single global in-flight reservation: at most one review
 // command may be getting posted at a time, fleet-wide.
 type FireSlot struct {
@@ -584,10 +611,12 @@ func (s *State) Normalize(now time.Time) {
 	}
 	for key, r := range s.Rounds {
 		r.foldLegacyCodex()
+		r.inferCoOnly()
 		s.Rounds[key] = r
 	}
 	for i := range s.Archive {
 		s.Archive[i].foldLegacyCodex()
+		s.Archive[i].inferCoOnly()
 	}
 	if len(s.Archive) > ArchiveMax {
 		s.Archive = s.Archive[len(s.Archive)-ArchiveMax:]
