@@ -74,7 +74,12 @@ func Completion(r state.Round, obs Observation, p Policy) CompletionStatus {
 			// immediately marks the primary delivered and reports done — before
 			// the only reviewer it actually has has said anything.
 			commanded := roundCoCommandID(r, cp.Login) != 0
-			if (co.AutoActive || co.ActiveThisRound || commanded) && !coUnableSince(obs, cp.Login, cutoff) {
+			// The unable notice binds from coCutoff, not the fire: a commanded
+			// co-reviewer can report exhaustion BEFORE a deferred CodeRabbit
+			// fire, and anchoring at FiredAt missed it — the round then waited
+			// for a review the bot had already said it could not produce.
+			if (co.AutoActive || co.ActiveThisRound || commanded) &&
+				!coUnableSince(obs, cp.Login, coCutoff(r, cp.Login)) {
 				reviewedBy[cp.Login] = false
 			}
 		}

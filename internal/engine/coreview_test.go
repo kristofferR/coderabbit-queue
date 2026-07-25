@@ -508,3 +508,58 @@ func TestUnavailablePrimaryWaitsForTheBotItJustCommanded(t *testing.T) {
 		t.Fatalf("a round must not complete right after commanding its only reviewer: %+v", got)
 	}
 }
+
+// TestRequiredCoReviewerHoldsAnUnavailablePrimaryRound: with no primary review
+// coming and a required co-reviewer that has not spoken yet, deduping wrote a
+// completed marker that Completion immediately contradicts — it still reports
+// that bot, and so the primary, unfinished — leaving Loop to time out and
+// requeue into the same cycle. A bounded wait is the honest state.
+func TestRequiredCoReviewerHoldsAnUnavailablePrimaryRound(t *testing.T) {
+	now := time.Date(2026, 7, 25, 10, 0, 0, 0, time.UTC)
+	head := "abcdef123"
+	queued := state.Round{Repo: "o/r", PR: 1, Head: head, Phase: state.PhaseQueued}
+	summaryOnly := dialect.BotEvent{Kind: dialect.EvOther, Bot: "coderabbitai[bot]", SummaryOnly: true, CommentID: 1}
+	obs := Observation{Head: head, Open: true, Events: []dialect.BotEvent{summaryOnly}}
+
+	required := Policy{Bot: "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]", bugbotLogin},
+		CoReviewers:  []CoReviewerPolicy{{Login: bugbotLogin, Command: "bugbot run", Trigger: TriggerSelfHeal}}}
+	if d := DecideFire(Global{SlotFree: true}, queued, obs, now, required); d.Verdict != FireCoReviewWait {
+		t.Fatalf("a silent REQUIRED co-reviewer must hold the round open, got %+v", d)
+	}
+	// A merely wanted bot in the same state still dedupes — "wanted" must not
+	// wedge a round on a bot that may never appear.
+	wanted := Policy{Bot: "coderabbitai[bot]",
+		RequiredBots: []string{"coderabbitai[bot]"},
+		CoReviewers:  []CoReviewerPolicy{{Login: bugbotLogin, Command: "bugbot run", Trigger: TriggerSelfHeal}}}
+	if d := DecideFire(Global{SlotFree: true}, queued, obs, now, wanted); d.Verdict != FireDedupe {
+		t.Fatalf("a wanted-only silent bot must not wedge the round, got %+v", d)
+	}
+}
+
+// TestFailedCheckStaysActivityForSelfHeal: a crashed run must not suppress the
+// recovery trigger, but it IS the bot working on this PR. If it were not
+// activity, a bot whose FIRST check failed would have no signal at all and
+// self-heal could never fire.
+func TestFailedCheckStaysActivityForSelfHeal(t *testing.T) {
+	now := time.Date(2026, 7, 25, 10, 0, 0, 0, time.UTC)
+	head := "abcdef123"
+	fired := now.Add(-time.Hour)
+	round := state.Round{Head: head, FiredAt: &fired}
+	obs := Observation{Head: head, Open: true,
+		Checks: []CheckSeen{{Bot: bugbotLogin, Verdict: dialect.CheckFailed, CompletedAt: now.Add(-30 * time.Minute)}}}
+
+	if !CoActiveThisRound(round, obs, bugbotLogin) {
+		t.Fatal("a failed check is still activity — otherwise self-heal has no signal to act on")
+	}
+	cp := CoReviewerPolicy{Login: bugbotLogin, Command: "bugbot run", Trigger: TriggerSelfHeal, SelfHealGrace: 10 * time.Minute}
+	obs.Co = map[string]CoSeen{dialect.NormalizeBotName(bugbotLogin): {ActiveThisRound: true}}
+	if !DecideCoPost(round, obs, cp, false, fired, now) {
+		t.Fatal("self-heal must be able to retrigger a bot whose check crashed")
+	}
+	// But an unreadable check-run fetch must fail closed: absence proves nothing.
+	obs.Co = map[string]CoSeen{dialect.NormalizeBotName(bugbotLogin): {ActiveThisRound: true, ChecksUnknown: true}}
+	if DecideCoPost(round, obs, cp, false, fired, now) {
+		t.Fatal("an unreadable check must suppress the trigger rather than double-ask a run in flight")
+	}
+}

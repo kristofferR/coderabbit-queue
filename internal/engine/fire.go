@@ -302,6 +302,15 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, prim
 		// to publish.
 		if co.AutoActive || co.ActiveThisRound || len(co.Commands) > 0 || roundCoCommandID(r, cp.Login) != 0 {
 			wait = true
+			continue
+		}
+		// A REQUIRED co-reviewer with no activity yet still gates. Deduping here
+		// wrote a completed marker that Completion immediately contradicts —
+		// it reports the bot, and so the primary, unfinished — leaving Loop to
+		// time out and requeue into the same cycle. A bounded wait is the
+		// honest state: the bot has not spoken, and the deadline ends it.
+		if primaryUnavailable && requiredBot(p, cp.Login) {
+			wait = true
 		}
 	}
 	delivered := "primary reviewed head"

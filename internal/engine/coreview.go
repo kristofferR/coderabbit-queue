@@ -103,6 +103,17 @@ func coCheckAny(obs Observation, login string) bool {
 	return false
 }
 
+// coCheckActivity reports whether login has ANY check run on this head,
+// including failed and auxiliary ones. Suppression and activity are separate
+// questions: a bot whose only check crashed must not suppress the self-heal
+// trigger (coCheckAny), but it is still demonstrably working on this PR — and
+// if that were not activity, a bot whose FIRST check failed would have no
+// signal at all, so self-heal could never fire and the round could only time
+// out.
+func coCheckActivity(obs Observation, login string) bool {
+	return len(coChecks(obs, login)) > 0
+}
+
 // coCheckReviewedAt reports the newest COMPLETED check verdict for the head
 // (Done or DoneClean — findings, if any, still gate via threads).
 func coCheckReviewedAt(obs Observation, login string) (time.Time, bool) {
@@ -200,7 +211,7 @@ func coReviewedHead(obs Observation, login string) bool {
 func CoActiveThisRound(r state.Round, obs Observation, login string) bool {
 	cutoff := coCutoff(r, login)
 	if coReviewedRound(r, obs, login, cutoff) || coCommentedRound(obs, login, cutoff) ||
-		coVerdictSince(obs, login, cutoff) || coCheckAny(obs, login) {
+		coVerdictSince(obs, login, cutoff) || coCheckActivity(obs, login) {
 		return true
 	}
 	// Codex's thumbs-up quirk is applied here so callers never branch on a bot
@@ -379,6 +390,12 @@ func DecideCoPost(r state.Round, obs Observation, cp CoReviewerPolicy, commandPr
 		return false
 	}
 	if coCheckAny(obs, cp.Login) {
+		return false
+	}
+	// Fail closed: with the head's checks unreadable, a missing check is not
+	// evidence the bot is idle, and posting would double-ask a run already in
+	// flight.
+	if obs.co(cp.Login).ChecksUnknown {
 		return false
 	}
 	switch cp.Trigger {

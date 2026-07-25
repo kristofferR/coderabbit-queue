@@ -305,7 +305,13 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 				reason = "CodeRabbit skipped the review for this head."
 			}
 			report.Findings = append(report.Findings, dialect.Finding{
-				Bot:       comment.User.Login,
+				Bot: comment.User.Login,
+				// Bound to the head so Loop's pre-enqueue blocking check treats
+				// it as work for THIS head rather than a reason never to start:
+				// returning exit 10 here short-circuited waitToFire, so the
+				// co-reviewers that are supposed to resolve a skipped round
+				// never ran at all.
+				Commit:    head,
 				Severity:  "major",
 				Title:     "CodeRabbit skipped this review — narrow the PR to get one: " + reason,
 				Body:      strings.TrimSpace(dialect.CompactReviewBody(comment.Body)),
@@ -420,8 +426,15 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 					}
 					return report, 1, feedbackErr
 				}
+				// The guard exists to stop a NEW review round starting while
+				// earlier findings are open. When the primary will not review
+				// this head, the co-reviewers are the entire round — and the
+				// skip notice itself is one of these findings, with no thread to
+				// resolve, so returning here short-circuited waitToFire forever
+				// and the co-reviewers never ran at all. Let the round start;
+				// the findings are still reported by the poll below.
 				blocking := engine.BlockingFindings(report.Findings, head)
-				if len(blocking) > 0 {
+				if len(blocking) > 0 && !report.PrimaryUnavailable {
 					report.Findings = blocking
 					report.Status = "feedback"
 					report.Reason = "unresolved findings must be addressed before a new review round"

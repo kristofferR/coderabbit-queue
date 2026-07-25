@@ -100,11 +100,16 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 	// gated on FiredAt. An unfetchable check degrades to the bounded co-review
 	// wait rather than failing the observation; the log line is the operator's
 	// signal that a required check-bearing bot may time out spuriously.
+	checksUnknown := false
 	if o.eng.Open && pull.Head.SHA != "" && s.coChecksRelevant() {
 		runs, cerr := s.gh.ListCheckRuns(ctx, repo, pull.Head.SHA)
 		if cerr != nil {
+			// Record the uncertainty rather than letting "no checks returned"
+			// masquerade as "the bot has not started": that read posts a trigger
+			// over a run already in flight.
+			checksUnknown = true
 			if s.log != nil {
-				s.log.Printf("warning: check runs unavailable for %s#%d@%s: %v (check-bearing co-reviewer evidence degraded)", repo, pr, dialect.ShortOID(pull.Head.SHA), cerr)
+				s.log.Printf("warning: check runs unavailable for %s#%d@%s: %v (co-reviewer triggers suppressed this pass)", repo, pr, dialect.ShortOID(pull.Head.SHA), cerr)
 			}
 		} else {
 			for _, run := range runs {
@@ -155,6 +160,9 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 		o.eng.Co = map[string]engine.CoSeen{}
 		for _, cb := range s.cfg.CoBots {
 			seen := engine.CoSeen{AutoActive: engine.CoAutoActive(o.eng, cb.Login)}
+			if co, ok := dialect.CoReviewerByName(cb.Name); ok && co.AppSlug != "" {
+				seen.ChecksUnknown = checksUnknown
+			}
 			if round != nil {
 				seen.ActiveThisRound = engine.CoActiveThisRound(*round, o.eng, cb.Login)
 			}

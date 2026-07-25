@@ -115,6 +115,12 @@ type CoSeen struct {
 	// review, a round-window comment/clean summary, or a head check run). It
 	// drives the dynamic completion gate for non-required co-reviewers.
 	ActiveThisRound bool
+	// ChecksUnknown reports that this bot's check runs could NOT be read for
+	// the head. Absence of a check then proves nothing, so crq must not treat
+	// it as "the bot has not started" and post a trigger — the run may be in
+	// flight. The bounded completion wait still applies; only triggering is
+	// suppressed.
+	ChecksUnknown bool
 }
 
 // Observation is everything the engine may know about one PR at one moment.
