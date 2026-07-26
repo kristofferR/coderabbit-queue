@@ -25,6 +25,9 @@ func blockedReport(t *testing.T, wait string) PreflightReport {
 	}
 	report := PreflightReport{Status: "rate_limited"}
 	applyPreflightEvent(&report, event)
+	if !report.OrgAttributed {
+		t.Fatalf("the captured fixture must be organisation-attributed: %+v", report)
+	}
 	if !IsCLIAccountBlock(report) {
 		t.Fatalf("the captured fixture must classify as an account block: %+v", report)
 	}
@@ -222,6 +225,68 @@ func TestRecordCLIQuotaFallbackIsAlwaysInTheFuture(t *testing.T) {
 		st, _, _ := store.Load(context.Background())
 		if st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.After(now) {
 			t.Errorf("fallback %s produced %v, want a block in the future", configured, st.Account.BlockedUntil)
+		}
+	}
+}
+
+// The CLI distinguishes a limit that belongs to the organisation from one that
+// belongs to this user. Sharing a personal limit would stall every repository in
+// the scope over one developer's usage.
+func TestRecordCLIQuotaRequiresOrgAttribution(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	svc, store := cliQuotaService(t, now)
+
+	report := blockedReport(t, "32 minutes")
+	report.OrgAttributed = false
+	got, err := svc.RecordCLIQuota(context.Background(), report, "kristofferR")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Applied {
+		t.Error("a personal limit must not become a fleet-wide block")
+	}
+	st, _, _ := store.Load(context.Background())
+	if st.Account.BlockedUntil != nil {
+		t.Errorf("BlockedUntil = %s, want none", st.Account.BlockedUntil)
+	}
+}
+
+// Credentials passed on the command line cannot be reproduced by the identity
+// probe, so it would report the executable's stored login instead — possibly a
+// different account than the one that hit the limit.
+func TestRecordCLIQuotaRefusesWhenCredentialsWerePassedIn(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	svc, store := cliQuotaService(t, now)
+
+	report := blockedReport(t, "32 minutes")
+	report.CredentialsOverridden = true
+	got, err := svc.RecordCLIQuota(context.Background(), report, "kristofferR")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Applied {
+		t.Error("the account behind the block cannot be confirmed, so it must not be shared")
+	}
+	st, _, _ := store.Load(context.Background())
+	if st.Account.BlockedUntil != nil {
+		t.Errorf("BlockedUntil = %s, want none", st.Account.BlockedUntil)
+	}
+}
+
+// The flag scan has to see both spellings and the =value form, or a run that
+// authenticated itself is treated as one that did not.
+func TestCarriesCredentials(t *testing.T) {
+	for _, args := range [][]string{
+		{"--api-key", "secret"}, {"--apikey", "secret"}, {"--token", "secret"},
+		{"--api-key=secret"}, {"--dir", "x", "--token=y"},
+	} {
+		if !carriesCredentials(args) {
+			t.Errorf("carriesCredentials(%v) = false, want true", args)
+		}
+	}
+	for _, args := range [][]string{nil, {"--light"}, {"--dir", "internal"}} {
+		if carriesCredentials(args) {
+			t.Errorf("carriesCredentials(%v) = true, want false", args)
 		}
 	}
 }

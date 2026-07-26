@@ -48,6 +48,15 @@ type PreflightReport struct {
 	ErrorType   string `json:"error_type,omitempty"`
 	Recoverable bool   `json:"recoverable,omitempty"`
 	RetryAfter  string `json:"retry_after,omitempty"`
+	// OrgAttributed is the CLI's own statement that the limit belongs to the
+	// organisation rather than to this user. The captured event distinguishes the
+	// two, and a personal limit must never become a fleet-wide block.
+	OrgAttributed bool `json:"org_attributed,omitempty"`
+	// CredentialsOverridden records that this run authenticated with credentials
+	// passed on the command line. The identity probe afterwards cannot reproduce
+	// them, so it would report the executable's STORED login instead — possibly a
+	// different account than the one that produced the block.
+	CredentialsOverridden bool `json:"credentials_overridden,omitempty"`
 	// Quota reports whether the account block this run observed was shared with
 	// crq's queue, and why not when it was not.
 	Quota      *CLIQuotaResult `json:"quota,omitempty"`
@@ -96,6 +105,7 @@ func Preflight(ctx context.Context, opts PreflightOptions) (PreflightReport, int
 	args := coderabbitArgs(opts)
 	report.Tool = binary
 	report.Command = redactSecrets(append([]string{binary}, args...))
+	report.CredentialsOverridden = carriesCredentials(opts.ExtraArgs)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	if opts.Timeout > 0 {
@@ -263,6 +273,9 @@ func applyPreflightEvent(report *PreflightReport, event map[string]any) {
 		}
 		if meta, ok := event["metadata"].(map[string]any); ok {
 			report.RetryAfter = stringField(meta, "waitTime")
+			if v, ok := meta["orgAttributed"].(bool); ok {
+				report.OrgAttributed = v
+			}
 		}
 	}
 }
@@ -292,6 +305,20 @@ func preflightFinding(event map[string]any) PreflightFinding {
 		finding.ID = hex.EncodeToString(sum[:])
 	}
 	return finding
+}
+
+// carriesCredentials reports whether these arguments authenticate the run
+// themselves. If they do, the login the CLI would report afterwards is not
+// necessarily the account that produced the block.
+func carriesCredentials(args []string) bool {
+	for _, arg := range args {
+		name, _, _ := strings.Cut(arg, "=")
+		switch name {
+		case "--api-key", "--apikey", "--token":
+			return true
+		}
+	}
+	return false
 }
 
 // redactSecrets masks the values of secret-bearing flags (e.g. --api-key) so the

@@ -22,16 +22,14 @@ func IsCLIAccountBlock(report PreflightReport) bool {
 	return dialect.IsCLIRateLimit(report.ErrorType)
 }
 
-// RecordCLIQuota folds a rate limit the LOCAL CodeRabbit CLI reported into the
-// shared account quota.
+// RecordCLIQuota folds an account block the LOCAL CodeRabbit CLI reported into
+// the shared AccountQuota.
 //
 // The CLI spends the same account-wide review budget the queue exists to
-// serialize, so when it refuses locally that is direct evidence about the very
-// thing crq otherwise discovers by posting `@coderabbitai rate limit` on a
-// calibration PR and reading the reply. This costs no probe comment, no
-// calibration-thread growth, and no GitHub round trip beyond the state write —
-// and it is fresher, because the CLI answers now rather than whenever CodeRabbit
-// gets round to replying.
+// serialize, so a local refusal is direct evidence about the very thing crq
+// otherwise discovers by asking on the calibration PR and reading the reply. It
+// costs no probe comment and no calibration-thread growth — only the state write
+// itself — and it is fresher, because the CLI answers immediately.
 //
 // It is deliberately best-effort and never fatal: preflight is a local command
 // that must keep working with no crq config and no GitHub token at all.
@@ -47,6 +45,18 @@ func IsCLIAccountBlock(report PreflightReport) bool {
 func (s *Service) RecordCLIQuota(ctx context.Context, report PreflightReport, cliOrg string) (CLIQuotaResult, error) {
 	if !dialect.IsCLIRateLimit(report.ErrorType) {
 		return CLIQuotaResult{Reason: "the cli reported no account block"}, nil
+	}
+	// A limit the CLI attributes to this USER is not a fleet-wide block, and the
+	// captured event distinguishes the two. Sharing a personal one would stall
+	// every repository in the scope.
+	if !report.OrgAttributed {
+		return CLIQuotaResult{Reason: "the cli did not attribute this block to the organisation"}, nil
+	}
+	// Credentials passed on the command line cannot be reproduced by the identity
+	// probe, so the login it reports may belong to a different account than the
+	// one that hit the limit. Refuse rather than guess whose block this is.
+	if report.CredentialsOverridden {
+		return CLIQuotaResult{Reason: "this run used credentials passed on the command line, so the account behind the block cannot be confirmed"}, nil
 	}
 	if err := s.cfg.RequireState(); err != nil {
 		return CLIQuotaResult{Reason: "no crq state configured, so there is no shared quota to update"}, nil

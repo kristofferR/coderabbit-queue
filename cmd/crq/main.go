@@ -531,10 +531,10 @@ Exit codes:
 
 The local CLI spends the same account quota as PR reviews, so a local block is
 evidence about that shared quota. crq records it for the whole fleet — no probe
-comment, no GitHub round trip — and .quota says whether it did. It only ever
-EXTENDS a standing block, and only when the CLI is signed in to the account crq
-queues for; otherwise .quota.reason says why not. Read .retry_after rather than
-re-running.
+comment on the calibration PR, though the state write itself is a GitHub call —
+and .quota says whether it did. It only ever EXTENDS a standing block, and only
+when the CLI attributes the limit to the organisation crq queues for; otherwise
+.quota.reason says why not. Read .retry_after rather than re-running.
 
 Use crq loop for queued GitHub PR reviews.
 `)
@@ -624,16 +624,17 @@ func shareCLIQuota(ctx context.Context, report crq.PreflightReport) *crq.CLIQuot
 	if err != nil || cfg.RequireState() != nil {
 		return &crq.CLIQuotaResult{Reason: "no crq state configured, so there is no shared quota to update"}
 	}
-	gh, err := ghapi.NewGitHub(ctx)
+	// Bound BEFORE resolving credentials. With no GITHUB_TOKEN/GH_TOKEN,
+	// NewGitHub shells out to `gh auth token`, and a wedged credential store
+	// would hang a preflight that has already produced its findings. The
+	// transport then rides out a network outage indefinitely by default, which is
+	// right for a review loop and wrong for a courtesy write.
+	shareCtx, cancel := context.WithTimeout(ctx, cliQuotaShareTimeout)
+	defer cancel()
+	gh, err := ghapi.NewGitHub(shareCtx)
 	if err != nil {
 		return &crq.CLIQuotaResult{Reason: "no github credentials available to record the block"}
 	}
-	// Bounded on purpose. The transport rides out a network outage indefinitely by
-	// default, which is right for a review loop and wrong here: a finished local
-	// review would hang before printing its findings, waiting on a best-effort
-	// state write. Give up quickly and say so instead.
-	shareCtx, cancel := context.WithTimeout(ctx, cliQuotaShareTimeout)
-	defer cancel()
 	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
 	service := crq.NewService(cfg, gh, store, stderrLogger{})
 	result, err := service.RecordCLIQuota(shareCtx, report, codeRabbitOrg(shareCtx, report.Tool))
