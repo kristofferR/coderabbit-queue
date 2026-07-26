@@ -37,9 +37,10 @@ type fakeGitHub struct {
 	graphQL         func(query string, vars map[string]any, out any) error
 	// stateRef is the SHA GetRef reports; tests that exercise `crq wait` move it
 	// to signal "the queue advanced".
-	stateRef  string
-	refReads  int
-	searchPRs []ghapi.SearchPR
+	stateRef    string
+	refReads    int
+	reviewReads int
+	searchPRs   []ghapi.SearchPR
 	// now, when set, timestamps posted comments off the same injected clock the
 	// service uses, so a fire's recorded FiredAt tracks the fake wall clock the
 	// replay suite advances. nil falls back to real time (all existing tests).
@@ -130,7 +131,17 @@ func (f *fakeGitHub) GetCommit(_ context.Context, repo, sha string) (ghapi.Commi
 func (f *fakeGitHub) ListReviews(_ context.Context, repo string, pr int) ([]ghapi.Review, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.reviewReads++
 	return append([]ghapi.Review(nil), f.reviews[fakeKey(repo, pr)]...), nil
+}
+
+// reviewPolls is how many times anything has read this PR's reviews. A test that
+// needs a running loop to have reached its polling cycle waits on this instead of
+// sleeping: a fixed sleep loses under parallel load, and did.
+func (f *fakeGitHub) reviewPolls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.reviewReads
 }
 
 func (f *fakeGitHub) ListIssueComments(_ context.Context, repo string, pr int) ([]ghapi.IssueComment, error) {
