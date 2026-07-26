@@ -89,8 +89,22 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 
 	// Nothing left to drain, so record the round for this head (idempotent;
 	// supersedes on a new head) and advance the queue one step.
-	if _, err := s.Enqueue(ctx, repo, pr); err != nil {
+	enqueued, err := s.Enqueue(ctx, repo, pr)
+	if err != nil {
 		return report, err
+	}
+	// Enqueue re-reads the head. If it moved in between, every conclusion above
+	// describes a head that is no longer current — and returning `done` for it
+	// would stop a caller just as an unreviewed head was queued. Say so and let
+	// the next call decide on one snapshot.
+	if enqueued.Head != "" && report.Head != "" && enqueued.Head != report.Head {
+		report.Head = enqueued.Head
+		report.Action = string(engine.ActionWait)
+		report.Reason = "the head moved while deciding; re-reading it"
+		report.Findings = []dialect.Finding{}
+		at := s.clock().Add(s.waitTick()).UTC()
+		report.RecheckAfter = &at
+		return report, nil
 	}
 	if err := s.advance(ctx, repo, pr, feedback); err != nil {
 		// Throttling is expected and self-clearing: the instruction above still
@@ -175,7 +189,7 @@ func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextR
 	round := st.Round(repo, pr)
 
 	report.LocalWork, report.LocalWorkReason = s.checkLocalWork(ctx,
-		[]string{repo, feedback.HeadRepo}, report.Head)
+		[]string{repo, feedback.HeadRepo}, report.Head, feedback.HeadRef)
 
 	in := engine.NextInput{
 		Obs:           engine.Observation{Head: feedback.Head, Open: feedback.Open},
@@ -189,7 +203,10 @@ func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextR
 		MinDelay:      s.cfg.PollInterval,
 		SettleUntil:   s.settleUntil(feedback),
 	}
-	if round != nil {
+	// Only a round that still tracks THIS head may shape the verdict. A stale
+	// fired/reviewing round carries its own phase and deadline, and an elapsed
+	// one would report a terminal `blocked` for a head it never covered.
+	if round != nil && round.Head == feedback.Head {
 		in.Round = *round
 	}
 
@@ -248,11 +265,11 @@ func (s *Service) NextWaiting(ctx context.Context, repo string, pr int) (NextRep
 	}
 }
 
-func (s *Service) checkLocalWork(ctx context.Context, repos []string, head string) (bool, string) {
+func (s *Service) checkLocalWork(ctx context.Context, repos []string, head, headRef string) (bool, string) {
 	if s.localWorkFn != nil {
 		return s.localWorkFn(ctx, head)
 	}
-	return localWork(ctx, repos, head)
+	return localWork(ctx, repos, head, headRef)
 }
 
 // localWork reports whether the working copy holds changes the PR head does not
@@ -272,7 +289,7 @@ func (s *Service) checkLocalWork(ctx context.Context, repos []string, head strin
 // `done` rather than `push`. That is the safe direction: `push` is only ever
 // emitted once the head is already released, so a missed one costs one extra
 // call, while a spurious `hold` would stall the loop.
-func localWork(ctx context.Context, repos []string, head string) (bool, string) {
+func localWork(ctx context.Context, repos []string, head, headRef string) (bool, string) {
 	git := func(args ...string) (string, bool) {
 		out, err := exec.CommandContext(ctx, "git", args...).Output()
 		if err != nil {
@@ -318,6 +335,18 @@ func localWork(ctx context.Context, repos []string, head string) (bool, string) 
 	}
 	if _, ahead := git("merge-base", "--is-ancestor", head, "HEAD"); !ahead {
 		return false, "local HEAD " + shortSHA(local) + " is not on the pr's branch (behind it, or a different branch)"
+	}
+	// Descending from the PR head is not the same as being the PR branch: a
+	// feature branch forked off it also descends, and reporting its commits as
+	// this PR's work invites a push that updates something else entirely.
+	if headRef != "" {
+		branch, ok := git("rev-parse", "--abbrev-ref", "HEAD")
+		if !ok || branch == "HEAD" {
+			return false, "this checkout is detached, so it cannot be confirmed as the pr branch " + headRef
+		}
+		if branch != headRef {
+			return false, "checked out " + branch + ", not the pr branch " + headRef
+		}
 	}
 	return true, "local HEAD " + shortSHA(local) + " is ahead of the pr head " + head
 }

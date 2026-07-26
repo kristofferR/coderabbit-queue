@@ -125,11 +125,28 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	}
 	completion := engine.Completion(completionRound, obs.eng, s.policy())
 	report.ReviewedBy = completion.ReviewedBy
-	for _, review := range obs.reviews {
-		if dialect.InBots(dialect.BotSet(unionBots(s.cfg.FeedbackBots, s.cfg.RequiredBots)), review.User.Login) &&
-			review.SubmittedAt.After(report.LastEvidenceAt) {
-			report.LastEvidenceAt = review.SubmittedAt
+	// Completion does not always arrive as a review: a clean-summary comment, a
+	// paired completion reply and a co-reviewer check run all satisfy it. Anchor
+	// the settle window on the newest of ANY of them, or a round completed by a
+	// comment would settle against a stale timestamp and converge instantly.
+	evidenceBots := dialect.BotSet(unionBots(s.cfg.FeedbackBots, s.cfg.RequiredBots))
+	noteEvidence := func(at time.Time) {
+		if at.After(report.LastEvidenceAt) {
+			report.LastEvidenceAt = at
 		}
+	}
+	for _, review := range obs.reviews {
+		if dialect.InBots(evidenceBots, review.User.Login) {
+			noteEvidence(review.SubmittedAt)
+		}
+	}
+	for _, comment := range obs.comments {
+		if dialect.InBots(evidenceBots, comment.User.Login) {
+			noteEvidence(comment.UpdatedAt)
+		}
+	}
+	for _, check := range obs.eng.Checks {
+		noteEvidence(check.CompletedAt)
 	}
 	verdictCutoff := anchorCutoff
 	if verdictCutoff.IsZero() {

@@ -50,9 +50,23 @@ func TestParseThreadCommand(t *testing.T) {
 			args: []string{"--treahd", t1}, wantErr: true,
 		},
 		{
-			name: "decline collects reason and resolve",
-			args: []string{t1, "--reason", "not a real issue", "--resolve"}, reason: true,
+			// Declining resolves by default: a thread left open keeps its finding
+			// actionable, so the loop would repeat `fix` forever.
+			name: "decline resolves by default",
+			args: []string{t1, "--reason", "not a real issue"}, reason: true,
 			want: []string{t1}, wantRsn: "not a real issue", wantRes: true,
+		},
+		{
+			name: "decline --keep-open leaves the disagreement open",
+			args: []string{t1, "--reason", "still discussing", "--keep-open"}, reason: true,
+			want: []string{t1}, wantRsn: "still discussing", wantRes: false,
+		},
+		{
+			// --resolve used to be required; accepting it as a no-op keeps existing
+			// callers working now that it is the default.
+			name: "legacy --resolve still accepted",
+			args: []string{t1, "--reason", "no", "--resolve"}, reason: true,
+			want: []string{t1}, wantRsn: "no", wantRes: true,
 		},
 		{
 			// resolve has no --reason, so passing one must fail rather than be

@@ -162,8 +162,10 @@ For a finding you are **not** addressing, record why instead of leaving it silen
 crq decline "$THREAD_ID" --reason "why this is declined"
 ```
 
-This replies on the thread with your reason and leaves it unresolved (add `--resolve` to also close it
-as "won't fix"), so the next reviewer and CodeRabbit can see the decision rather than an ignored finding.
+This replies with your reason and resolves the thread. crq reads GitHub's resolution state, so a
+thread left open keeps its finding actionable and `crq next` would repeat `fix` forever. The
+disagreement is not lost: if the bot contests the decline, crq re-surfaces that reply as its own
+finding. Pass `--keep-open` to leave it unresolved deliberately.
 
 ## Fleet Auto-Review
 

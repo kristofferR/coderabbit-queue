@@ -322,21 +322,26 @@ second review or posting another CodeRabbit trigger.
 set -uo pipefail
 REPO="${REPO:?set REPO=owner/name}"; PR="${PR:?set PR=<number>}"
 
+# Keep the report OUT of the checkout: crq decides push-vs-done by asking whether
+# the working tree holds changes the PR head lacks, so a report written next to
+# your code is itself uncommitted work and the loop can never reach "done".
+OUT="$(mktemp -t crq-next.XXXXXX.json)"; trap 'rm -f "$OUT"' EXIT
+
 while :; do
-  crq next "$REPO" "$PR" > crq-next.json || exit 1
-  action=$(jq -r .action crq-next.json)
+  crq next "$REPO" "$PR" > "$OUT" || exit 1
+  action=$(jq -r .action "$OUT")
 
   case "$action" in
     done)    echo "✅ $REPO#$PR converged."; break ;;
-    blocked) echo "⛔ $(jq -r .reason crq-next.json)"; exit 1 ;;
+    blocked) echo "⛔ $(jq -r .reason "$OUT")"; exit 1 ;;
 
     fix)
       # Read findings, fix the real ones, run your tests/linters.
-      jq -r '.findings[] | "\(.severity) \(.path // "-"):\(.line // 0) — \(.title)"' crq-next.json
+      jq -r '.findings[] | "\(.severity) \(.path // "-"):\(.line // 0) — \(.title)"' "$OUT"
       #   ... apply fixes and validate ...
 
       # Resolve the threads you addressed; record why for any you decline.
-      threads=$(jq -r '.findings[] | select(.thread_id != null) | .thread_id' crq-next.json)
+      threads=$(jq -r '.findings[] | select(.thread_id != null) | .thread_id' "$OUT")
       # shellcheck disable=SC2086 -- thread ids are opaque tokens with no spaces
       [ -n "$threads" ] && crq resolve $threads
       # crq decline <id> --reason "why this one is declined"
@@ -347,8 +352,8 @@ while :; do
     hold|wait)
       # crq computed this time from the quota window, the retry cooldown and the
       # poll interval. Never substitute a delay of your own.
-      until=$(jq -r '.recheck_after // empty' crq-next.json)
-      echo "$action: $(jq -r .reason crq-next.json) — until ${until:-soon}"
+      until=$(jq -r '.recheck_after // empty' "$OUT")
+      echo "$action: $(jq -r .reason "$OUT") — until ${until:-soon}"
       secs=15
       [ -n "$until" ] && secs=$(( $(date -d "$until" +%s) - $(date +%s) ))
       sleep $(( secs > 0 ? secs : 15 ))

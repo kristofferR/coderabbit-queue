@@ -201,7 +201,7 @@ func run(ctx context.Context, args []string) int {
 	case "decline":
 		threads, reason, resolve, ok := parseDeclineArgs(args[1:])
 		if !ok || len(threads) == 0 || strings.TrimSpace(reason) == "" {
-			fatal(errors.New(`usage: crq decline <thread-id> [<thread-id>...] --reason "<why>" [--resolve]`))
+			fatal(errors.New(`usage: crq decline <thread-id> [<thread-id>...] --reason "<why>" [--keep-open]`))
 			return 1
 		}
 		result, err := service.DeclineThreads(ctx, threads, reason, resolve)
@@ -475,14 +475,19 @@ Leave declined, stale, incorrect, or deferred findings unresolved.
 Thread IDs come from .findings[].thread_id in crq loop/feedback output.
 `)
 	case "decline":
-		fmt.Print(`crq decline <thread-id> [<thread-id>...] --reason "<why>" [--resolve]
+		fmt.Print(`crq decline <thread-id> [<thread-id>...] --reason "<why>" [--keep-open]
 
 Record on the PR why a finding is being declined: posts the reason as a reply on
 each review thread. Use this instead of silently leaving a finding unaddressed, so
 the next reviewer (and CodeRabbit) can see the decision.
 
-By default the thread stays unresolved (an on-the-record disagreement). Pass
---resolve to also close it ("won't fix"). Thread IDs come from .findings[].thread_id.
+Declining RESOLVES the thread, because crq reads GitHub's resolution state: a
+thread left open keeps its finding actionable, so crq next would repeat "fix"
+forever and never reach push or done. The disagreement is not lost — if the bot
+replies contesting the decline, crq re-surfaces that reply as its own finding.
+
+Pass --keep-open to leave it unresolved anyway (an on-the-record disagreement you
+intend to keep working). Thread IDs come from .findings[].thread_id.
 `)
 	case "autoreview", "auto":
 		fmt.Print(`crq autoreview [--once] [--no-incremental]
@@ -670,6 +675,13 @@ func parseDeclineArgs(args []string) (threads []string, reason string, resolve, 
 // An unrecognized flag is an error rather than a positional: a typo like
 // `--resove` must fail loudly, not silently become a thread ID.
 func parseThreadCommand(args []string, allowReason bool) (threads []string, reason string, resolve, ok bool) {
+	// Declining resolves the thread unless the caller asks to keep it open.
+	// Leaving it open by default made `crq next` repeat `fix` forever: crq keys
+	// off GitHub's resolution state, so a documented decline cleared nothing and
+	// the loop could never reach push or done. A bot that disagrees still gets
+	// heard — a contested reply is re-surfaced as its own finding.
+	resolve = allowReason
+	var keepOpen bool
 	var positional []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -687,12 +699,19 @@ func parseThreadCommand(args []string, allowReason bool) (threads []string, reas
 			reason = args[i+1]
 			i++
 		case allowReason && arg == "--resolve":
+			// Kept as an accepted no-op: resolving is now the default, and
+			// failing on a flag that used to be required would break callers.
 			resolve = true
+		case allowReason && arg == "--keep-open":
+			keepOpen = true
 		case strings.HasPrefix(arg, "-"):
 			return nil, "", false, false
 		default:
 			positional = append(positional, arg)
 		}
+	}
+	if keepOpen {
+		resolve = false
 	}
 	return append(threads, dropLegacyTarget(positional)...), reason, resolve, true
 }
