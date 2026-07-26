@@ -242,8 +242,6 @@ func (s *Service) beatDispatch(ctx context.Context, report NextReport, token str
 	return cancel
 }
 
-func (s *Service) workspace() Workspace { return Workspace{Root: s.cfg.WorkspaceRoot} }
-
 func openPullQuery() url.Values {
 	q := url.Values{}
 	q.Set("state", "open")

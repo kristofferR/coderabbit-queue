@@ -50,12 +50,14 @@ type Config struct {
 	Reviewers []Reviewer
 	// WatchInterval paces `crq watch`; DispatchCommand is the fix session it
 	// runs with --dispatch, argv-style; DispatchMaxAttempts bounds dispatches per
-	// head so a fix that keeps not working stops. WorkspaceRoot holds crq's own
-	// mirrors and worktrees.
+	// head so a fix that keeps not working stops.
 	WatchInterval       time.Duration
 	DispatchCommand     []string
 	DispatchMaxAttempts int
-	WorkspaceRoot       string
+	// WorkspaceRoot holds crq's own mirrors and worktrees. Read here rather than
+	// from the process environment, so a value in ~/.config/crq/env — the
+	// documented place for crq settings — is actually used.
+	WorkspaceRoot string
 	// WorkDir is the checkout the local-work probe inspects. Empty means the
 	// process's own directory, which is what an agent running crq from its
 	// working copy means. Set programmatically by a caller working in a

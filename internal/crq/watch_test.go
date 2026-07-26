@@ -88,10 +88,14 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	if round.Dispatch == nil || round.Dispatch.Attempts != 1 {
 		t.Errorf("attempts = %#v, want 1 recorded", round.Dispatch)
 	}
-	// And the worktree is cleaned up rather than left to accumulate.
-	if entries, err := os.ReadDir(filepath.Join(cfg.WorkspaceRoot, "work")); err == nil && len(entries) != 0 {
-		t.Errorf("worktrees left behind: %v", entries)
-	}
+	// And the worktree is cleaned up rather than left to accumulate. Empty
+	// parent directories are fine; a checkout still holding a repository is not.
+	_ = filepath.WalkDir(filepath.Join(cfg.WorkspaceRoot, "work"), func(path string, d os.DirEntry, err error) error {
+		if err == nil && d.Name() == ".git" {
+			t.Errorf("a worktree was left behind at %s", filepath.Dir(path))
+		}
+		return nil
+	})
 }
 
 // Watching is an observation; dispatching writes code. Asking for the second
