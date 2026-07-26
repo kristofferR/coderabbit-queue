@@ -43,7 +43,11 @@ type Config struct {
 	// CoBots are the enabled co-reviewer bots (CRQ_COBOTS + per-bot
 	// CRQ_COBOT_<NAME>_* keys). An entry exists for every wanted or required
 	// co-reviewer; required ones are already folded into RequiredBots.
-	CoBots            []CoBotConfig
+	CoBots []CoBotConfig
+	// Reviewers is the single description of who reviews and what they cost.
+	// Bot / RequiredBots / FeedbackBots / CoBots above are DERIVED from it and
+	// kept only so existing consumers keep compiling; new code should read this.
+	Reviewers         []Reviewer
 	RateLimitCommand  string
 	RateLimitMarker   string
 	CalibrationMarker string
@@ -123,7 +127,9 @@ func LoadConfig() (Config, error) {
 	for _, cb := range coBots {
 		coLogins = append(coLogins, cb.Login)
 	}
+	reviewers := buildReviewers(bot, requiredBots, coBots)
 	cfg := Config{
+		Reviewers:           reviewers,
 		GateRepo:            env["CRQ_REPO"],
 		DashboardIssue:      intEnv(env, "CRQ_ISSUE", 0),
 		CalibrationPR:       intEnv(env, "CRQ_CAL_PR", 0),
@@ -164,6 +170,14 @@ func LoadConfig() (Config, error) {
 	}
 	if len(cfg.Scope) == 0 && cfg.GateRepo != "" {
 		cfg.Scope = []string{ownerOf(cfg.GateRepo)}
+	}
+	// The legacy lists are now VIEWS of cfg.Reviewers rather than parallel
+	// parses, so they cannot answer differently from it. An explicit
+	// CRQ_FEEDBACK_BOTS still wins: it is the one list an operator may widen
+	// beyond who reviews (to surface a bot's findings without waiting for it).
+	cfg.RequiredBots = cfg.reviewerLogins(func(r Reviewer) bool { return r.Required })
+	if _, explicit := env["CRQ_FEEDBACK_BOTS"]; !explicit {
+		cfg.FeedbackBots = cfg.reviewerLogins(func(Reviewer) bool { return true })
 	}
 	return cfg, nil
 }
