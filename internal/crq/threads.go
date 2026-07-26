@@ -51,13 +51,14 @@ func (s *Service) OpenThreads(ctx context.Context, repo string, pr int) ([]OpenT
 			// Only when the author is actually a reviewer bot. The command
 			// promises every unresolved thread, humans included, and labelling
 			// "alice" as a bot makes the output plainly wrong.
-			if login := first.Author.Login; isReviewerBot(s.cfg, login) {
-				open.Bot = dialect.NormalizeBotName(login)
+			isBot := isReviewerBot(s.cfg, first.Author.Login)
+			if isBot {
+				open.Bot = dialect.NormalizeBotName(first.Author.Login)
 			} else {
-				open.Author = login
+				open.Author = first.Author.Login
 			}
+			open.Title = dialect.ThreadTitle(isBot, first.Body)
 			open.URL = first.URL
-			open.Title = dialect.ThreadTitle(first.Author.Login, first.Body)
 			if open.Path == "" {
 				open.Path = first.Path
 			}
@@ -96,6 +97,10 @@ func isReviewerBot(cfg Config, login string) bool {
 			return true
 		}
 	}
-	_, known := dialect.CoReviewerByName(login)
-	return known
+	// By login. CoReviewerByName also matches the config NAME, so a human whose
+	// GitHub handle is "codex" or "bugbot" would be serialized as that bot.
+	if co, ok := dialect.CoReviewerByName(login); ok {
+		return dialect.NormalizeBotName(co.Login) == key
+	}
+	return false
 }

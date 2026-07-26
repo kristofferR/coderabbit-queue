@@ -5,14 +5,16 @@ import (
 	"strings"
 )
 
-// markup matches the wrappers a bot puts AROUND its title: badge images, HTML
-// tags, and emphasis runs that delimit a span. Left in, a listing reads as
-// `![P2 Badge](https://img.shields.io/...)` instead of what the finding says.
+// markup matches the wrappers a bot puts AROUND its title: badge images, the
+// specific HTML tags the bots use, and emphasis runs that delimit a span.
 //
-// Emphasis is matched only where it delimits — at a boundary — so a literal
-// underscore inside a word survives. Stripping every `_` turned "Handle user_id"
-// into "Handle user id", which is a different identifier.
-var markup = regexp.MustCompile(`!\[[^\]]*\]\([^)]*\)|<[^>]+>|(^|\s)[*_` + "`" + `#]+|[*_` + "`" + `#]+(\s|$)`)
+// Both halves are deliberately narrow. A generic <[^>]+> would eat `Map<string,
+// User>` from a title, and stripping every # would turn "#123" into "123", so
+// only known tags and boundary emphasis go. Heading markers are handled by
+// headingOf, which is where they mean something.
+var markup = regexp.MustCompile(`!\[[^\]]*\]\([^)]*\)` +
+	`|</?(?i:sub|sup|details|summary|b|i|em|strong|br|img|div|span|p|a|code)(?:\s[^>]*)?/?>` +
+	"|(^|\\s)[*_`]+|[*_`]+(\\s|$)")
 
 // rubric matches CodeRabbit's fixed severity header — "🎯 Functional
 // Correctness | 🟡 Minor | ⚡ Quick win" — which is the same on every finding
@@ -21,10 +23,16 @@ var markup = regexp.MustCompile(`!\[[^\]]*\]\([^)]*\)|<[^>]+>|(^|\s)[*_` + "`" +
 // become "B configuration".
 var rubric = regexp.MustCompile(`^[^|]*\b(Correctness|Maintainability|Security|Performance|Reliability|Quality)\b[^|]*\|[^|]*\|[^|]*\|?\s*`)
 
-// severityOnly matches a title that is just a severity label — "High Severity",
-// "🟠 High", "Critical" — which is what the first bold span is for Bugbot and
-// Macroscope. It carries no information a severity field does not already hold.
-var severityOnly = regexp.MustCompile(`(?i)^\W*(critical|high|medium|low|major|minor|blocker|trivial|info)(\s+severity)?\W*$`)
+// severityWord is the vocabulary Bugbot and Macroscope lead with.
+const severityWord = `critical|high|medium|low|major|minor|blocker|trivial|info`
+
+// severityOnly matches a title that is nothing but a severity label — "High
+// Severity", "Critical" — which carries nothing a severity field does not.
+var severityOnly = regexp.MustCompile(`(?i)^\W*(` + severityWord + `)(\s+severity)?\W*$`)
+
+// severityPrefix matches a leading severity label, which Macroscope puts in
+// front of the path on its first line.
+var severityPrefix = regexp.MustCompile(`(?i)^\W*(` + severityWord + `)(\s+severity)?\b[\s:—-]*`)
 
 // ThreadTitle reduces a review comment to one readable line, per bot.
 //
@@ -35,27 +43,76 @@ var severityOnly = regexp.MustCompile(`(?i)^\W*(critical|high|medium|low|major|m
 // Severity" for the others.
 //
 // It lives here because this is where bot wording lives; a listing in the
-// orchestration layer must not have to know how a bot writes a heading.
-func ThreadTitle(author, body string) string {
-	candidates := []string{TitleFromDetailedBlock(body)}
-	if co, ok := CoReviewerByName(author); ok && co.Name != "" {
-		// A heading, where the bots that lead with a severity label put the
-		// actual summary.
-		candidates = append([]string{headingOf(body)}, candidates...)
+// orchestration layer must not have to know how a bot writes a heading. Whether
+// the author IS a reviewer is the caller's question, not this package's: it
+// depends on the configured primary and on matching logins rather than config
+// names, and a person whose handle happens to be "codex" is not the bot.
+func ThreadTitle(bot bool, body string) string {
+	var candidates []string
+	if bot {
+		// A heading first, for the bots that lead with a severity label and put
+		// the summary in one; then the bold span, then the first prose line,
+		// which is where Macroscope's summary lives.
+		candidates = append(candidates, headingOf(body), TitleFromDetailedBlock(body), firstProse(body))
+	} else {
+		// A person's first line is what they meant to say. Preferring a bold
+		// span picks up a label they wrote later — "Suggestion:" instead of the
+		// question they asked.
+		candidates = append(candidates, firstProse(body), TitleOf(body))
 	}
-	candidates = append(candidates, TitleOf(body))
 
 	for _, candidate := range candidates {
-		title := cleanTitle(candidate)
-		if title != "" && !severityOnly.MatchString(title) {
+		if title := usableTitle(candidate); title != "" {
 			return title
 		}
 	}
-	// Everything looked like a severity label; the least bad answer is the
-	// first non-empty one rather than nothing at all.
+	// Everything reduced to a severity label or a path; the least bad answer is
+	// the first non-empty candidate rather than nothing at all.
 	for _, candidate := range candidates {
 		if title := cleanTitle(candidate); title != "" {
 			return title
+		}
+	}
+	return ""
+}
+
+// usableTitle is a cleaned candidate that actually says something: not a bare
+// severity label, and not just the file it points at.
+func usableTitle(candidate string) string {
+	title := cleanTitle(candidate)
+	if title == "" || severityOnly.MatchString(title) {
+		return ""
+	}
+	// A line that is only the rubric describes every finding equally, so it
+	// describes none of them.
+	if rubric.MatchString(candidate) && strings.TrimSpace(rubric.ReplaceAllString(cleanTitle(candidate), "")) == "" {
+		return ""
+	}
+	if rest := strings.TrimSpace(severityPrefix.ReplaceAllString(title, "")); rest == "" || pathLike(rest) {
+		return ""
+	}
+	return title
+}
+
+// pathLike reports whether text is a bare file reference, which is a location
+// rather than a description of what is wrong.
+func pathLike(text string) bool {
+	if strings.ContainsAny(text, " \t") {
+		return false
+	}
+	return strings.ContainsAny(text, "/.:")
+}
+
+// firstProse returns the first line that reads like a sentence rather than a
+// severity label or a path. Macroscope's summary is its third line.
+func firstProse(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "<") || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if usableTitle(line) != "" {
+			return line
 		}
 	}
 	return ""
@@ -72,6 +129,9 @@ func headingOf(body string) string {
 }
 
 func cleanTitle(title string) string {
+	// TitleOf caps at 180 BYTES, which can leave a half-written rune; JSON then
+	// renders it as a replacement character.
+	title = strings.ToValidUTF8(title, "")
 	title = strings.Join(strings.Fields(markup.ReplaceAllString(title, " ")), " ")
 	if trimmed := strings.TrimSpace(rubric.ReplaceAllString(title, "")); trimmed != "" {
 		title = trimmed

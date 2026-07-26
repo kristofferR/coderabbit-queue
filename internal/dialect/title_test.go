@@ -1,6 +1,8 @@
 package dialect
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -40,20 +42,20 @@ func TestThreadTitleReadsAsText(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := ThreadTitle("coderabbitai[bot]", tc.body); got != tc.want {
+			if got := ThreadTitle(true, tc.body); got != tc.want {
 				t.Errorf("threadTitle = %q, want %q", got, tc.want)
 			}
 		})
 	}
 
-	long := ThreadTitle("coderabbitai[bot]", strings.Repeat("x", 400))
+	long := ThreadTitle(true, strings.Repeat("x", 400))
 	if len([]rune(long)) > 120 {
 		t.Errorf("title is %d chars; a listing line must stay short", len([]rune(long)))
 	}
 
 	// Truncation cuts runes, not bytes: splitting a multi-byte character leaves
 	// invalid UTF-8, which JSON renders as a replacement character.
-	wide := ThreadTitle("coderabbitai[bot]", strings.Repeat("é", 400))
+	wide := ThreadTitle(true, strings.Repeat("é", 400))
 	if !utf8.ValidString(wide) {
 		t.Errorf("truncated title is not valid UTF-8: %q", wide)
 	}
@@ -83,9 +85,57 @@ func TestThreadTitleSkipsASeverityLabel(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := ThreadTitle(tc.author, tc.body); got != tc.want {
+			if got := ThreadTitle(true, tc.body); got != tc.want {
 				t.Errorf("ThreadTitle = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// Against the real captured comments, which is what the corpus is for. Each of
+// these formats produced a title that said nothing: "High Severity" for Bugbot,
+// the severity-and-path line for Macroscope.
+func TestThreadTitleAgainstTheCorpus(t *testing.T) {
+	for _, tc := range []struct{ file, want string }{
+		{"bugbot/inline-finding-high.md", "Queue cap desyncs stores"},
+		{"bugbot/inline-finding-medium.md", "Composer acks unrelated queue changes"},
+		{"macroscope/inline-finding-high.md", "`writeScreenshotFile` writes directly to `absolutePath`"},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			body, err := os.ReadFile(filepath.Join("testdata", tc.file))
+			if err != nil {
+				t.Skipf("corpus file missing: %v", err)
+			}
+			got := ThreadTitle(true, string(body))
+			if !strings.HasPrefix(got, strings.TrimPrefix(tc.want, "`")) &&
+				!strings.Contains(got, strings.Trim(strings.SplitN(tc.want, " ", 2)[0], "`")) {
+				t.Errorf("ThreadTitle = %q, want it to start from %q", got, tc.want)
+			}
+			if severityOnly.MatchString(got) {
+				t.Errorf("ThreadTitle = %q — a severity label is not a summary", got)
+			}
+		})
+	}
+}
+
+// Titles carry code and issue references. A generic tag or heading strip eats
+// them: `Map<string, User>` becomes `Map`, and `#123` becomes `123`.
+func TestThreadTitleKeepsCodeAndReferences(t *testing.T) {
+	for _, tc := range []struct{ body, want string }{
+		{"**Handle Map<string, User> correctly**\n\ndetail", "Handle Map<string, User> correctly"},
+		{"**Fix the leak from #123**\n\ndetail", "Fix the leak from #123"},
+	} {
+		if got := ThreadTitle(true, tc.body); got != tc.want {
+			t.Errorf("ThreadTitle = %q, want %q", got, tc.want)
+		}
+	}
+}
+
+// A person's first line is what they meant to say; a label they bolded later is
+// not a better summary of it.
+func TestThreadTitlePrefersAHumansFirstLine(t *testing.T) {
+	body := "Could we simplify this?\n\n**Suggestion:** use a map.\n"
+	if got := ThreadTitle(false, body); got != "Could we simplify this?" {
+		t.Errorf("ThreadTitle = %q, want the question they asked", got)
 	}
 }
