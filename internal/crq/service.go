@@ -221,10 +221,28 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		return PumpResult{}, err
 	}
 
-	// 1. The round holding the fire slot: progress it and return, mirroring v2's
-	//    "handle in-flight first" so a single pump never both progresses and fires.
+	// 1. The round holding the fire slot: progress it first, mirroring v2's
+	//    "handle in-flight first" so a single pump never both progresses and
+	//    fires. It does not end the pump, though. The slot serializes the METERED
+	//    fire and nothing else, so rounds whose next step spends no CodeRabbit
+	//    quota still get their turn below.
 	if slot := st.SlotRound(); slot != nil {
-		return s.progressSlotRound(ctx, *slot)
+		res, err := s.progressSlotRound(ctx, *slot)
+		if err != nil {
+			return res, err
+		}
+		// Reload: progressing the slot round may have released it, and the sweep
+		// must not decide against a snapshot that says otherwise.
+		st, _, err = s.store.Load(ctx)
+		if err != nil {
+			return PumpResult{}, err
+		}
+		if free, handled, err := s.sweepQuotaFree(ctx, st, s.clock(), slot.Repo, slot.PR); err != nil {
+			return PumpResult{}, err
+		} else if handled {
+			return free, nil
+		}
+		return res, nil
 	}
 
 	// 2. Reviewing rounds no longer hold the slot; sweep the oldest one toward
@@ -286,56 +304,76 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if err != nil {
 		return result, err
 	}
-	// A blocked or slot-busy front of the queue must not starve later PRs of
-	// resolutions that spend NO CodeRabbit quota — a co-reviewer defer, or a
-	// summary-only round whose review is never coming from CodeRabbit at all.
-	// Scan a bounded number of following queued rounds and apply any quota-free
-	// verdict (each costs one observation; ETag caching keeps it cheap).
-	//
-	// The scan is deliberately verdict-driven rather than flag-driven:
-	// `decideCoDeferred` already honours RateLimitCoDegrade internally, so a
-	// disabled degrade simply never yields FireCoDeferred, while a summary-only
-	// round must be rescued regardless of that flag.
+	// A blocked front of the queue must not starve later PRs of resolutions that
+	// spend NO CodeRabbit quota — a co-reviewer defer, or a summary-only round
+	// whose review is never coming from CodeRabbit at all.
 	accountBlocked := global.BlockedUntil != nil && global.BlockedUntil.After(now)
-	if decision.Verdict == engine.FireNo && (accountBlocked || !global.SlotFree) {
-		// Rotate the window start across pumps. A fixed start meant that when the
-		// three rounds behind the FIFO head all needed CodeRabbit, every pump
-		// observed those same three and stopped — a fourth, quota-free round was
-		// never even looked at until the unrelated block cleared.
-		queued := st.QueuedRounds(now)
-		scanned := 0
-		policy := s.policy()
-		for i := range queued {
-			r := queued[(i+s.scanOffset)%len(queued)]
-			if r.Repo == next.Repo && r.PR == next.PR {
-				continue
-			}
-			if scanned >= 3 {
-				break
-			}
-			// No cheap pre-filter here. "Every trigger already posted" is not
-			// proof that nothing is left to do: a primary-unavailable round in
-			// that state still needs its quota-free FireDedupe/FireCoReviewWait,
-			// and a co-review answer to an earlier deferred command needs
-			// collecting. Skipping those left them behind the account block for
-			// hours. The scan budget below bounds the cost instead.
-			scanned++
-			round := r
-			robs, oerr := s.observe(ctx, round.Repo, round.PR, &round, now)
-			if oerr != nil {
-				continue
-			}
-			d := engine.DecideFire(s.global(st, now), round, robs.eng, now, policy)
-			if !quotaFreeVerdict(d.Verdict) {
-				continue
-			}
-			return s.applyFire(ctx, round, robs.eng, d, now)
-		}
-		if len(queued) > 0 {
-			s.scanOffset = (s.scanOffset + scanned + 1) % len(queued)
+	if decision.Verdict == engine.FireNo && accountBlocked {
+		if free, handled, err := s.sweepQuotaFree(ctx, st, now, next.Repo, next.PR); err != nil {
+			return PumpResult{}, err
+		} else if handled {
+			return free, nil
 		}
 	}
 	return result, nil
+}
+
+// sweepQuotaFree gives the queued rounds that spend no CodeRabbit quota their
+// turn when the metered front cannot move — because another PR holds the fire
+// slot, or the account window is shut.
+//
+// Neither of those has any authority here. The slot exists to serialize one
+// account-metered review, and the window bounds that same allowance; a
+// co-reviewer defer or a summary-only round asks for neither. Leaving them in
+// the FIFO is what stranded PRs behind an unrelated block for hours.
+//
+// skipRepo/skipPR is the round the caller already decided about, so one pump
+// never applies two verdicts to it.
+//
+// It observes at most scanBudget rounds per pump and rotates where it starts.
+// A fixed start meant that when the rounds behind the head all needed
+// CodeRabbit, every pump observed those same few and stopped — a quota-free
+// round further back was never even looked at until the unrelated block cleared.
+func (s *Service) sweepQuotaFree(ctx context.Context, st State, now time.Time, skipRepo string, skipPR int) (PumpResult, bool, error) {
+	const scanBudget = 3
+	queued := st.QueuedRounds(now)
+	if len(queued) == 0 {
+		return PumpResult{}, false, nil
+	}
+	policy := s.policy()
+	global := s.global(st, now)
+	scanned := 0
+	defer func() { s.scanOffset = (s.scanOffset + scanned + 1) % len(queued) }()
+	for i := range queued {
+		round := queued[(i+s.scanOffset)%len(queued)]
+		if round.Repo == skipRepo && round.PR == skipPR {
+			continue
+		}
+		if scanned >= scanBudget {
+			break
+		}
+		// No cheap pre-filter here. "Every trigger already posted" is not proof
+		// that nothing is left to do: a primary-unavailable round in that state
+		// still needs its quota-free FireDedupe/FireCoReviewWait, and a co-review
+		// answer to an earlier deferred command needs collecting. Skipping those
+		// left them behind the account block for hours. The budget above bounds
+		// the cost instead.
+		scanned++
+		obs, err := s.observe(ctx, round.Repo, round.PR, &round, now)
+		if err != nil {
+			continue
+		}
+		d := engine.DecideFire(global, round, obs.eng, now, policy)
+		if !quotaFreeVerdict(d.Verdict) {
+			continue
+		}
+		res, err := s.applyFire(ctx, round, obs.eng, d, now)
+		if err != nil {
+			return PumpResult{}, false, err
+		}
+		return res, true, nil
+	}
+	return PumpResult{}, false, nil
 }
 
 // advanceQuotaFree resolves ONE PR's round directly, bypassing the account-wide
