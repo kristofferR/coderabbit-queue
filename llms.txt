@@ -186,6 +186,13 @@ reappearing until its thread is resolved there):
 crq resolve THREAD_ID [THREAD_ID...]
 ```
 
+After a push, threads from the previous head become outdated and drop out of `findings`, so their
+IDs are no longer available there. List every unresolved thread, outdated included:
+
+```bash
+crq threads REPO PR
+```
+
 Decline a finding you are not addressing. This posts the reason AND resolves the thread — crq reads
 GitHub resolution state, so one left open keeps returning `fix`. A contested bot reply is
 re-surfaced as its own finding, so nothing is buried. Use `--keep-open` to leave it open on purpose:

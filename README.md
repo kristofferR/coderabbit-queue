@@ -383,6 +383,7 @@ least 10 minutes of silence.
 crq next <repo> <pr>      # ⭐ the agent loop: emit the single next action as JSON (--wait blocks)
 crq loop <repo> <pr>      # blocking one-shot round: fire + wait + emit JSON findings
 crq feedback <repo> <pr>  # current normalized findings as JSON, WITHOUT triggering a review
+crq threads <repo> <pr>                                     # every unresolved thread, outdated included
 crq resolve <thread-id> [<thread-id>...]                    # resolve addressed review threads
 crq decline <thread-id> [...] --reason "<why>" [--resolve]  # record why a finding is declined
 crq autoreview            # ⭐ review ALL open PRs automatically, rate-coordinated
