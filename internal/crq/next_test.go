@@ -408,6 +408,13 @@ func TestDismissEndsTheUnresolvableFindingDeadlock(t *testing.T) {
 		t.Error("dismissing an unknown finding id must be refused")
 	}
 
+	// And a round that has moved on is refused rather than superseded back: the
+	// head advanced after the findings were read, so this decision is about a
+	// commit nobody is looking at, and superseding would archive the live round.
+	if _, _, err := f.svc.recordDismissal(f.ctx, repo, pr, "999999999", []string{id}, "stale", true); err == nil {
+		t.Error("recording a dismissal against a stale head must be refused, not superseded")
+	}
+
 	// It is scoped to this head. A push supersedes the round, and the next
 	// reviewer reporting the same thing must be heard again.
 	f.clk.advance(time.Minute)

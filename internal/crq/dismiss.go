@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
 )
 
 // DismissResult reports what a dismissal did, per finding ID.
@@ -55,10 +56,9 @@ func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string
 		return DismissResult{}, errors.New("no finding id given")
 	}
 
-	// Read the findings BEFORE writing anything. Two reasons: a dismissal is only
-	// meaningful against a finding that is actually there, and enqueueing first
-	// would leave a fire-eligible round behind whenever validation then failed —
-	// which the autoreview daemon could claim and spend a review on.
+	// Read the findings BEFORE writing anything. A dismissal is only meaningful
+	// against a finding that is actually there, and writing first would leave a
+	// round behind whenever validation then failed.
 	feedback, err := s.Feedback(ctx, repo, pr)
 	if err != nil {
 		return DismissResult{}, err
@@ -71,50 +71,72 @@ func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string
 		current[finding.ID] = finding
 	}
 
+	wanted := map[string]bool{}
+	for _, id := range clean {
+		finding, ok := current[id]
+		if !ok {
+			return DismissResult{}, fmt.Errorf("%s is not a finding on %s#%d at %s; re-read them with crq next", id, repo, pr, feedback.Head)
+		}
+		if err := dismissible(finding); err != nil {
+			return DismissResult{}, err
+		}
+		// A finding ID is a hash of its text, not of its commit. Dismissing one
+		// carried from an older commit would record it against the current head,
+		// and the identical finding re-reported here would then be filtered
+		// though it was never judged for this head.
+		if finding.Commit != "" && feedback.Head != "" && !dialect.SHAPrefixMatch(finding.Commit, feedback.Head) {
+			return DismissResult{}, fmt.Errorf("%s belongs to commit %s, not the current head %s; re-read the findings",
+				id, shortSHA(finding.Commit), feedback.Head)
+		}
+		wanted[id] = true
+	}
+
+	// Whether this call drains the head decides if a round may be CREATED here.
+	// Creating one while other findings are still open would put a fire-eligible
+	// round in the queue that DecideFire cannot hold back — it sees no findings —
+	// so a pump could spend the primary's quota on code the caller is still
+	// expected to fix.
+	remaining := 0
+	for _, finding := range engine.BlockingFindings(feedback.Findings, feedback.Head) {
+		if !wanted[finding.ID] {
+			remaining++
+		}
+	}
+
 	out := DismissResult{Repo: repo, PR: pr, Head: feedback.Head, Reason: reason, Dismissed: []string{}}
-	state, err := s.store.Update(ctx, func(st *State) error {
-		now := s.clock()
-		round := st.Round(repo, pr)
-		var err error
-		switch {
-		case round == nil:
-			round, err = st.NewRound(repo, pr, feedback.Head, now)
-		case round.Head != feedback.Head:
-			round, err = st.Supersede(repo, pr, feedback.Head, now)
-		}
-		if err != nil {
-			return err
-		}
-		out.Dismissed = out.Dismissed[:0]
-		out.Already = nil
-		for _, id := range clean {
-			if round.IsDismissed(id) {
-				out.Already = append(out.Already, id)
-				continue
-			}
-			finding, ok := current[id]
-			if !ok {
-				return fmt.Errorf("%s is not a finding on %s#%d at %s; re-read them with crq next", id, repo, pr, feedback.Head)
-			}
-			// A threaded finding has resolve and decline, and both put the
-			// decision on the PR where the bot can answer it. Dismissing one
-			// would converge the round with the thread still open, silently
-			// skipping the rebuttal flow that exists for exactly this.
-			if finding.ThreadID != "" {
-				return fmt.Errorf("%s has review thread %s: resolve it or decline it, so the decision is on the PR", id, finding.ThreadID)
-			}
-			round.Dismiss(id, reason)
-			out.Dismissed = append(out.Dismissed, id)
-		}
-		st.PutRound(*round)
-		return nil
-	})
+	out.Dismissed, out.Already, err = s.recordDismissal(ctx, repo, pr, feedback.Head, clean, reason, remaining == 0)
 	if err != nil {
 		return DismissResult{}, err
 	}
-	s.sync(ctx, state)
 	if s.log != nil && len(out.Dismissed) > 0 {
 		s.log.Printf("%s#%d dismissed %d finding(s) at %s: %s", repo, pr, len(out.Dismissed), out.Head, reason)
 	}
 	return out, nil
+}
+
+// dismissibleSources are the finding kinds that intrinsically have no review
+// thread. Everything else either has one, or only LOOKS threadless: the REST
+// fallback Feedback uses when the GraphQL thread query fails emits inline
+// comments as "review_comment" with no thread ID, because REST does not return
+// one — dismissing those would converge a round over threads that are open.
+var dismissibleSources = map[string]bool{
+	"review_body":    true,
+	"review_prompt":  true,
+	"review_skipped": true,
+	"issue_comment":  true,
+}
+
+// dismissible reports why a finding may not be dismissed, or nil.
+func dismissible(finding dialect.Finding) error {
+	// A threaded finding has resolve and decline, and both put the decision on
+	// the PR where the bot can answer it. Dismissing one would converge the
+	// round with the thread still open, skipping the rebuttal flow.
+	if finding.ThreadID != "" {
+		return fmt.Errorf("%s has review thread %s: resolve it or decline it, so the decision is on the PR", finding.ID, finding.ThreadID)
+	}
+	if !dismissibleSources[finding.Source] {
+		return fmt.Errorf("%s came from %s, which can carry a review thread crq could not read; resolve or decline it instead",
+			finding.ID, finding.Source)
+	}
+	return nil
 }

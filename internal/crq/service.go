@@ -375,6 +375,56 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 	return res, true, nil
 }
 
+// recordDismissal is the effects executor for `crq dismiss`: the CAS write that
+// records which findings a round has accounted for. Dismiss decides WHETHER a
+// dismissal is legitimate; this performs it, so the write surface stays in one
+// file with every other one.
+//
+// allowCreate says whether a round may be created for this head. It is false
+// when other blocking findings remain, because a fresh round is fire-eligible
+// and DecideFire — which never sees findings — could not hold it back.
+//
+// A round tracking a DIFFERENT head is refused rather than superseded. The head
+// moved after Dismiss read the findings, so this decision is about a commit
+// nobody is looking at any more; superseding would archive the newer round and
+// point the queue back at the stale head.
+func (s *Service) recordDismissal(ctx context.Context, repo string, pr int, head string, ids []string, reason string, allowCreate bool) (dismissed, already []string, err error) {
+	if s.cfg.DryRun {
+		return []string{}, nil, nil
+	}
+	state, err := s.store.Update(ctx, func(st *State) error {
+		round := st.Round(repo, pr)
+		switch {
+		case round == nil && !allowCreate:
+			return fmt.Errorf("%s#%d has other unaddressed findings at %s: dismiss or resolve them in the same pass, so no round is queued while work is open", repo, pr, head)
+		case round == nil:
+			var err error
+			if round, err = st.NewRound(repo, pr, head, s.clock()); err != nil {
+				return err
+			}
+		case round.Head != head:
+			return fmt.Errorf("%s#%d moved to %s while dismissing; re-read the findings", repo, pr, round.Head)
+		}
+		// Reset on every CAS attempt: a retry replays this closure, and appending
+		// to the outer slices would report each dismissal once per attempt.
+		dismissed, already = []string{}, nil
+		for _, id := range ids {
+			if round.Dismiss(id, reason) {
+				dismissed = append(dismissed, id)
+			} else {
+				already = append(already, id)
+			}
+		}
+		st.PutRound(*round)
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	s.sync(ctx, state)
+	return dismissed, already, nil
+}
+
 // applyAccountBlock records an observed account-quota block, whatever observed
 // it. It is the single writer for that transition: the decision of whether the
 // block counts is engine.AcceptAccountBlock's, and executing it belongs here with
