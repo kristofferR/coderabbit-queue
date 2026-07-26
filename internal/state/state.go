@@ -79,6 +79,12 @@ type Round struct {
 	// CodeRabbit requests must skip these.
 	CoOnly bool `json:"co_only,omitempty"`
 
+	// Dispatch is the claim held by a watcher running a fix for this round. It
+	// exists so two watchers cannot both spawn a session for the same PR, and so
+	// a session that dies does not hold the round forever — the claim is
+	// heartbeated, and one older than DispatchTTL is free to take over.
+	Dispatch *DispatchClaim `json:"dispatch,omitempty"`
+
 	// RetryAt is the earliest time this head may fire again (awaiting_retry).
 	RetryAt *time.Time `json:"retry_at,omitempty"`
 
@@ -603,6 +609,71 @@ func (s *State) QueuedRounds(now time.Time) []Round {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
 	return out
+}
+
+// DispatchTTL is how long a dispatch claim survives without a heartbeat. A fix
+// session outlives any single poll, so the claim is refreshed while one runs;
+// this bounds how long a crashed watcher blocks the next attempt.
+const DispatchTTL = 10 * time.Minute
+
+// DispatchClaim records who is running a fix for a round, and how many attempts
+// this head has had.
+type DispatchClaim struct {
+	Host string `json:"host"`
+	// Token distinguishes two claims from the same host, so a restarted watcher
+	// cannot heartbeat or release the claim of the process it replaced.
+	Token     string    `json:"token"`
+	At        time.Time `json:"at"`
+	Heartbeat time.Time `json:"heartbeat"`
+	// Attempts counts dispatches for THIS head, so a fix that keeps failing
+	// stops instead of looping. It survives release; only a new head clears it,
+	// because a new head means the previous attempt achieved something.
+	Attempts int `json:"attempts,omitempty"`
+}
+
+// DispatchHeld reports whether a live claim exists.
+func (r *Round) DispatchHeld(now time.Time) bool {
+	return r.Dispatch != nil && !r.Dispatch.Heartbeat.IsZero() && now.UTC().Sub(r.Dispatch.Heartbeat) < DispatchTTL
+}
+
+// ClaimDispatch takes this round's dispatch claim, or reports why it cannot. A
+// claim past its TTL is taken over, keeping the attempt count: that session died,
+// but its attempt still happened.
+func (r *Round) ClaimDispatch(host, token string, now time.Time, maxAttempts int) (bool, string) {
+	now = now.UTC()
+	attempts := 0
+	if r.Dispatch != nil {
+		if r.DispatchHeld(now) {
+			return false, "another watcher is already fixing this round"
+		}
+		attempts = r.Dispatch.Attempts
+	}
+	if maxAttempts > 0 && attempts >= maxAttempts {
+		return false, fmt.Sprintf("%d dispatch attempts already made for this head", attempts)
+	}
+	r.Dispatch = &DispatchClaim{Host: host, Token: token, At: now, Heartbeat: now, Attempts: attempts + 1}
+	return true, ""
+}
+
+// HeartbeatDispatch refreshes a claim this token owns. False means the claim is
+// gone or belongs to somebody else, which is how a watcher learns it was taken
+// over and should stop.
+func (r *Round) HeartbeatDispatch(token string, now time.Time) bool {
+	if r.Dispatch == nil || r.Dispatch.Token != token {
+		return false
+	}
+	r.Dispatch.Heartbeat = now.UTC()
+	return true
+}
+
+// ReleaseDispatch drops a claim this token owns, keeping the attempt count.
+func (r *Round) ReleaseDispatch(token string) bool {
+	if r.Dispatch == nil || r.Dispatch.Token != token {
+		return false
+	}
+	r.Dispatch.Heartbeat = time.Time{}
+	r.Dispatch.Token = ""
+	return true
 }
 
 // Queue-entry wait reasons. A waiting round is held by exactly one of these

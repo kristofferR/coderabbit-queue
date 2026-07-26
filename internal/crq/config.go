@@ -48,6 +48,14 @@ type Config struct {
 	// Bot / RequiredBots / FeedbackBots / CoBots above are DERIVED from it and
 	// kept only so existing consumers keep compiling; new code should read this.
 	Reviewers []Reviewer
+	// WatchInterval paces `crq watch`; DispatchCommand is the fix session it
+	// runs with --dispatch, argv-style; DispatchMaxAttempts bounds dispatches per
+	// head so a fix that keeps not working stops. WorkspaceRoot holds crq's own
+	// mirrors and worktrees.
+	WatchInterval       time.Duration
+	DispatchCommand     []string
+	DispatchMaxAttempts int
+	WorkspaceRoot       string
 	// WorkDir is the checkout the local-work probe inspects. Empty means the
 	// process's own directory, which is what an agent running crq from its
 	// working copy means. Set programmatically by a caller working in a
@@ -177,6 +185,10 @@ func LoadConfig() (Config, error) {
 		AutoReviewMaxScan:   intEnv(env, "CRQ_AUTOREVIEW_MAX_SCAN", 400),
 		LeaderTTL:           durationEnv(env, "CRQ_LEADER_TTL", 3*time.Minute),
 		FiredMax:            intEnv(env, "CRQ_FIRED_MAX", 500),
+		WatchInterval:       durationEnv(env, "CRQ_WATCH_INTERVAL", 2*time.Minute),
+		DispatchCommand:     splitArgv(env["CRQ_DISPATCH_CMD"]),
+		DispatchMaxAttempts: intEnv(env, "CRQ_DISPATCH_MAX_ATTEMPTS", 3),
+		WorkspaceRoot:       env["CRQ_WORKSPACE"],
 		NoOpen:              env["CRQ_NO_OPEN"] != "",
 		DryRun:              env["CRQ_DRY_RUN"] == "1",
 		FeedbackWaitTimeout: durationEnv(env, "CRQ_FEEDBACK_WAIT_TIMEOUT", 20*time.Minute),
@@ -484,4 +496,15 @@ func authorSet(value string) map[string]bool {
 func ownerOf(repo string) string {
 	owner, _, _ := strings.Cut(repo, "/")
 	return owner
+}
+
+// splitArgv splits a configured command into argv on whitespace. It is
+// deliberately not a shell: a dispatch command runs directly, so nothing here
+// expands a variable, a glob, or a pipe that the operator did not write.
+func splitArgv(value string) []string {
+	fields := strings.Fields(value)
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
 }

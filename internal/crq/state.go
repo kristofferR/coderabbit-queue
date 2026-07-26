@@ -33,6 +33,9 @@ const (
 	PhaseAwaitingRetry = crqstate.PhaseAwaitingRetry
 	PhaseCompleted     = crqstate.PhaseCompleted
 	PhaseAbandoned     = crqstate.PhaseAbandoned
+
+	// DispatchTTL is how long a watcher's fix claim survives without a heartbeat.
+	DispatchTTL = crqstate.DispatchTTL
 )
 
 var (

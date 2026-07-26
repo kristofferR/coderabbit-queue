@@ -224,6 +224,44 @@ func run(ctx context.Context, args []string) int {
 		}
 		printJSON(result)
 		return 0
+	case "watch":
+		fs := flag.NewFlagSet("watch", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		dispatch := fs.Bool("dispatch", false, "start a fix session for a PR that needs one")
+		once := fs.Bool("once", false, "run one pass and exit")
+		interval := fs.Duration("interval", 0, "time between passes")
+		attempts := fs.Int("max-attempts", 0, "dispatches allowed per head")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		opts := crq.WatchOptions{
+			Dispatch: *dispatch, Once: *once,
+			Interval: *interval, MaxAttempts: *attempts,
+		}
+		// Everything after the flags is either repositories or, past a --, the
+		// fix session's argv.
+		rest := fs.Args()
+		for i, arg := range rest {
+			if arg == "--" {
+				opts.Command = rest[i+1:]
+				rest = rest[:i]
+				break
+			}
+		}
+		opts.Repos = rest
+		enc := json.NewEncoder(os.Stdout)
+		werr := service.Watch(ctx, opts, func(e crq.WatchEvent) {
+			_ = enc.Encode(e)
+		})
+		if werr != nil && !errors.Is(werr, context.Canceled) {
+			fatal(werr)
+			return 1
+		}
+		return 0
 	case "autoreview", "auto":
 		fs := flag.NewFlagSet("autoreview", flag.ContinueOnError)
 		fs.SetOutput(os.Stderr)
@@ -356,6 +394,9 @@ USAGE
   crq decline <thread-id> [...] --reason "<why>" [--keep-open]
                                    reply on a thread to record why a finding is declined
                                    (resolves it; --keep-open leaves it open)
+  crq watch [--dispatch] [--once] [<repo>...] [-- <fix command>]
+                                   drive open PRs through crq next; --dispatch starts a
+                                   session to fix the ones that need it
   crq autoreview [--once] [--no-incremental]
                                    keep open PRs reviewed, rate-coordinated
   crq preflight [--type all|committed|uncommitted] [--base <branch>]
@@ -509,6 +550,32 @@ replies contesting the decline, crq re-surfaces that reply as its own finding.
 
 Pass --keep-open to leave it unresolved anyway (an on-the-record disagreement you
 intend to keep working). Thread IDs come from .findings[].thread_id.
+`)
+	case "watch":
+		fmt.Print(`crq watch [--dispatch] [--once] [--interval <d>] [--max-attempts <n>] [<repo>...] [-- <cmd>...]
+
+Drive every open PR through the same crq next oracle an agent uses, and emit one
+JSON line per PR per pass. Without --dispatch that is all it does: watching is an
+observation.
+
+With --dispatch, a PR whose action is "fix" gets a session started for it, in a
+worktree crq checked out at that head, with:
+
+  CRQ_DISPATCH_REPO      owner/name
+  CRQ_DISPATCH_PR        the number
+  CRQ_DISPATCH_HEAD      the commit the findings are about
+  CRQ_DISPATCH_FINDINGS  path to the findings as JSON
+
+The command comes from CRQ_DISPATCH_CMD or from everything after --. It is run
+directly, not through a shell, so nothing expands that you did not write.
+
+crq still does not decide which findings are real — it starts the session and
+says which PR to look at; the session judges. Every dispatch is claimed under
+compare-and-swap, so two watchers cannot both work one PR, and bounded per head
+(CRQ_DISPATCH_MAX_ATTEMPTS, default 3) so a fix that keeps not working stops
+instead of spending a review round each time.
+
+Repositories default to CRQ_REPOS.
 `)
 	case "autoreview", "auto":
 		fmt.Print(`crq autoreview [--once] [--no-incremental]
