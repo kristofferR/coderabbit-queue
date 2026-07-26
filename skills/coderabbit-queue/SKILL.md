@@ -175,15 +175,18 @@ finding. Pass `--keep-open` to leave it unresolved deliberately.
 
 ```bash
 crq reviewers "$REPO"                                   # who runs here, and what each costs
-crq reviewers set "$REPO" --bots codex --required codex # only Codex here
+crq reviewers set "$REPO" --bots codex --required codex # Codex the only required co-reviewer
 crq reviewers clear "$REPO"                             # back to the fleet default
 ```
 
 Each reviewer reports its `budget`: `account` is serialized against the shared CodeRabbit allowance,
 `none` runs immediately and waits for nobody. That is the only property the queue cares about.
 
-The setting lives in the shared state ref, so the daemon and every agent read the same one. The
-primary reviewer is fleet-wide and cannot be set per repository. `--required` cannot be empty (a
+The setting lives in the shared state ref, so the daemon and every agent read the same one.
+
+The primary reviewer is fleet-wide: an override chooses the **co-reviewers**. Leaving the primary out
+of `--required` means the round does not wait for it — not that it is never triggered, so it still
+spends account quota. `--required` cannot be empty (a
 round gating on nobody converges before anything runs); use `clear` to drop the override.
 
 If the output lists `lagging_hosts`, those hosts are driving the queue with a binary that predates

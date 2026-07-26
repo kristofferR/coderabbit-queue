@@ -42,3 +42,17 @@ func TestLaggingWritersNamesWhoWillIgnoreTheOverride(t *testing.T) {
 		t.Errorf("writers = %v, want the day-old host pruned", st.Writers)
 	}
 }
+
+// The leader records itself as "host=<name> pid=<n>" while capabilities are
+// keyed by host alone. Comparing those directly reported every current-version
+// daemon as needing an upgrade — the warning would have been pure noise.
+func TestLaggingWritersMatchesTheLeadersHostForm(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	st := New()
+	st.Leader = &LeaderLease{Owner: "host=cachyos pid=1234", ExpiresAt: now.Add(time.Minute)}
+	st.NoteWriter("cachyos", CapsRepoOverrides, now)
+
+	if got := st.LaggingWriters(CapsRepoOverrides, now); len(got) != 0 {
+		t.Errorf("lagging = %v, want none — the leader IS the capable writer", got)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
 )
 
 // The override has to reach a real decision, not just the config value: a
@@ -124,4 +125,117 @@ func TestOverrideKeepsTheSilencedPrimaryEntry(t *testing.T) {
 	}
 	primaryPresent(fleet, "fleet default")
 	primaryPresent(fleet.ForRepo(RepoReviewers{CoBots: []string{"codex"}, SetCoBots: true}), "override naming only codex")
+}
+
+// Four defects that all end the same way: a round waiting on a reviewer crq
+// never asks, or never waiting at all.
+func TestOverrideNeverGatesOnAReviewerItCannotTrigger(t *testing.T) {
+	t.Run("required alone enables the bot", func(t *testing.T) {
+		// `reviewers set repo --required bugbot` with no --bots: SetRequired is
+		// true and SetCoBots is false, so nothing enabled Bugbot and it became an
+		// unknown required reviewer with no command.
+		fleet := isolatedConfig(t, map[string]string{"CRQ_COBOTS": "codex"})
+		got := fleet.ForRepo(RepoReviewers{Required: []string{"bugbot"}, SetRequired: true})
+		for _, r := range got.Reviewers {
+			if dialect.NormalizeBotName(r.Login) != "cursor" {
+				continue
+			}
+			if !r.Required {
+				t.Error("bugbot must gate here")
+			}
+			if r.Command == "" || r.Trigger == engine.TriggerNever {
+				t.Errorf("bugbot = %+v: required but never triggered, so the round waits forever", r)
+			}
+			return
+		}
+		t.Errorf("reviewers = %+v, want bugbot enabled by requiring it", got.Reviewers)
+	})
+
+	t.Run("a promoted co-reviewer gets a trigger", func(t *testing.T) {
+		// Codex's fleet entry is trigger=never while it is optional. Retaining
+		// that entry and only flipping Required leaves the engine waiting for
+		// evidence no command was ever posted for.
+		fleet := isolatedConfig(t, map[string]string{"CRQ_COBOTS": "codex,bugbot"})
+		for _, cb := range fleet.CoBots {
+			if cb.Name == "codex" && cb.Trigger != engine.TriggerNever {
+				t.Skip("codex is already triggered by default here; nothing to promote")
+			}
+		}
+		got := fleet.ForRepo(RepoReviewers{
+			CoBots: []string{"codex"}, SetCoBots: true,
+			Required: []string{"codex"}, SetRequired: true,
+		})
+		for _, cb := range got.CoBots {
+			if cb.Name == "codex" && cb.Trigger == engine.TriggerNever {
+				t.Errorf("codex = %+v: required with no trigger", cb)
+			}
+		}
+	})
+
+	t.Run("an explicit feedback set survives", func(t *testing.T) {
+		// CRQ_FEEDBACK_BOTS is the one list an operator may widen beyond who
+		// reviews. Deriving over it would silently stop surfacing those findings
+		// the moment the repository got any override at all.
+		fleet := isolatedConfig(t, map[string]string{"CRQ_FEEDBACK_BOTS": "sonar[bot]"})
+		got := fleet.ForRepo(RepoReviewers{CoBots: []string{"codex"}, SetCoBots: true})
+		if len(got.FeedbackBots) != 1 || got.FeedbackBots[0] != "sonar[bot]" {
+			t.Errorf("FeedbackBots = %v, want the explicit setting kept", got.FeedbackBots)
+		}
+	})
+}
+
+// Changing who has to review a head must not strand the PR. A completed round
+// is the "this head was reviewed" dedup marker, so adding a required reviewer
+// leaves convergence reporting it pending while enqueue keeps skipping the head:
+// no eligible round exists to trigger it, and next waits for a push that has no
+// reason to come.
+func TestChangingRequirementsReopensACompletedRound(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = codexCoBots(nil)
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	repo, pr, head := "o/r", 3, "aaaaaaaa1"
+	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 11)
+
+	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(repo, pr)
+	if round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("round = %#v, want it requeued so the new reviewer can be asked", round)
+	}
+	if round.Head != head {
+		t.Errorf("head = %q, want the same head %q — what changed is who must answer", round.Head, head)
+	}
+
+	// An override that does not change the required set leaves rounds alone: a
+	// finished round must not be reopened for nothing.
+	if _, err := store.Update(ctx, func(st *State) error {
+		r := st.Round(repo, pr)
+		if err := r.Reserve("t", "h", time.Now().UTC()); err != nil {
+			return err
+		}
+		if err := r.Fire(12, time.Now().UTC()); err != nil {
+			return err
+		}
+		if err := r.Complete(); err != nil {
+			return err
+		}
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ = store.Load(ctx)
+	if round := st.Round(repo, pr); round == nil || round.Phase != PhaseCompleted {
+		t.Errorf("round = %#v, want it left completed when nothing changed", round)
+	}
 }
