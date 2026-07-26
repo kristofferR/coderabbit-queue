@@ -12,9 +12,13 @@ import (
 // User>` from a title, and stripping every # would turn "#123" into "123", so
 // only known tags and boundary emphasis go. Heading markers are handled by
 // headingOf, which is where they mean something.
+//
+// A boundary run is one delimiter KIND, never a mixture: in "`__init__`" the
+// run is the backtick alone, so the underscores stay part of the identifier.
+// Merging them would report the finding as being about "init".
 var markup = regexp.MustCompile(`!\[[^\]]*\]\([^)]*\)` +
 	`|</?(?i:sub|sup|details|summary|b|i|em|strong|br|img|div|span|p|a|code)(?:\s[^>]*)?/?>` +
-	"|(^|\\s)[*_`]+|[*_`]+(\\s|$)")
+	"|(^|\\s)(?:_+|[*`]+)|(?:_+|[*`]+)(\\s|$)")
 
 // rubric matches CodeRabbit's fixed severity header — "🎯 Functional
 // Correctness | 🟡 Minor | ⚡ Quick win" — which is the same on every finding

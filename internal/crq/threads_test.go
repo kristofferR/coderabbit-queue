@@ -53,6 +53,42 @@ func TestOpenThreadsIncludesOutdatedAndOrdersThem(t *testing.T) {
 	}
 }
 
+// A login in CRQ_FEEDBACK_BOTS is a bot to `crq feedback`, which surfaces its
+// findings. Listing the same thread as a human's would disagree with the command
+// an agent reads next, and would parse the title with the human heuristic.
+func TestOpenThreadsNamesAConfiguredFeedbackBot(t *testing.T) {
+	gh := newFakeGitHub()
+	gh.graphQL = func(query string, _ map[string]any, out any) error {
+		if !strings.Contains(query, "reviewThreads") {
+			return nil
+		}
+		return json.Unmarshal([]byte(`{"repository":{"pullRequest":{"reviewThreads":{
+		  "pageInfo":{"hasNextPage":false,"endCursor":""},
+		  "nodes":[{"id":"T_custom","isResolved":false,"isOutdated":false,"path":"a.go","line":1,
+		    "comments":{"totalCount":1,"nodes":[{"body":"### Nil deref\n\n**High Severity**\n\nDetail.",
+		      "author":{"login":"reviewdog[bot]"}}]}}]
+		}}}}`), out)
+	}
+	cfg := firingConfig()
+	cfg.FeedbackBots = append(cfg.FeedbackBots, "reviewdog[bot]")
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	threads, err := svc.OpenThreads(context.Background(), "o/r", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(threads) != 1 {
+		t.Fatalf("got %d threads, want the custom reviewer's", len(threads))
+	}
+	if threads[0].Bot != "reviewdog" || threads[0].Author != "" {
+		t.Errorf("thread = %+v, want the configured feedback bot named as a bot", threads[0])
+	}
+	// Read as a bot's: the heading is the summary and the bold span is severity.
+	if threads[0].Title != "Nil deref" {
+		t.Errorf("title = %q, want the bot's heading rather than its severity", threads[0].Title)
+	}
+}
+
 // The command promises every unresolved thread, so it also gets humans'. Copying
 // the author into `bot` made the output say `"bot":"alice"`.
 func TestOpenThreadsDoesNotCallAPersonABot(t *testing.T) {

@@ -86,11 +86,20 @@ func (s *Service) OpenThreads(ctx context.Context, repo string, pr int) ([]OpenT
 }
 
 // isReviewerBot reports whether login is a reviewer crq knows: the configured
-// primary, a configured co-reviewer, or a registry entry.
+// primary, a configured feedback bot, a configured co-reviewer, or a registry
+// entry.
 func isReviewerBot(cfg Config, login string) bool {
 	key := dialect.NormalizeBotName(login)
 	if key == dialect.NormalizeBotName(cfg.Bot) {
 		return true
+	}
+	// Whatever CRQ_FEEDBACK_BOTS names is a bot to `crq feedback`, so it has to
+	// be one here too — otherwise the same thread is a bot's finding in one
+	// command and a human's comment in the other.
+	for _, bot := range cfg.FeedbackBots {
+		if dialect.NormalizeBotName(bot) == key {
+			return true
+		}
 	}
 	for _, cb := range cfg.CoBots {
 		if dialect.NormalizeBotName(cb.Login) == key {

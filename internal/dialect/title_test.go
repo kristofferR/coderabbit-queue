@@ -40,6 +40,14 @@ func TestThreadTitleReadsAsText(t *testing.T) {
 			"**Handle user_id and api_key**\n\nDetail.",
 			"Handle user_id and api_key",
 		},
+		{
+			// The code span goes, the identifier stays whole: a run of markup is
+			// one delimiter kind, so the backtick does not carry the dunder with
+			// it and leave the title talking about "init".
+			"identifier with leading underscores in a code span",
+			"**Preserve `__init__` ordering**\n\nDetail.",
+			"Preserve __init__ ordering",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := ThreadTitle(true, tc.body); got != tc.want {
