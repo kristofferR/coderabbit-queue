@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // originRepo builds a real repository on disk to clone from, so these tests
@@ -262,5 +263,58 @@ func TestCheckoutLeavesALiveSiblingAlone(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(first.Dir, "README.md")); err != nil {
 		t.Errorf("a live checkout was removed by the next one: %v", err)
+	}
+}
+
+// A fix session's documented way to make changes is a branch in its checkout.
+// A --mirror clone's refspec is +refs/*:refs/*, so the next `fetch --prune`
+// reached into refs/heads and deleted that branch — destroying the session's work
+// between one dispatch and the next.
+func TestFetchDoesNotDeleteABranchAWorktreeCreated(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	co, err := ws.Checkout(ctx, repo, 3, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := co.Git(ctx, "checkout", "-b", "crq/fix-3"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Another dispatch fetches the shared mirror.
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	if branch, err := co.Git(ctx, "rev-parse", "--abbrev-ref", "HEAD"); err != nil || branch != "crq/fix-3" {
+		t.Fatalf("branch = %q err=%v, want the session's branch to survive a fetch", branch, err)
+	}
+}
+
+// Pruning read the checkout directory's own mtime, which editing files inside
+// does not update — so a busy session read as abandoned and was deleted.
+func TestPruningMeasuresTheNewestFileNotTheDirectory(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Now().Add(-48 * time.Hour)
+	nested := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(nested, "edited.go")
+	if err := os.WriteFile(file, []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The directories look ancient; the file inside was just written.
+	for _, d := range []string{dir, nested} {
+		if err := os.Chtimes(d, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if since := time.Since(newestModTime(dir)); since > time.Minute {
+		t.Errorf("newest modification read as %s ago; a live session would be pruned", since)
 	}
 }

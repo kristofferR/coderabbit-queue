@@ -144,6 +144,12 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 				return "", err
 			}
 		}
+		// Still contended. The mirror exists and another worker is updating it,
+		// so returning an error here fails a dispatch over somebody else's
+		// success — the case concurrent dispatch is supposed to survive.
+		if _, statErr := os.Stat(filepath.Join(path, "HEAD")); statErr == nil {
+			return path, nil
+		}
 		return path, fmt.Errorf("fetching %s: %w", repo, ferr)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
@@ -160,8 +166,15 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 	}
 	defer os.RemoveAll(staging)
 	pending := filepath.Join(staging, "mirror.git")
-	if _, err := w.git(ctx, "", "clone", "--mirror", w.remoteURL(repo), pending); err != nil {
+	// --bare, not --mirror. A mirror's refspec is +refs/*:refs/*, so `fetch
+	// --prune` reaches into refs/heads and deletes any branch a fix session
+	// created in a worktree — the documented way to make changes. Remote refs
+	// live under refs/remotes/origin/*, leaving refs/heads to the sessions.
+	if _, err := w.git(ctx, "", "clone", "--bare", w.remoteURL(repo), pending); err != nil {
 		return "", fmt.Errorf("cloning %s: %w", repo, err)
+	}
+	if _, err := w.git(ctx, pending, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+		return "", fmt.Errorf("configuring %s: %w", repo, err)
 	}
 	if err := os.Rename(pending, path); err != nil {
 		if _, statErr := os.Stat(filepath.Join(path, "HEAD")); statErr == nil {
@@ -224,7 +237,7 @@ func (w Workspace) Checkout(ctx context.Context, repo string, pr int, sha string
 	if err := os.MkdirAll(prDir, 0o700); err != nil {
 		return Checkout{}, err
 	}
-	if _, err := gitDir(ctx, mirror, "worktree", "add", "--detach", dir, sha); err != nil {
+	if _, err := w.git(ctx, mirror, "worktree", "add", "--detach", dir, sha); err != nil {
 		return Checkout{}, fmt.Errorf("checking out %s@%s: %w", repo, shortSHA(sha), err)
 	}
 	return Checkout{Dir: dir, Repo: NormalizeRepo(repo), PR: pr, mirror: mirror, token: token}, nil
@@ -261,15 +274,33 @@ func (w Workspace) pruneStaleWork(ctx context.Context, mirror, prDir string) err
 		return err
 	}
 	for _, entry := range entries {
-		info, err := entry.Info()
-		if err != nil || time.Since(info.ModTime()) < staleWorkAge {
+		dir := filepath.Join(prDir, entry.Name())
+		// The NEWEST file in the checkout, not the directory's own timestamp:
+		// editing a file or running a build inside leaves the root's mtime
+		// untouched, so a busy session would read as abandoned.
+		if touched := newestModTime(dir); time.Since(touched) < staleWorkAge {
 			continue
 		}
-		if err := w.removeWorktree(ctx, mirror, filepath.Join(prDir, entry.Name())); err != nil {
+		if err := w.removeWorktree(ctx, mirror, dir); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// newestModTime is the most recent modification anywhere under dir.
+func newestModTime(dir string) time.Time {
+	newest := time.Time{}
+	_ = filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info, ierr := d.Info(); ierr == nil && info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+		return nil
+	})
+	return newest
 }
 
 // Remove deletes the worktree. Safe to call on an already-removed one.
