@@ -302,3 +302,87 @@ func TestNextResolvesSummaryOnlyWithoutTheQueue(t *testing.T) {
 		t.Fatalf("the front PR must keep the fire slot, got %#v", st.FireSlot)
 	}
 }
+
+// A finding with no review thread cannot be resolved or declined — GitHub offers
+// nothing to act on — so drain-first blocks every future round on it. The
+// observed end state was a PR reporting "no review was ever requested" for its
+// current head, four rounds running. `crq dismiss` is the only way out, and this
+// pins both halves: that the deadlock is real, and that dismissing ends it.
+func TestDismissEndsTheUnresolvableFindingDeadlock(t *testing.T) {
+	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr := "owner/repo", 505
+	head := "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+
+	f.next(repo, pr)
+
+	// The review lands as a BODY finding: no inline comment, so no thread.
+	f.clk.advance(2 * time.Minute)
+	f.gh.mu.Lock()
+	r := ghapi.Review{ID: 900, CommitID: head, State: "COMMENTED", SubmittedAt: f.clk.now(),
+		Body: corpusMessage(t, "coderabbit/findings-outside-diff.md")}
+	r.User.Login = f.bot
+	key := fakeKey(repo, pr)
+	f.gh.reviews[key] = append(f.gh.reviews[key], r)
+	f.gh.mu.Unlock()
+
+	report := f.next(repo, pr)
+	f.wantAction(report, engine.ActionFix)
+	if len(report.Findings) == 0 {
+		t.Fatal("the body finding must be reported before it can be dismissed")
+	}
+	var id string
+	for _, finding := range report.Findings {
+		if finding.ThreadID == "" {
+			id = finding.ID
+			break
+		}
+	}
+	if id == "" {
+		t.Fatal("this test is only meaningful for a finding with no thread")
+	}
+
+	// It repeats forever: nothing the caller can do clears it.
+	f.clk.advance(2 * time.Minute)
+	f.wantAction(f.next(repo, pr), engine.ActionFix)
+	posted := f.reviewsPosted(repo, pr)
+
+	if _, err := f.svc.Dismiss(f.ctx, repo, pr, []string{id}, "already handled in an earlier commit"); err != nil {
+		t.Fatal(err)
+	}
+	// Dismissing is a record, not a review: it must post nothing of its own,
+	// even though it enqueues so the decision has a round to live on.
+	if got := f.reviewsPosted(repo, pr); got != posted {
+		t.Fatalf("dismissing posted a review: %d -> %d", posted, got)
+	}
+
+	f.clk.advance(2 * time.Minute)
+	after := f.next(repo, pr)
+	if after.Action == string(engine.ActionFix) {
+		t.Fatalf("a dismissed finding must stop blocking the round, got %+v", after)
+	}
+	if after.Dismissed != 1 {
+		t.Errorf("dismissed = %d, want 1 — the count is how a caller sees it was set aside, not lost", after.Dismissed)
+	}
+	for _, finding := range after.Findings {
+		if finding.ID == id {
+			t.Error("a dismissed finding must be withheld from findings")
+		}
+	}
+	// It is scoped to this head. A push supersedes the round, and the next
+	// reviewer reporting the same thing must be heard again.
+	f.clk.advance(time.Minute)
+	f.setHead(repo, pr, "bbbbbbbb2")
+	f.setCommitDate("bbbbbbbb2", f.clk.now())
+	f.next(repo, pr)
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(repo, pr); round == nil || round.IsDismissed(id) {
+		t.Errorf("the dismissal must not outlive the head it was made for, got %#v", round)
+	}
+}

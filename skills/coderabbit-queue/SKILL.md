@@ -25,7 +25,7 @@ crq next "$REPO" "$PR"
 
 | `.action` | what to do |
 |---|---|
-| `fix` | Fix `.findings[]`, validate locally, then `crq resolve` each addressed `.thread_id` (or `crq decline` with a reason). Call again. |
+| `fix` | Fix `.findings[]`, validate locally, then `crq resolve` each addressed `.thread_id` (or `crq decline` with a reason). A finding with no `.thread_id` is cleared with `crq dismiss` once judged — at this head nothing else can. Call again. |
 | `hold` | Do NOT commit or push — a required reviewer has not answered for this head, and moving the head restarts its review (resolving threads does not). Call again at `.recheck_after`. |
 | `push` | The head is released. Commit and push the accumulated fixes once. Call again. |
 | `wait` | Nothing to do until `.recheck_after`. |
@@ -168,6 +168,24 @@ This replies with your reason and resolves the thread. crq reads GitHub's resolu
 thread left open keeps its finding actionable and `crq next` would repeat `fix` forever. The
 disagreement is not lost: if the bot contests the decline, crq re-surfaces that reply as its own
 finding. Pass `--keep-open` to leave it unresolved deliberately.
+
+## Findings With No Thread
+
+Review-body findings, review-skipped notices and outside-diff remarks have no
+`thread_id`. `crq resolve` and `crq decline` both act on a thread, so neither can touch them — and a
+finding that can never drain blocks every future round on that PR.
+
+```bash
+crq dismiss "$REPO" "$PR" "$FINDING_ID" --reason "why this is being set aside"
+```
+
+Finding IDs come from `.findings[].id`; they are content-derived, not GitHub node IDs, which is why
+the repo and PR are required. A dismissal covers the current head only — push, and the next reviewer
+has to report it again. `crq next` then reports `dismissed: N` so nothing looks silently dropped.
+
+Judge the finding first. Dismiss is for one you have decided about, not for clearing the list. When
+the notice is a SKIPPED review, narrowing the PR addresses the cause; dismissing only records that
+you chose to proceed at this head.
 
 ## Fleet Auto-Review
 
