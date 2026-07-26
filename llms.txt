@@ -45,6 +45,7 @@ finished — is a value crq computes.
 ```bash
 crq next OWNER/REPO PR_NUMBER
 crq next                      # inside the checkout, the target is inferred
+                              # (same for feedback/loop/cancel: omit <repo> <pr>)
 ```
 
 | `.action` | what to do |

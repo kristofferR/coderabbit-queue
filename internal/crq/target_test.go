@@ -44,3 +44,40 @@ func TestInferTargetAsksForTheBranchesPull(t *testing.T) {
 		t.Fatalf("unfiltered = %+v, want 11,12,13 in order", all)
 	}
 }
+
+// A fork checkout has the branch in one repository and the pull request in
+// another: origin is me/app, upstream is owner/app, and the PR is filed against
+// upstream with head me:branch. Taking the first remote and its own owner asks
+// /repos/me/app/pulls?head=me:branch and reports that no PR exists.
+func TestRemoteSlugsCoversForkCheckouts(t *testing.T) {
+	repos, owners := remoteSlugs(`origin	git@github.com:me/app.git (fetch)
+origin	git@github.com:me/app.git (push)
+upstream	https://github.com/owner/app.git (fetch)
+upstream	https://github.com/owner/app.git (push)`)
+
+	if len(repos) != 2 || repos[0] != "me/app" || repos[1] != "owner/app" {
+		t.Fatalf("repos = %v, want both, origin first", repos)
+	}
+	if len(owners) != 2 || owners[0] != "me" || owners[1] != "owner" {
+		t.Fatalf("owners = %v, want both head owners, origin first", owners)
+	}
+
+	// The ordinary single-remote checkout still yields exactly one of each, so
+	// inference there still costs exactly one request.
+	repos, owners = remoteSlugs("origin\tgit@github.com:owner/app.git (fetch)\norigin\tgit@github.com:owner/app.git (push)")
+	if len(repos) != 1 || len(owners) != 1 {
+		t.Fatalf("one remote gave repos=%v owners=%v, want one of each", repos, owners)
+	}
+
+	// A slug here becomes an API lookup, so a remote that is not GitHub at all
+	// must not produce one — repoSlugFromRemote alone would return "code/app".
+	if repos, _ := remoteSlugs("origin\t/home/me/code/app (fetch)"); len(repos) != 0 {
+		t.Errorf("a non-github remote must not become a repository: %v", repos)
+	}
+
+	// An SSH host alias (git@github.com-work:owner/app.git) is how a second
+	// account is configured, and is still GitHub.
+	if repos, _ := remoteSlugs("origin\tgit@github.com-work:owner/app.git (fetch)"); len(repos) != 1 || repos[0] != "owner/app" {
+		t.Errorf("an ssh host alias must still resolve, got %v", repos)
+	}
+}

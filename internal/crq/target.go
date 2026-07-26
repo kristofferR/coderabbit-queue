@@ -31,37 +31,90 @@ func (s *Service) InferTarget(ctx context.Context) (string, int, error) {
 	if err != nil {
 		return "", 0, fmt.Errorf("could not read this checkout's remotes: %w", err)
 	}
-	repo := ""
+	repos, owners := remoteSlugs(remotes)
+	if len(repos) == 0 {
+		return "", 0, fmt.Errorf("no github remote found in this checkout")
+	}
+
+	// Every remote repository, with every remote owner as a possible head. In a
+	// fork checkout the branch lives in origin (me/app) while the pull request
+	// is filed against upstream (owner/app), so taking the first remote and its
+	// own owner finds nothing and reports that no PR exists.
+	//
+	// Asking for this branch specifically rather than listing every PR keeps
+	// each lookup one request whatever the repository's size, and the usual
+	// single-remote checkout still costs exactly one.
+	type match struct {
+		repo string
+		pr   int
+	}
+	var found []match
+	seen := map[string]bool{}
+	for _, repo := range repos {
+		for _, owner := range owners {
+			query := url.Values{}
+			query.Set("state", "open")
+			query.Set("head", owner+":"+branch)
+			pulls, err := s.gh.ListPulls(ctx, repo, query)
+			if err != nil {
+				return "", 0, err
+			}
+			for _, pull := range pulls {
+				key := fmt.Sprintf("%s#%d", strings.ToLower(repo), pull.Number)
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				found = append(found, match{repo, pull.Number})
+			}
+		}
+	}
+	if len(found) == 0 {
+		return "", 0, fmt.Errorf("no open pull request for %s on branch %s", strings.Join(repos, " or "), branch)
+	}
+	if len(found) > 1 {
+		names := make([]string, 0, len(found))
+		for _, m := range found {
+			names = append(names, fmt.Sprintf("%s#%d", m.repo, m.pr))
+		}
+		return "", 0, fmt.Errorf("branch %s has %d open pull requests (%s); name the one you mean",
+			branch, len(found), strings.Join(names, ", "))
+	}
+	return found[0].repo, found[0].pr, nil
+}
+
+// remoteSlugs reduces `git remote -v` to the GitHub repositories it names and
+// the owners of those repositories, both in first-seen order (so origin leads)
+// and deduplicated.
+func remoteSlugs(remotes string) (repos, owners []string) {
+	seenRepo, seenOwner := map[string]bool{}, map[string]bool{}
 	for _, line := range strings.Split(remotes, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue
 		}
-		if slug := repoSlugFromRemote(fields[1]); slug != "" {
-			repo = slug
-			break
+		// repoSlugFromRemote is deliberately loose — it exists to MATCH a remote
+		// against a repo crq already knows, where a wrong guess simply fails to
+		// match. Here the slug becomes an API lookup, so a local path like
+		// /home/me/code/app must not turn into a request for code/app.
+		if !strings.Contains(strings.ToLower(fields[1]), "github.com") {
+			continue
+		}
+		slug := repoSlugFromRemote(fields[1])
+		if slug == "" {
+			continue
+		}
+		if key := strings.ToLower(slug); !seenRepo[key] {
+			seenRepo[key] = true
+			repos = append(repos, slug)
+		}
+		owner := ownerOf(slug)
+		if key := strings.ToLower(owner); owner != "" && !seenOwner[key] {
+			seenOwner[key] = true
+			owners = append(owners, owner)
 		}
 	}
-	if repo == "" {
-		return "", 0, fmt.Errorf("no github remote found in this checkout")
-	}
-
-	// Ask for this branch's PR specifically rather than listing them all: the
-	// head filter is one request whatever the repository's size.
-	query := url.Values{}
-	query.Set("state", "open")
-	query.Set("head", ownerOf(repo)+":"+branch)
-	pulls, err := s.gh.ListPulls(ctx, repo, query)
-	if err != nil {
-		return "", 0, err
-	}
-	if len(pulls) == 0 {
-		return "", 0, fmt.Errorf("no open pull request for %s on branch %s", repo, branch)
-	}
-	if len(pulls) > 1 {
-		return "", 0, fmt.Errorf("%d open pull requests for %s on branch %s; name the one you mean", len(pulls), repo, branch)
-	}
-	return repo, pulls[0].Number, nil
+	return repos, owners
 }
 
 func gitIn(ctx context.Context, args ...string) (string, error) {

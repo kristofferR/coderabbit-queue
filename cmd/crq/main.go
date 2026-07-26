@@ -119,9 +119,9 @@ func run(ctx context.Context, args []string) int {
 		fmt.Print(dashboard)
 		return 0
 	case "feedback":
-		repo, pr, ok := repoPR(args[1:])
-		if !ok {
-			fatal(errors.New("usage: crq feedback <repo> <pr>"))
+		repo, pr, err := target(ctx, service, args[1:], "crq feedback [<repo> <pr>]")
+		if err != nil {
+			fatal(err)
 			return 1
 		}
 		report, err := service.Feedback(ctx, repo, pr)
@@ -178,9 +178,9 @@ func run(ctx context.Context, args []string) int {
 		// Same contract as next: the action is the answer, the exit code is not.
 		return 0
 	case "loop":
-		repo, pr, ok := repoPR(args[1:])
-		if !ok {
-			fatal(errors.New("usage: crq loop <repo> <pr>"))
+		repo, pr, err := target(ctx, service, args[1:], "crq loop [<repo> <pr>]")
+		if err != nil {
+			fatal(err)
 			return 1
 		}
 		if err := cfg.RequireState(); err != nil {
@@ -242,9 +242,9 @@ func run(ctx context.Context, args []string) int {
 		}
 		return 0
 	case "cancel":
-		repo, pr, ok := repoPR(args[1:])
-		if !ok {
-			fatal(errors.New("usage: crq cancel <repo> <pr>"))
+		repo, pr, err := target(ctx, service, args[1:], "crq cancel [<repo> <pr>]")
+		if err != nil {
+			fatal(err)
 			return 1
 		}
 		if err := cfg.RequireState(); err != nil {
@@ -276,9 +276,9 @@ func debug(ctx context.Context, service *crq.Service, store crq.StateStore, cfg 
 	}
 	switch args[0] {
 	case "enqueue":
-		repo, pr, ok := repoPR(args[1:])
-		if !ok {
-			fatal(errors.New("usage: crq debug enqueue <repo> <pr>"))
+		repo, pr, err := target(ctx, service, args[1:], "crq debug enqueue [<repo> <pr>]")
+		if err != nil {
+			fatal(err)
 			return 1
 		}
 		result, err := service.Enqueue(ctx, repo, pr)
@@ -349,8 +349,8 @@ USAGE
                                    omit the target inside a checkout: crq reads the
                                    remote and branch to find the pull request
   crq wait <repo> <pr>             block until actionable, then emit that action as JSON
-  crq loop <repo> <pr>             coordinated trigger -> wait -> JSON feedback/convergence
-  crq feedback <repo> <pr>         emit normalized actionable review findings as JSON
+  crq loop [<repo> <pr>]           coordinated trigger -> wait -> JSON feedback/convergence
+  crq feedback [<repo> <pr>]       emit normalized actionable review findings as JSON
   crq resolve <thread-id> [<thread-id>...]
                                    resolve addressed GitHub review threads
   crq decline <thread-id> [...] --reason "<why>" [--keep-open]
@@ -362,7 +362,7 @@ USAGE
                                    local CodeRabbit CLI pre-push review as JSON
   crq doctor                       emit JSON readiness report for agents and humans
   crq status [--line]              print the dashboard, or one line for a status bar
-  crq cancel <repo> <pr>           remove queued/in-flight state for a PR
+  crq cancel [<repo> <pr>]         remove queued/in-flight state for a PR
   crq debug <enqueue|pump|refresh|state>
                                    maintenance tools; not for normal review loops
 

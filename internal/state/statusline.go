@@ -20,12 +20,18 @@ func StatusLine(st State, cfg StoreConfig) string {
 	queue := st.Queue(now, cfg.MinInterval)
 	inFlight := inFlightRounds(st)
 
+	// Something is ready to go right now: the queue put it at the front with no
+	// reason to wait. That outranks the account block, because a quota-free round
+	// is exactly what Queue leaves actionable while the window is shut — saying
+	// "blocked" and then "next #7" in the same line contradicts itself.
+	ready := len(queue) > 0 && queue[0].ReadyAt.IsZero() && queue[0].Why == ""
+
 	var parts []string
+	stranded := firstStranded(st, inFlight)
 	switch {
-	case firstStranded(st, inFlight) != nil:
-		s := firstStranded(st, inFlight)
-		parts = append(parts, fmt.Sprintf("⚠ #%d stranded", s.PR))
-	case st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now):
+	case stranded != nil:
+		parts = append(parts, fmt.Sprintf("⚠ #%d stranded", stranded.PR))
+	case !ready && st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now):
 		parts = append(parts, fmt.Sprintf("⏳ blocked %dm", minutesUntil(*st.Account.BlockedUntil, now)))
 	case len(inFlight) > 0:
 		parts = append(parts, fmt.Sprintf("🔬 #%d reviewing", inFlight[0].PR))
@@ -37,8 +43,10 @@ func StatusLine(st State, cfg StoreConfig) string {
 
 	if n := len(queue); n > 0 {
 		next := ""
-		// Name the next PR only when the queue knows which it is; see Queue.
-		if queue[0].ReadyAt.IsZero() && queue[0].Why == "" {
+		// Name the next PR only when the queue knows which it is (see Queue) and
+		// nothing is stranded: a stranded reservation is the whole line, and
+		// pointing at what comes after it reads as though the queue is moving.
+		if ready && stranded == nil {
 			next = fmt.Sprintf(" next #%d", queue[0].PR)
 		}
 		parts = append(parts, fmt.Sprintf("%d queued%s", n, next))
