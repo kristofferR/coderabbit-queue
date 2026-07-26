@@ -780,6 +780,12 @@ func runReviewers(ctx context.Context, service *crq.Service, args []string) int 
 	var err error
 	switch action {
 	case "clear":
+		// Ignoring a mutation flag here would turn a malformed automation call
+		// like `reviewers clear repo --bots codex` into a silent wipe.
+		if bots != nil || required != nil {
+			fatal(errors.New("clear takes no --bots/--required (it drops the whole override)"))
+			return 1
+		}
 		view, err = service.ClearReviewers(ctx, repo)
 	case "set":
 		if bots == nil && required == nil {

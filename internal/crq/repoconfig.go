@@ -16,10 +16,15 @@ type ReviewerView struct {
 	Repo string `json:"repo"`
 	// Overridden says whether this repository has its own configuration or is
 	// simply following the fleet default.
-	Overridden bool             `json:"overridden"`
-	UpdatedAt  string           `json:"updated_at,omitempty"`
-	By         string           `json:"by,omitempty"`
-	Reviewers  []ReviewerDetail `json:"reviewers"`
+	Overridden bool `json:"overridden"`
+	// Lagging names hosts that are driving this queue without understanding
+	// per-repo overrides — an older binary loads the field, writes it back
+	// untouched, and keeps deciding from its own fleet-wide configuration. The
+	// override is real; those hosts will not honour it until they are upgraded.
+	Lagging   []string         `json:"lagging_hosts,omitempty"`
+	UpdatedAt string           `json:"updated_at,omitempty"`
+	By        string           `json:"by,omitempty"`
+	Reviewers []ReviewerDetail `json:"reviewers"`
 }
 
 // ReviewerDetail is one reviewer as it will actually be used.
@@ -41,6 +46,7 @@ func (s *Service) Reviewers(ctx context.Context, repo string) (ReviewerView, err
 	repo = NormalizeRepo(repo)
 	cfg := s.cfgFor(st, repo)
 	view := ReviewerView{Repo: repo, Reviewers: []ReviewerDetail{}}
+	view.Lagging = st.LaggingWriters(CapsRepoOverrides, s.clock().UTC())
 	if ov, ok := st.RepoOverride(repo); ok {
 		view.Overridden = true
 		view.By = ov.By
@@ -73,36 +79,45 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 	}
 	// Accept either spelling: the login (chatgpt-codex-connector[bot]) or the
 	// short config name (codex), which is what CRQ_COBOTS already takes.
+	// Resolve against the REGISTRY, not the fleet's enabled list. Restricting a
+	// project to bots the fleet already runs would make this feature only ever
+	// subtract, when the point is choosing different reviewers per project.
+	// Either spelling works: the login, or the short name CRQ_COBOTS takes.
 	known := map[string]string{}
-	for _, cb := range s.cfg.CoBots {
-		known[dialect.NormalizeBotName(cb.Login)] = cb.Login
-		if cb.Name != "" {
-			known[strings.ToLower(strings.TrimSpace(cb.Name))] = cb.Login
-		}
+	for _, co := range dialect.KnownCoReviewers() {
+		known[dialect.NormalizeBotName(co.Login)] = co.Login
+		known[strings.ToLower(strings.TrimSpace(co.Name))] = co.Login
 	}
-	// Refuse a bot crq has no registry entry for: it could never be triggered or
-	// classified, so accepting it would record a configuration that silently
-	// does nothing.
-	resolve := func(known map[string]string, list []string, what string) ([]string, error) {
+	resolve := func(allowed map[string]string, list []string, what string) ([]string, error) {
 		out := make([]string, 0, len(list))
 		for _, name := range list {
 			name = strings.TrimSpace(name)
 			if name == "" {
 				continue
 			}
-			login, ok := known[dialect.NormalizeBotName(name)]
+			login, ok := allowed[dialect.NormalizeBotName(name)]
 			if !ok {
-				login, ok = known[strings.ToLower(strings.TrimSpace(name))]
+				login, ok = allowed[strings.ToLower(name)]
 			}
 			if !ok {
-				return nil, fmt.Errorf("%s: unknown reviewer %q (known: %s)", what, name, strings.Join(knownLogins(known), ", "))
+				return nil, fmt.Errorf("%s: unknown reviewer %q (known: %s)", what, name, strings.Join(knownLogins(allowed), ", "))
 			}
 			out = append(out, login)
 		}
 		return out, nil
 	}
 
+	// Start from the existing override so a call that names one half leaves the
+	// other alone — the contract the nil/empty distinction promises.
 	ov := RepoReviewers{}
+	if st, _, err := s.store.Load(ctx); err == nil {
+		if existing, ok := st.RepoOverride(repo); ok {
+			ov = existing
+		}
+	} else {
+		return ReviewerView{}, err
+	}
+
 	if coBots != nil {
 		resolved, err := resolve(known, coBots, "--bots")
 		if err != nil {
@@ -111,6 +126,12 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 		ov.CoBots, ov.SetCoBots = resolved, true
 	}
 	if required != nil {
+		if len(required) == 0 {
+			// Gating on nobody means Feedback reports converged before anything
+			// runs, so `crq next` says done and the reviewers chosen by --bots
+			// never review at all.
+			return ReviewerView{}, errors.New("--required cannot be empty: a round that gates on nobody converges before any reviewer runs (crq reviewers clear <repo> to drop the override)")
+		}
 		// The primary may gate here even though it cannot be replaced here.
 		allowed := map[string]string{dialect.NormalizeBotName(s.cfg.Bot): s.cfg.Bot}
 		for k, v := range known {

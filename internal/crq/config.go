@@ -359,20 +359,18 @@ func parseCoBots(env map[string]string, requiredBots []string) ([]CoBotConfig, e
 		if !enabled[co.Name] && !required {
 			continue
 		}
+		base := defaultCoBot(co, required)
 		// Uniform across bots: the per-bot key wins, then the registry's legacy
 		// alias if it declares one, then its default command. No bot is named
 		// here — the policy travels as registry metadata.
-		command := co.Command
+		command := base.Command
 		if v, ok := env["CRQ_COBOT_"+key+"_CMD"]; ok {
 			command = v
 		} else if co.LegacyCommandEnv != "" {
 			command = stringEnvAllowEmpty(env, co.LegacyCommandEnv, command)
 		}
 		command = strings.TrimSpace(command)
-		trigger := triggerMode(co.DefaultTrigger, engine.TriggerSelfHeal)
-		if required && co.RequiredTrigger != "" {
-			trigger = triggerMode(co.RequiredTrigger, trigger)
-		}
+		trigger := base.Trigger
 		switch v := engine.TriggerMode(strings.ToLower(strings.TrimSpace(env["CRQ_COBOT_"+key+"_TRIGGER"]))); v {
 		case engine.TriggerNever, engine.TriggerSelfHeal, engine.TriggerAlways:
 			trigger = v
@@ -381,16 +379,36 @@ func parseCoBots(env map[string]string, requiredBots []string) ([]CoBotConfig, e
 			// No trigger command means crq can never post one, whatever the mode.
 			trigger = engine.TriggerNever
 		}
-		out = append(out, CoBotConfig{
-			Login:         co.Login,
-			Name:          co.Name,
-			Command:       command,
-			Trigger:       trigger,
-			Required:      required,
-			SelfHealGrace: durationEnv(env, "CRQ_COBOT_"+key+"_GRACE", 10*time.Minute),
-		})
+		base.Command, base.Trigger = command, trigger
+		base.SelfHealGrace = durationEnv(env, "CRQ_COBOT_"+key+"_GRACE", defaultSelfHealGrace)
+		out = append(out, base)
 	}
 	return out, nil
+}
+
+const defaultSelfHealGrace = 10 * time.Minute
+
+// defaultCoBot is a co-reviewer's configuration from the registry alone, with no
+// environment applied. parseCoBots layers env on top of it, and a per-repo
+// override uses it directly for a bot the fleet default does not enable — which
+// is the whole point of choosing reviewers per project.
+func defaultCoBot(co dialect.CoReviewer, required bool) CoBotConfig {
+	trigger := triggerMode(co.DefaultTrigger, engine.TriggerSelfHeal)
+	if required && co.RequiredTrigger != "" {
+		trigger = triggerMode(co.RequiredTrigger, trigger)
+	}
+	command := strings.TrimSpace(co.Command)
+	if command == "" {
+		trigger = engine.TriggerNever
+	}
+	return CoBotConfig{
+		Login:         co.Login,
+		Name:          co.Name,
+		Command:       command,
+		Trigger:       trigger,
+		Required:      required,
+		SelfHealGrace: defaultSelfHealGrace,
+	}
 }
 
 // triggerMode converts a registry trigger string to the engine mode, falling

@@ -35,6 +35,9 @@ const (
 	PhaseAwaitingRetry = crqstate.PhaseAwaitingRetry
 	PhaseCompleted     = crqstate.PhaseCompleted
 	PhaseAbandoned     = crqstate.PhaseAbandoned
+
+	// CapsRepoOverrides is the binary capability per-repo reviewer overrides need.
+	CapsRepoOverrides = crqstate.CapsRepoOverrides
 )
 
 var (
@@ -51,6 +54,7 @@ func (c Config) storeConfig() StoreConfig {
 		Timezone:       c.Timezone,
 		Scope:          c.Scope,
 		CoReviewers:    c.coReviewerSummary(),
+		Host:           c.Host,
 		MinInterval:    c.MinInterval,
 	}
 }
