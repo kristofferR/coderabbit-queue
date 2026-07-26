@@ -2,9 +2,7 @@ package crq
 
 import (
 	"context"
-	"regexp"
 	"sort"
-	"strings"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 )
@@ -12,10 +10,12 @@ import (
 // OpenThread is one unresolved review thread, enough to decide about it and to
 // pass its ID to `crq resolve`.
 type OpenThread struct {
-	ID       string `json:"thread_id"`
-	Path     string `json:"path,omitempty"`
-	Line     int    `json:"line,omitempty"`
-	Bot      string `json:"bot,omitempty"`
+	ID   string `json:"thread_id"`
+	Path string `json:"path,omitempty"`
+	Line int    `json:"line,omitempty"`
+	Bot  string `json:"bot,omitempty"`
+	// Author names a human reviewer, when the thread is not a bot's.
+	Author   string `json:"author,omitempty"`
 	Outdated bool   `json:"outdated"`
 	// Title is the thread's first line, so a list is readable without opening
 	// each one.
@@ -48,14 +48,24 @@ func (s *Service) OpenThreads(ctx context.Context, repo string, pr int) ([]OpenT
 		open := OpenThread{ID: thread.ID, Path: thread.Path, Line: thread.Line, Outdated: thread.IsOutdated}
 		if nodes := thread.Comments.Nodes; len(nodes) > 0 {
 			first := nodes[0]
-			open.Bot = dialect.NormalizeBotName(first.Author.Login)
+			// Only when the author is actually a reviewer bot. The command
+			// promises every unresolved thread, humans included, and labelling
+			// "alice" as a bot makes the output plainly wrong.
+			if login := first.Author.Login; isReviewerBot(s.cfg, login) {
+				open.Bot = dialect.NormalizeBotName(login)
+			} else {
+				open.Author = login
+			}
 			open.URL = first.URL
-			open.Title = threadTitle(first.Body)
+			open.Title = dialect.ThreadTitle(first.Author.Login, first.Body)
 			if open.Path == "" {
 				open.Path = first.Path
 			}
 			if open.Line == 0 {
-				open.Line = first.Line
+				// GitHub clears both current lines on an outdated thread while
+				// keeping originalLine — and outdated threads are the whole reason
+				// this command exists.
+				open.Line = firstPositive(first.Line, first.OriginalLine)
 			}
 		}
 		out = append(out, open)
@@ -74,38 +84,18 @@ func (s *Service) OpenThreads(ctx context.Context, repo string, pr int) ([]OpenT
 	return out, nil
 }
 
-// markup matches the wrappers a bot puts AROUND its title: badge images, HTML
-// tags, and emphasis runs that delimit a span. Left in, a listing reads as
-// `![P2 Badge](https://img.shields.io/...)` instead of what the finding says.
-//
-// Emphasis is matched only where it delimits — at a boundary — so a literal
-// underscore inside a word survives. Stripping every `_` turned "Handle user_id"
-// into "Handle user id", which is a different identifier.
-var markup = regexp.MustCompile(`!\[[^\]]*\]\([^)]*\)|<[^>]+>|(^|\s)[*_` + "`" + `#]+|[*_` + "`" + `#]+(\s|$)`)
-
-// rubric matches CodeRabbit's fixed severity header — "🎯 Functional
-// Correctness | 🟡 Minor | ⚡ Quick win" — which is the same on every finding
-// and displaces the part that differs.
-//
-// It matches the SHAPE rather than any pipe, because a title is allowed to
-// contain one: "Support A | B configuration" must not become "B configuration".
-var rubric = regexp.MustCompile(`^[^|]*\b(Correctness|Maintainability|Security|Performance|Reliability|Quality)\b[^|]*\|[^|]*\|[^|]*\|?\s*`)
-
-// threadTitle reduces a comment body to one readable line. It prefers the bot's
-// own bold title, which is where both CodeRabbit and Codex put the summary.
-func threadTitle(body string) string {
-	title := dialect.TitleFromDetailedBlock(body)
-	if strings.TrimSpace(markup.ReplaceAllString(title, " ")) == "" {
-		title = dialect.TitleOf(body)
+// isReviewerBot reports whether login is a reviewer crq knows: the configured
+// primary, a configured co-reviewer, or a registry entry.
+func isReviewerBot(cfg Config, login string) bool {
+	key := dialect.NormalizeBotName(login)
+	if key == dialect.NormalizeBotName(cfg.Bot) {
+		return true
 	}
-	title = strings.Join(strings.Fields(markup.ReplaceAllString(title, " ")), " ")
-	if trimmed := strings.TrimSpace(rubric.ReplaceAllString(title, "")); trimmed != "" {
-		title = trimmed
+	for _, cb := range cfg.CoBots {
+		if dialect.NormalizeBotName(cb.Login) == key {
+			return true
+		}
 	}
-	// By runes: cutting bytes can split a multi-byte character, and the invalid
-	// UTF-8 that leaves becomes a replacement character in the JSON.
-	if runes := []rune(title); len(runes) > 120 {
-		title = string(runes[:117]) + "..."
-	}
-	return title
+	_, known := dialect.CoReviewerByName(login)
+	return known
 }

@@ -5,64 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"unicode/utf8"
 )
-
-// A listing exists to be read. Both bots wrap their title in badge images and
-// HTML, and CodeRabbit prefixes a rubric that is identical on every finding, so
-// the raw first line shows everything except what the finding says.
-func TestThreadTitleReadsAsText(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		body string
-		want string
-	}{
-		{
-			"codex badge",
-			"**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Remove the primary from the legacy view**\n\nWhen CRQ_BOT names a registry bot...",
-			"Remove the primary from the legacy view",
-		},
-		{
-			"coderabbit rubric",
-			"_🎯 Functional Correctness_ | _🟡 Minor_ | _⚡ Quick win_\n\n**Reject flags supplied as option values.**\n\nDetail follows.",
-			"Reject flags supplied as option values.",
-		},
-		{"plain", "Just a sentence about the bug.", "Just a sentence about the bug."},
-		{
-			// A pipe is allowed in a title; only the fixed rubric header goes.
-			"pipe in the title",
-			"**Support A | B configuration**\n\nDetail.",
-			"Support A | B configuration",
-		},
-		{
-			// Underscores inside an identifier are content, not emphasis.
-			"identifier with underscores",
-			"**Handle user_id and api_key**\n\nDetail.",
-			"Handle user_id and api_key",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := threadTitle(tc.body); got != tc.want {
-				t.Errorf("threadTitle = %q, want %q", got, tc.want)
-			}
-		})
-	}
-
-	long := threadTitle(strings.Repeat("x", 400))
-	if len([]rune(long)) > 120 {
-		t.Errorf("title is %d chars; a listing line must stay short", len([]rune(long)))
-	}
-
-	// Truncation cuts runes, not bytes: splitting a multi-byte character leaves
-	// invalid UTF-8, which JSON renders as a replacement character.
-	wide := threadTitle(strings.Repeat("é", 400))
-	if !utf8.ValidString(wide) {
-		t.Errorf("truncated title is not valid UTF-8: %q", wide)
-	}
-	if strings.Contains(wide, "\uFFFD") {
-		t.Errorf("truncation split a character: %q", wide)
-	}
-}
 
 // The point of the command: after a push every thread from the previous head is
 // outdated, findings leave those out by design, and an agent then had no way to
@@ -102,5 +45,49 @@ func TestOpenThreadsIncludesOutdatedAndOrdersThem(t *testing.T) {
 	}
 	if threads[0].Title != "Live point" || threads[0].Bot != "coderabbitai" {
 		t.Errorf("thread = %+v, want a readable title and the bot named", threads[0])
+	}
+	// A human's thread is listed too — the command promises every unresolved one
+	// — but calling a person a bot makes the output plainly wrong.
+	if threads[0].Author != "" {
+		t.Errorf("thread = %+v, want no author on a bot's thread", threads[0])
+	}
+}
+
+// The command promises every unresolved thread, so it also gets humans'. Copying
+// the author into `bot` made the output say `"bot":"alice"`.
+func TestOpenThreadsDoesNotCallAPersonABot(t *testing.T) {
+	gh := newFakeGitHub()
+	gh.graphQL = func(query string, _ map[string]any, out any) error {
+		if !strings.Contains(query, "reviewThreads") {
+			return nil
+		}
+		return json.Unmarshal([]byte(`{"repository":{"pullRequest":{"reviewThreads":{
+		  "pageInfo":{"hasNextPage":false,"endCursor":""},
+		  "nodes":[{"id":"T_human","isResolved":false,"isOutdated":true,"path":"","line":0,
+		    "comments":{"totalCount":1,"nodes":[{"body":"Can we rename this?","originalLine":42,
+		      "path":"a.go","author":{"login":"alice"}}]}}]
+		}}}}`), out)
+	}
+	cfg := firingConfig()
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	threads, err := svc.OpenThreads(context.Background(), "o/r", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(threads) != 1 {
+		t.Fatalf("got %d threads, want the human's", len(threads))
+	}
+	if threads[0].Bot != "" {
+		t.Errorf("thread = %+v, want no bot on a human's thread", threads[0])
+	}
+	if threads[0].Author != "alice" {
+		t.Errorf("thread = %+v, want the human named as the author", threads[0])
+	}
+	// An outdated thread often keeps only originalLine, and those are the whole
+	// reason this command exists — dropping the location loses the only pointer
+	// to what the comment was about.
+	if threads[0].Line != 42 {
+		t.Errorf("line = %d, want the original line 42", threads[0].Line)
 	}
 }
