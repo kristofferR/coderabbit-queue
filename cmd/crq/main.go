@@ -794,6 +794,13 @@ func runReviewers(ctx context.Context, service *crq.Service, args []string) int 
 		}
 		view, err = service.SetReviewers(ctx, repo, splitList(bots), splitList(required))
 	default:
+		// `crq reviewers owner/repo --bots codex` is a set command missing its
+		// verb. Showing the configuration and exiting 0 tells automation the
+		// mutation worked when nothing changed.
+		if bots != nil || required != nil {
+			fatal(errors.New("did you mean `crq reviewers set`? --bots/--required only apply to set"))
+			return 1
+		}
 		view, err = service.Reviewers(ctx, repo)
 	}
 	if err != nil {
