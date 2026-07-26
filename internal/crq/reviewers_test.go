@@ -225,3 +225,54 @@ func TestDerivationLosesNothing(t *testing.T) {
 		}
 	})
 }
+
+// Per-repo reviewers answer the request crq exists to make easy: which bots run
+// on which project. The override has to reach the DERIVED views too, or crq
+// would still gate on, and surface findings from, a bot this repository excluded.
+func TestForRepoOverridesEveryDerivedView(t *testing.T) {
+	// isolatedConfig blanks CRQ_COBOTS, so ask for the shipped default explicitly.
+	fleet := isolatedConfig(t, map[string]string{"CRQ_COBOTS": "codex,bugbot,macroscope"})
+	if len(fleet.CoBots) < 2 {
+		t.Fatalf("this test needs several co-reviewers by default, got %d", len(fleet.CoBots))
+	}
+
+	t.Run("no override changes nothing", func(t *testing.T) {
+		if got := fleet.ForRepo(RepoReviewers{}); len(got.Reviewers) != len(fleet.Reviewers) {
+			t.Errorf("reviewers = %d, want the fleet's %d", len(got.Reviewers), len(fleet.Reviewers))
+		}
+	})
+
+	t.Run("only the chosen co-reviewer runs", func(t *testing.T) {
+		only := fleet.ForRepo(RepoReviewers{
+			CoBots: []string{dialect.CodexBotLogin}, SetCoBots: true,
+			Required: []string{dialect.CodexBotLogin}, SetRequired: true,
+		})
+		if len(only.CoBots) != 1 || dialect.NormalizeBotName(only.CoBots[0].Login) != dialect.NormalizeBotName(dialect.CodexBotLogin) {
+			t.Fatalf("CoBots = %+v, want only codex", only.CoBots)
+		}
+		// The derived views must agree, or crq gates on a bot this repo excluded.
+		if len(only.RequiredBots) != 1 || dialect.NormalizeBotName(only.RequiredBots[0]) != dialect.NormalizeBotName(dialect.CodexBotLogin) {
+			t.Errorf("RequiredBots = %v, want only codex", only.RequiredBots)
+		}
+		for _, login := range only.FeedbackBots {
+			if dialect.NormalizeBotName(login) == "cursor" {
+				t.Errorf("FeedbackBots = %v still surfaces an excluded bot", only.FeedbackBots)
+			}
+		}
+		// The primary is fleet-wide and still configured, just not gating here.
+		primary, ok := only.Primary()
+		if !ok || primary.Login != fleet.Bot {
+			t.Errorf("primary = %+v ok=%v, want it kept", primary, ok)
+		}
+	})
+
+	t.Run("chosen to be none is not the same as unset", func(t *testing.T) {
+		none := fleet.ForRepo(RepoReviewers{CoBots: []string{}, SetCoBots: true})
+		if len(none.CoBots) != 0 {
+			t.Errorf("CoBots = %+v, want none — an empty choice must survive", none.CoBots)
+		}
+		if _, ok := none.Primary(); !ok {
+			t.Error("excluding every co-reviewer must not remove the primary")
+		}
+	})
+}

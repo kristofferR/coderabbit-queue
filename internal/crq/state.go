@@ -23,6 +23,8 @@ type (
 	Revision     = crqstate.Revision
 	StateStore   = crqstate.StateStore
 	StoreConfig  = crqstate.StoreConfig
+	// RepoReviewers is the per-repository reviewer override (see Config.ForRepo).
+	RepoReviewers = crqstate.RepoReviewers
 )
 
 const (

@@ -202,6 +202,18 @@ convergence never hides a rebuttal you have not answered. Address it or decline 
 reason; the loop clears it once the bot withdraws (or you stop declining and fix it). Ambiguous bot
 replies surface too — crq errs toward showing a possible rebuttal rather than burying it.
 
+Choose which bots review one project:
+
+```bash
+crq reviewers REPO                                    # effective reviewers + budgets
+crq reviewers set REPO --bots codex --required codex  # only Codex here
+crq reviewers clear REPO                              # fleet default again
+```
+
+`budget: account` means the reviewer is serialized against the shared CodeRabbit allowance;
+`budget: none` means it runs immediately. Stored in the shared state ref, so the daemon and agents
+cannot disagree. The primary reviewer is fleet-wide.
+
 Current feedback without triggering a review:
 
 ```bash

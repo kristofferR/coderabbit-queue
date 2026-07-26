@@ -175,3 +175,54 @@ func silenceTrigger(coBots []CoBotConfig, login string) []CoBotConfig {
 func (c Config) evidenceBots() map[string]struct{} {
 	return dialect.BotSet(unionBots(c.FeedbackBots, c.RequiredBots))
 }
+
+// ForRepo applies a repository's reviewer override to the fleet configuration.
+//
+// The primary is deliberately NOT overridable. Its markers and command are
+// injected into the dialect classifiers when the Service is constructed, so a
+// per-repo primary would mean per-repo classifiers — a much larger change than
+// "which co-reviewers run here", which is what the request actually is.
+func (c Config) ForRepo(ov RepoReviewers) Config {
+	if !ov.SetCoBots && !ov.SetRequired {
+		return c
+	}
+	out := c
+	if ov.SetCoBots {
+		keep := make([]CoBotConfig, 0, len(c.CoBots))
+		for _, cb := range c.CoBots {
+			if containsBot(ov.CoBots, cb.Login) {
+				keep = append(keep, cb)
+			}
+		}
+		out.CoBots = keep
+	}
+	if ov.SetRequired {
+		out.RequiredBots = append([]string(nil), ov.Required...)
+	}
+	// Rebuild the derived views from the overridden lists, exactly as
+	// LoadConfig does, so no view can answer differently from another.
+	out.Reviewers = buildReviewers(out.Bot, out.ReviewCommand, out.RequiredBots, out.CoBots)
+	out.RequiredBots = out.reviewerLogins(func(r Reviewer) bool { return r.Required })
+	out.FeedbackBots = out.reviewerLogins(func(r Reviewer) bool { return r.Required || !r.Metered() })
+	return out
+}
+
+func containsBot(logins []string, login string) bool {
+	key := dialect.NormalizeBotName(login)
+	for _, candidate := range logins {
+		if dialect.NormalizeBotName(candidate) == key {
+			return true
+		}
+	}
+	return false
+}
+
+// cfgFor is the configuration crq should use for one repository: the fleet
+// default with that repository's override applied.
+func (s *Service) cfgFor(st State, repo string) Config {
+	ov, ok := st.RepoOverride(repo)
+	if !ok {
+		return s.cfg
+	}
+	return s.cfg.ForRepo(ov)
+}
