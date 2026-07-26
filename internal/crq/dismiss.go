@@ -42,6 +42,11 @@ type DismissResult struct {
 // that no round exists for the head at all, so a dismissal with nowhere to live
 // would change nothing.
 func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string, reason string) (DismissResult, error) {
+	// Normalize once, up front: Feedback normalizes internally but pullHead and
+	// the round key do not, so a spelling the CLI accepts (`Owner/Repo.git`)
+	// would otherwise validate against one repository and write the round
+	// against another.
+	repo = NormalizeRepo(repo)
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		return DismissResult{}, errors.New("a dismissal needs a reason")
