@@ -55,19 +55,24 @@ type Config struct {
 	// CompletionMarker identifies the bot's reply to a processed review command
 	// (CodeRabbit: "Review finished."). Feedback uses it to count a command
 	// round that produced no review object toward convergence.
-	CompletionMarker    string
-	Host                string
-	Timezone            string
-	MinInterval         time.Duration
-	InflightTimeout     time.Duration
-	PollInterval        time.Duration
-	WaitTimeout         time.Duration
-	CalibrationTTL      time.Duration
-	RateLimitFallback   time.Duration
-	AutoReviewPoll      time.Duration
-	AutoReviewMaxScan   int
-	LeaderTTL           time.Duration
-	FiredMax            int
+	CompletionMarker  string
+	Host              string
+	Timezone          string
+	MinInterval       time.Duration
+	InflightTimeout   time.Duration
+	PollInterval      time.Duration
+	WaitTimeout       time.Duration
+	CalibrationTTL    time.Duration
+	RateLimitFallback time.Duration
+	AutoReviewPoll    time.Duration
+	AutoReviewMaxScan int
+	LeaderTTL         time.Duration
+	FiredMax          int
+	// Tidy removes crq's own spent review-trigger comments as rounds progress.
+	// On by default: they are comments crq posted and the bot has answered, and
+	// a PR driven through a dozen rounds is otherwise unreadable. CRQ_TIDY=0
+	// turns it off.
+	Tidy                bool
 	NoOpen              bool
 	DryRun              bool
 	FeedbackWaitTimeout time.Duration
@@ -172,6 +177,7 @@ func LoadConfig() (Config, error) {
 		AutoReviewMaxScan:   intEnv(env, "CRQ_AUTOREVIEW_MAX_SCAN", 400),
 		LeaderTTL:           durationEnv(env, "CRQ_LEADER_TTL", 3*time.Minute),
 		FiredMax:            intEnv(env, "CRQ_FIRED_MAX", 500),
+		Tidy:                stringEnv(env, "CRQ_TIDY", "1") != "0",
 		NoOpen:              env["CRQ_NO_OPEN"] != "",
 		DryRun:              env["CRQ_DRY_RUN"] == "1",
 		FeedbackWaitTimeout: durationEnv(env, "CRQ_FEEDBACK_WAIT_TIMEOUT", 20*time.Minute),

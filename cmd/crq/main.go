@@ -224,6 +224,28 @@ func run(ctx context.Context, args []string) int {
 		}
 		printJSON(result)
 		return 0
+	case "tidy":
+		dryRun := hasFlag(args[1:], "--dry-run")
+		repo, pr, ok := repoPR(positional(args[1:]))
+		if !ok {
+			fatal(errors.New("usage: crq tidy <repo> <pr> [--dry-run]"))
+			return 1
+		}
+		if bad, found := unknownFlag(args[1:], "--dry-run"); found {
+			fatal(fmt.Errorf("unknown flag %s (usage: crq tidy <repo> <pr> [--dry-run])", bad))
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		result, terr := service.Tidy(ctx, repo, pr, dryRun)
+		if terr != nil {
+			fatal(terr)
+			return 1
+		}
+		printJSON(result)
+		return 0
 	case "autoreview", "auto":
 		fs := flag.NewFlagSet("autoreview", flag.ContinueOnError)
 		fs.SetOutput(os.Stderr)
@@ -356,6 +378,7 @@ USAGE
   crq decline <thread-id> [...] --reason "<why>" [--keep-open]
                                    reply on a thread to record why a finding is declined
                                    (resolves it; --keep-open leaves it open)
+  crq tidy <repo> <pr> [--dry-run] remove crq's own spent review-trigger comments
   crq autoreview [--once] [--no-incremental]
                                    keep open PRs reviewed, rate-coordinated
   crq preflight [--type all|committed|uncommitted] [--base <branch>]
@@ -509,6 +532,31 @@ replies contesting the decline, crq re-surfaces that reply as its own finding.
 
 Pass --keep-open to leave it unresolved anyway (an on-the-record disagreement you
 intend to keep working). Thread IDs come from .findings[].thread_id.
+`)
+	case "tidy":
+		fmt.Print(`crq tidy <repo> <pr> [--dry-run]
+
+Delete the review-trigger comments crq posted that nothing needs any more. A PR
+driven through a dozen rounds collects a dozen "@coderabbitai review" comments,
+which buries the conversation a human came to read.
+
+A comment is removed only when all three hold:
+
+  * crq posted it — the candidates are the command IDs crq recorded on its own
+    rounds, not anything matching the text. A person's "@coderabbitai review" is
+    their decision to ask and not crq's to erase.
+  * the round that asked has PROGRESSED. A live round keeps its command, because
+    that is the comment crq adopts instead of posting another one.
+  * the bot answered it, and it predates the current head. Adoption only ever
+    considers commands newer than the head commit, so deleting one of those
+    would make the next pump post a duplicate and buy a second review.
+
+It never deletes the bots' own comments. An auto-generated reply can be a
+rate-limit or skipped-review notice, which crq reads as evidence and surfaces as
+a finding — deleting those would destroy feedback nobody had read yet.
+
+Runs by itself as rounds progress under crq autoreview; CRQ_TIDY=0 turns that
+off. --dry-run reports what it would remove.
 `)
 	case "autoreview", "auto":
 		fmt.Print(`crq autoreview [--once] [--no-incremental]
