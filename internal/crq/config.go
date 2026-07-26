@@ -124,9 +124,16 @@ func LoadConfig() (Config, error) {
 	// CRQ_BOT may name a registry bot — pointing crq at Codex as the primary is a
 	// real configuration. It is then the primary and must not ALSO be driven as a
 	// co-reviewer: DecideFire posts its review command and fireCoOnly would post
-	// its co-reviewer trigger, asking the same reviewer twice. Requiredness is
-	// folded in above first, so dropping the entry cannot un-gate it.
-	coBots = withoutLogin(coBots, bot)
+	// its co-reviewer trigger, asking the same reviewer twice.
+	//
+	// Silenced, not removed. The registry entry is also where that bot's wording
+	// and check-run hooks come from (classifierCoReviewers, coChecksRelevant both
+	// walk CoBots), so dropping it would cost the primary its evidence: a Codex
+	// clean summary would read as a generic no-action event, and a check-only
+	// result would not be fetched at all — crq would fire and then time out with
+	// current-head evidence sitting in front of it. Every trigger post goes
+	// through engine.DecideCoPost, which posts nothing for a never trigger.
+	coBots = silenceTrigger(coBots, bot)
 	// Enabled co-reviewers surface findings without gating: their logins join
 	// the feedback set unless CRQ_FEEDBACK_BOTS overrides explicitly.
 	coLogins := make([]string, 0, len(coBots))

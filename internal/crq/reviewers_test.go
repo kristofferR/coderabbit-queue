@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
 )
 
 // isolatedConfig loads config from an empty file so only the env vars a test sets
@@ -175,10 +176,20 @@ func TestDerivationLosesNothing(t *testing.T) {
 		// same reviewer asked twice. Pointing crq at Codex as the primary is a
 		// real configuration, so this is a live double-post, not a hypothetical.
 		cfg := isolatedConfig(t, map[string]string{"CRQ_BOT": "chatgpt-codex-connector[bot]"})
+		found := false
 		for _, cb := range cfg.CoBots {
-			if dialect.NormalizeBotName(cb.Login) == dialect.NormalizeBotName(cfg.Bot) {
-				t.Errorf("CoBots still holds the primary %q, so crq would trigger it twice", cb.Login)
+			if dialect.NormalizeBotName(cb.Login) != dialect.NormalizeBotName(cfg.Bot) {
+				continue
 			}
+			found = true
+			if cb.Trigger != engine.TriggerNever {
+				t.Errorf("the primary's co-trigger is %q, so crq would ask it twice", cb.Trigger)
+			}
+		}
+		// The entry must SURVIVE, silenced: it is where this bot's wording and
+		// check-run hooks come from, and the primary needs those to be believed.
+		if !found {
+			t.Error("removing the primary from CoBots costs it its registry evidence hooks")
 		}
 		// It is still a reviewer, and still the metered one.
 		if primary, ok := cfg.Primary(); !ok || primary.Login != cfg.Bot {

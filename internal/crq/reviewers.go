@@ -150,9 +150,11 @@ func buildReviewers(primary, primaryCommand string, required []string, coBots []
 	return out
 }
 
-// withoutLogin drops the co-reviewer entry matching login, if any. Used to keep a
-// primary that happens to be a registry bot out of the co-reviewer machinery.
-func withoutLogin(coBots []CoBotConfig, login string) []CoBotConfig {
+// silenceTrigger stops crq posting a co-reviewer trigger for login while leaving
+// its entry — and therefore its registry wording and check hooks — in place.
+// Used for a primary that is also a registry bot: it is triggered as the
+// primary, and asking it twice is the bug, but its evidence is still read here.
+func silenceTrigger(coBots []CoBotConfig, login string) []CoBotConfig {
 	if login == "" {
 		return coBots
 	}
@@ -160,7 +162,7 @@ func withoutLogin(coBots []CoBotConfig, login string) []CoBotConfig {
 	out := make([]CoBotConfig, 0, len(coBots))
 	for _, cb := range coBots {
 		if dialect.NormalizeBotName(cb.Login) == key {
-			continue
+			cb.Trigger = engine.TriggerNever
 		}
 		out = append(out, cb)
 	}
