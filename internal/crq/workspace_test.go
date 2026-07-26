@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // originRepo builds a real repository on disk to clone from, so these tests
@@ -210,5 +211,148 @@ func TestGitTokenTravelsInTheEnvironment(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "ghp_secret_value") {
 		t.Errorf("the token leaked into an error message: %v", err)
+	}
+}
+
+// A relative root would make `git worktree add` — which runs inside the mirror —
+// create the worktree under the mirror, while the path handed back points at a
+// directory that does not exist.
+func TestWorkspaceResolvesARelativeRoot(t *testing.T) {
+	base := t.TempDir()
+	sha := originRepo(t, filepath.Join(base, "owner/thing"))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	// Run from a scratch directory so a relative root has somewhere to land.
+	scratch := t.TempDir()
+	prev, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(scratch); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+
+	co, err := Workspace{Root: "relative-cache"}.Checkout(context.Background(), "owner/thing", 5, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(co.Dir) {
+		t.Errorf("checkout dir %q is relative", co.Dir)
+	}
+	if _, err := os.Stat(filepath.Join(co.Dir, "README.md")); err != nil {
+		t.Errorf("the checkout is not where it says it is: %v", err)
+	}
+}
+
+// Another worker may be building in an earlier generation right now. Clearing
+// the directory eagerly pulled the ground out from under a live session.
+func TestCheckoutLeavesALiveSiblingAlone(t *testing.T) {
+	base := t.TempDir()
+	sha := originRepo(t, filepath.Join(base, "owner/thing"))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	first, err := ws.Checkout(ctx, "owner/thing", 6, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Checkout(ctx, "owner/thing", 6, sha); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(first.Dir, "README.md")); err != nil {
+		t.Errorf("a live checkout was removed by the next one: %v", err)
+	}
+}
+
+// A fix session's documented way to make changes is a branch in its checkout.
+// A --mirror clone's refspec is +refs/*:refs/*, so the next `fetch --prune`
+// reached into refs/heads and deleted that branch — destroying the session's work
+// between one dispatch and the next.
+func TestFetchDoesNotDeleteABranchAWorktreeCreated(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	co, err := ws.Checkout(ctx, repo, 3, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := co.Git(ctx, "checkout", "-b", "crq/fix-3"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Another dispatch fetches the shared mirror.
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	if branch, err := co.Git(ctx, "rev-parse", "--abbrev-ref", "HEAD"); err != nil || branch != "crq/fix-3" {
+		t.Fatalf("branch = %q err=%v, want the session's branch to survive a fetch", branch, err)
+	}
+}
+
+// Pruning read the checkout directory's own mtime, which editing files inside
+// does not update — so a busy session read as abandoned and was deleted.
+func TestPruningMeasuresTheNewestFileNotTheDirectory(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Now().Add(-48 * time.Hour)
+	nested := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(nested, "edited.go")
+	if err := os.WriteFile(file, []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The directories look ancient; the file inside was just written.
+	for _, d := range []string{dir, nested} {
+		if err := os.Chtimes(d, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if since := time.Since(newestModTime(dir)); since > time.Minute {
+		t.Errorf("newest modification read as %s ago; a live session would be pruned", since)
+	}
+}
+
+// A mirror created before the refspec rule still fetches +refs/*:refs/*. One
+// branch created in a worktree then wedges every future fetch for the whole
+// repository — "refusing to fetch into branch ... checked out at" — which is how
+// a single fix session stopped every dispatch for hours.
+func TestMirrorMigratesAnOldRefspec(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Put it back the way an older crq left it.
+	if _, err := gitDir(ctx, mirror, "config", "remote.origin.fetch", "+refs/*:refs/*"); err != nil {
+		t.Fatal(err)
+	}
+	co, err := ws.Checkout(ctx, repo, 4, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := co.Git(ctx, "checkout", "-b", "session-branch"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The next dispatch of ANY pr in this repository fetches the same mirror.
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Fatalf("a branch in one worktree wedged the whole repository: %v", err)
+	}
+	got, err := gitDir(ctx, mirror, "config", "--get", "remote.origin.fetch")
+	if err != nil || got != originRefspec {
+		t.Errorf("refspec = %q err=%v, want it migrated to %q", got, err, originRefspec)
 	}
 }
