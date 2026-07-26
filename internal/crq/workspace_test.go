@@ -212,3 +212,55 @@ func TestGitTokenTravelsInTheEnvironment(t *testing.T) {
 		t.Errorf("the token leaked into an error message: %v", err)
 	}
 }
+
+// A relative root would make `git worktree add` — which runs inside the mirror —
+// create the worktree under the mirror, while the path handed back points at a
+// directory that does not exist.
+func TestWorkspaceResolvesARelativeRoot(t *testing.T) {
+	base := t.TempDir()
+	sha := originRepo(t, filepath.Join(base, "owner/thing"))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	// Run from a scratch directory so a relative root has somewhere to land.
+	scratch := t.TempDir()
+	prev, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(scratch); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+
+	co, err := Workspace{Root: "relative-cache"}.Checkout(context.Background(), "owner/thing", 5, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(co.Dir) {
+		t.Errorf("checkout dir %q is relative", co.Dir)
+	}
+	if _, err := os.Stat(filepath.Join(co.Dir, "README.md")); err != nil {
+		t.Errorf("the checkout is not where it says it is: %v", err)
+	}
+}
+
+// Another worker may be building in an earlier generation right now. Clearing
+// the directory eagerly pulled the ground out from under a live session.
+func TestCheckoutLeavesALiveSiblingAlone(t *testing.T) {
+	base := t.TempDir()
+	sha := originRepo(t, filepath.Join(base, "owner/thing"))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	first, err := ws.Checkout(ctx, "owner/thing", 6, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Checkout(ctx, "owner/thing", 6, sha); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(first.Dir, "README.md")); err != nil {
+		t.Errorf("a live checkout was removed by the next one: %v", err)
+	}
+}
