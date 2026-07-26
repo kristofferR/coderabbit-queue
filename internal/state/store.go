@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -81,10 +82,14 @@ type StateStore interface {
 }
 
 // GitStateStore persists v3 state as state.json in a git ref, with the same
-// compare-and-swap mechanism as v2 (12 retries on UpdateRef 409/422). Only the
-// payload shape changed; a payload whose schema version isn't 3 (or won't
-// parse) is logged loudly and auto-reinitialized — crq is pre-release, there is
-// no migration.
+// compare-and-swap mechanism as v2 (12 retries on UpdateRef 409/422).
+//
+// An OLDER payload is discarded and reinitialized: crq is pre-release, there is
+// no migration, and a v2 payload describes a world this binary cannot act on.
+// A NEWER one is refused. The fleet runs mixed binary versions during a rolling
+// deploy, so reinitializing there would mean the first old binary to wake up
+// erases every live round the new ones are working — the whole account's queue,
+// silently, in the one situation the version field exists to detect.
 type GitStateStore struct {
 	cfg StoreConfig
 	gh  *gh.GitHub
@@ -146,21 +151,38 @@ func (s *GitStateStore) Load(ctx context.Context) (State, Revision, error) {
 	var probe struct {
 		Version int `json:"v"`
 	}
-	if err := json.Unmarshal(raw, &probe); err != nil || probe.Version != SchemaVersion {
-		reason := fmt.Sprintf("schema v%d", probe.Version)
-		if err != nil {
-			reason = "an unparseable payload"
-		}
-		s.logf("state ref %s holds %s (want v%d) — reinitializing to a fresh state (no migration; crq is pre-release)", s.cfg.StateRef, reason, SchemaVersion)
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return State{}, Revision{}, s.refuse("holds a payload that does not parse as JSON", err)
+	}
+	if probe.Version > SchemaVersion {
+		return State{}, Revision{}, s.refuse(
+			fmt.Sprintf("holds schema v%d, which this binary (v%d) does not understand", probe.Version, SchemaVersion), nil)
+	}
+	if probe.Version != SchemaVersion {
+		s.logf("state ref %s holds schema v%d (want v%d) — reinitializing to a fresh state (no migration; crq is pre-release)", s.cfg.StateRef, probe.Version, SchemaVersion)
 		return s.fresh(), rev, nil
 	}
 	var st State
 	if err := json.Unmarshal(raw, &st); err != nil {
-		s.logf("state ref %s payload failed to decode (%v) — reinitializing to a fresh state", s.cfg.StateRef, err)
-		return s.fresh(), rev, nil
+		// The version says this binary should understand it and it does not.
+		// That is a shape change inside v3, not an obsolete payload, so the
+		// rounds it describes are live and must not be thrown away.
+		return State{}, Revision{}, s.refuse("holds a v"+strconv.Itoa(SchemaVersion)+" payload this binary cannot decode", err)
 	}
 	st.Normalize(time.Now().UTC())
 	return st, rev, nil
+}
+
+// refuse turns a state payload this binary must not touch into an actionable
+// error. It names the ref and the way out, because the safe response is a human
+// decision — upgrade, or deliberately reset — and never a silent erase.
+func (s *GitStateStore) refuse(what string, cause error) error {
+	msg := fmt.Sprintf("state ref %s %s; refusing to touch it. Upgrade crq, or reset deliberately with: git push origin --delete %s",
+		s.cfg.StateRef, what, s.cfg.StateRef)
+	if cause != nil {
+		return fmt.Errorf("%s (%w)", msg, cause)
+	}
+	return errors.New(msg)
 }
 
 func (s *GitStateStore) fresh() State {
