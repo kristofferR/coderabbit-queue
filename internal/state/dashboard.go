@@ -143,7 +143,7 @@ func dash(s string) string {
 func RenderDashboard(st State, cfg StoreConfig) string {
 	loc := dashboardLoc(cfg)
 	now := time.Now().UTC()
-	queue := st.Queue(now)
+	queue := st.Queue(now, cfg.MinInterval)
 	inFlight := inFlightRounds(st)
 	slot := st.SlotRound()
 	blocked := st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now)
@@ -157,7 +157,15 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	case slot != nil:
 		fmt.Fprintf(&b, "### 🟡 Reviewing %s#%d\n\n", slot.Repo, slot.PR)
 	case len(inFlight) > 0:
-		fmt.Fprintf(&b, "### 🟡 Awaiting feedback for %s#%d\n\n", inFlight[0].Repo, inFlight[0].PR)
+		// A reserved round has not posted its command yet, so no feedback can be
+		// on its way — and with no FireSlot behind it, Pump cannot move it either.
+		// Calling that a feedback wait sends the reader looking for a review that
+		// was never requested.
+		if front := inFlight[0]; front.Phase == PhaseReserved {
+			fmt.Fprintf(&b, "### 🟠 Stranded reservation on %s#%d — no fire slot backs it\n\n", front.Repo, front.PR)
+		} else {
+			fmt.Fprintf(&b, "### 🟡 Awaiting feedback for %s#%d\n\n", inFlight[0].Repo, inFlight[0].PR)
+		}
 	case len(queue) > 0:
 		// Nothing ready yet is still queued work, never idle — say when the front
 		// of the queue opens instead of leaving the reader to guess.
@@ -250,9 +258,9 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 // RenderTitle summarizes the state for the dashboard issue title. The queue
 // count is the WHOLE queue, cooling-down rounds included: a state whose only
 // work is not yet fire-eligible is queued, never idle.
-func RenderTitle(st State) string {
+func RenderTitle(st State, cfg StoreConfig) string {
 	now := time.Now().UTC()
-	queue := len(st.Queue(now))
+	queue := len(st.Queue(now, cfg.MinInterval))
 	switch {
 	case st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now):
 		return fmt.Sprintf("🐰 crq — blocked · queue %d", queue)

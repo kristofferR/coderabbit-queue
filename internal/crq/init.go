@@ -43,7 +43,7 @@ func Init(ctx context.Context, cfg Config, gh *ghapi.GitHub, store StateStore) (
 		if err != nil {
 			return InitResult{}, err
 		}
-		issue, err := gh.CreateIssue(ctx, cfg.GateRepo, renderTitle(state), body)
+		issue, err := gh.CreateIssue(ctx, cfg.GateRepo, renderTitle(state, cfg), body)
 		if err != nil {
 			return InitResult{}, err
 		}

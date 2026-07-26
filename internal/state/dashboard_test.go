@@ -93,7 +93,7 @@ func TestRenderDashboardCoolingDownOnly(t *testing.T) {
 		t.Errorf("header does not report the next ready time:\n%s", out)
 	}
 
-	if got, want := RenderTitle(st), "🐰 crq — 2 queued"; got != want {
+	if got, want := RenderTitle(st, StoreConfig{}), "🐰 crq — 2 queued"; got != want {
 		t.Errorf("RenderTitle = %q, want %q", got, want)
 	}
 }
@@ -110,7 +110,7 @@ func TestRenderDashboardEmpty(t *testing.T) {
 	if !strings.Contains(out, "## 🔬 In flight — 0\n\n_None._") {
 		t.Errorf("empty state lost its empty in-flight section:\n%s", out)
 	}
-	if got, want := RenderTitle(st), "🐰 crq — idle"; got != want {
+	if got, want := RenderTitle(st, StoreConfig{}), "🐰 crq — idle"; got != want {
 		t.Errorf("RenderTitle = %q, want %q", got, want)
 	}
 }
@@ -126,7 +126,7 @@ func TestQueueOrdersByReadyThenSeq(t *testing.T) {
 		coolingRound("kristofferr/d", 4, 4, now, -2*time.Minute), // window already open
 	)
 
-	q := st.Queue(now)
+	q := st.Queue(now, 0)
 	var got []int
 	for _, e := range q {
 		got = append(got, e.PR)
@@ -161,7 +161,7 @@ func TestQueueAccountBlockDominatesRetryAt(t *testing.T) {
 	blockedUntil := now.Add(44 * time.Minute)
 	st.Account.BlockedUntil = &blockedUntil
 
-	q := st.Queue(now)
+	q := st.Queue(now, 0)
 	if len(q) != 1 {
 		t.Fatalf("Queue returned %d entries, want 1", len(q))
 	}
@@ -193,7 +193,7 @@ func TestQueueSlotBusy(t *testing.T) {
 	st := stateWith(holder, queuedRound("kristofferr/b", 2, 2, now))
 	st.FireSlot = &FireSlot{Key: Key(holder.Repo, holder.PR), Token: "tok"}
 
-	q := st.Queue(now)
+	q := st.Queue(now, 0)
 	if len(q) != 1 || q[0].PR != 2 {
 		t.Fatalf("Queue = %+v, want only the queued round", q)
 	}
@@ -301,5 +301,112 @@ func TestRenderDashboardQueueHonoursTimezone(t *testing.T) {
 	out := RenderDashboard(st, StoreConfig{Timezone: "Europe/Oslo"})
 	if !strings.Contains(out, fmtStamp(r.RetryAt, loc)) {
 		t.Errorf("ready time not rendered in Europe/Oslo:\n%s", out)
+	}
+}
+
+// The dashboard's "ready" column is a promise about when firing will accept a
+// round, so every gate DecideFire applies has to be reflected. These three cases
+// each rendered "ready: now" for a round the fire gate would have refused.
+
+// Pacing: after a fire, DecideFire rejects everything until LastFired +
+// MinInterval. Excluding it as "sub-minute churn" was wrong twice over — it is an
+// absolute boundary, so it does not churn between renders, and CRQ_MIN_INTERVAL
+// can be configured far beyond 90s.
+func TestQueueReflectsThePacingGate(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(queuedRound("kristofferr/a", 1, 1, now))
+	fired := now.Add(-30 * time.Second)
+	st.LastFired = &fired
+
+	q := st.Queue(now, 90*time.Second)
+	if len(q) != 1 {
+		t.Fatalf("Queue = %d entries, want 1", len(q))
+	}
+	if want := fired.Add(90 * time.Second); !q[0].ReadyAt.Equal(want) {
+		t.Errorf("ReadyAt = %v, want the pacing boundary %s", q[0].ReadyAt, want)
+	}
+	if q[0].Why != WaitPacing {
+		t.Errorf("Why = %q, want %q", q[0].Why, WaitPacing)
+	}
+
+	// Once the interval has elapsed it stops being a gate at all.
+	if q := st.Queue(now.Add(2*time.Minute), 90*time.Second); len(q) != 1 || !q[0].ReadyAt.IsZero() {
+		t.Errorf("an elapsed interval must not gate: %+v", q)
+	}
+}
+
+// A slot held by another PR has no knowable release time. Leaving ReadyAt empty
+// rendered as "now", which is the one thing that is definitely false.
+func TestQueueDoesNotClaimSlotBlockedRoundsAreReadyNow(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(queuedRound("kristofferr/a", 1, 1, now), queuedRound("kristofferr/b", 2, 2, now))
+	st.FireSlot = &FireSlot{Key: "kristofferr/b#2", Token: "tok", Since: now.Add(-time.Minute)}
+	st.Rounds["kristofferr/b#2"] = func() Round {
+		r := st.Rounds["kristofferr/b#2"]
+		r.Phase = PhaseFired
+		r.Token = "tok"
+		return r
+	}()
+
+	for _, e := range st.Queue(now, 0) {
+		if e.Why != WaitSlotBusy {
+			continue
+		}
+		if !e.ReadyAt.IsZero() {
+			t.Errorf("a slot-blocked entry must not carry a ready time, got %s", e.ReadyAt)
+		}
+	}
+}
+
+// A reserved round has not posted its command, so no feedback can be coming —
+// and with no FireSlot behind it, Pump cannot advance it either. Reporting a
+// feedback wait sent the reader looking for a review nobody requested.
+func TestRenderNamesAStrandedReservation(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(queuedRound("kristofferr/a", 1, 1, now))
+	st.Rounds["kristofferr/a#1"] = func() Round {
+		r := st.Rounds["kristofferr/a#1"]
+		r.Phase = PhaseReserved
+		reserved := now.Add(-time.Minute)
+		r.ReservedAt = &reserved
+		return r
+	}()
+
+	got := RenderDashboard(st, StoreConfig{})
+	if strings.Contains(got, "Awaiting feedback") {
+		t.Error("a reserved round with no fire slot is not a feedback wait")
+	}
+	if !strings.Contains(got, "Stranded reservation") {
+		t.Errorf("the stranded reservation must be named, got:\n%s", got)
+	}
+}
+
+// Gates compose: the ready time is the latest of them, and the reason is
+// whichever one binds. Taking the first that matched let a short cooldown hide a
+// long account block, advertising a time firing would refuse for hours.
+func TestQueueTakesTheLatestBindingGate(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(coolingRound("kristofferr/a", 1, 1, now, time.Minute))
+	blocked := now.Add(2 * time.Hour)
+	st.Account.BlockedUntil = &blocked
+
+	q := st.Queue(now, 0)
+	if len(q) != 1 {
+		t.Fatalf("Queue = %d entries, want 1", len(q))
+	}
+	if !q[0].ReadyAt.Equal(blocked.UTC()) {
+		t.Errorf("ReadyAt = %v, want the dominating account block %s", q[0].ReadyAt, blocked.UTC())
+	}
+	if q[0].Why != WaitAccountBlocked {
+		t.Errorf("Why = %q, want %q", q[0].Why, WaitAccountBlocked)
+	}
+
+	// And the other way round: a pacing boundary beyond a short cooldown binds.
+	st2 := stateWith(coolingRound("kristofferr/b", 2, 2, now, time.Second))
+	fired := now
+	st2.LastFired = &fired
+	q2 := st2.Queue(now, 10*time.Minute)
+	if len(q2) != 1 || q2[0].Why != WaitPacing || !q2[0].ReadyAt.Equal(fired.Add(10*time.Minute).UTC()) {
+		t.Errorf("pacing must bind past a shorter cooldown, got %+v", q2)
 	}
 }

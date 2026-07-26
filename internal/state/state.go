@@ -602,6 +602,7 @@ const (
 	WaitCoolingDown    = "cooling down"    // this round's own RetryAt has not passed
 	WaitAccountBlocked = "account blocked" // the CodeRabbit account quota window dominates
 	WaitSlotBusy       = "slot busy"       // another PR's review holds the fire slot
+	WaitPacing         = "pacing"          // LastFired + CRQ_MIN_INTERVAL has not passed
 )
 
 // QueueEntry is one round waiting for a fire, plus when it can actually fire
@@ -640,33 +641,50 @@ func roundReadyAt(r Round) time.Time {
 // not honour once CodeRabbit extends the window. This is the same max() that
 // AccountBlockedUntil computes for the wait path.
 //
-// MinInterval is deliberately NOT reflected: it is sub-minute pacing, so
-// surfacing it would only churn DashboardSHA on every render.
-func (s *State) Queue(now time.Time) []QueueEntry {
+// minInterval is folded in too. It is DecideFire's pacing gate, so leaving it out
+// rendered a round "ready: now" that firing would refuse for up to another
+// CRQ_MIN_INTERVAL — 90s by default and configurable far longer. It is an
+// absolute boundary (LastFired + minInterval), not a countdown, so surfacing it
+// does not churn DashboardSHA between renders.
+func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 	var blocked time.Time
 	if s.Account.BlockedUntil != nil && s.Account.BlockedUntil.After(now) {
 		blocked = s.Account.BlockedUntil.UTC()
 	}
 	slotBusy := s.SlotRound() != nil
+	// The pacing gate applies to whichever round fires next, so it bounds every
+	// entry's earliest possible start.
+	var paced time.Time
+	if minInterval > 0 && s.LastFired != nil {
+		if at := s.LastFired.Add(minInterval).UTC(); at.After(now) {
+			paced = at
+		}
+	}
 
 	var out []QueueEntry
 	for _, r := range s.Rounds {
 		if r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry {
 			continue
 		}
-		own := roundReadyAt(r)
-		e := QueueEntry{Round: r, ReadyAt: own}
-		switch {
-		case blocked.After(own) && blocked.After(now):
-			e.ReadyAt = blocked
-			e.Why = WaitAccountBlocked
-		case own.After(now):
-			e.Why = WaitCoolingDown
-		case slotBusy:
-			e.Why = WaitSlotBusy
+		// Every gate is a lower bound on when firing will accept this round, so
+		// the ready time is the LATEST of them and the reason is whichever one
+		// binds. Picking the first that matched let a later boundary hide behind
+		// an earlier one — a round cooling down for a minute inside a two-hour
+		// account block was advertised at the wrong time entirely.
+		e := QueueEntry{Round: r}
+		gate := func(at time.Time, why string) {
+			if at.After(now) && at.After(e.ReadyAt) {
+				e.ReadyAt, e.Why = at, why
+			}
 		}
-		if !e.ReadyAt.After(now) {
-			e.ReadyAt = time.Time{} // ready now
+		gate(roundReadyAt(r), WaitCoolingDown)
+		gate(blocked, WaitAccountBlocked)
+		gate(paced, WaitPacing)
+		if e.ReadyAt.IsZero() && slotBusy {
+			// No time gate binds, but another PR holds the account-wide slot and
+			// its release time is unknowable. The Why column carries that; the
+			// ready column must stay empty rather than claim "now".
+			e.Why = WaitSlotBusy
 		}
 		out = append(out, e)
 	}
