@@ -117,6 +117,31 @@ func run(ctx context.Context, args []string) int {
 		}
 		printJSON(report)
 		return 0
+	case "next":
+		repo, pr, ok := repoPR(positional(args[1:]))
+		if !ok {
+			fatal(errors.New("usage: crq next <repo> <pr> [--wait]"))
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		var report crq.NextReport
+		var err error
+		if hasFlag(args[1:], "--wait") {
+			report, err = service.NextWaiting(ctx, repo, pr)
+		} else {
+			report, err = service.Next(ctx, repo, pr)
+		}
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		printJSON(report)
+		// The action field is the whole contract: exit 0 for every action so a
+		// caller never has to interpret two things at once.
+		return 0
 	case "loop":
 		repo, pr, ok := repoPR(args[1:])
 		if !ok {
@@ -262,20 +287,27 @@ func usage() {
 	fmt.Print(`crq - CodeRabbit review queue for humans and automation
 
 QUEUE WORKFLOWS
+  crq next <repo> <pr>             ask what to do next about a PR (the agent loop)
   crq loop <repo> <pr>             queue one PR review round, then emit JSON feedback
   crq autoreview                   keep open PRs reviewed through the same queue
   crq status                       show the queue, in-flight review, and quota state
 
-ONE PR ROUND
-  1. Run: crq loop <repo> <pr> > crq-feedback.json
-  2. If exit 10, read .findings[], fix only valid findings, and validate locally.
-  3. Resolve each addressed thread immediately after its local fix; do not wait for a push.
-  4. If any .reviewed_by value is false, HOLD THE HEAD: do not commit or push.
-  5. After every required bot is true, fix/resolve the rest, then commit and push once.
-  6. Repeat crq loop until exit 0. Never post @coderabbitai review directly.
+DRIVING A PR REVIEW
+  Call crq next, do exactly what .action says, call it again. That is the whole loop.
+
+    fix      fix .findings[], validate, then crq resolve (or crq decline) each thread
+    hold     do NOT push: a required reviewer is pending; call again at .recheck_after
+    push     the head is released — commit and push your fixes once
+    wait     nothing to do; call again at .recheck_after
+    done     converged
+    blocked  needs a human; .reason says why
+
+  crq next is non-blocking and idempotent, so nothing is lost if it is interrupted.
+  Never invent a delay of your own, and never post @coderabbitai review directly.
 
 USAGE
   crq init                         initialize state in CRQ_REPO
+  crq next <repo> <pr> [--wait]    emit the single next action as JSON (--wait blocks)
   crq loop <repo> <pr>             coordinated trigger -> wait -> JSON feedback/convergence
   crq feedback <repo> <pr>         emit normalized actionable review findings as JSON
   crq resolve <repo> <pr> --thread <id> [...]
@@ -293,6 +325,7 @@ USAGE
                                    maintenance tools; not for normal review loops
 
 EXIT CODES
+  next: always 0 on success — read .action, not the exit code
   loop: 0 converged/no actionable findings/skipped, 10 actionable feedback, 2 timeout
 
 Configure with environment variables or ~/.config/crq/env. CRQ_REPO points at the gate repo.
@@ -303,6 +336,43 @@ Use "crq help <command>" for command-specific guidance.
 
 func commandHelp(command string) {
 	switch command {
+	case "next":
+		fmt.Print(`crq next <repo> <pr> [--wait]
+
+The agent loop, in one command: crq answers what to do next about this PR, you do
+exactly that, then you call it again. Non-blocking, idempotent, and it advances the
+queue by one step as a side effect — so a PR outside the autoreview fleet still
+progresses, and an interrupted caller loses nothing by calling again.
+
+Always exits 0 on success. Read .action; the exit code carries no information.
+
+  fix      .findings[] are actionable for the current head. Fix them, validate, then
+           crq resolve each addressed .thread_id (or crq decline with a reason).
+  hold     You have work to land but a required reviewer has not answered for this
+           head. Do NOT commit or push — that restarts the review. Resolving threads
+           is still fine. Call again at .recheck_after.
+  push     The head is released. Commit and push the accumulated fixes once.
+  wait     Nothing to do until .recheck_after.
+  done     Converged: no findings, every required reviewer answered.
+  blocked  Needs a human (.reason says why, e.g. the PR was closed).
+
+Fields:
+  action            the instruction — the entire contract
+  reason            why, in one line
+  recheck_after     when to call again (hold and wait). crq computes this from the
+                    account-quota window, the round's retry cooldown and the poll
+                    interval. Never substitute a delay of your own.
+  pending[]         required reviewers with no evidence for this head
+  findings[]        actionable feedback (fix); same shape as crq feedback
+  local_work        whether crq saw changes the PR head lacks — what separates push
+                    from done. Run crq next inside the repository checkout so this
+                    is accurate; local_work_reason says when it could not be.
+
+--wait blocks through the states you cannot act on and returns the first actionable
+instruction. It shares one code path with the non-blocking form.
+
+Never post @coderabbitai review directly; crq is the only trigger.
+`)
 	case "loop":
 		fmt.Print(`crq loop <repo> <pr>
 
@@ -487,6 +557,27 @@ func repoPR(args []string) (string, int, bool) {
 
 func isHelpArg(arg string) bool {
 	return arg == "-h" || arg == "--help" || arg == "help"
+}
+
+// hasFlag reports whether args contains the exact flag.
+func hasFlag(args []string, flag string) bool {
+	for _, arg := range args {
+		if arg == flag {
+			return true
+		}
+	}
+	return false
+}
+
+// positional drops flag arguments so repoPR sees only <repo> <pr>.
+func positional(args []string) []string {
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			out = append(out, arg)
+		}
+	}
+	return out
 }
 
 func parseResolveArgs(args []string) ([]string, bool) {

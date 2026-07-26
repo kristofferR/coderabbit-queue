@@ -2,7 +2,8 @@
 
 crq is the repo's CLI for autonomous CodeRabbit/Codex pull-request review loops.
 
-Core rule: never post `@coderabbitai review` directly. Use `crq loop`.
+Core rule: never post `@coderabbitai review` directly. To drive a PR, call `crq next` and do exactly
+what its `.action` says (see Agent Loop below); everything else is reference material.
 
 Do not bypass crq to read review status, either. Never hand-poll the GitHub API
 (`gh api .../pulls/N/reviews|comments`, looping on the head) to wait for a review
@@ -37,32 +38,60 @@ CodeRabbit native auto-review must be off.
 
 ## Agent Loop
 
-Drain-first invariant: before waiting for a new review, run `crq feedback` and address every
-current finding. Fix genuine issues, validate locally, and immediately resolve each addressed thread
-(or record and resolve a decline). Commit and push only when every configured required reviewer has a
-`true` `.reviewed_by` value for the current head; otherwise hold the head. Repeat until `.findings` is
-empty, then start `crq loop`. After any loop return, inspect
-`.findings` before the exit code; non-empty findings are immediate work even if a required bot
-timed out. Never describe the PR as “waiting for review” while actionable findings are present.
-The loop also returns as soon as any feedback bot reports a finding; it does not wait for the
-remaining required bots or a shared review slot. Fix those findings locally, but HOLD THE HEAD:
-resolve each addressed thread immediately, but do not commit or push while any `.reviewed_by` value
-is false, because changing the head restarts the pending checks while thread resolution does not.
-Exception: when `.coderabbit_deferred` is true and every non-CodeRabbit required reviewer is true,
-the round is Codex-only (CodeRabbit rate-limited) — fix, push, and loop again without holding the
-head; the queued CodeRabbit review is untouched.
-Keep the queued review alive and poll `crq feedback` with the same `CRQ_REQUIRED_BOTS`. When every
-required bot is true, fix and resolve the rest, then commit all fixes once and push once.
+**Call `crq next`, do exactly what `.action` says, call it again.** That is the entire loop. Every
+judgement an agent used to make — how long to wait, whether the head may move, whether the round is
+finished — is a value crq computes.
 
-`crq loop` also enforces this invariant for new rounds: unresolved findings are returned before
-the PR is queued or a review slot is consumed.
-Thread-less review-body findings from a previous commit do not block after fixes are pushed; the
-next current-head review supersedes them or reports the finding again.
+```bash
+crq next OWNER/REPO PR_NUMBER
+```
+
+| `.action` | what to do |
+|---|---|
+| `fix` | Fix `.findings[]`, validate locally, then `crq resolve` each addressed `.thread_id` (or `crq decline` with a reason). Call again. |
+| `hold` | Do NOT commit or push: a required reviewer has not answered for this head, and moving the head restarts its review (resolving threads does not). Call again at `.recheck_after`. |
+| `push` | The head is released. Commit and push the accumulated fixes once. Call again. |
+| `wait` | Nothing to do until `.recheck_after`. |
+| `done` | Converged. |
+| `blocked` | Needs a human; `.reason` says why (e.g. the PR was closed). |
+
+`crq next` always exits 0 on success — read `.action`, never the exit code. It is non-blocking and
+idempotent, and it advances the queue by one step as a side effect, so a PR in a repo outside the
+autoreview fleet still progresses. There is no long-lived process to keep alive: if the harness kills
+the agent mid-loop, the next `crq next` returns the correct action from persisted state.
+
+Two rules this replaces, which agents previously had to remember:
+
+- **Never invent a delay.** `.recheck_after` is computed from the account-quota window, the round's
+  retry cooldown and the poll interval, and is always at least one poll interval away. Do not
+  substitute a timer, guessed review latency, or a `crq status` polling loop.
+- **Never decide to push yourself.** `hold` vs `push` is crq's answer. It already accounts for the
+  rate-limit degrade (a Codex-only round while CodeRabbit is blocked releases the head, because the
+  queued CodeRabbit review fires against whatever head exists when the window opens).
+
+`.local_work` is what separates `push` from `done`: crq checks whether the working copy holds changes
+the PR head lacks. Run `crq next` inside the repository checkout so that answer is accurate;
+`.local_work_reason` says when it could not be determined.
+
+`crq next --wait` blocks through the states you cannot act on and returns the first actionable
+instruction. It shares one code path with the non-blocking form.
+
+### crq loop (interactive/one-shot)
+
+`crq loop` is the older primitive: it triggers a round, blocks until feedback lands, and returns one
+report. It remains supported for humans and one-shot scripts, but an agent driving a PR should use
+`crq next` — `loop` requires the caller to interpret exit codes and to enforce the hold-the-head and
+drain-first rules by hand.
 
 ```bash
 crq loop OWNER/REPO PR_NUMBER > crq-feedback.json
 rc=$?
 ```
+
+`crq loop` enforces the drain-first invariant for new rounds: unresolved findings are returned before
+the PR is queued or a review slot is consumed. Thread-less review-body findings from a previous
+commit do not block after fixes are pushed; the next current-head review supersedes them or reports
+the finding again.
 
 `crq loop` queues the PR and triggers CodeRabbit when the account can spend a review. Alongside it
 crq runs its **co-reviewers** — Codex, Cursor Bugbot and Macroscope (`CRQ_COBOTS`, all enabled by
@@ -91,7 +120,7 @@ CodeRabbit is rate-limited. Only after every
 `CRQ_REQUIRED_BOTS` entry is true for the current head should you fix and resolve the rest, then
 commit and push the combined fixes once. Convergence is reported only after that same condition is met.
 
-Exit codes:
+Exit codes (`crq loop` only — `crq next` always exits 0 and answers in `.action`):
 - `0`: done; converged or no actionable findings. Check `.coderabbit_deferred`: when true (with
   `.status == "deferred"`), Codex reviewed clean but the CodeRabbit review is still owed — this is
   progress, NOT convergence (`.converged` stays false). Re-run `crq loop` after
@@ -166,19 +195,18 @@ re-emitted. Unresolved cross-commit threads remain visible.
 Long waits are not hangs. During queue/rate-limit waits, missing required-bot reviews, and
 network/GitHub outages, crq logs progress to stderr; stdout stays reserved for the final JSON.
 
-Keep the loop alive: harnesses often kill plain background shell jobs between agent turns, which
-orphans the wait. Run `crq loop` under the harness's persistent long-running-task primitive (in
-Claude Code: the Monitor tool with `persistent: true`, e.g.
-`set +e; crq loop OWNER/REPO PR > crq-feedback.json; echo "CRQ_EXIT:$?"` so the exit line is the
-completion event — the `set +e` keeps an errexit shell from dying on the meaningful non-zero exits
-(10 = findings, 2 = timeout) before it can echo). If a runner is killed anyway, the PR stays
-enqueued — re-running the same `crq loop` is
-idempotent and re-attaches to the wait. Never replace the runner with a `crq status` polling loop.
+Keeping a loop alive is not your problem when you use `crq next`: it returns immediately, so there is
+no long-lived process for a harness to kill between turns and nothing to re-attach to. If you do run
+the blocking `crq loop` (or `crq next --wait`), run it under the harness's persistent
+long-running-task primitive rather than a fire-and-forget background shell — in Claude Code, the
+Monitor tool with `persistent: true`. If a runner is killed anyway nothing is lost: the PR stays
+enqueued and the next `crq next` (or an identical `crq loop`) resumes. Never substitute a `crq
+status` polling loop, a timer, or a guessed review latency for either.
 
 Agent communication rule: do not relay every stderr progress line or send repeated "still waiting"
-updates. Tell the user once when a long `crq loop` wait begins, then stay quiet until the state
-changes (fired, feedback wait, findings, convergence, timeout, rate-limit/window change, network
-outage/recovery), the user asks for status, or at least 10 minutes have passed with no update.
+updates. Report a real state change — fired, findings, `push`, convergence, timeout, a
+rate-limit/window change, a network outage or recovery — or answer when the user asks. If the only
+new information is elapsed time on the same wait, stay quiet.
 
 Fleet review:
 

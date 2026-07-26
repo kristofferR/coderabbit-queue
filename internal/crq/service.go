@@ -57,6 +57,11 @@ type Service struct {
 	// deterministically. It intentionally does NOT reach logging/jitter/token or
 	// the fake GitHub timestamps, which stay on real time.
 	now func() time.Time
+	// localWorkFn overrides Next's "does the caller hold changes the PR head
+	// lacks" probe, which otherwise shells out to git in the process's working
+	// directory. nil in production; tests inject an answer instead of depending
+	// on the checkout they happen to run in.
+	localWorkFn func(ctx context.Context, head string) (bool, string)
 }
 
 func NewService(cfg Config, gh GitHubAPI, store StateStore, log Logger) *Service {
