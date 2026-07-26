@@ -75,6 +75,12 @@ type NextInput struct {
 	// MinDelay is the floor for Action.At — the caller's poll interval. It makes
 	// a hot loop unrepresentable: every wait is at least this long.
 	MinDelay time.Duration
+	// SettleUntil holds back a convergence verdict until the PR has been quiet
+	// for the configured settle window. Bots deliver in waves — a co-reviewer
+	// auto-reviews a pushed head minutes later, and a primary's detailed
+	// comments can trail its own completion shell — so the first clean
+	// observation is not yet an answer. Zero disables.
+	SettleUntil *time.Time
 }
 
 const defaultMinDelay = 15 * time.Second
@@ -166,6 +172,19 @@ func NextAction(in NextInput, now time.Time) Action {
 	// 3. Required reviewers still pending: the head must not move. Resolving a
 	//    thread does not restart a review; pushing does.
 	if !in.Completion.Done {
+		// ...unless the wait already expired. A primary that acknowledges the
+		// command and then never submits a review leaves the round reviewing
+		// forever, and `Progress` deliberately does not time it out because the
+		// legacy Loop owned that deadline. Without an actionable verdict here a
+		// caller — and `crq wait` — would idle indefinitely on a bot that
+		// crashed. Say so instead, and never re-fire: the head was acknowledged.
+		if in.waitExpired(now) {
+			return Action{
+				Kind:    ActionBlocked,
+				Reason:  "the review was acknowledged for this head but never delivered before the deadline",
+				Pending: pending,
+			}
+		}
 		kind, reason := ActionWait, "awaiting review"
 		if in.LocalWork {
 			kind, reason = ActionHold, "do not push: a required reviewer has not answered for this head"
@@ -173,11 +192,31 @@ func NextAction(in NextInput, now time.Time) Action {
 		return Action{Kind: kind, Reason: reason, At: in.nextCheck(now, nil, pending), Pending: pending}
 	}
 
-	// 4. Everything answered. Land the work, or report convergence.
+	// 4. Everything answered. Land the work, or report convergence — but only
+	//    once the PR has been quiet long enough that a trailing wave would have
+	//    landed. Declaring `done` on the first clean observation is how a loop
+	//    stops moments before the findings arrive.
 	if in.LocalWork {
 		return Action{Kind: ActionPush, Reason: "all required reviewers answered on this head"}
 	}
+	if in.SettleUntil != nil && in.SettleUntil.After(now) {
+		return Action{
+			Kind:   ActionWait,
+			Reason: "every required reviewer answered; holding briefly in case a trailing review is still landing",
+			At:     in.nextCheck(now, in.SettleUntil, pending),
+		}
+	}
 	return Action{Kind: ActionDone, Reason: "converged: no findings and every required reviewer answered"}
+}
+
+// waitExpired reports whether this round's own wait deadline has passed while it
+// is still under review.
+func (in NextInput) waitExpired(now time.Time) bool {
+	switch in.Round.Phase {
+	case state.PhaseFired, state.PhaseReviewing:
+		return in.Round.WaitDeadline != nil && now.After(*in.Round.WaitDeadline)
+	}
+	return false
 }
 
 // nextCheck is when the caller should call again. It is never sooner than

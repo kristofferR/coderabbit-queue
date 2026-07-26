@@ -37,6 +37,10 @@ type FeedbackReport struct {
 	// feedback JSON contract is frozen.
 	HeadRef  string `json:"-"`
 	HeadRepo string `json:"-"`
+	// LastEvidenceAt is when the newest review from a feedback bot landed. It
+	// anchors the settle window for a caller that holds no state between calls:
+	// "quiet since" is derivable, where the loop's in-process settledAt is not.
+	LastEvidenceAt time.Time `json:"-"`
 	// CodeRabbitDeferred marks a round degraded to Codex-only while the
 	// CodeRabbit account is rate-limited: Codex feedback is authoritative for
 	// this round, the CodeRabbit review stays queued and fires after
@@ -121,6 +125,12 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	}
 	completion := engine.Completion(completionRound, obs.eng, s.policy())
 	report.ReviewedBy = completion.ReviewedBy
+	for _, review := range obs.reviews {
+		if dialect.InBots(dialect.BotSet(unionBots(s.cfg.FeedbackBots, s.cfg.RequiredBots)), review.User.Login) &&
+			review.SubmittedAt.After(report.LastEvidenceAt) {
+			report.LastEvidenceAt = review.SubmittedAt
+		}
+	}
 	verdictCutoff := anchorCutoff
 	if verdictCutoff.IsZero() {
 		// Not fired yet (queued behind another PR): without a fire anchor the

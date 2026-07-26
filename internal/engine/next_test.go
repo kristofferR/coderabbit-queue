@@ -333,3 +333,64 @@ func TestNextActionKeepsShortCadenceForACommandedCoReviewer(t *testing.T) {
 		t.Errorf("At = %s, want a poll-interval recheck while a co-review is in flight", got.At)
 	}
 }
+
+// A primary that acknowledges the command and then never submits a review leaves
+// the round reviewing forever — Progress deliberately does not time that out,
+// because the legacy Loop owned the deadline. Without an actionable verdict here
+// the newly recommended flow idles indefinitely on a bot that crashed.
+func TestNextActionReportsAnExpiredReviewWait(t *testing.T) {
+	expired := t0.Add(-time.Minute)
+	got := NextAction(NextInput{
+		Round:      state.Round{Phase: state.PhaseReviewing, WaitDeadline: &expired},
+		Obs:        openObs(),
+		Completion: completionOf(map[string]bool{nextPrimary: false}),
+		Primary:    nextPrimary,
+		MinDelay:   time.Minute,
+	}, t0)
+	if got.Kind != ActionBlocked {
+		t.Fatalf("NextAction = %q (%s), want %q", got.Kind, got.Reason, ActionBlocked)
+	}
+
+	// An unexpired deadline is still just a wait.
+	live := t0.Add(time.Hour)
+	if got := NextAction(NextInput{
+		Round:      state.Round{Phase: state.PhaseReviewing, WaitDeadline: &live},
+		Obs:        openObs(),
+		Completion: completionOf(map[string]bool{nextPrimary: false}),
+		Primary:    nextPrimary,
+		MinDelay:   time.Minute,
+	}, t0); got.Kind != ActionWait {
+		t.Fatalf("NextAction = %q (%s), want %q while the deadline is live", got.Kind, got.Reason, ActionWait)
+	}
+}
+
+// Bots deliver in waves, so the first clean observation is not an answer yet.
+// The legacy loop held its verdict for a settle window; a stateless caller needs
+// the same guarantee or it stops moments before the findings land.
+func TestNextActionHoldsConvergenceThroughTheSettleWindow(t *testing.T) {
+	settleUntil := t0.Add(90 * time.Second)
+	got := NextAction(NextInput{
+		Obs:         openObs(),
+		Completion:  completionOf(map[string]bool{nextPrimary: true}),
+		Primary:     nextPrimary,
+		SettleUntil: &settleUntil,
+		MinDelay:    time.Minute,
+	}, t0)
+	if got.Kind != ActionWait {
+		t.Fatalf("NextAction = %q (%s), want %q inside the settle window", got.Kind, got.Reason, ActionWait)
+	}
+	if !got.At.Equal(settleUntil) {
+		t.Errorf("At = %s, want the settle boundary %s", got.At, settleUntil)
+	}
+
+	// Once quiet, it converges.
+	passed := t0.Add(-time.Second)
+	if got := NextAction(NextInput{
+		Obs:         openObs(),
+		Completion:  completionOf(map[string]bool{nextPrimary: true}),
+		Primary:     nextPrimary,
+		SettleUntil: &passed,
+	}, t0); got.Kind != ActionDone {
+		t.Fatalf("NextAction = %q (%s), want %q once settled", got.Kind, got.Reason, ActionDone)
+	}
+}

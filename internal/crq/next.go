@@ -80,17 +80,43 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 		return report, nil
 	}
 
+	// A dry run reports decisions and writes nothing. Enqueue is a CAS write
+	// plus a dashboard sync, so it has to be skipped here rather than left to
+	// the dry-run-aware apply path further down.
+	if s.cfg.DryRun {
+		return report, nil
+	}
+
 	// Nothing left to drain, so record the round for this head (idempotent;
 	// supersedes on a new head) and advance the queue one step.
 	if _, err := s.Enqueue(ctx, repo, pr); err != nil {
 		return report, err
 	}
-	// Not fatal if it fails: the instruction above stands on the observation
-	// already taken, and the next call advances again.
-	if err := s.advance(ctx, repo, pr, feedback); err != nil && s.log != nil {
-		s.log.Printf("warning: advancing %s: %v", QueueKey(repo, pr), err)
+	if err := s.advance(ctx, repo, pr, feedback); err != nil {
+		// Throttling is expected and self-clearing: the instruction above still
+		// stands on the observation already taken, and the next call advances.
+		// Anything else is a real failure — a token that cannot post the review
+		// command, say — and returning a cheerful `wait` would have callers
+		// retrying forever against something no amount of waiting fixes.
+		if _, throttled := ghapi.ThrottleWait(err); !throttled {
+			return report, err
+		}
+		if s.log != nil {
+			s.log.Printf("throttled while advancing %s: %v", QueueKey(repo, pr), err)
+		}
 	}
 	return report, nil
+}
+
+// settleUntil is when a convergence verdict may be trusted: the newest review
+// plus the configured quiet period. Nil when settling is disabled or nothing has
+// been observed to settle from.
+func (s *Service) settleUntil(feedback FeedbackReport) *time.Time {
+	if s.cfg.SettleWindow <= 0 || feedback.LastEvidenceAt.IsZero() {
+		return nil
+	}
+	at := feedback.LastEvidenceAt.Add(s.cfg.SettleWindow).UTC()
+	return &at
 }
 
 // advance moves the queue one step on this caller's behalf.
@@ -161,6 +187,7 @@ func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextR
 		Deferred:      feedback.CodeRabbitDeferred,
 		DeferredUntil: feedback.DeferredUntil,
 		MinDelay:      s.cfg.PollInterval,
+		SettleUntil:   s.settleUntil(feedback),
 	}
 	if round != nil {
 		in.Round = *round
