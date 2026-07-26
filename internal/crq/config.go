@@ -47,7 +47,12 @@ type Config struct {
 	// Reviewers is the single description of who reviews and what they cost.
 	// Bot / RequiredBots / FeedbackBots / CoBots above are DERIVED from it and
 	// kept only so existing consumers keep compiling; new code should read this.
-	Reviewers         []Reviewer
+	Reviewers []Reviewer
+	// WorkDir is the checkout the local-work probe inspects. Empty means the
+	// process's own directory, which is what an agent running crq from its
+	// working copy means. Set programmatically by a caller working in a
+	// worktree it made, since that caller is not standing in one.
+	WorkDir           string
 	RateLimitCommand  string
 	RateLimitMarker   string
 	CalibrationMarker string

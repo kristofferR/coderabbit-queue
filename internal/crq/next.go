@@ -2,7 +2,6 @@ package crq
 
 import (
 	"context"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -293,7 +292,7 @@ func (s *Service) checkLocalWork(ctx context.Context, repos []string, head, head
 	if s.localWorkFn != nil {
 		return s.localWorkFn(ctx, head)
 	}
-	return localWork(ctx, repos, head, headRef)
+	return localWork(ctx, s.cfg.WorkDir, repos, head, headRef)
 }
 
 // localWork reports whether the working copy holds changes the PR head does not
@@ -313,13 +312,15 @@ func (s *Service) checkLocalWork(ctx context.Context, repos []string, head, head
 // `done` rather than `push`. That is the safe direction: `push` is only ever
 // emitted once the head is already released, so a missed one costs one extra
 // call, while a spurious `hold` would stall the loop.
-func localWork(ctx context.Context, repos []string, head, headRef string) (bool, string) {
+// dir is the checkout to inspect; "" means the process's own directory,
+// which is what an agent running crq from its working copy means.
+func localWork(ctx context.Context, dir string, repos []string, head, headRef string) (bool, string) {
 	git := func(args ...string) (string, bool) {
-		out, err := exec.CommandContext(ctx, "git", args...).Output()
+		out, err := gitDir(ctx, dir, args...)
 		if err != nil {
 			return "", false
 		}
-		return strings.TrimSpace(string(out)), true
+		return out, true
 	}
 	if _, ok := git("rev-parse", "--is-inside-work-tree"); !ok {
 		return false, "not run inside a git checkout"
