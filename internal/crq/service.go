@@ -108,6 +108,10 @@ type EnqueueResult struct {
 	Deduped       bool   `json:"deduped"`
 	Head          string `json:"head,omitempty"`
 	Seq           int64  `json:"seq,omitempty"`
+	// Held says the PR is out of the queue on purpose. A caller that treats a
+	// no-op as "try again" would otherwise spin: nothing about a held PR changes
+	// by asking again.
+	Held bool `json:"held,omitempty"`
 	// Reason explains a no-op, which today means the PR is held.
 	Reason string `json:"reason,omitempty"`
 }
@@ -131,6 +135,7 @@ func (s *Service) Enqueue(ctx context.Context, repo string, pr int) (EnqueueResu
 		if h, held := st.HeldPR(repo, pr); held {
 			// Enqueueing a held PR would queue a round nothing may fire, which
 			// reads on the dashboard as work waiting its turn.
+			result.Held = true
 			result.Reason = "held: " + h.Reason
 			return ErrNoChange
 		}
@@ -580,6 +585,20 @@ func sameRound(r *Round, want Round) bool {
 	return r != nil && r.Seq == want.Seq && r.Head == want.Head
 }
 
+// firable is the fire guard every reserving CAS uses: eligible, and not held.
+//
+// Selecting the round and writing the reservation are two steps, and a hold that
+// commits between them would otherwise be too late — the daemon has already
+// decided. Re-reading it here is what makes `crq hold` mean something the moment
+// it returns, rather than from the next pass onward.
+func firable(st *State, r *Round, now time.Time) bool {
+	if r == nil || !r.FireEligible(now) {
+		return false
+	}
+	_, held := st.HeldPR(r.Repo, r.PR)
+	return !held
+}
+
 // applyAccountBlock ports requeueInflight's account-quota bookkeeping. The window
 // (including same-comment reuse) was resolved by the engine, so only the store
 // write happens here.
@@ -748,7 +767,7 @@ func (s *Service) dedupeRound(ctx context.Context, round Round, now time.Time, r
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		deduped = false
 		r := st.Round(round.Repo, round.PR)
-		if !sameRound(r, round) || !r.FireEligible(now) {
+		if !sameRound(r, round) || !firable(st, r, now) {
 			return ErrNoChange
 		}
 		if err := r.Dedupe(now); err != nil {
@@ -815,7 +834,7 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 				return ErrNoChange
 			}
 			r := st.Round(round.Repo, round.PR)
-			if !sameRound(r, round) || !r.FireEligible(now) {
+			if !sameRound(r, round) || !firable(st, r, now) {
 				return ErrNoChange
 			}
 			if err := r.Reserve(token, s.cfg.Host, now); err != nil {
@@ -877,7 +896,7 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 			return ErrNoChange
 		}
 		r := st.Round(round.Repo, round.PR)
-		if !sameRound(r, round) || !r.FireEligible(now) {
+		if !sameRound(r, round) || !firable(st, r, now) {
 			return ErrNoChange
 		}
 		if err := r.Reserve(token, s.cfg.Host, now); err != nil {

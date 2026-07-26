@@ -11,12 +11,14 @@ import (
 
 // HoldResult reports a PR's hold state after a change.
 type HoldResult struct {
-	Repo   string    `json:"repo"`
-	PR     int       `json:"pr"`
-	Held   bool      `json:"held"`
-	Reason string    `json:"reason,omitempty"`
-	By     string    `json:"by,omitempty"`
-	At     time.Time `json:"at,omitempty"`
+	Repo   string `json:"repo"`
+	PR     int    `json:"pr"`
+	Held   bool   `json:"held"`
+	Reason string `json:"reason,omitempty"`
+	By     string `json:"by,omitempty"`
+	// At is a pointer because time.Time is a struct: omitempty never omits one,
+	// so an unhold response used to carry "at":"0001-01-01T00:00:00Z".
+	At *time.Time `json:"at,omitempty"`
 }
 
 // Hold takes a PR out of the review queue in one write.
@@ -47,7 +49,7 @@ func (s *Service) Hold(ctx context.Context, repo string, pr int, reason string) 
 	if s.log != nil {
 		s.log.Printf("%s#%d held: %s", repo, pr, reason)
 	}
-	return HoldResult{Repo: repo, PR: pr, Held: true, Reason: reason, By: s.cfg.Host, At: now}, nil
+	return HoldResult{Repo: repo, PR: pr, Held: true, Reason: reason, By: s.cfg.Host, At: &now}, nil
 }
 
 // Unhold puts a PR back in the queue.
@@ -89,7 +91,8 @@ func (s *Service) Holds(ctx context.Context) ([]HoldResult, error) {
 		if _, err := fmt.Sscanf(number, "%d", &pr); err != nil {
 			continue
 		}
-		out = append(out, HoldResult{Repo: repo, PR: pr, Held: true, Reason: h.Reason, By: h.By, At: h.At})
+		at := h.At
+		out = append(out, HoldResult{Repo: repo, PR: pr, Held: true, Reason: h.Reason, By: h.By, At: &at})
 	}
 	sortHolds(out)
 	return out, nil

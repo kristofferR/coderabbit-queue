@@ -741,6 +741,11 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 		if r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry {
 			continue
 		}
+		// A held round is not waiting its turn — nothing will take it — so
+		// showing it in the queue tells the reader the opposite of the truth.
+		if s.isHeld(r) {
+			continue
+		}
 		e := QueueEntry{Round: r}
 		// Its own cooldown binds either way: that is the round's, not the queue's.
 		if own := roundReadyAt(r); own.After(now) {

@@ -239,7 +239,9 @@ func run(ctx context.Context, args []string) int {
 			return 0
 		}
 		rest, reason, ok := parseReasonArgs(args[1:])
-		if !ok || len(rest) < 2 {
+		// Exactly two: `crq hold owner/repo 12 13` is a malformed administrative
+		// command, and silently holding 12 is the wrong answer to it.
+		if !ok || len(rest) != 2 {
 			fatal(errors.New(`usage: crq hold <repo> <pr> --reason "<why>" | crq unhold <repo> <pr>`))
 			return 1
 		}
