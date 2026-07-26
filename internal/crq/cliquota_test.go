@@ -290,3 +290,27 @@ func TestCarriesCredentials(t *testing.T) {
 		}
 	}
 }
+
+// RefreshQuota only trusts CheckedAt while no calibration probe is outstanding,
+// so a pending marker left beside a fresh CLI block makes the next pump resume the
+// older calibration — and a late reply then overwrites the block with a window
+// measured before it.
+func TestRecordCLIQuotaClearsAPendingCalibration(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	svc, store := cliQuotaService(t, now)
+	asked := now.Add(-2 * time.Minute)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.Account.CalibAskedAt = &asked
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.RecordCLIQuota(context.Background(), blockedReport(t, "32 minutes"), "kristofferR"); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ := store.Load(context.Background())
+	if st.Account.CalibAskedAt != nil {
+		t.Errorf("a pending calibration must not outlive the block that replaced it: %s", st.Account.CalibAskedAt)
+	}
+}

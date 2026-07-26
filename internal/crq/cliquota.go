@@ -104,11 +104,18 @@ func (s *Service) RecordCLIQuota(ctx context.Context, report PreflightReport, cl
 		// leaving a stale count beside a fresh block would read as authoritative.
 		st.Account.Remaining = nil
 		// The standing block is no longer the one a PR comment produced, so its
-		// comment identity must not survive. Left in place, a later edit of that
-		// same comment is matched as a repeat of the block crq already holds and
-		// its window is reused instead of read afresh.
+		// provenance must not survive it.
+		//
+		// The comment identity: left in place, a later edit of that same comment is
+		// matched as a repeat of the block crq already holds, and its window is
+		// reused instead of read afresh.
 		st.Account.RLCommentID = 0
 		st.Account.RLCommentUpdated = nil
+		// The pending calibration: RefreshQuota only trusts CheckedAt while no
+		// probe is outstanding, so leaving this set makes the next pump resume the
+		// older calibration — and a late reply then overwrites the block just
+		// recorded with a window measured before it.
+		st.Account.CalibAskedAt = nil
 		return nil
 	})
 	if err != nil {
