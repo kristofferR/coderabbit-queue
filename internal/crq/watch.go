@@ -181,7 +181,7 @@ func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextRe
 		return false, why
 	}
 
-	co, err := s.workspace().Checkout(ctx, report.Repo, report.PR, report.Head)
+	co, err := s.workspace(ctx).Checkout(ctx, report.Repo, report.PR, report.Head)
 	if err != nil {
 		// Nothing ran, so the attempt did not happen: a transient clone failure
 		// must not eat the per-head budget and permanently skip the PR.
