@@ -30,6 +30,16 @@ func TestStaleCommandsKeepsWhatCrqStillReads(t *testing.T) {
 	if len(got) != 1 || got[0] != 1 {
 		t.Fatalf("stale = %v, want only the answered, superseded, non-live command", got)
 	}
+
+	// A retry the round explicitly replaced is spent even though it is newer
+	// than the head: crq's own record that it posted a successor is stronger
+	// evidence than the timestamp. This is the case that leaves a rate-limited
+	// PR with a column of identical review requests.
+	in.Superseded = map[int64]bool{8: true}
+	got = StaleCommands(in)
+	if len(got) != 2 || got[1] != 8 {
+		t.Fatalf("stale = %v, want the superseded retry included", got)
+	}
 }
 
 // A round that has not progressed keeps its command, whatever else is true.

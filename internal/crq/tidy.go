@@ -53,6 +53,7 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 	// closed, cancelled) or completed. A round still working keeps its command,
 	// because that is the comment crq would adopt instead of posting again.
 	live := map[int64]bool{}
+	superseded := map[int64]bool{}
 	var commands []engine.CommandComment
 	collect := func(r Round, progressed bool) {
 		for _, entry := range roundCommands(r, cfg) {
@@ -61,6 +62,16 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 			} else {
 				live[entry.ID] = true
 			}
+		}
+		// Superseded commands are spent whether or not the round has finished.
+		// A retry answered by a rate-limit notice can never be adopted again, so
+		// leaving it on the PR is how a throttled review collects a column of
+		// identical requests.
+		for _, id := range r.SpentCommands {
+			superseded[id] = true
+			commands = append(commands, engine.CommandComment{
+				ID: id, Bot: dialect.NormalizeBotName(cfg.Bot), CreatedAt: r.EnqueuedAt,
+			})
 		}
 	}
 	if round := st.Round(repo, pr); round != nil {
@@ -90,6 +101,7 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 	in := engine.TidyInput{
 		Commands:   commands,
 		Live:       live,
+		Superseded: superseded,
 		HeadAt:     obs.eng.HeadAt,
 		AnsweredAt: answeredAt(obs, cfg),
 	}

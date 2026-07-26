@@ -79,6 +79,13 @@ type Round struct {
 	// CodeRabbit requests must skip these.
 	CoOnly bool `json:"co_only,omitempty"`
 
+	// SpentCommands are trigger comments this round posted and then moved past.
+	// A retry supersedes its predecessor — the bot answered the old one, usually
+	// with a rate-limit notice, so it can never be adopted again. Without this
+	// record nothing knows those comments exist, which is why a throttled PR
+	// collects a column of identical review requests.
+	SpentCommands []int64 `json:"spent_commands,omitempty"`
+
 	// RetryAt is the earliest time this head may fire again (awaiting_retry).
 	RetryAt *time.Time `json:"retry_at,omitempty"`
 
@@ -170,6 +177,11 @@ func (r *Round) setCo(login string, c CoBotRound) {
 // round and releases its claim.
 func (r *Round) SetCoCommand(login string, commandID int64, at time.Time) {
 	c := r.Co(login)
+	// Same as the primary: a replaced co-reviewer trigger is spent, and only
+	// this round remembers the comment it left on the PR.
+	if c.CommandID != 0 && c.CommandID != commandID {
+		r.SpentCommands = appendSpent(r.SpentCommands, c.CommandID)
+	}
 	c.CommandID = commandID
 	t := at.UTC()
 	c.CommandedAt = &t
@@ -347,6 +359,13 @@ func (r *Round) Fire(commandID int64, at time.Time) error {
 		return r.illegal(PhaseFired)
 	}
 	r.Phase = PhaseFired
+	// A retry posts a NEW command: the bot answered the previous one (with a
+	// rate-limit notice, typically) so it can never be adopted again. Remember
+	// it, or the comment it left behind is one nothing knows about — which is
+	// why a rate-limited PR collects a column of identical review requests.
+	if r.CommandID != 0 && r.CommandID != commandID {
+		r.SpentCommands = appendSpent(r.SpentCommands, r.CommandID)
+	}
 	r.CommandID = commandID
 	t := at.UTC()
 	r.FiredAt = &t
@@ -603,6 +622,22 @@ func (s *State) QueuedRounds(now time.Time) []Round {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
 	return out
+}
+
+// appendSpent records a superseded command, bounded so a PR that retries all day
+// cannot grow its round without limit.
+func appendSpent(spent []int64, id int64) []int64 {
+	const maxSpent = 50
+	for _, have := range spent {
+		if have == id {
+			return spent
+		}
+	}
+	spent = append(spent, id)
+	if len(spent) > maxSpent {
+		spent = spent[len(spent)-maxSpent:]
+	}
+	return spent
 }
 
 // Queue-entry wait reasons. A waiting round is held by exactly one of these

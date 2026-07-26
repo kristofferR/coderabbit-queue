@@ -21,8 +21,13 @@ type TidyInput struct {
 	// the open round's own command and its co-reviewer triggers.
 	Live map[int64]bool
 	// HeadAt is when the current head was committed. A command at or after it is
-	// still adoptable, so removing it would make crq post a duplicate.
+	// still adoptable, so removing it would make crq post a duplicate — unless
+	// the round itself has already replaced it (Superseded).
 	HeadAt time.Time
+	// Superseded are commands the round explicitly moved past by posting a newer
+	// one. They are exempt from the head check: crq's own record that it has
+	// replaced a command is stronger evidence than any timestamp.
+	Superseded map[int64]bool
 }
 
 // StaleCommands returns the trigger comments that can be deleted: crq asked, the
@@ -50,7 +55,7 @@ func StaleCommands(in TidyInput) []int64 {
 		if !ok || answered.Before(cmd.CreatedAt) {
 			continue
 		}
-		if !in.HeadAt.IsZero() && !cmd.CreatedAt.Before(in.HeadAt) {
+		if !in.Superseded[cmd.ID] && !in.HeadAt.IsZero() && !cmd.CreatedAt.Before(in.HeadAt) {
 			continue
 		}
 		stale = append(stale, cmd.ID)
