@@ -136,6 +136,27 @@ func TestNextAction(t *testing.T) {
 			pending: []string{nextCoBot, nextPrimary},
 		},
 		{
+			// A threadless finding has no lever: fixing it only dirties the tree,
+			// and only a push clears it. Repeating `fix` forever is how a PR ended
+			// up with no review ever requested for the code that replaced it.
+			name: "threadless finding stops repeating fix once the work is done",
+			in: NextInput{
+				Obs: openObs(), Completion: both(true, true), LocalWork: true,
+				Findings: []dialect.Finding{{Bot: nextPrimary, Title: "body finding", Commit: nextHead}},
+			},
+			want: ActionPush,
+		},
+		{
+			// ...but a finding the caller CAN resolve still gates: that lever
+			// exists, so drain-first still applies.
+			name: "resolvable finding keeps gating even with work done",
+			in: NextInput{
+				Obs: openObs(), Completion: both(true, true), LocalWork: true,
+				Findings: []dialect.Finding{finding(nextHead)},
+			},
+			want: ActionFix,
+		},
+		{
 			name: "all answered with staged work means push",
 			in: NextInput{
 				Obs: openObs(), Completion: both(true, true), LocalWork: true,
@@ -284,5 +305,31 @@ func TestNextActionIgnoresUnresolvableStaleFindings(t *testing.T) {
 	}, t0)
 	if got.Kind != ActionDone {
 		t.Fatalf("NextAction = %q (%s), want %q", got.Kind, got.Reason, ActionDone)
+	}
+}
+
+// The account window gates the PRIMARY's review and nothing else. In the default
+// configuration only the primary is required, so a co-reviewer commanded for
+// this round never appears in ReviewedBy — and the caller would be told to sleep
+// until the window opened, hours later, straight through the co-review findings
+// the degrade exists to deliver.
+func TestNextActionKeepsShortCadenceForACommandedCoReviewer(t *testing.T) {
+	blocked := t0.Add(90 * time.Minute)
+	commanded := t0.Add(-time.Minute)
+	round := state.Round{Phase: state.PhaseQueued}
+	round.CoBots = map[string]state.CoBotRound{
+		"chatgpt-codex-connector": {CommandID: 42, CommandedAt: &commanded},
+	}
+
+	got := NextAction(NextInput{
+		Round:      round,
+		Obs:        openObs(),
+		Global:     Global{BlockedUntil: &blocked},
+		Completion: completionOf(map[string]bool{nextPrimary: false}),
+		Primary:    nextPrimary,
+		MinDelay:   time.Minute,
+	}, t0)
+	if !got.At.Equal(t0.Add(time.Minute)) {
+		t.Errorf("At = %s, want a poll-interval recheck while a co-review is in flight", got.At)
 	}
 }

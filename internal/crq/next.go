@@ -58,36 +58,37 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 	repo = NormalizeRepo(repo)
 	report := NextReport{Repo: repo, PR: pr, Findings: []dialect.Finding{}, CheckedAt: s.clock()}
 
-	// Ensure a round exists for the current head (idempotent; supersedes on a
-	// new head), so the pump below has something to advance.
-	if _, err := s.Enqueue(ctx, repo, pr); err != nil {
-		return report, err
-	}
-
+	// Observe BEFORE publishing anything. Enqueue makes this head fire-eligible
+	// in shared state, and an autoreview daemon pumping concurrently can claim
+	// and fire it in the gap — CAS protects each individual write, not this
+	// sequence. Deciding first means the drain-first rule is enforced before the
+	// round is exposed at all, rather than only in this process's own pump.
 	report, action, feedback, err := s.nextFromState(ctx, repo, pr)
 	if err != nil {
 		return report, err
 	}
 
-	// One queue step, AFTER the decision. Pump owns DecideFire, whose gate list
-	// has no "unresolved findings exist" step, so pumping first let this command
-	// spend account quota on a round the caller had not drained yet — the very
-	// rule `next` exists to enforce.
+	// Undrained feedback for THIS head: publish nothing. Another review of the
+	// same head would spend account quota to be told what the caller is already
+	// holding.
 	//
-	// The gate is deliberately narrow: only feedback for THIS head means a fire
-	// would buy nothing. Findings CARRIED from an older commit — an unresolved
-	// thread the caller may well have already fixed — must not stop a new head
-	// from being reviewed, or an unresolvable one deadlocks the PR forever and
-	// no review is ever requested for the code that replaced it. DecideFire
-	// separately refuses a head it has already reviewed, so this only has to
-	// answer "is the feedback I am holding about the head I would fire on".
-	//
+	// The gate is deliberately narrow. Findings CARRIED from an older commit —
+	// an unresolved thread the caller may well have already fixed — must not
+	// stop a new head from being reviewed, or an unresolvable one deadlocks the
+	// PR forever and no review is ever requested for the code that replaced it.
+	if len(engine.FindingsOnHead(action.Findings, report.Head)) > 0 {
+		return report, nil
+	}
+
+	// Nothing left to drain, so record the round for this head (idempotent;
+	// supersedes on a new head) and advance the queue one step.
+	if _, err := s.Enqueue(ctx, repo, pr); err != nil {
+		return report, err
+	}
 	// Not fatal if it fails: the instruction above stands on the observation
-	// already taken, and the next call pumps again.
-	if len(engine.FindingsOnHead(action.Findings, report.Head)) == 0 {
-		if err := s.advance(ctx, repo, pr, feedback); err != nil && s.log != nil {
-			s.log.Printf("warning: advancing %s: %v", QueueKey(repo, pr), err)
-		}
+	// already taken, and the next call advances again.
+	if err := s.advance(ctx, repo, pr, feedback); err != nil && s.log != nil {
+		s.log.Printf("warning: advancing %s: %v", QueueKey(repo, pr), err)
 	}
 	return report, nil
 }
@@ -147,7 +148,8 @@ func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextR
 	now := s.clock()
 	round := st.Round(repo, pr)
 
-	report.LocalWork, report.LocalWorkReason = s.checkLocalWork(ctx, repo, report.Head)
+	report.LocalWork, report.LocalWorkReason = s.checkLocalWork(ctx,
+		[]string{repo, feedback.HeadRepo}, report.Head)
 
 	in := engine.NextInput{
 		Obs:           engine.Observation{Head: feedback.Head, Open: feedback.Open},
@@ -219,26 +221,31 @@ func (s *Service) NextWaiting(ctx context.Context, repo string, pr int) (NextRep
 	}
 }
 
-func (s *Service) checkLocalWork(ctx context.Context, repo, head string) (bool, string) {
+func (s *Service) checkLocalWork(ctx context.Context, repos []string, head string) (bool, string) {
 	if s.localWorkFn != nil {
 		return s.localWorkFn(ctx, head)
 	}
-	return localWork(ctx, repo, head)
+	return localWork(ctx, repos, head)
 }
 
 // localWork reports whether the working copy holds changes the PR head does not
-// have — a dirty tree, or a local HEAD that is not the PR head. It is the
-// difference between "push your fixes" and "nothing left to do".
+// have. It is the difference between "push your fixes" and "nothing left to do",
+// so both mistakes are expensive: a false negative strands finished work behind
+// a terminal `done`, and a false positive tells the caller to push something
+// that is not this PR at all.
 //
-// It first checks that this checkout actually belongs to the PR's repository:
-// asking about owner/a from a checkout of owner/b would otherwise read that
-// unrelated HEAD as unlanded work.
+// The order matters. It first checks the checkout belongs to one of the PR's
+// repositories — the base, or on a fork PR the head repository, which is the
+// only remote a contributor's clone has. Then it establishes the checkout is on
+// the PR's line of history BEFORE reading a dirty tree as this PR's work: an
+// unrelated branch of the right repository is dirty for its own reasons, and
+// pushing it would land somebody else's changes.
 //
 // Anything it cannot establish answers false with a reason, which errs toward
 // `done` rather than `push`. That is the safe direction: `push` is only ever
 // emitted once the head is already released, so a missed one costs one extra
 // call, while a spurious `hold` would stall the loop.
-func localWork(ctx context.Context, repo, head string) (bool, string) {
+func localWork(ctx context.Context, repos []string, head string) (bool, string) {
 	git := func(args ...string) (string, bool) {
 		out, err := exec.CommandContext(ctx, "git", args...).Output()
 		if err != nil {
@@ -250,33 +257,53 @@ func localWork(ctx context.Context, repo, head string) (bool, string) {
 		return false, "not run inside a git checkout"
 	}
 	remotes, ok := git("remote", "-v")
-	if !ok || !remoteMatchesRepo(remotes, repo) {
-		// Match on any remote, not just origin, so a fork checkout whose upstream
-		// is the PR's repository still counts.
-		return false, "this checkout has no remote for " + repo
+	if !ok {
+		return false, "could not read this checkout's remotes"
 	}
-	if status, ok := git("status", "--porcelain"); ok && status != "" {
-		return true, "uncommitted changes in the working tree"
+	matched := ""
+	for _, candidate := range repos {
+		if candidate != "" && remoteMatchesRepo(remotes, candidate) {
+			matched = candidate
+			break
+		}
+	}
+	if matched == "" {
+		return false, "this checkout has no remote for " + strings.Join(nonEmpty(repos), " or ")
 	}
 	local, ok := git("rev-parse", "HEAD")
 	if !ok {
 		return false, "could not read local HEAD"
 	}
+
+	// Sitting exactly on the PR head: only an uncommitted change is new work.
 	if head == "" || strings.HasPrefix(local, head) {
+		if status, ok := git("status", "--porcelain"); ok && status != "" {
+			return true, "uncommitted changes in the working tree"
+		}
 		return false, ""
 	}
-	// A local HEAD that differs from the PR head means one of two opposite
-	// things: unpushed commits (real work), or a checkout that is simply behind
-	// (nothing to push). Reporting work for the second produces a `push` the
-	// caller cannot land — a rejected non-fast-forward, every round — so only an
-	// ancestry check settles it, and anything unprovable answers false.
+
+	// Otherwise the checkout is somewhere else, and only ancestry can say
+	// whether that somewhere is this PR's branch carrying unpushed commits, a
+	// checkout merely behind it, or an unrelated branch entirely.
 	if _, known := git("rev-parse", "--verify", "--quiet", head+"^{commit}"); !known {
-		return false, "the pr head " + head + " is not in this checkout, so ahead and behind are indistinguishable"
+		return false, "the pr head " + head + " is not in this checkout, so its relation to local HEAD is unknown"
 	}
 	if _, ahead := git("merge-base", "--is-ancestor", head, "HEAD"); !ahead {
-		return false, "local HEAD " + shortSHA(local) + " is behind the pr head " + head
+		return false, "local HEAD " + shortSHA(local) + " is not on the pr's branch (behind it, or a different branch)"
 	}
 	return true, "local HEAD " + shortSHA(local) + " is ahead of the pr head " + head
+}
+
+// nonEmpty drops blanks so a reason never reads "owner/repo or ".
+func nonEmpty(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // remoteMatchesRepo reports whether any configured remote points at repo.

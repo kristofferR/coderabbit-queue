@@ -31,6 +31,12 @@ type FeedbackReport struct {
 	// JSON contract is frozen — and exists so a caller deciding an action reads
 	// head, open and evidence from ONE snapshot rather than re-reading the pull.
 	Open bool `json:"-"`
+	// HeadRef and HeadRepo describe where the PR's branch actually lives. On a
+	// fork PR that repository is not the one the PR is filed against, and a
+	// contributor's checkout only has a remote for it. Not serialized: the
+	// feedback JSON contract is frozen.
+	HeadRef  string `json:"-"`
+	HeadRepo string `json:"-"`
 	// CodeRabbitDeferred marks a round degraded to Codex-only while the
 	// CodeRabbit account is rate-limited: Codex feedback is authoritative for
 	// this round, the CodeRabbit review stays queued and fires after
@@ -93,6 +99,8 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		PR:         pr,
 		Head:       head,
 		Open:       obs.eng.Open,
+		HeadRef:    pull.Head.Ref,
+		HeadRepo:   NormalizeRepo(pull.Head.Repo.FullName),
 		ReviewedBy: map[string]bool{},
 		Findings:   []dialect.Finding{},
 		CheckedAt:  now,

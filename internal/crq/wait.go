@@ -58,8 +58,14 @@ func (s *Service) waitTick() time.Duration {
 // elapses.
 func (s *Service) WaitForAction(ctx context.Context, repo string, pr int) (NextReport, error) {
 	repo = NormalizeRepo(repo)
-	var lastRef string
 	for {
+		// Sample the ref BEFORE deciding. Taken after, a daemon transition landing
+		// between the decision and the first read would be recorded as the
+		// baseline instead of recognised as a change, and the waiter would sleep
+		// to its ceiling — up to two leader periods — with an actionable answer
+		// already sitting there.
+		lastRef, refErr := s.gh.GetRef(ctx, s.cfg.GateRepo, s.cfg.StateRef)
+
 		report, action, _, err := s.nextFromState(ctx, repo, pr)
 		if err != nil {
 			if wait, throttled := ghapi.ThrottleWait(err); throttled {
@@ -81,12 +87,19 @@ func (s *Service) WaitForAction(ctx context.Context, repo string, pr int) (NextR
 		// forever: the daemon normally does, and a live leader lease is how the
 		// waiter knows. Without one it drives the queue itself through Next,
 		// which enqueues and pumps — correct, just costlier.
+		//
+		// A live leader is not enough on its own. The daemon only advances PRs in
+		// its own scope, so a PR outside the fleet with no round for this head
+		// would wait forever on a queue nobody was ever going to put it in. If
+		// this head is untracked, drive it regardless of who holds the lease.
 		st, _, err := s.store.Load(ctx)
 		if err != nil {
 			return report, err
 		}
 		now := s.clock()
-		if !leaderLive(st, now) {
+		round := st.Round(repo, pr)
+		untracked := round == nil || (report.Head != "" && round.Head != report.Head)
+		if untracked || !leaderLive(st, now) {
 			if _, nerr := s.Next(ctx, repo, pr); nerr != nil {
 				return report, nerr
 			}
@@ -105,12 +118,15 @@ func (s *Service) WaitForAction(ctx context.Context, repo string, pr int) (NextR
 		if floor := now.Add(s.waitTick()); deadline.Before(floor) {
 			deadline = floor
 		}
-		moved, ref, err := s.watchStateRef(ctx, lastRef, deadline)
-		if err != nil {
+		// Without a baseline the watch cannot recognise a change — it would adopt
+		// whatever it reads first — so a failed sample must not buy a long sleep.
+		// Come back after one tick and take the baseline again instead.
+		if refErr != nil {
+			deadline = now.Add(s.waitTick())
+		}
+		if _, _, err := s.watchStateRef(ctx, lastRef, deadline); err != nil {
 			return report, err
 		}
-		lastRef = ref
-		_ = moved // either way the loop re-evaluates; moved only shortens the wait
 	}
 }
 

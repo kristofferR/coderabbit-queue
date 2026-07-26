@@ -209,3 +209,40 @@ func TestWaitNeverHotLoopsOnZeroedIntervals(t *testing.T) {
 		}
 	}
 }
+
+// A live leader lease means "a daemon is advancing the queue", not "a daemon is
+// advancing YOUR pr". The daemon only scans its own scope, so a PR outside the
+// fleet with no round for this head would idle forever on a queue nobody was
+// ever going to put it in. An untracked head drives itself regardless of who
+// holds the lease.
+func TestWaitDrivesAnUntrackedHeadEvenUnderALiveLeader(t *testing.T) {
+	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr := "owner/outside-the-fleet", 701
+	head := "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+
+	// A daemon holds the lease, but has never heard of this PR.
+	f.leader(f.clk.now().Add(time.Hour))
+	if r := f.round(repo, pr); r != nil {
+		t.Fatalf("precondition: no round should exist yet, got %#v", r)
+	}
+
+	// Idle exactly once so the test cannot hang if the fix regresses.
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	f.svc.sleepFn = func(context.Context, time.Duration) error {
+		cancel()
+		return context.Canceled
+	}
+	f.svc.WaitForAction(ctx, repo, pr) //nolint:errcheck // the cancel is the bound
+
+	if r := f.round(repo, pr); r == nil {
+		t.Fatal("the waiter must enqueue an untracked head instead of waiting on a daemon that cannot see it")
+	}
+	if got := f.reviewsPosted(repo, pr); got != 1 {
+		t.Errorf("the untracked head must get its review requested, posted %d", got)
+	}
+}

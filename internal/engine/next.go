@@ -107,12 +107,23 @@ func NextAction(in NextInput, now time.Time) Action {
 
 	// 1. Findings first. An agent that starts a new review round on top of
 	//    unresolved feedback burns account quota to be told the same thing.
+	//
+	//    "Unresolved" has to mean something the caller can still act on, or the
+	//    loop cannot end. A finding with a thread is cleared by resolving or
+	//    declining it, so it keeps returning `fix` until that happens. A
+	//    THREADLESS one has no such lever: fixing it only dirties the working
+	//    tree, and nothing clears it but a push whose review supersedes it. So
+	//    once the caller has done the local work, threadless findings stop
+	//    repeating `fix` and the reviewer gates below decide when it may land —
+	//    otherwise a review-body finding pins the loop on `fix` forever.
 	if blocking := BlockingFindings(in.Findings, in.Obs.Head); len(blocking) > 0 {
-		return Action{
-			Kind:     ActionFix,
-			Reason:   "actionable findings for this head",
-			Pending:  pending,
-			Findings: blocking,
+		if !in.LocalWork || anyResolvable(blocking) {
+			return Action{
+				Kind:     ActionFix,
+				Reason:   "actionable findings for this head",
+				Pending:  pending,
+				Findings: blocking,
+			}
 		}
 	}
 
@@ -146,7 +157,7 @@ func NextAction(in NextInput, now time.Time) Action {
 		}
 		return Action{
 			Kind:    ActionWait,
-			Reason:  "primary review deferred while the account is rate-limited",
+			Reason:  "primary review deferred while the account quota is blocked",
 			At:      in.nextCheck(now, in.DeferredUntil, pending),
 			Pending: pending,
 		}
@@ -186,7 +197,7 @@ func NextAction(in NextInput, now time.Time) Action {
 //     co-reviewer findings the degrade exists to deliver.
 func (in NextInput) nextCheck(now time.Time, extra *time.Time, pending []string) time.Time {
 	at := now.Add(in.minDelay()).UTC()
-	if !in.onlyPrimaryPending(pending) {
+	if !in.onlyPrimaryPending(pending) || coReviewActive(in.Round) {
 		return at
 	}
 	gate := func(t *time.Time) {
@@ -203,6 +214,37 @@ func (in NextInput) nextCheck(now time.Time, extra *time.Time, pending []string)
 		}
 	}
 	return at
+}
+
+// coReviewActive reports whether a co-reviewer has been commanded for this
+// round.
+//
+// Co-reviewers spend no account quota and take no fire slot, so neither the
+// account window nor this round's own fire cooldown gates their answer. A round
+// with one in flight must therefore keep the short cadence even when the only
+// entry in ReviewedBy is the primary — which is the default configuration, and
+// is exactly the degrade path: the caller would otherwise sleep until the
+// account window opened, hours later, straight through the co-review findings
+// the degrade exists to deliver.
+func coReviewActive(r state.Round) bool {
+	for _, co := range r.CoBots {
+		if co.CommandedAt != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// anyResolvable reports whether some finding carries a thread the caller can
+// resolve or decline. Without one, repeating `fix` asks for an action that does
+// not exist.
+func anyResolvable(findings []dialect.Finding) bool {
+	for _, f := range findings {
+		if f.ThreadID != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // onlyPrimaryPending reports whether every reviewer still owed for this head is

@@ -792,6 +792,11 @@ type Pull struct {
 	Head    struct {
 		SHA string `json:"sha"`
 		Ref string `json:"ref"`
+		// Repo is the head's repository, which differs from the base on a fork
+		// PR. A contributor's checkout has a remote for THIS, not the base.
+		Repo struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
 	} `json:"head"`
 	Merged bool `json:"merged"`
 }
