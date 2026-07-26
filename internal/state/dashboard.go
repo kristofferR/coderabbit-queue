@@ -283,6 +283,11 @@ func RenderTitle(st State, cfg StoreConfig) string {
 	case st.SlotRound() != nil:
 		return fmt.Sprintf("🐰 crq — reviewing #%d · queue %d", st.SlotRound().PR, queue)
 	case len(inFlightRounds(st)) > 0:
+		// The body names a stranded reservation; the title must not contradict it
+		// by reporting a feedback wait for a round that posted no command.
+		if stranded := firstStranded(inFlightRounds(st)); stranded != nil {
+			return fmt.Sprintf("🐰 crq — stranded #%d · queue %d", stranded.PR, queue)
+		}
 		return fmt.Sprintf("🐰 crq — awaiting feedback · queue %d", queue)
 	case queue > 0:
 		return fmt.Sprintf("🐰 crq — %d queued", queue)

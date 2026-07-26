@@ -603,6 +603,7 @@ const (
 	WaitAccountBlocked = "account blocked" // the CodeRabbit account quota window dominates
 	WaitSlotBusy       = "slot busy"       // another PR's review holds the fire slot
 	WaitPacing         = "pacing"          // LastFired + CRQ_MIN_INTERVAL has not passed
+	WaitBehind         = "behind an earlier round"
 )
 
 // QueueEntry is one round waiting for a fire, plus when it can actually fire
@@ -682,28 +683,63 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 		gate(paced, WaitPacing)
 		out = append(out, e)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].ReadyAt.Equal(out[j].ReadyAt) {
-			return out[i].ReadyAt.Before(out[j].ReadyAt)
+	// Order by SIMULATING what firing does, because pacing makes the naive sort
+	// disagree with it. NextEligible takes the lowest Seq among rounds that are
+	// eligible *at that moment*, so a round still cooling down when the front
+	// fires can become eligible before a ready round with a higher Seq — with
+	// seq 1 ready, seq 2 cooling for 60s and seq 3 ready on a 90s interval, the
+	// real order is 1, 2, 3, while sorting by ready time renders 1, 3, 2.
+	clock := now
+	if paced.After(clock) {
+		clock = paced
+	}
+	ordered := make([]QueueEntry, 0, len(out))
+	remaining := out
+	for len(remaining) > 0 {
+		// Advance to when something can actually run.
+		soonest := time.Time{}
+		for _, e := range remaining {
+			if own := roundReadyAt(e.Round); own.After(clock) && (soonest.IsZero() || own.Before(soonest)) {
+				soonest = own
+			}
 		}
-		return out[i].Seq < out[j].Seq
-	})
+		pick, picked := -1, int64(0)
+		for i, e := range remaining {
+			if roundReadyAt(e.Round).After(clock) {
+				continue
+			}
+			if pick < 0 || e.Seq < picked {
+				pick, picked = i, e.Seq
+			}
+		}
+		if pick < 0 {
+			if soonest.IsZero() {
+				break // nothing can ever run; keep the rest in Seq order below
+			}
+			clock = soonest
+			continue
+		}
+		ordered = append(ordered, remaining[pick])
+		remaining = append(remaining[:pick:pick], remaining[pick+1:]...)
+		if minInterval > 0 {
+			clock = clock.Add(minInterval)
+		}
+	}
+	// Anything unreachable keeps a stable order rather than map order.
+	sort.Slice(remaining, func(i, j int) bool { return remaining[i].Seq < remaining[j].Seq })
+	out = append(ordered, remaining...)
 
-	// Pacing is serial, so it has to be projected along the queue rather than
-	// applied to each entry independently. With a free slot and two ready rounds,
-	// both looked "ready now" — but firing the first pushes the second out by a
-	// whole interval, so only the front of the queue was telling the truth.
+	// Only ABSOLUTE times are shown. A projected "front + one interval" is
+	// anchored to render time, so an unchanged state would produce a different
+	// body — and therefore a different DashboardSHA — every minute, which is the
+	// churn that argued against surfacing pacing in the first place. A round
+	// queued behind another says so instead of naming a time crq cannot know
+	// until the round ahead of it actually fires.
 	if minInterval > 0 {
-		earliest := paced
 		for i := range out {
-			if earliest.After(now) && earliest.After(out[i].ReadyAt) {
-				out[i].ReadyAt, out[i].Why = earliest, WaitPacing
+			if i > 0 && out[i].ReadyAt.IsZero() {
+				out[i].Why = WaitBehind
 			}
-			start := out[i].ReadyAt
-			if start.Before(now) || start.IsZero() {
-				start = now
-			}
-			earliest = start.Add(minInterval)
 		}
 	}
 

@@ -411,10 +411,12 @@ func TestQueueTakesTheLatestBindingGate(t *testing.T) {
 	}
 }
 
-// Pacing is serial: firing the front of the queue pushes the next one out by a
-// whole interval. Applying the current boundary to every entry independently made
-// two ready rounds both read "ready now", when only the first was true.
-func TestQueueProjectsPacingAlongTheQueue(t *testing.T) {
+// Pacing is serial, so a round behind the front cannot start until the front
+// fires — but crq does not know when that is, and a time derived from render
+// time would give an unchanged state a different DashboardSHA every minute (the
+// churn that argued against surfacing pacing at all). So the queue says "behind
+// an earlier round" rather than naming a time it cannot know.
+func TestQueueNamesRoundsBehindTheFrontWithoutInventingATime(t *testing.T) {
 	now := time.Now().UTC()
 	st := stateWith(
 		queuedRound("kristofferr/a", 1, 1, now),
@@ -426,16 +428,52 @@ func TestQueueProjectsPacingAlongTheQueue(t *testing.T) {
 	if len(q) != 3 {
 		t.Fatalf("Queue = %d entries, want 3", len(q))
 	}
-	if !q[0].ReadyAt.IsZero() {
-		t.Errorf("the front of the queue is ready now, got %s", q[0].ReadyAt)
+	if !q[0].ReadyAt.IsZero() || q[0].Why != "" {
+		t.Errorf("the front is ready now with no gate, got ready=%v why=%q", q[0].ReadyAt, q[0].Why)
 	}
 	for i := 1; i < len(q); i++ {
-		want := now.Add(time.Duration(i) * 90 * time.Second)
-		if !q[i].ReadyAt.Equal(want) {
-			t.Errorf("entry %d ReadyAt = %v, want %s (one interval per place in line)", i, q[i].ReadyAt, want)
+		if !q[i].ReadyAt.IsZero() {
+			t.Errorf("entry %d invented a ready time %s; only absolute gates may be shown", i, q[i].ReadyAt)
 		}
-		if q[i].Why != WaitPacing {
-			t.Errorf("entry %d Why = %q, want %q", i, q[i].Why, WaitPacing)
+		if q[i].Why != WaitBehind {
+			t.Errorf("entry %d Why = %q, want %q", i, q[i].Why, WaitBehind)
+		}
+	}
+
+	// Stability is the point: the same state rendered a minute later must produce
+	// the same queue, or every render becomes a dashboard write.
+	later := st.Queue(now.Add(time.Minute), 90*time.Second)
+	for i := range q {
+		if !later[i].ReadyAt.Equal(q[i].ReadyAt) || later[i].Why != q[i].Why {
+			t.Errorf("entry %d changed with render time: %v/%q -> %v/%q",
+				i, q[i].ReadyAt, q[i].Why, later[i].ReadyAt, later[i].Why)
+		}
+	}
+}
+
+// The order has to be what firing will actually do. NextEligible takes the lowest
+// Seq among rounds eligible at that moment, so a round still cooling down when the
+// front fires can overtake a ready round with a higher Seq. Sorting by ready time
+// alone rendered 1, 3, 2 where the queue really runs 1, 2, 3.
+func TestQueueOrderMatchesWhatFiringWillDo(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(
+		queuedRound("kristofferr/a", 1, 1, now),                  // ready now
+		coolingRound("kristofferr/b", 2, 2, now, 60*time.Second), // eligible before the next slot
+		queuedRound("kristofferr/c", 3, 3, now),                  // ready now, higher Seq
+	)
+
+	var got []int
+	for _, e := range st.Queue(now, 90*time.Second) {
+		got = append(got, e.PR)
+	}
+	want := []int{1, 2, 3}
+	if len(got) != len(want) {
+		t.Fatalf("Queue = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Queue = %v, want %v (b is eligible by the time the slot frees)", got, want)
 		}
 	}
 }
@@ -484,5 +522,26 @@ func TestRenderFindsAStrandedReservationBehindAReviewingRound(t *testing.T) {
 	got := RenderDashboard(st, StoreConfig{})
 	if !strings.Contains(got, "Stranded reservation on kristofferr/b#2") {
 		t.Errorf("the stranded reservation must be named even behind a reviewing round, got:\n%s", got)
+	}
+}
+
+// The title is what a human sees first, so it must not contradict the body: a
+// reserved round whose slot was cleared cannot be awaiting feedback.
+func TestRenderTitleNamesAStrandedReservation(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(queuedRound("kristofferr/a", 1, 1, now))
+	reserved := now.Add(-time.Minute)
+	st.Rounds["kristofferr/a#1"] = func() Round {
+		r := st.Rounds["kristofferr/a#1"]
+		r.Phase, r.ReservedAt = PhaseReserved, &reserved
+		return r
+	}()
+
+	got := RenderTitle(st, StoreConfig{})
+	if strings.Contains(got, "awaiting feedback") {
+		t.Errorf("title claims a feedback wait for a stranded reservation: %q", got)
+	}
+	if !strings.Contains(got, "stranded") {
+		t.Errorf("title = %q, want it to name the stranded reservation", got)
 	}
 }
