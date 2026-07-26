@@ -689,9 +689,16 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 	// fires can become eligible before a ready round with a higher Seq — with
 	// seq 1 ready, seq 2 cooling for 60s and seq 3 ready on a 90s interval, the
 	// real order is 1, 2, 3, while sorting by ready time renders 1, 3, 2.
+	// Start where firing can actually resume, not at render time. An account block
+	// that outlasts a round's cooldown makes several rounds eligible together the
+	// moment it clears, and NextEligible then takes the lowest Seq — so ordering
+	// from now rendered a ready higher-Seq round ahead of one still cooling.
 	clock := now
 	if paced.After(clock) {
 		clock = paced
+	}
+	if blocked.After(clock) {
+		clock = blocked
 	}
 	ordered := make([]QueueEntry, 0, len(out))
 	remaining := out

@@ -545,3 +545,25 @@ func TestRenderTitleNamesAStrandedReservation(t *testing.T) {
 		t.Errorf("title = %q, want it to name the stranded reservation", got)
 	}
 }
+
+// An account block that outlasts a cooldown makes both rounds eligible the moment
+// it clears, and NextEligible then takes the lowest Seq. Simulating from render
+// time instead put the ready higher-Seq round first.
+func TestQueueOrdersFromWhenFiringResumes(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(
+		coolingRound("kristofferr/a", 1, 1, now, time.Hour), // lower Seq, cooling
+		queuedRound("kristofferr/b", 2, 2, now),             // ready now, higher Seq
+	)
+	blocked := now.Add(2 * time.Hour)
+	st.Account.BlockedUntil = &blocked
+
+	q := st.Queue(now, 90*time.Second)
+	if len(q) != 2 {
+		t.Fatalf("Queue = %d entries, want 2", len(q))
+	}
+	if q[0].PR != 1 {
+		t.Errorf("Queue order = [%d %d], want [1 2]: both are eligible when the block clears, so Seq decides",
+			q[0].PR, q[1].PR)
+	}
+}
