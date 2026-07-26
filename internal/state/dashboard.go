@@ -96,6 +96,13 @@ func inFlightRounds(st State) []Round {
 // seconds ago ahead of reviews fired much earlier, contradicting the table's own
 // ordering.
 func firedAtOf(r Round) time.Time {
+	// A reserved round is BETWEEN attempts: a retry deliberately preserves the
+	// previous FiredAt as history, so reading it here ordered the round by a fire
+	// that may be hours old — and printed that stale time in a column describing a
+	// command this attempt has not posted yet.
+	if r.Phase == PhaseReserved && r.ReservedAt != nil {
+		return *r.ReservedAt
+	}
 	if r.FiredAt != nil {
 		return *r.FiredAt
 	}
@@ -272,8 +279,11 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 			// when its slot releases — the bot acknowledging, or the in-flight
 			// timeout — so any number past the first is a guess. List them; do not
 			// rank them.
+			// A position is claimed only for a round that can fire now (see Queue):
+			// anything else depends on when a pump runs and which windows have
+			// opened by then.
 			position := "—"
-			if i == 0 && e.Why != WaitSlotBusy {
+			if i == 0 && e.ReadyAt.IsZero() && e.Why == "" {
 				position = strconv.Itoa(1)
 			}
 			fmt.Fprintf(&b, "| %s | [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %d | %s | `%s` |\n",

@@ -699,42 +699,71 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 		queued = append(queued, e)
 	}
 
-	byGateThenSeq := func(list []QueueEntry) {
-		sort.Slice(list, func(i, j int) bool {
-			if !list[i].ReadyAt.Equal(list[j].ReadyAt) {
-				// Ready now (zero) sorts ahead of anything with a future gate.
-				if list[i].ReadyAt.IsZero() != list[j].ReadyAt.IsZero() {
-					return list[i].ReadyAt.IsZero()
-				}
-				return list[i].ReadyAt.Before(list[j].ReadyAt)
-			}
-			return list[i].Seq < list[j].Seq
-		})
-	}
-	byGateThenSeq(queued)
-	byGateThenSeq(freeRunning)
-
-	// Order past the front is not knowable and this stops asserting it. Simulating
-	// the queue assumed a slot frees one pacing interval after a fire, but release
-	// comes from the bot acknowledging or from CRQ_INFLIGHT_TIMEOUT — neither of
-	// which pacing knows. So only the front carries a time: a follower cannot start
-	// before its own gate, but neither can it start then, and printing that gate in
-	// a "ready" column states a lower bound as though it were the answer.
-	for i := 1; i < len(queued); i++ {
-		queued[i].ReadyAt, queued[i].Why = time.Time{}, WaitBehind
-	}
-
-	// A held slot gates every queued round, the front included: nothing fires
-	// until it releases, and that moment is unknowable.
+	// A held slot gates every queued round: nothing metered fires until it
+	// releases, and that moment is unknowable. Free-running rounds are untouched —
+	// they never wanted the slot.
 	if slotBusy {
 		for i := range queued {
 			queued[i].ReadyAt, queued[i].Why = time.Time{}, WaitSlotBusy
 		}
 	}
 
-	// Free-running work first: it is actionable now, and burying it under rounds
-	// waiting for a slot it never needs is what the exemption exists to prevent.
-	return append(freeRunning, queued...)
+	// One list, ordered by readiness then Seq — which is NextEligible's own rule
+	// among rounds that are eligible together. Concatenating the groups instead
+	// put a cooling co-only round ahead of work that could fire immediately.
+	out := append(freeRunning, queued...)
+	// An empty ReadyAt means two different things and they must not sort alike:
+	// nothing is holding this round, or something is holding it whose end is
+	// unknowable (a slot another PR holds). Rank them apart, or a slot-blocked
+	// round sorts as if it were ready and can take the front.
+	rank := func(e QueueEntry) int {
+		switch {
+		case e.ReadyAt.IsZero() && e.Why == "":
+			return 0 // fire-eligible now
+		case !e.ReadyAt.IsZero():
+			return 1 // waiting until a known time
+		default:
+			return 2 // waiting on something with no knowable end
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if ri, rj := rank(out[i]), rank(out[j]); ri != rj {
+			return ri < rj
+		}
+		if !out[i].ReadyAt.Equal(out[j].ReadyAt) {
+			return out[i].ReadyAt.Before(out[j].ReadyAt)
+		}
+		return out[i].Seq < out[j].Seq
+	})
+
+	// Say which round is next ONLY when one is eligible now — then it is the
+	// lowest-Seq ready round, exactly what NextEligible picks. With everything
+	// still cooling, which one fires depends on when a pump happens to run: if
+	// none runs between two retry times, both are eligible at the next pass and
+	// the lower Seq wins, not the earlier window. So no front is claimed, and the
+	// soonest opening is reported without saying whose it is.
+	//
+	// Only that front carries a time. Anything behind it starts when the front
+	// finishes, which is the unknowable part, so naming its own gate there would
+	// state a lower bound as if it were the answer.
+	front := len(out) > 0 && rank(out[0]) == 0
+	for i := range out {
+		if front && i == 0 {
+			continue // the front is the one round whose readiness is knowable
+		}
+		if !front && i == 0 {
+			continue // nothing is eligible; the soonest opening is still worth naming
+		}
+		// Drop the TIME but keep the reason. A round's own gate is real and worth
+		// reporting — "slot busy", "account blocked" — it just is not a start time,
+		// because the round ahead has to finish first. Only a round with nothing of
+		// its own holding it is purely behind.
+		out[i].ReadyAt = time.Time{}
+		if out[i].Why == "" {
+			out[i].Why = WaitBehind
+		}
+	}
+	return out
 }
 
 // Normalize repairs invariants after load: map init, expired retry windows

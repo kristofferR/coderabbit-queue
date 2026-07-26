@@ -151,9 +151,13 @@ func TestQueueOrdersByReadyThenSeq(t *testing.T) {
 		t.Errorf("the front is ready now: %+v", q[0])
 	}
 	for i := 1; i < len(q); i++ {
-		if q[i].Why != WaitBehind {
-			t.Errorf("q[%d].Why = %q, want %q", i, q[i].Why, WaitBehind)
+		if !q[i].ReadyAt.IsZero() {
+			t.Errorf("q[%d] must carry no time, got %v", i, q[i].ReadyAt)
 		}
+	}
+	// The ready follower has nothing of its own holding it, so it is purely behind.
+	if q[1].Why != WaitBehind {
+		t.Errorf("q[1].Why = %q, want %q", q[1].Why, WaitBehind)
 	}
 }
 
@@ -476,10 +480,18 @@ func TestQueueRanksOnlyTheFront(t *testing.T) {
 	if !q[0].ReadyAt.IsZero() || q[0].Why != "" {
 		t.Errorf("the front is ready now, got ready=%v why=%q", q[0].ReadyAt, q[0].Why)
 	}
+	// Behind the front: no time, whatever the reason. A round with a gate of its
+	// own still reports it; one with nothing holding it is purely behind.
 	for i := 1; i < len(q); i++ {
-		if !q[i].ReadyAt.IsZero() || q[i].Why != WaitBehind {
-			t.Errorf("entry %d must be unranked and untimed, got ready=%v why=%q", i, q[i].ReadyAt, q[i].Why)
+		if !q[i].ReadyAt.IsZero() {
+			t.Errorf("entry %d must be untimed, got %v", i, q[i].ReadyAt)
 		}
+	}
+	if q[1].Why != WaitBehind {
+		t.Errorf("the ready follower has nothing of its own holding it, got %q", q[1].Why)
+	}
+	if q[2].Why != WaitCoolingDown {
+		t.Errorf("the cooling round should still say so, got %q", q[2].Why)
 	}
 
 	// And the table must not number them.
@@ -613,8 +625,13 @@ func TestQueueDoesNotRepeatTheFrontsBoundaryForFollowers(t *testing.T) {
 	if !q[0].ReadyAt.Equal(blocked.UTC()) {
 		t.Errorf("the front is gated by the account block, got %v", q[0].ReadyAt)
 	}
-	if !q[1].ReadyAt.IsZero() || q[1].Why != WaitBehind {
-		t.Errorf("the follower must carry no time at all: ready=%v why=%q", q[1].ReadyAt, q[1].Why)
+	// The follower keeps its reason — the block is real — but loses the time,
+	// because when it actually starts depends on the round ahead of it.
+	if !q[1].ReadyAt.IsZero() {
+		t.Errorf("the follower must carry no time: ready=%v", q[1].ReadyAt)
+	}
+	if q[1].Why != WaitAccountBlocked {
+		t.Errorf("the follower should still report why it waits, got %q", q[1].Why)
 	}
 }
 
