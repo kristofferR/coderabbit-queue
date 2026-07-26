@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -372,6 +373,41 @@ func TestDismissEndsTheUnresolvableFindingDeadlock(t *testing.T) {
 			t.Error("a dismissed finding must be withheld from findings")
 		}
 	}
+	// A threaded finding is refused: resolve and decline both put the decision on
+	// the PR where the bot can answer it, and dismissing one would converge the
+	// round with its thread still open.
+	f.gh.graphQL = func(query string, _ map[string]any, out any) error {
+		if !strings.Contains(query, "reviewThreads") {
+			return json.Unmarshal([]byte(`{"repository":{"pullRequest":{"timelineItems":{"nodes":[]}}}}`), out)
+		}
+		return json.Unmarshal([]byte(`{"repository":{"pullRequest":{"reviewThreads":{
+		  "pageInfo":{"hasNextPage":false,"endCursor":""},
+		  "nodes":[{"id":"PRRT_open","isResolved":false,"isOutdated":false,"path":"internal/state/state.go","line":42,
+		    "comments":{"totalCount":1,"nodes":[{"databaseId":902,"body":"_⚠️ Potential issue_\n\nThis dereferences a nil round.",
+		      "path":"internal/state/state.go","line":42,"author":{"login":"coderabbitai[bot]"},"commit":{"oid":"aaaaaaaa1"}}]}}]
+		}}}}`), out)
+	}
+	threaded := f.next(repo, pr)
+	var threadedID string
+	for _, finding := range threaded.Findings {
+		if finding.ThreadID != "" {
+			threadedID = finding.ID
+			break
+		}
+	}
+	if threadedID == "" {
+		t.Fatal("expected a threaded finding to try to dismiss")
+	}
+	if _, err := f.svc.Dismiss(f.ctx, repo, pr, []string{threadedID}, "not doing this one"); err == nil {
+		t.Error("dismissing a finding that HAS a thread must be refused")
+	}
+
+	// So is an ID that is not a finding here at all — a stale copy-paste would
+	// otherwise record a dismissal that silences whatever later matches it.
+	if _, err := f.svc.Dismiss(f.ctx, repo, pr, []string{"deadbeef"}, "typo"); err == nil {
+		t.Error("dismissing an unknown finding id must be refused")
+	}
+
 	// It is scoped to this head. A push supersedes the round, and the next
 	// reviewer reporting the same thing must be heard again.
 	f.clk.advance(time.Minute)

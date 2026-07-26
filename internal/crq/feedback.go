@@ -25,7 +25,11 @@ type FeedbackReport struct {
 	Converged  bool              `json:"converged"`
 	ReviewedBy map[string]bool   `json:"reviewed_by"`
 	Findings   []dialect.Finding `json:"findings"`
-	CheckedAt  time.Time         `json:"checked_at"`
+	// Dismissed counts the findings this head's round accounted for through
+	// `crq dismiss`. They are withheld from Findings, so the count is how a
+	// reader sees something was set aside rather than never reported.
+	Dismissed int       `json:"dismissed,omitempty"`
+	CheckedAt time.Time `json:"checked_at"`
 	// Open is whether the PR was open in the same observation Head and
 	// ReviewedBy came from. It is deliberately not serialized — the feedback
 	// JSON contract is frozen — and exists so a caller deciding an action reads
@@ -428,6 +432,20 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	}
 
 	report.Findings = dedupeFindings(report.Findings, suppressPromptAt, settledStableIDs)
+	// Dismissals apply HERE, not in the caller: convergence and `crq loop`'s exit
+	// code are computed from this list, so filtering further out would leave a
+	// dismissed finding permanently actionable everywhere except `crq next`.
+	if round != nil && round.Head == head && len(round.Dismissed) > 0 {
+		kept := make([]dialect.Finding, 0, len(report.Findings))
+		for _, finding := range report.Findings {
+			if round.IsDismissed(finding.ID) {
+				report.Dismissed++
+				continue
+			}
+			kept = append(kept, finding)
+		}
+		report.Findings = kept
+	}
 	sort.Slice(report.Findings, func(i, j int) bool {
 		if dialect.RankSeverity(report.Findings[i].Severity) != dialect.RankSeverity(report.Findings[j].Severity) {
 			return dialect.RankSeverity(report.Findings[i].Severity) > dialect.RankSeverity(report.Findings[j].Severity)

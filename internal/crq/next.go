@@ -219,26 +219,14 @@ func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextR
 	report.LocalWork, report.LocalWorkReason = s.checkLocalWork(ctx,
 		[]string{repo, feedback.HeadRepo}, report.Head, feedback.HeadRef)
 
-	// A dismissed finding is one the agent accounted for and GitHub offers no way
-	// to close. Withholding it here is what lets the round move on; leaving it in
-	// would repeat `fix` forever, which is the deadlock dismissal exists to end.
-	findings := feedback.Findings
-	if round != nil && round.Head == feedback.Head && len(round.Dismissed) > 0 {
-		kept := make([]dialect.Finding, 0, len(findings))
-		for _, f := range findings {
-			if round.IsDismissed(f.ID) {
-				report.Dismissed++
-				continue
-			}
-			kept = append(kept, f)
-		}
-		findings = kept
-	}
+	// Feedback has already withheld what this round dismissed — including from
+	// its own convergence verdict — so there is one filter, not one per caller.
+	report.Dismissed = feedback.Dismissed
 
 	in := engine.NextInput{
 		Obs:           engine.Observation{Head: feedback.Head, Open: feedback.Open},
 		Completion:    engine.CompletionStatus{ReviewedBy: feedback.ReviewedBy, Done: allReviewed(feedback.ReviewedBy)},
-		Findings:      findings,
+		Findings:      feedback.Findings,
 		Global:        s.global(st, now),
 		Primary:       s.cfg.Bot,
 		LocalWork:     report.LocalWork,
