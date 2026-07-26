@@ -72,7 +72,13 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 		t.Errorf("session ran in %q, want a worktree under %q", got.Cwd, cfg.WorkspaceRoot)
 	}
 	if got.Findings == "" {
-		t.Error("the session was given no findings file")
+		t.Fatal("the session was given no findings file")
+	}
+	// OUTSIDE the worktree: at the repository root it is an untracked file, and
+	// a session following the documented `git add -A` push would commit crq's
+	// review payload into the PR.
+	if strings.HasPrefix(got.Findings, got.Cwd) {
+		t.Errorf("findings at %q are inside the worktree %q", got.Findings, got.Cwd)
 	}
 
 	// The claim is released afterwards, so the next round is not blocked by a
@@ -107,5 +113,75 @@ func TestWatchRefusesDispatchWithNoCommand(t *testing.T) {
 	err := svc.Watch(context.Background(), WatchOptions{Dispatch: true, Once: true}, nil)
 	if err == nil || !strings.Contains(err.Error(), "command") {
 		t.Errorf("err = %v, want a refusal naming the missing command", err)
+	}
+}
+
+// DryRun means crq writes nothing and posts nothing. Claiming shared state and
+// running a code-writing command is the largest possible violation of that.
+func TestDispatchHonoursDryRun(t *testing.T) {
+	cfg := firingConfig()
+	cfg.DryRun = true
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	ran := filepath.Join(t.TempDir(), "ran")
+	script := filepath.Join(t.TempDir(), "s.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch "+ran+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ok, why := svc.dispatch(context.Background(), WatchOptions{Dispatch: true, Command: []string{script}},
+		NextReport{Repo: "o/r", PR: 1, Head: "aaaaaaaa1", Action: "fix"})
+	if ok {
+		t.Error("a dry run dispatched a session")
+	}
+	if !strings.Contains(why, "dry run") {
+		t.Errorf("reason = %q, want it to say why", why)
+	}
+	if _, err := os.Stat(ran); !os.IsNotExist(err) {
+		t.Error("the fix command ran under a dry run")
+	}
+}
+
+// A session that fixes files without pushing must not have that work deleted:
+// removing the worktree discards fixes that were made but not landed.
+func TestDispatchKeepsAWorktreeWithUnpushedWork(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey(repo, 8)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, repo, 8, sha, PhaseQueued, time.Now().UTC(), 0)
+
+	// A session that edits a file and stops there, which is the ordinary shape.
+	script := filepath.Join(t.TempDir(), "fix.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho fixed >> README.md\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ok, why := svc.dispatch(context.Background(), WatchOptions{Dispatch: true, Command: []string{script}, MaxAttempts: 3},
+		NextReport{Repo: repo, PR: 8, Head: sha, Action: "fix"})
+	if !ok {
+		t.Fatalf("dispatch failed: %s", why)
+	}
+	found := false
+	_ = filepath.WalkDir(filepath.Join(cfg.WorkspaceRoot, "work"), func(path string, d os.DirEntry, err error) error {
+		if err == nil && d.Name() == "README.md" {
+			if body, rerr := os.ReadFile(path); rerr == nil && strings.Contains(string(body), "fixed") {
+				found = true
+			}
+		}
+		return nil
+	})
+	if !found {
+		t.Error("the session's uncommitted fix was deleted with the worktree")
 	}
 }

@@ -8,8 +8,9 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
@@ -59,7 +60,7 @@ type WatchEvent struct {
 // Every dispatch is claimed under CAS, so two watchers cannot both spawn a
 // session for one PR, and bounded per head, so a fix that keeps not working
 // stops instead of spending a review round each time.
-func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchEvent)) error {
+func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchEvent) error) error {
 	if opts.Interval <= 0 {
 		opts.Interval = s.cfg.WatchInterval
 	}
@@ -73,24 +74,33 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 		return errors.New("dispatch needs a command: set CRQ_DISPATCH_CMD, or pass one after --")
 	}
 	for {
+		wait := opts.Interval
 		if err := s.watchPass(ctx, opts, emit); err != nil {
-			if _, ok := ghapi.ThrottleWait(err); !ok {
+			reset, throttled := ghapi.ThrottleWait(err)
+			if !throttled {
 				return err
 			}
+			// Retrying on the ordinary interval hammers an exhausted quota and
+			// pushes the reset further out, which is the opposite of waiting it
+			// out. Sleep for what the API said.
+			if reset > wait {
+				wait = reset
+			}
 			if s.log != nil {
-				s.log.Printf("watch: %v; waiting it out", err)
+				s.log.Printf("watch: %v; waiting %s for the reset", err, wait.Round(time.Second))
 			}
 		}
 		if opts.Once {
 			return nil
 		}
-		if err := ghapi.SleepCtx(ctx, opts.Interval); err != nil {
+		if err := ghapi.SleepCtx(ctx, wait); err != nil {
 			return err
 		}
 	}
 }
 
-func (s *Service) watchPass(ctx context.Context, opts WatchOptions, emit func(WatchEvent)) error {
+func (s *Service) watchPass(ctx context.Context, opts WatchOptions, emit func(WatchEvent) error) error {
+	var failures []string
 	repos := opts.Repos
 	if len(repos) == 0 {
 		for repo := range s.cfg.AllowRepos {
@@ -110,6 +120,13 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, emit func(Wa
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			// The fleet's skip marker suppresses review deliberately, to protect
+			// the shared quota. Next is a MUTATING oracle — it enqueues and can
+			// fire — so the marker has to be honoured before calling it, not
+			// after.
+			if marker := strings.TrimSpace(s.cfg.SkipMarker); marker != "" && strings.Contains(pull.Body, marker) {
+				continue
+			}
 			report, err := s.Next(ctx, repo, pull.Number)
 			if err != nil {
 				if _, ok := ghapi.ThrottleWait(err); ok {
@@ -117,6 +134,12 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, emit func(Wa
 				}
 				if s.log != nil {
 					s.log.Printf("watch: %s#%d: %v", repo, pull.Number, err)
+				}
+				// A one-shot run is somebody's cron or CI job: reporting success
+				// after skipping a PR it could not read makes a broken scan look
+				// like a clean one.
+				if opts.Once {
+					failures = append(failures, fmt.Sprintf("%s#%d: %v", repo, pull.Number, err))
 				}
 				continue
 			}
@@ -129,43 +152,62 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, emit func(Wa
 				event.Dispatched, event.Skipped = s.dispatch(ctx, opts, report)
 			}
 			if emit != nil {
-				emit(event)
+				// A consumer that has gone away (a closed pipe, a full
+				// destination) means nothing is observing a watcher that is still
+				// firing reviews and starting sessions. Stop instead.
+				if err := emit(event); err != nil {
+					return fmt.Errorf("emitting %s#%d: %w", repo, pull.Number, err)
+				}
 			}
 		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("%d pull request(s) could not be checked: %s", len(failures), strings.Join(failures, "; "))
 	}
 	return nil
 }
 
 // dispatch claims the round, checks the head out, and runs the fix session.
 func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextReport) (bool, string) {
+	// DryRun means crq writes nothing and posts nothing. Claiming shared state
+	// and running a code-writing command is the largest possible violation of
+	// that, so it is checked before anything else.
+	if s.cfg.DryRun {
+		return false, "dry run: would dispatch a fix session"
+	}
 	token := randomToken()
 	claimed, why := s.claimDispatch(ctx, report, token, opts.MaxAttempts)
 	if !claimed {
 		return false, why
 	}
-	defer s.releaseDispatch(context.WithoutCancel(ctx), report, token)
 
 	co, err := s.workspace().Checkout(ctx, report.Repo, report.PR, report.Head)
 	if err != nil {
+		// Nothing ran, so the attempt did not happen: a transient clone failure
+		// must not eat the per-head budget and permanently skip the PR.
+		s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
 		return false, "checkout failed: " + err.Error()
 	}
-	defer func() { _ = co.Remove(context.WithoutCancel(ctx)) }()
 
-	// The session gets the findings as a file rather than an argument: they are
-	// long, and a shell would be the wrong place to carry them.
-	findingsPath := filepath.Join(co.Dir, ".crq-findings.json")
-	body, err := json.MarshalIndent(report.Findings, "", "  ")
+	// The findings go OUTSIDE the worktree. At the repository root they are an
+	// untracked file, and a session following the documented `git add -A` push
+	// would commit crq's review payload into the PR.
+	findingsPath, err := s.writeFindings(report)
 	if err != nil {
+		s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
+		_ = co.Remove(context.WithoutCancel(ctx))
 		return false, err.Error()
 	}
-	if err := os.WriteFile(findingsPath, body, 0o600); err != nil {
-		return false, err.Error()
-	}
+	defer os.Remove(findingsPath)
 
-	stop := s.beatDispatch(ctx, report, token)
-	defer stop()
+	// Losing the claim means another watcher has taken this round and may be
+	// running its own session. Two sessions writing one worktree is worse than
+	// no session, so the heartbeat cancels this one.
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	lost := s.beatDispatch(runCtx, report, token, cancel)
 
-	cmd := exec.CommandContext(ctx, opts.Command[0], opts.Command[1:]...)
+	cmd := exec.CommandContext(runCtx, opts.Command[0], opts.Command[1:]...)
 	cmd.Dir = co.Dir
 	cmd.Env = append(os.Environ(),
 		"CRQ_DISPATCH_REPO="+report.Repo,
@@ -177,10 +219,45 @@ func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextRe
 		s.log.Printf("watch: dispatching %s for %s#%d@%s (%d findings)",
 			opts.Command[0], report.Repo, report.PR, report.Head, len(report.Findings))
 	}
-	if err := cmd.Run(); err != nil {
-		return false, "fix session failed: " + err.Error()
+	runErr := cmd.Run()
+	s.releaseDispatch(context.WithoutCancel(ctx), report, token, true)
+	if lost() {
+		return false, "another watcher took this round; the session was stopped"
 	}
+	if runErr != nil {
+		_ = co.Remove(context.WithoutCancel(ctx))
+		return false, "fix session failed: " + runErr.Error()
+	}
+
+	// Keep a worktree the session left work in. Removing it discards fixes that
+	// were made but not pushed, which is the one outcome a fix session must
+	// never suffer.
+	if dirty, err := co.Git(context.WithoutCancel(ctx), "status", "--porcelain"); err == nil && strings.TrimSpace(dirty) != "" {
+		if s.log != nil {
+			s.log.Printf("watch: keeping %s — the session left uncommitted work", co.Dir)
+		}
+		return true, ""
+	}
+	_ = co.Remove(context.WithoutCancel(ctx))
 	return true, ""
+}
+
+// writeFindings puts the findings somewhere the fix session can read and the
+// repository cannot accidentally commit.
+func (s *Service) writeFindings(report NextReport) (string, error) {
+	body, err := json.MarshalIndent(report.Findings, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	file, err := os.CreateTemp("", fmt.Sprintf("crq-findings-%d-*.json", report.PR))
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	if _, err := file.Write(body); err != nil {
+		return "", err
+	}
+	return file.Name(), nil
 }
 
 func (s *Service) claimDispatch(ctx context.Context, report NextReport, token string, maxAttempts int) (bool, string) {
@@ -205,11 +282,17 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 	return reason == "", reason
 }
 
-func (s *Service) releaseDispatch(ctx context.Context, report NextReport, token string) {
+// releaseDispatch frees the round. attempted=false also gives the attempt back,
+// for a claim that never reached a running session — a clone that failed or a
+// command that could not start did not use up the per-head budget.
+func (s *Service) releaseDispatch(ctx context.Context, report NextReport, token string, attempted bool) {
 	_, _ = s.store.Update(ctx, func(st *State) error {
 		round := st.Round(report.Repo, report.PR)
 		if round == nil || !round.ReleaseDispatch(token) {
 			return ErrNoChange
+		}
+		if !attempted && round.Dispatch != nil && round.Dispatch.Attempts > 0 {
+			round.Dispatch.Attempts--
 		}
 		st.PutRound(*round)
 		return nil
@@ -218,28 +301,42 @@ func (s *Service) releaseDispatch(ctx context.Context, report NextReport, token 
 
 // beatDispatch refreshes the claim while the session runs, so a session that
 // outlives the TTL keeps its round and a crashed watcher's does not.
-func (s *Service) beatDispatch(ctx context.Context, report NextReport, token string) func() {
-	beatCtx, cancel := context.WithCancel(ctx)
+// beatDispatch refreshes the claim while the session runs and reports whether it
+// was lost. Losing it means another watcher took the round over, so stop() is
+// called to end this session rather than let two write one worktree.
+func (s *Service) beatDispatch(ctx context.Context, report NextReport, token string, stop func()) func() bool {
+	var lost atomic.Bool
 	go func() {
 		ticker := time.NewTicker(DispatchTTL / 3)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-beatCtx.Done():
+			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				_, _ = s.store.Update(beatCtx, func(st *State) error {
+				held := false
+				if _, err := s.store.Update(ctx, func(st *State) error {
 					round := st.Round(report.Repo, report.PR)
 					if round == nil || !round.HeartbeatDispatch(token, s.clock()) {
 						return ErrNoChange
 					}
+					held = true
 					st.PutRound(*round)
 					return nil
-				})
+				}); err != nil {
+					// A failed write is not proof the claim is gone; the next
+					// tick decides. Only an explicit "not yours" ends the session.
+					continue
+				}
+				if !held {
+					lost.Store(true)
+					stop()
+					return
+				}
 			}
 		}
 	}()
-	return cancel
+	return lost.Load
 }
 
 func openPullQuery() url.Values {

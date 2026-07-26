@@ -227,11 +227,22 @@ func run(ctx context.Context, args []string) int {
 	case "watch":
 		fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 		fs.SetOutput(os.Stderr)
+		// Split on "--" BEFORE parsing: FlagSet.Parse consumes the terminator, so
+		// looking for it in fs.Args() afterwards never finds it and the fix
+		// command is silently read as a list of repositories.
+		flagArgs, command := args[1:], []string(nil)
+		for i, arg := range flagArgs {
+			if arg == "--" {
+				command = flagArgs[i+1:]
+				flagArgs = flagArgs[:i]
+				break
+			}
+		}
 		dispatch := fs.Bool("dispatch", false, "start a fix session for a PR that needs one")
 		once := fs.Bool("once", false, "run one pass and exit")
 		interval := fs.Duration("interval", 0, "time between passes")
 		attempts := fs.Int("max-attempts", 0, "dispatches allowed per head")
-		if err := fs.Parse(args[1:]); err != nil {
+		if err := fs.Parse(flagArgs); err != nil {
 			return 1
 		}
 		if err := cfg.RequireState(); err != nil {
@@ -241,21 +252,12 @@ func run(ctx context.Context, args []string) int {
 		opts := crq.WatchOptions{
 			Dispatch: *dispatch, Once: *once,
 			Interval: *interval, MaxAttempts: *attempts,
+			Command: command,
 		}
-		// Everything after the flags is either repositories or, past a --, the
-		// fix session's argv.
-		rest := fs.Args()
-		for i, arg := range rest {
-			if arg == "--" {
-				opts.Command = rest[i+1:]
-				rest = rest[:i]
-				break
-			}
-		}
-		opts.Repos = rest
+		opts.Repos = fs.Args()
 		enc := json.NewEncoder(os.Stdout)
-		werr := service.Watch(ctx, opts, func(e crq.WatchEvent) {
-			_ = enc.Encode(e)
+		werr := service.Watch(ctx, opts, func(e crq.WatchEvent) error {
+			return enc.Encode(e)
 		})
 		if werr != nil && !errors.Is(werr, context.Canceled) {
 			fatal(werr)
