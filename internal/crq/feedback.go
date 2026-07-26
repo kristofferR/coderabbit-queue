@@ -1165,15 +1165,27 @@ func threadRebuttal(thread reviewThread, bots map[string]struct{}) *dialect.Find
 		return nil // a platform notice or ack, not a rebuttal (e.g. Codex's
 		// "create an environment" boilerplate posted as a thread reply)
 	}
-	// A contested decline deserves attention even when the finding's own severity
-	// is a nitpick, so floor an unknown severity at major.
+	// Say which of the two this actually is. Everything that was not a clear
+	// withdrawal used to be announced as a contest, so a bot AGREEING with the
+	// decline was reported as standing its ground — and an agent, told to
+	// re-address a rebuttal that did not exist, looped on the artifact.
+	//
+	// Surfacing an ambiguous reply is still right — a buried rebuttal is the
+	// worse failure — and it keeps the same major floor, so visibility is
+	// unchanged. Only the CLAIM is corrected: an unclassified reply is reported
+	// as something to read, and a contest is asserted only when the reply really
+	// retains the finding.
 	severity := dialect.FloorSeverity(dialect.SeverityOf(last.Body), "major")
+	title := "Reviewer replied after your decline — read it and confirm the decline stands: "
+	if dialect.IsReviewFindingRetained(last.Body) {
+		title = "Reviewer contests your reply — re-address or reply again: "
+	}
 	return &dialect.Finding{
 		Bot:       last.Author.Login,
 		Severity:  severity,
 		Path:      firstNonEmpty(thread.Path, last.Path),
 		Line:      firstPositive(thread.Line, last.Line, last.OriginalLine),
-		Title:     "Reviewer contests your reply — re-address or reply again: " + dialect.TitleOf(last.Body),
+		Title:     title + dialect.TitleOf(last.Body),
 		Body:      strings.TrimSpace(last.Body),
 		ThreadID:  thread.ID,
 		CommentID: last.DatabaseID,

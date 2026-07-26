@@ -706,3 +706,68 @@ func TestReplayEmptyReviewShellDoesNotConverge(t *testing.T) {
 		t.Fatalf("real review must converge: %+v", report.ReviewedBy)
 	}
 }
+
+// --- a refusal is not a rate limit -----------------------------------------
+
+// TestReplaySkippedRefusalNeverBlocksTheAccount pins the fleet-wide property
+// behind CodeRabbit's "Review skipped" refusal.
+//
+// That notice ships with the rate-limit marker embedded, and reading it as a
+// timed block was catastrophic rather than merely wrong: the block is
+// account-WIDE, nothing about waiting clears "this PR has 119 files", and every
+// re-fire re-read the same notice and re-blocked. One oversized PR stalled review
+// for every repository.
+//
+// The classifier discriminates them (TestGoldenClassification), but the cost of
+// a regression lands here, so assert the consequence and not just the reading:
+// after observing the refusal, no account block exists and an unrelated PR still
+// fires.
+func TestReplaySkippedRefusalNeverBlocksTheAccount(t *testing.T) {
+	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	oversized, other := 700, 701
+	f.openPull("owner/repo", oversized, "aaaaaaaa1")
+	f.setCommitDate("aaaaaaaa1", base.Add(-time.Minute))
+	f.openPull("owner/repo", other, "bbbbbbbb2")
+	f.setCommitDate("bbbbbbbb2", base.Add(-time.Minute))
+
+	f.enqueue("owner/repo", oversized)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("the oversized PR should fire once, got %#v", res)
+	}
+
+	// CodeRabbit refuses the head. The body carries the rate-limit marker.
+	f.clk.advance(time.Minute)
+	f.botComment("owner/repo", oversized, 900,
+		corpusMessage(t, "coderabbit/review-skipped-too-many-files.md"), f.clk.now())
+	f.pump()
+
+	// Prove the refusal was actually observed. Without this the assertions below
+	// would also pass if nothing had happened at all — and "no block" is only
+	// meaningful once the notice that used to create one has been read.
+	if r := f.round("owner/repo", oversized); r == nil || r.Phase == PhaseFired {
+		t.Fatalf("the refusal must move the round off fired, got %#v", r)
+	}
+
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Account.BlockedUntil != nil {
+		t.Fatalf("a refusal must not block the account: BlockedUntil = %s", st.Account.BlockedUntil)
+	}
+
+	// And the block being absent has to mean something: an unrelated PR fires.
+	f.clk.advance(2 * time.Minute)
+	f.enqueue("owner/repo", other)
+	for i := 0; i < 4; i++ {
+		if f.reviewsPosted("owner/repo", other) > 0 {
+			break
+		}
+		f.clk.advance(time.Minute)
+		f.pump()
+	}
+	if got := f.reviewsPosted("owner/repo", other); got == 0 {
+		t.Fatal("an unrelated PR must still fire: one oversized PR cannot stall the fleet")
+	}
+}
