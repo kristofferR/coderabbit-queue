@@ -359,8 +359,13 @@ func (s *State) NoteWriter(host string, caps int, now time.Time) {
 // back untouched, and keeps deciding from its own fleet-wide configuration.
 func (s *State) LaggingWriters(caps int, now time.Time) []string {
 	acting := map[string]bool{}
-	if s.Leader != nil && s.Leader.Owner != "" && s.Leader.ExpiresAt.After(now) {
-		acting[s.Leader.Owner] = true
+	// The leader records itself as "host=<name> pid=<n>", while capabilities are
+	// keyed by host alone. Comparing the two directly would report every
+	// current-version daemon as lagging.
+	if s.Leader != nil && s.Leader.ExpiresAt.After(now) {
+		if host := ownerHost(s.Leader.Owner); host != "" {
+			acting[host] = true
+		}
 	}
 	if slot := s.SlotRound(); slot != nil && slot.ByHost != "" {
 		acting[slot.ByHost] = true
@@ -374,6 +379,17 @@ func (s *State) LaggingWriters(caps int, now time.Time) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ownerHost extracts the host from a leader owner string ("host=x pid=1"),
+// falling back to the whole value for an owner that is just a host.
+func ownerHost(owner string) string {
+	for _, field := range strings.Fields(owner) {
+		if rest, ok := strings.CutPrefix(field, "host="); ok {
+			return rest
+		}
+	}
+	return strings.TrimSpace(owner)
 }
 
 // RepoReviewers overrides which reviewers run on one repository. A nil slice
@@ -492,6 +508,30 @@ func (r *Round) ReleaseToQueue(reason string, now time.Time) error {
 	t := now.UTC()
 	r.LastAttemptAt = &t
 	r.Note = reason
+	return nil
+}
+
+// Reopen puts a completed round back in the queue because the set of reviewers
+// that has to answer for its head changed.
+//
+// A completed round is the "this head was reviewed" dedup marker, so a newly
+// required reviewer would otherwise strand the PR: convergence reports it
+// pending while enqueue keeps skipping the head, and no eligible round exists to
+// trigger it. This is the one transition that reopens a finished round, and it
+// keeps the head, the attempts and the co-reviewer bookkeeping — what changed is
+// who still has to answer, not what happened.
+func (r *Round) Reopen(now time.Time) error {
+	if r.Phase != PhaseCompleted {
+		return r.illegal(PhaseQueued)
+	}
+	r.Phase = PhaseQueued
+	r.Token = ""
+	r.ReservedAt = nil
+	r.WaitDeadline = nil
+	r.RetryAt = nil
+	t := now.UTC()
+	r.LastAttemptAt = &t
+	r.Note = "reviewer requirements changed"
 	return nil
 }
 

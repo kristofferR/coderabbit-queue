@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 )
@@ -107,23 +108,17 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 		return out, nil
 	}
 
-	// Start from the existing override so a call that names one half leaves the
-	// other alone — the contract the nil/empty distinction promises.
-	ov := RepoReviewers{}
-	if st, _, err := s.store.Load(ctx); err == nil {
-		if existing, ok := st.RepoOverride(repo); ok {
-			ov = existing
-		}
-	} else {
-		return ReviewerView{}, err
-	}
-
+	// Both halves are resolved here; the MERGE happens inside the CAS closure,
+	// because two hosts setting different halves would otherwise derive from the
+	// same snapshot and the later write would drop the earlier one's half — and
+	// a retry that reuses an already-merged value cannot fix that.
+	var setCoBots, setRequired []string
 	if coBots != nil {
 		resolved, err := resolve(known, coBots, "--bots")
 		if err != nil {
 			return ReviewerView{}, err
 		}
-		ov.CoBots, ov.SetCoBots = resolved, true
+		setCoBots = resolved
 	}
 	if required != nil {
 		if len(required) == 0 {
@@ -141,14 +136,22 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 		if err != nil {
 			return ReviewerView{}, err
 		}
-		ov.Required, ov.SetRequired = resolved, true
+		setRequired = resolved
 	}
-	now := s.clock().UTC()
-	ov.UpdatedAt = &now
-	ov.By = s.cfg.Host
 
+	now := s.clock().UTC()
 	state, err := s.store.Update(ctx, func(st *State) error {
+		ov, _ := st.RepoOverride(repo)
+		if coBots != nil {
+			ov.CoBots, ov.SetCoBots = setCoBots, true
+		}
+		if required != nil {
+			ov.Required, ov.SetRequired = setRequired, true
+		}
+		ov.UpdatedAt, ov.By = &now, s.cfg.Host
+		before := s.cfg.ForRepo(mustOverride(st, repo))
 		st.SetRepoOverride(repo, ov)
+		s.reopenForChangedReviewers(st, repo, before, s.cfg.ForRepo(ov), now)
 		return nil
 	})
 	if err != nil {
@@ -161,10 +164,13 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 // ClearReviewers returns repo to the fleet default.
 func (s *Service) ClearReviewers(ctx context.Context, repo string) (ReviewerView, error) {
 	repo = NormalizeRepo(repo)
+	now := s.clock().UTC()
 	state, err := s.store.Update(ctx, func(st *State) error {
+		before := s.cfg.ForRepo(mustOverride(st, repo))
 		if !st.ClearRepoOverride(repo) {
 			return ErrNoChange
 		}
+		s.reopenForChangedReviewers(st, repo, before, s.cfg, now)
 		return nil
 	})
 	if err != nil && !errors.Is(err, ErrNoChange) {
@@ -191,4 +197,60 @@ func knownLogins(known map[string]string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// mustOverride is the repo's override, or the zero value meaning "fleet
+// default" — the same thing ForRepo treats as no override.
+func mustOverride(st *State, repo string) RepoReviewers {
+	ov, _ := st.RepoOverride(repo)
+	return ov
+}
+
+// reopenForChangedReviewers requeues this repository's completed rounds when the
+// set of reviewers that gates them changed.
+//
+// A completed round is the "this head was reviewed" dedup marker, so adding a
+// required reviewer would otherwise strand the PR: Feedback reports the new bot
+// pending, while Enqueue keeps skipping the head because the completed round is
+// still there. No eligible round exists to trigger it, and `crq next` waits for
+// a push that has no reason to come.
+//
+// Only rounds whose required set actually changed are touched, and only
+// completed ones — an in-flight round is already going to answer.
+func (s *Service) reopenForChangedReviewers(st *State, repo string, before, after Config, now time.Time) {
+	if sameLogins(before.RequiredBots, after.RequiredBots) {
+		return
+	}
+	for _, round := range st.Rounds {
+		if NormalizeRepo(round.Repo) != NormalizeRepo(repo) || round.Phase != PhaseCompleted {
+			continue
+		}
+		reopened := round
+		if err := reopened.Reopen(now); err != nil {
+			continue
+		}
+		st.PutRound(reopened)
+		if s.log != nil {
+			s.log.Printf("reviewers: requeued %s#%d@%s — the required set changed", round.Repo, round.PR, round.Head)
+		}
+	}
+}
+
+// sameLogins compares two reviewer lists as sets, since order is presentation.
+func sameLogins(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := map[string]int{}
+	for _, login := range a {
+		seen[dialect.NormalizeBotName(login)]++
+	}
+	for _, login := range b {
+		key := dialect.NormalizeBotName(login)
+		seen[key]--
+		if seen[key] < 0 {
+			return false
+		}
+	}
+	return true
 }

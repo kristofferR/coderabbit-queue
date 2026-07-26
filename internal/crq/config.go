@@ -47,11 +47,15 @@ type Config struct {
 	// Reviewers is the single description of who reviews and what they cost.
 	// Bot / RequiredBots / FeedbackBots / CoBots above are DERIVED from it and
 	// kept only so existing consumers keep compiling; new code should read this.
-	Reviewers         []Reviewer
-	RateLimitCommand  string
-	RateLimitMarker   string
-	CalibrationMarker string
-	ReviewDoneMarker  string
+	Reviewers []Reviewer
+	// FeedbackBotsExplicit records that CRQ_FEEDBACK_BOTS was set. It is the one
+	// list an operator may widen beyond who reviews, so neither LoadConfig's
+	// derivation nor a per-repo override may quietly replace it.
+	FeedbackBotsExplicit bool
+	RateLimitCommand     string
+	RateLimitMarker      string
+	CalibrationMarker    string
+	ReviewDoneMarker     string
 	// CompletionMarker identifies the bot's reply to a processed review command
 	// (CodeRabbit: "Review finished."). Feedback uses it to count a command
 	// round that produced no review object toward convergence.
@@ -190,7 +194,12 @@ func LoadConfig() (Config, error) {
 	// CRQ_FEEDBACK_BOTS still wins: it is the one list an operator may widen
 	// beyond who reviews (to surface a bot's findings without waiting for it).
 	cfg.RequiredBots = cfg.reviewerLogins(func(r Reviewer) bool { return r.Required })
-	if _, explicit := env["CRQ_FEEDBACK_BOTS"]; !explicit {
+	// Present-but-empty is not a choice: an operator who exports the variable
+	// blank has named nobody, and treating that as explicit would freeze the
+	// derived list and, through ForRepo, ignore every per-repo override.
+	explicitFeedback := strings.TrimSpace(env["CRQ_FEEDBACK_BOTS"]) != ""
+	cfg.FeedbackBotsExplicit = explicitFeedback
+	if !explicitFeedback {
 		// Everyone except a primary the operator deliberately left out of
 		// CRQ_REQUIRED_BOTS. That omission is how you say "do not wait for
 		// CodeRabbit here", and surfacing its findings anyway would put the round

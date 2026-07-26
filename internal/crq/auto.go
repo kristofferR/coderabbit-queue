@@ -305,17 +305,36 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 	if err != nil {
 		return false, "", err
 	}
-	bot := dialect.NormalizeBotName(s.cfg.Bot)
+	cfg := s.cfgFor(state, repo)
+	bot := dialect.NormalizeBotName(cfg.Bot)
 	lastBotReview := ""
+	// Every reviewer this repository gates on, not just the primary. A repo that
+	// requires Codex or Bugbot and already has a CodeRabbit review at the head
+	// would otherwise never be enqueued, so the reviewer it chose is never asked.
+	reviewedHere := map[string]string{}
 	for _, review := range reviews {
-		if dialect.NormalizeBotName(review.User.Login) == bot && review.CommitID != "" {
+		login := dialect.NormalizeBotName(review.User.Login)
+		if review.CommitID == "" {
+			continue
+		}
+		if login == bot {
 			lastBotReview = dialect.ShortOID(review.CommitID)
 		}
+		reviewedHere[login] = dialect.ShortOID(review.CommitID)
 	}
 	if incremental {
 		need := lastBotReview != head
+		missing := cfg.Bot
+		if !need {
+			for _, login := range cfg.RequiredBots {
+				if reviewedHere[dialect.NormalizeBotName(login)] != head {
+					need, missing = true, login
+					break
+				}
+			}
+		}
 		if need {
-			s.logEnqueue(repo, pr, head, "no bot review at head")
+			s.logEnqueue(repo, pr, head, "no "+dialect.NormalizeBotName(missing)+" review at head")
 		}
 		return need, head, nil
 	}
