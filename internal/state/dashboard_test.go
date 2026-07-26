@@ -142,12 +142,18 @@ func TestQueueOrdersByReadyThenSeq(t *testing.T) {
 			t.Fatalf("Queue order = %v, want %v", got, want)
 		}
 	}
-	// An elapsed RetryAt is ready, not cooling down.
-	if q[1].Why != "" || !q[1].ReadyAt.IsZero() {
-		t.Errorf("elapsed retry window not treated as ready: %+v", q[1])
+	// That d (an ELAPSED RetryAt) sorts among the ready rounds rather than after
+	// the cooling ones is the point: an expired window is not a wait.
+	//
+	// Only the front reports its own gate; everything behind it reports being
+	// behind, because when it starts depends on when the front finishes.
+	if q[0].Why != "" || !q[0].ReadyAt.IsZero() {
+		t.Errorf("the front is ready now: %+v", q[0])
 	}
-	if q[2].Why != WaitCoolingDown {
-		t.Errorf("q[2].Why = %q, want %q", q[2].Why, WaitCoolingDown)
+	for i := 1; i < len(q); i++ {
+		if q[i].Why != WaitBehind {
+			t.Errorf("q[%d].Why = %q, want %q", i, q[i].Why, WaitBehind)
+		}
 	}
 }
 
@@ -451,30 +457,35 @@ func TestQueueNamesRoundsBehindTheFrontWithoutInventingATime(t *testing.T) {
 	}
 }
 
-// The order has to be what firing will actually do. NextEligible takes the lowest
-// Seq among rounds eligible at that moment, so a round still cooling down when the
-// front fires can overtake a ready round with a higher Seq. Sorting by ready time
-// alone rendered 1, 3, 2 where the queue really runs 1, 2, 3.
-func TestQueueOrderMatchesWhatFiringWillDo(t *testing.T) {
+// Order past the front is not knowable, so the queue stops asserting it. What it
+// must still get right is WHICH round is next and that the rest are not ranked:
+// slot release comes from the bot acknowledging or from the in-flight timeout, so
+// a round cooling now can overtake a ready one with a higher Seq.
+func TestQueueRanksOnlyTheFront(t *testing.T) {
 	now := time.Now().UTC()
 	st := stateWith(
-		queuedRound("kristofferr/a", 1, 1, now),                  // ready now
-		coolingRound("kristofferr/b", 2, 2, now, 60*time.Second), // eligible before the next slot
-		queuedRound("kristofferr/c", 3, 3, now),                  // ready now, higher Seq
+		queuedRound("kristofferr/a", 1, 1, now),                 // ready, lowest Seq
+		coolingRound("kristofferr/b", 2, 2, now, 5*time.Minute), // cooling
+		queuedRound("kristofferr/c", 3, 3, now),                 // ready, higher Seq
 	)
 
-	var got []int
-	for _, e := range st.Queue(now, 90*time.Second) {
-		got = append(got, e.PR)
+	q := st.Queue(now, 90*time.Second)
+	if q[0].PR != 1 {
+		t.Errorf("front = %d, want the lowest-Seq ready round", q[0].PR)
 	}
-	want := []int{1, 2, 3}
-	if len(got) != len(want) {
-		t.Fatalf("Queue = %v, want %v", got, want)
+	if !q[0].ReadyAt.IsZero() || q[0].Why != "" {
+		t.Errorf("the front is ready now, got ready=%v why=%q", q[0].ReadyAt, q[0].Why)
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("Queue = %v, want %v (b is eligible by the time the slot frees)", got, want)
+	for i := 1; i < len(q); i++ {
+		if !q[i].ReadyAt.IsZero() || q[i].Why != WaitBehind {
+			t.Errorf("entry %d must be unranked and untimed, got ready=%v why=%q", i, q[i].ReadyAt, q[i].Why)
 		}
+	}
+
+	// And the table must not number them.
+	rendered := RenderDashboard(st, StoreConfig{})
+	if strings.Contains(rendered, "| 2 | [") || strings.Contains(rendered, "| 3 | [") {
+		t.Errorf("only the front may carry a position:\n%s", rendered)
 	}
 }
 
@@ -603,7 +614,7 @@ func TestQueueDoesNotRepeatTheFrontsBoundaryForFollowers(t *testing.T) {
 		t.Errorf("the front is gated by the account block, got %v", q[0].ReadyAt)
 	}
 	if !q[1].ReadyAt.IsZero() || q[1].Why != WaitBehind {
-		t.Errorf("the follower must not repeat the block boundary: ready=%v why=%q", q[1].ReadyAt, q[1].Why)
+		t.Errorf("the follower must carry no time at all: ready=%v why=%q", q[1].ReadyAt, q[1].Why)
 	}
 }
 

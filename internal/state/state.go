@@ -689,99 +689,47 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 		}
 		out = append(out, e)
 	}
-	// Order by SIMULATING what firing does, because pacing makes the naive sort
-	// disagree with it. NextEligible takes the lowest Seq among rounds that are
-	// eligible *at that moment*, so a round still cooling down when the front
-	// fires can become eligible before a ready round with a higher Seq — with
-	// seq 1 ready, seq 2 cooling for 60s and seq 3 ready on a 90s interval, the
-	// real order is 1, 2, 3, while sorting by ready time renders 1, 3, 2.
-	// Start where firing can actually resume, not at render time. An account block
-	// that outlasts a round's cooldown makes several rounds eligible together the
-	// moment it clears, and NextEligible then takes the lowest Seq — so ordering
-	// from now rendered a ready higher-Seq round ahead of one still cooling.
-	clock := now
-	if paced.After(clock) {
-		clock = paced
-	}
-	if blocked.After(clock) {
-		clock = blocked
-	}
-	ordered := make([]QueueEntry, 0, len(out))
-	remaining := out
-	for len(remaining) > 0 {
-		// Advance to when something can actually run.
-		soonest := time.Time{}
-		for _, e := range remaining {
-			if own := roundReadyAt(e.Round); own.After(clock) && (soonest.IsZero() || own.Before(soonest)) {
-				soonest = own
+	// Order by what is KNOWN — the binding gate, then Seq — and claim a position
+	// for the front alone.
+	//
+	// Four review rounds were spent refining a prediction that cannot be made.
+	// Simulating the queue assumed the next slot frees one pacing interval after a
+	// fire, but release comes from the bot acknowledging the command or from
+	// CRQ_INFLIGHT_TIMEOUT, neither of which pacing knows: with seq 1 ready, seq 2
+	// cooling five minutes and seq 3 ready, an unacknowledged seq 1 makes both
+	// followers eligible together and NextEligible then takes seq 2 — the opposite
+	// of what any simulation rendered. Ordering past the front is not knowable, so
+	// this stops asserting it: the rows are listed by what gates them, and only the
+	// front carries a number (see the renderer, which prints "—" for the rest).
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].ReadyAt.Equal(out[j].ReadyAt) {
+			// Ready now (zero) sorts ahead of anything with a future gate.
+			if out[i].ReadyAt.IsZero() != out[j].ReadyAt.IsZero() {
+				return out[i].ReadyAt.IsZero()
 			}
+			return out[i].ReadyAt.Before(out[j].ReadyAt)
 		}
-		pick, picked := -1, int64(0)
-		for i, e := range remaining {
-			if roundReadyAt(e.Round).After(clock) {
-				continue
-			}
-			if pick < 0 || e.Seq < picked {
-				pick, picked = i, e.Seq
-			}
-		}
-		if pick < 0 {
-			if soonest.IsZero() {
-				break // nothing can ever run; keep the rest in Seq order below
-			}
-			clock = soonest
-			continue
-		}
-		ordered = append(ordered, remaining[pick])
-		remaining = append(remaining[:pick:pick], remaining[pick+1:]...)
-		if minInterval > 0 {
-			clock = clock.Add(minInterval)
-		}
-	}
-	// Anything unreachable keeps a stable order rather than map order.
-	sort.Slice(remaining, func(i, j int) bool { return remaining[i].Seq < remaining[j].Seq })
-	out = append(ordered, remaining...)
+		return out[i].Seq < out[j].Seq
+	})
 
-	// Only ABSOLUTE times are shown. A projected "front + one interval" is
-	// anchored to render time, so an unchanged state would produce a different
-	// body — and therefore a different DashboardSHA — every minute, which is the
-	// churn that argued against surfacing pacing in the first place. A round
-	// queued behind another says so instead of naming a time crq cannot know
-	// until the round ahead of it actually fires.
-	// A follower may only show a time that is genuinely later than the round ahead
-	// of it could finish. Sharing the front's boundary is not that: after the front
-	// fires, pacing pushes the next one out by another interval, so repeating that
-	// same timestamp advertises a moment firing will refuse. The floor is built
-	// from ABSOLUTE gates only, so nothing here is anchored to render time.
-	if minInterval > 0 {
-		floor := time.Time{}
-		for i := range out {
-			if i > 0 && !(floor.IsZero() || out[i].ReadyAt.After(floor)) {
-				out[i].ReadyAt, out[i].Why = time.Time{}, WaitBehind
-			}
-			if at := out[i].ReadyAt; !at.IsZero() {
-				floor = at.Add(minInterval)
-			} else {
-				floor = time.Time{} // ready now: the follower's start is unknowable
-			}
-		}
-		for i := 1; i < len(out); i++ {
-			if out[i].ReadyAt.IsZero() {
-				out[i].Why = WaitBehind
-			}
-		}
+	// Only the front carries a time. A follower cannot start before its own gate,
+	// but neither can it start then — that depends on when the round ahead of it
+	// finishes, which is the unknown above. Showing its gate as a "ready" time
+	// states a lower bound as though it were the answer, so followers say what is
+	// actually true: they are behind an earlier round. The header and the front row
+	// already carry the account block or cooldown that explains the wait.
+	for i := 1; i < len(out); i++ {
+		out[i].ReadyAt, out[i].Why = time.Time{}, WaitBehind
 	}
 
-	// A slot held by another PR outranks everything. Its release time is
-	// unknowable, so neither a timestamp nor a simulated POSITION means anything:
-	// which round is picked depends on which cooldowns have elapsed by then. Fall
-	// back to Seq — the only ordering that is true whenever several rounds become
-	// eligible together — and say the slot is why.
+	// A slot held by another PR gates every entry, including the front: nothing
+	// fires until it releases, and that moment is unknowable.
 	if slotBusy {
 		for i := range out {
-			out[i].ReadyAt, out[i].Why = time.Time{}, WaitSlotBusy
+			if !out[i].Round.CoOnly {
+				out[i].ReadyAt, out[i].Why = time.Time{}, WaitSlotBusy
+			}
 		}
-		sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
 	}
 	return out
 }

@@ -268,13 +268,13 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 			case e.Why != "":
 				ready = "unknown"
 			}
-			// Only claim a position when one is knowable. While another PR holds the
-			// slot, which round fires next depends on whose cooldown has elapsed by
-			// the moment it releases — and that moment is unknown, so every possible
-			// order (including Seq) is a guess. Say so instead of numbering it.
-			position := strconv.Itoa(i + 1)
-			if e.Why == WaitSlotBusy {
-				position = "—"
+			// Only the front has a knowable position. What fires after it depends on
+			// when its slot releases — the bot acknowledging, or the in-flight
+			// timeout — so any number past the first is a guess. List them; do not
+			// rank them.
+			position := "—"
+			if i == 0 && e.Why != WaitSlotBusy {
+				position = strconv.Itoa(1)
 			}
 			fmt.Fprintf(&b, "| %s | [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %d | %s | `%s` |\n",
 				position, e.Repo, e.PR, e.Repo, e.PR, e.Head, ready, dash(e.Why),
