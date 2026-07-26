@@ -83,6 +83,20 @@ func TestThreadTitleSkipsASeverityLabel(t *testing.T) {
 			"🟠 **High** internal/crq/service.go\n\n### Slot released twice\n\nDetail.",
 			"Slot released twice",
 		},
+		{
+			// Nothing left to say: no title beats one that repeats the severity
+			// field. The listing still carries path, line and URL.
+			"nothing but the severity",
+			"cursor[bot]",
+			"**High Severity**\n",
+			"",
+		},
+		{
+			"nothing but the severity and the path",
+			"macroscopeapp[bot]",
+			"🟠 **High** internal/crq/service.go\n",
+			"",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := ThreadTitle(true, tc.body); got != tc.want {

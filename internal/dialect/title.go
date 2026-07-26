@@ -40,7 +40,8 @@ var severityPrefix = regexp.MustCompile(`(?i)^\W*(` + severityWord + `)(\s+sever
 // rubric, Codex leads with a badge image, Bugbot opens with a `###` heading
 // followed by a bold severity, and Macroscope starts with an emoji severity and
 // the path. Taking the first bold span works for two of them and reports "High
-// Severity" for the others.
+// Severity" for the others. It returns "" when nothing in the comment describes
+// the finding, since a non-descriptive title is worse than none.
 //
 // It lives here because this is where bot wording lives; a listing in the
 // orchestration layer must not have to know how a bot writes a heading. Whether
@@ -66,13 +67,9 @@ func ThreadTitle(bot bool, body string) string {
 			return title
 		}
 	}
-	// Everything reduced to a severity label or a path; the least bad answer is
-	// the first non-empty candidate rather than nothing at all.
-	for _, candidate := range candidates {
-		if title := cleanTitle(candidate); title != "" {
-			return title
-		}
-	}
+	// Everything reduced to a severity label or a path. Empty is the honest
+	// answer: the listing omits the title and still shows path, line and URL,
+	// which is strictly more than "High Severity" would have said.
 	return ""
 }
 
