@@ -742,20 +742,40 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 	// churn that argued against surfacing pacing in the first place. A round
 	// queued behind another says so instead of naming a time crq cannot know
 	// until the round ahead of it actually fires.
+	// A follower may only show a time that is genuinely later than the round ahead
+	// of it could finish. Sharing the front's boundary is not that: after the front
+	// fires, pacing pushes the next one out by another interval, so repeating that
+	// same timestamp advertises a moment firing will refuse. The floor is built
+	// from ABSOLUTE gates only, so nothing here is anchored to render time.
 	if minInterval > 0 {
+		floor := time.Time{}
 		for i := range out {
-			if i > 0 && out[i].ReadyAt.IsZero() {
+			if i > 0 && !(floor.IsZero() || out[i].ReadyAt.After(floor)) {
+				out[i].ReadyAt, out[i].Why = time.Time{}, WaitBehind
+			}
+			if at := out[i].ReadyAt; !at.IsZero() {
+				floor = at.Add(minInterval)
+			} else {
+				floor = time.Time{} // ready now: the follower's start is unknowable
+			}
+		}
+		for i := 1; i < len(out); i++ {
+			if out[i].ReadyAt.IsZero() {
 				out[i].Why = WaitBehind
 			}
 		}
 	}
 
-	// A slot held by another PR outranks every projected time: its release is
-	// unknowable, so any timestamp here would be a guess presented as a promise.
+	// A slot held by another PR outranks everything. Its release time is
+	// unknowable, so neither a timestamp nor a simulated POSITION means anything:
+	// which round is picked depends on which cooldowns have elapsed by then. Fall
+	// back to Seq — the only ordering that is true whenever several rounds become
+	// eligible together — and say the slot is why.
 	if slotBusy {
 		for i := range out {
 			out[i].ReadyAt, out[i].Why = time.Time{}, WaitSlotBusy
 		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
 	}
 	return out
 }

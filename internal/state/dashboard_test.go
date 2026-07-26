@@ -567,3 +567,64 @@ func TestQueueOrdersFromWhenFiringResumes(t *testing.T) {
 			q[0].PR, q[1].PR)
 	}
 }
+
+// The model clears the ready time when a gate's end is unknowable; the renderer
+// must not turn that zero back into "now" beside a "slot busy" reason.
+func TestRenderShowsUnknownRatherThanNowForAnUnknowableGate(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(queuedRound("kristofferr/a", 1, 1, now), queuedRound("kristofferr/b", 2, 2, now))
+	st.FireSlot = &FireSlot{Key: "kristofferr/b#2", Token: "tok", Since: now.Add(-time.Minute)}
+	st.Rounds["kristofferr/b#2"] = func() Round {
+		r := st.Rounds["kristofferr/b#2"]
+		r.Phase, r.Token = PhaseFired, "tok"
+		return r
+	}()
+
+	got := RenderDashboard(st, StoreConfig{})
+	if strings.Contains(got, "now | slot busy") {
+		t.Errorf("a slot-blocked round must not read as ready now:\n%s", got)
+	}
+	if !strings.Contains(got, "unknown | slot busy") {
+		t.Errorf("want an unknown ready time beside the slot-busy reason, got:\n%s", got)
+	}
+}
+
+// Sharing the front's boundary is not a later time: after the front fires, pacing
+// pushes the next round out by another interval, so repeating that timestamp
+// advertises a moment firing will refuse.
+func TestQueueDoesNotRepeatTheFrontsBoundaryForFollowers(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(queuedRound("kristofferr/a", 1, 1, now), queuedRound("kristofferr/b", 2, 2, now))
+	blocked := now.Add(time.Hour)
+	st.Account.BlockedUntil = &blocked
+
+	q := st.Queue(now, 90*time.Second)
+	if !q[0].ReadyAt.Equal(blocked.UTC()) {
+		t.Errorf("the front is gated by the account block, got %v", q[0].ReadyAt)
+	}
+	if !q[1].ReadyAt.IsZero() || q[1].Why != WaitBehind {
+		t.Errorf("the follower must not repeat the block boundary: ready=%v why=%q", q[1].ReadyAt, q[1].Why)
+	}
+}
+
+// A stranded reservation cannot be advanced by Pump at all, so a quota window or
+// another PR's review — both of which clear by themselves — must not hide it.
+func TestStrandedReservationOutranksTransientStates(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(queuedRound("kristofferr/a", 1, 1, now))
+	reserved := now.Add(-time.Minute)
+	st.Rounds["kristofferr/a#1"] = func() Round {
+		r := st.Rounds["kristofferr/a#1"]
+		r.Phase, r.ReservedAt = PhaseReserved, &reserved
+		return r
+	}()
+	blocked := now.Add(time.Hour)
+	st.Account.BlockedUntil = &blocked
+
+	if got := RenderDashboard(st, StoreConfig{}); !strings.Contains(got, "Stranded reservation") {
+		t.Errorf("an account block must not hide a stranded reservation:\n%s", got)
+	}
+	if got := RenderTitle(st, StoreConfig{}); !strings.Contains(got, "stranded") {
+		t.Errorf("title = %q, want the stranded reservation named", got)
+	}
+}

@@ -163,25 +163,20 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# 🐰 crq — CodeRabbit review queue\n\n")
 
+	stranded := firstStranded(inFlight)
 	switch {
+	case stranded != nil:
+		// Reported before the transient states: a quota window or another PR's
+		// review clears on its own, but a reserved round with no slot behind it
+		// cannot be advanced by Pump at all, so hiding it behind them leaves
+		// permanently stuck work looking ordinary.
+		fmt.Fprintf(&b, "### 🟠 Stranded reservation on %s#%d — no fire slot backs it\n\n", stranded.Repo, stranded.PR)
 	case blocked:
 		fmt.Fprintf(&b, "### 🔴 Blocked — next review in ~%dm\n\n", minutesUntil(*st.Account.BlockedUntil, now))
 	case slot != nil:
 		fmt.Fprintf(&b, "### 🟡 Reviewing %s#%d\n\n", slot.Repo, slot.PR)
 	case len(inFlight) > 0:
-		// A reserved round has not posted its command yet, so no feedback can be
-		// on its way — and with no FireSlot behind it, Pump cannot move it either.
-		// Calling that a feedback wait sends the reader looking for a review that
-		// was never requested.
-		//
-		// Look past the first row: in flight is ordered by fire time, so an older
-		// reviewing round hides a later stranded reservation — and a reviewing
-		// round alongside a stranded one is the normal shape, not the exception.
-		if stranded := firstStranded(inFlight); stranded != nil {
-			fmt.Fprintf(&b, "### 🟠 Stranded reservation on %s#%d — no fire slot backs it\n\n", stranded.Repo, stranded.PR)
-		} else {
-			fmt.Fprintf(&b, "### 🟡 Awaiting feedback for %s#%d\n\n", inFlight[0].Repo, inFlight[0].PR)
-		}
+		fmt.Fprintf(&b, "### 🟡 Awaiting feedback for %s#%d\n\n", inFlight[0].Repo, inFlight[0].PR)
 	case len(queue) > 0:
 		// Nothing ready yet is still queued work, never idle — say when the front
 		// of the queue opens instead of leaving the reader to guess.
@@ -242,10 +237,17 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 		for i, e := range queue {
 			// Absolute stamps only: a relative "in 11m" would re-hash the dashboard
 			// on every render, and fmtStamp already honours CRQ_TZ.
+			// A zero ReadyAt means "now" only when nothing is holding the round.
+			// With a gate whose end is unknowable — a slot held elsewhere, or a
+			// round queued behind another — printing "now" contradicts the very
+			// column next to it.
 			ready := "now"
-			if !e.ReadyAt.IsZero() {
+			switch {
+			case !e.ReadyAt.IsZero():
 				at := e.ReadyAt
 				ready = fmtStamp(&at, loc)
+			case e.Why != "":
+				ready = "unknown"
 			}
 			fmt.Fprintf(&b, "| %d | [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %d | %s | `%s` |\n",
 				i+1, e.Repo, e.PR, e.Repo, e.PR, e.Head, ready, dash(e.Why),
@@ -278,16 +280,15 @@ func RenderTitle(st State, cfg StoreConfig) string {
 	now := time.Now().UTC()
 	queue := len(st.Queue(now, cfg.MinInterval))
 	switch {
+	case firstStranded(inFlightRounds(st)) != nil:
+		// Same precedence as the body: permanently stuck work outranks states that
+		// clear by themselves.
+		return fmt.Sprintf("🐰 crq — stranded #%d · queue %d", firstStranded(inFlightRounds(st)).PR, queue)
 	case st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now):
 		return fmt.Sprintf("🐰 crq — blocked · queue %d", queue)
 	case st.SlotRound() != nil:
 		return fmt.Sprintf("🐰 crq — reviewing #%d · queue %d", st.SlotRound().PR, queue)
 	case len(inFlightRounds(st)) > 0:
-		// The body names a stranded reservation; the title must not contradict it
-		// by reporting a feedback wait for a round that posted no command.
-		if stranded := firstStranded(inFlightRounds(st)); stranded != nil {
-			return fmt.Sprintf("🐰 crq — stranded #%d · queue %d", stranded.PR, queue)
-		}
 		return fmt.Sprintf("🐰 crq — awaiting feedback · queue %d", queue)
 	case queue > 0:
 		return fmt.Sprintf("🐰 crq — %d queued", queue)
