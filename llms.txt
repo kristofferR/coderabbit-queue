@@ -60,6 +60,25 @@ idempotent, and it advances the queue by one step as a side effect, so a PR in a
 autoreview fleet still progresses. There is no long-lived process to keep alive: if the harness kills
 the agent mid-loop, the next `crq next` returns the correct action from persisted state.
 
+## Waiting
+
+On `wait` or `hold` there is nothing to do yet. Do not sleep, poll, or guess a delay — hand the
+wait over and end your turn:
+
+```bash
+crq wait OWNER/REPO PR_NUMBER
+```
+
+It blocks until there IS something to do (`fix`, `push`, `done`, `blocked`), then prints that same
+JSON and exits 0. Run it as your harness's background task: its **exit is the wake event**, so you
+burn no tokens idling.
+
+It owns nothing — no round, no state, no writes — so being killed costs only the process. If that
+happens, run it again or call `crq next`; the answer comes from persisted state either way. While
+idle it watches the shared state ref with a conditional request that costs no rate-limit quota.
+
+`crq next --wait` is the same thing inline, for a human at a terminal.
+
 Two rules this replaces, which agents previously had to remember:
 
 - **Never invent a delay.** `.recheck_after` is computed from the account-quota window, the round's
@@ -195,13 +214,10 @@ re-emitted. Unresolved cross-commit threads remain visible.
 Long waits are not hangs. During queue/rate-limit waits, missing required-bot reviews, and
 network/GitHub outages, crq logs progress to stderr; stdout stays reserved for the final JSON.
 
-Keeping a loop alive is not your problem when you use `crq next`: it returns immediately, so there is
-no long-lived process for a harness to kill between turns and nothing to re-attach to. If you do run
-the blocking `crq loop` (or `crq next --wait`), run it under the harness's persistent
-long-running-task primitive rather than a fire-and-forget background shell — in Claude Code, the
-Monitor tool with `persistent: true`. If a runner is killed anyway nothing is lost: the PR stays
-enqueued and the next `crq next` (or an identical `crq loop`) resumes. Never substitute a `crq
-status` polling loop, a timer, or a guessed review latency for either.
+Keeping a loop alive is not your problem. `crq next` returns immediately, and `crq wait` owns
+nothing, so neither leaves anything for a harness to orphan: if either is killed, run it again and
+the answer comes from persisted state. Never substitute a `crq status` polling loop, a `gh api`
+poll, a timer, or a guessed review latency for `crq wait`.
 
 Agent communication rule: do not relay every stderr progress line or send repeated "still waiting"
 updates. Report a real state change — fired, findings, `push`, convergence, timeout, a

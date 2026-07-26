@@ -37,6 +37,10 @@ type GitHubAPI interface {
 	SearchOpenPRs(context.Context, string, bool, int) ([]ghapi.SearchPR, error)
 	EachOpenPR(context.Context, string, bool, func(ghapi.SearchPR) (bool, error)) error
 	GraphQL(context.Context, string, map[string]any, any) error
+	// GetRef reads a ref's SHA. It is the cheapest "did anything change?" probe
+	// crq has — a conditional GET that costs no quota while the ref is
+	// unchanged — which is what `crq wait` idles on.
+	GetRef(context.Context, string, string) (string, error)
 }
 
 type Service struct {
@@ -62,6 +66,9 @@ type Service struct {
 	// directory. nil in production; tests inject an answer instead of depending
 	// on the checkout they happen to run in.
 	localWorkFn func(ctx context.Context, head string) (bool, string)
+	// sleepFn overrides how the waiter idles. Only tests set it — a replay must
+	// not spend real seconds to prove what the injected clock already decides.
+	sleepFn func(ctx context.Context, d time.Duration) error
 }
 
 func NewService(cfg Config, gh GitHubAPI, store StateStore, log Logger) *Service {

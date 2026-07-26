@@ -64,20 +64,59 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 		return report, err
 	}
 
-	// ONE observation drives the whole decision. Feedback already reads the
-	// pull, so head, open, per-bot evidence and findings all describe the same
-	// instant. Re-reading the head separately used to let a push land between
-	// the two calls and answer "done" for a head nobody had reviewed.
-	feedback, err := s.Feedback(ctx, repo, pr)
+	report, action, err := s.nextFromState(ctx, repo, pr)
 	if err != nil {
 		return report, err
+	}
+
+	// One queue step, AFTER the decision. Pump owns DecideFire, whose gate list
+	// has no "unresolved findings exist" step, so pumping first let this command
+	// spend account quota on a round the caller had not drained yet — the very
+	// rule `next` exists to enforce.
+	//
+	// The gate is deliberately narrow: only feedback for THIS head means a fire
+	// would buy nothing. Findings CARRIED from an older commit — an unresolved
+	// thread the caller may well have already fixed — must not stop a new head
+	// from being reviewed, or an unresolvable one deadlocks the PR forever and
+	// no review is ever requested for the code that replaced it. DecideFire
+	// separately refuses a head it has already reviewed, so this only has to
+	// answer "is the feedback I am holding about the head I would fire on".
+	//
+	// Not fatal if it fails: the instruction above stands on the observation
+	// already taken, and the next call pumps again.
+	if len(engine.FindingsOnHead(action.Findings, report.Head)) == 0 {
+		if _, perr := s.Pump(ctx); perr != nil && s.log != nil {
+			s.log.Printf("warning: pump during next for %s: %v", QueueKey(repo, pr), perr)
+		}
+	}
+	return report, nil
+}
+
+// nextFromState derives the instruction from what is already recorded and
+// observable. It writes NOTHING — no enqueue, no pump, no dashboard sync — which
+// is what lets `crq wait` re-evaluate as often as it likes without spending the
+// account's write budget or firing reviews behind the caller's back.
+//
+// ONE observation drives the whole decision. Feedback already reads the pull, so
+// head, open, per-bot evidence and findings all describe the same instant.
+// Reading the head separately used to let a push land between the two and answer
+// "done" for a head nobody had reviewed.
+//
+// Both `crq next` and `crq wait` decide here, through the same pure
+// engine.NextAction, so the blocking and non-blocking forms cannot disagree.
+func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextReport, engine.Action, error) {
+	report := NextReport{Repo: repo, PR: pr, Findings: []dialect.Finding{}, CheckedAt: s.clock()}
+
+	feedback, err := s.Feedback(ctx, repo, pr)
+	if err != nil {
+		return report, engine.Action{}, err
 	}
 	report.Head = feedback.Head
 	report.ReviewedBy = feedback.ReviewedBy
 
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
-		return report, err
+		return report, engine.Action{}, err
 	}
 	now := s.clock()
 	round := st.Round(repo, pr)
@@ -110,28 +149,7 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 		at := action.At.UTC()
 		report.RecheckAfter = &at
 	}
-
-	// One queue step, AFTER the decision. Pump owns DecideFire, whose gate list
-	// has no "unresolved findings exist" step, so pumping first let this command
-	// spend account quota on a round the caller had not drained yet — the very
-	// rule `next` exists to enforce.
-	//
-	// The gate is deliberately narrow: only feedback for THIS head means a fire
-	// would buy nothing. Findings CARRIED from an older commit — an unresolved
-	// thread the caller may well have already fixed — must not stop a new head
-	// from being reviewed, or an unresolvable one deadlocks the PR forever and
-	// no review is ever requested for the code that replaced it. DecideFire
-	// separately refuses a head it has already reviewed, so this only has to
-	// answer "is the feedback I am holding about the head I would fire on".
-	//
-	// Not fatal if it fails: the instruction above stands on the observation
-	// already taken, and the next call pumps again.
-	if len(engine.FindingsOnHead(action.Findings, report.Head)) == 0 {
-		if _, perr := s.Pump(ctx); perr != nil && s.log != nil {
-			s.log.Printf("warning: pump during next for %s: %v", QueueKey(repo, pr), perr)
-		}
-	}
-	return report, nil
+	return report, action, nil
 }
 
 // NextWaiting is Next for an interactive caller: it sleeps through the states a

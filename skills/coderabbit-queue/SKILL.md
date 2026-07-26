@@ -40,8 +40,9 @@ Three things this deliberately takes away from you:
 
 - **Choosing a delay.** `.recheck_after` is computed by crq from the account-quota window, the
   round's retry cooldown and the poll interval, and is never less than one poll interval away. Never
-  substitute a timer, a scheduled wake-up, a guessed CodeRabbit latency, or a `crq status` polling
-  loop.
+  invent one: hand the wait to `crq wait` (below), and only if your harness cannot run a background
+  task, schedule a single wake at exactly `.recheck_after`. Never poll in-chat and never loop on
+  `crq status` or `gh api`.
 - **Deciding when to push.** `hold` vs `push` is crq's answer. It already accounts for the
   rate-limit degrade: a Codex-only round while CodeRabbit is blocked returns `push`, because the
   queued CodeRabbit review fires against whatever head exists when the window opens.
@@ -52,9 +53,24 @@ Three things this deliberately takes away from you:
 head lacks. **Run `crq next` from inside the repository checkout** so that answer is accurate;
 `.local_work_reason` says when it could not be determined.
 
-`crq next --wait` blocks through the states you cannot act on and returns the first actionable
-instruction — useful interactively. It shares one code path with the non-blocking form, so the two
-can never disagree.
+## Waiting
+
+On `wait` or `hold`, do not sleep, poll, or guess a delay. Hand the wait over and end your turn:
+
+```bash
+crq wait "$REPO" "$PR"
+```
+
+It blocks until there IS something to do (`fix`, `push`, `done`, `blocked`), prints that same JSON
+and exits 0. Run it as your harness's background task — its **exit is the wake event**, so you burn
+no tokens idling and never narrate a countdown.
+
+It owns nothing: no round, no state, no writes. Being killed costs only the process, so if that
+happens just run it again (or call `crq next`). While idle it watches the shared state ref with a
+conditional request that spends no rate-limit quota.
+
+`crq next --wait` is the same wait inline, for a human at a terminal. All three share one decision
+function, so they cannot disagree.
 
 ## Never Bypass crq
 
@@ -64,8 +80,8 @@ limit is account-wide and direct posts stampede it.
 Never hand-poll the GitHub API (`gh api .../pulls/N/reviews|comments`, looping on the head) to wait
 for a review or learn its outcome. That drains the shared account-wide GitHub REST quota — also spent
 by the `crq autoreview` daemon and every other agent, so it exhausts fast — and competes with crq's
-own polling. Use `crq next` (the loop), `crq feedback` (current findings, no trigger), or
-`crq status` (queue/quota).
+own polling. Use `crq next` (the loop), `crq wait` (block until actionable), `crq feedback`
+(current findings, no trigger), or `crq status` (queue/quota).
 
 Before starting, check local readiness:
 
@@ -84,9 +100,7 @@ for humans and one-shot scripts.
 
 An agent driving a PR should use `crq next` instead. `crq loop` requires the caller to interpret exit
 codes, enforce the drain-first and hold-the-head rules by hand, and keep a long-lived process alive
-across turns — the three things that go wrong. If you do run it from an agent, run it under the
-harness's persistent long-running-task primitive (in Claude Code, the Monitor tool with
-`persistent: true`), never a fire-and-forget background shell.
+across turns — the three things that go wrong. Use `crq next` plus `crq wait` instead.
 
 Rate-limit degrade (default on, `CRQ_RL_CODEX_DEGRADE=0` disables): when CodeRabbit is rate-limited
 and Codex demonstrably reviews the PR, crq returns Codex feedback promptly instead of waiting out the

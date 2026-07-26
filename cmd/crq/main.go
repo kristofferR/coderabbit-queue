@@ -146,6 +146,24 @@ func run(ctx context.Context, args []string) int {
 		// The action field is the whole contract: exit 0 for every action so a
 		// caller never has to interpret two things at once.
 		return 0
+	case "wait":
+		repo, pr, ok := repoPR(args[1:])
+		if !ok {
+			fatal(errors.New("usage: crq wait <repo> <pr>"))
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		report, err := service.WaitForAction(ctx, repo, pr)
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		printJSON(report)
+		// Same contract as next: the action is the answer, the exit code is not.
+		return 0
 	case "loop":
 		repo, pr, ok := repoPR(args[1:])
 		if !ok {
@@ -292,6 +310,7 @@ func usage() {
 
 QUEUE WORKFLOWS
   crq next <repo> <pr>             ask what to do next about a PR (the agent loop)
+  crq wait <repo> <pr>             block until there IS something to do, then say what
   crq loop <repo> <pr>             queue one PR review round, then emit JSON feedback
   crq autoreview                   keep open PRs reviewed through the same queue
   crq status                       show the queue, in-flight review, and quota state
@@ -307,11 +326,14 @@ DRIVING A PR REVIEW
     blocked  needs a human; .reason says why
 
   crq next is non-blocking and idempotent, so nothing is lost if it is interrupted.
+  On wait or hold, hand the delay to crq wait — run it as your harness's background
+  task and let its EXIT wake you. It owns nothing, so being killed costs only itself.
   Never invent a delay of your own, and never post @coderabbitai review directly.
 
 USAGE
   crq init                         initialize state in CRQ_REPO
   crq next <repo> <pr> [--wait]    emit the single next action as JSON (--wait blocks)
+  crq wait <repo> <pr>             block until actionable, then emit that action as JSON
   crq loop <repo> <pr>             coordinated trigger -> wait -> JSON feedback/convergence
   crq feedback <repo> <pr>         emit normalized actionable review findings as JSON
   crq resolve <thread-id> [<thread-id>...]
@@ -376,6 +398,25 @@ Fields:
 instruction. It shares one code path with the non-blocking form.
 
 Never post @coderabbitai review directly; crq is the only trigger.
+`)
+	case "wait":
+		fmt.Print(`crq wait <repo> <pr>
+
+Block until there is something to DO about this PR, then print that instruction
+(the same JSON as crq next) and exit 0.
+
+This is how an ephemeral agent waits. Run it as your harness's background task and
+end your turn: its EXIT is the wake event, so you burn no tokens idling and invent
+no delay. It writes nothing, holds no round and owns no state, so if it is killed
+the round is untouched — just run it again, or call crq next.
+
+It returns on fix, push, done and blocked. wait and hold are the two states it
+waits THROUGH, because they mean "come back later" and that is its whole job.
+
+While idle it watches the shared state ref with a conditional request, which costs
+no rate-limit quota, and re-evaluates when the queue moves. If no autoreview daemon
+holds the leader lease it drives the queue itself instead, which works but spends
+more of the shared budget — run the daemon.
 `)
 	case "loop":
 		fmt.Print(`crq loop <repo> <pr>
