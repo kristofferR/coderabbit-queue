@@ -16,6 +16,18 @@ const (
 	crqProjectURL = "https://github.com/kristofferR/coderabbit-queue"
 )
 
+// firstStranded finds an in-flight round that reserved the slot but no longer
+// holds it: it cannot receive feedback (no command was posted) and Pump cannot
+// advance it (no slot), so it needs naming wherever it sits in the list.
+func firstStranded(inFlight []Round) *Round {
+	for i := range inFlight {
+		if inFlight[i].Phase == PhaseReserved {
+			return &inFlight[i]
+		}
+	}
+	return nil
+}
+
 func joinScope(scope []string) string {
 	return strings.Join(scope, ",")
 }
@@ -161,8 +173,12 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 		// on its way — and with no FireSlot behind it, Pump cannot move it either.
 		// Calling that a feedback wait sends the reader looking for a review that
 		// was never requested.
-		if front := inFlight[0]; front.Phase == PhaseReserved {
-			fmt.Fprintf(&b, "### 🟠 Stranded reservation on %s#%d — no fire slot backs it\n\n", front.Repo, front.PR)
+		//
+		// Look past the first row: in flight is ordered by fire time, so an older
+		// reviewing round hides a later stranded reservation — and a reviewing
+		// round alongside a stranded one is the normal shape, not the exception.
+		if stranded := firstStranded(inFlight); stranded != nil {
+			fmt.Fprintf(&b, "### 🟠 Stranded reservation on %s#%d — no fire slot backs it\n\n", stranded.Repo, stranded.PR)
 		} else {
 			fmt.Fprintf(&b, "### 🟡 Awaiting feedback for %s#%d\n\n", inFlight[0].Repo, inFlight[0].PR)
 		}

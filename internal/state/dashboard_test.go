@@ -410,3 +410,79 @@ func TestQueueTakesTheLatestBindingGate(t *testing.T) {
 		t.Errorf("pacing must bind past a shorter cooldown, got %+v", q2)
 	}
 }
+
+// Pacing is serial: firing the front of the queue pushes the next one out by a
+// whole interval. Applying the current boundary to every entry independently made
+// two ready rounds both read "ready now", when only the first was true.
+func TestQueueProjectsPacingAlongTheQueue(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(
+		queuedRound("kristofferr/a", 1, 1, now),
+		queuedRound("kristofferr/b", 2, 2, now),
+		queuedRound("kristofferr/c", 3, 3, now),
+	)
+
+	q := st.Queue(now, 90*time.Second)
+	if len(q) != 3 {
+		t.Fatalf("Queue = %d entries, want 3", len(q))
+	}
+	if !q[0].ReadyAt.IsZero() {
+		t.Errorf("the front of the queue is ready now, got %s", q[0].ReadyAt)
+	}
+	for i := 1; i < len(q); i++ {
+		want := now.Add(time.Duration(i) * 90 * time.Second)
+		if !q[i].ReadyAt.Equal(want) {
+			t.Errorf("entry %d ReadyAt = %v, want %s (one interval per place in line)", i, q[i].ReadyAt, want)
+		}
+		if q[i].Why != WaitPacing {
+			t.Errorf("entry %d Why = %q, want %q", i, q[i].Why, WaitPacing)
+		}
+	}
+}
+
+// A slot held by another PR has no knowable release time, so it outranks every
+// projected timestamp — otherwise a cooldown or pacing boundary is presented as a
+// promise while the round cannot fire at all.
+func TestQueueLetsSlotBusyDominateATimedGate(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(coolingRound("kristofferr/a", 1, 1, now, 5*time.Minute), queuedRound("kristofferr/b", 2, 2, now))
+	st.FireSlot = &FireSlot{Key: "kristofferr/b#2", Token: "tok", Since: now.Add(-time.Minute)}
+	st.Rounds["kristofferr/b#2"] = func() Round {
+		r := st.Rounds["kristofferr/b#2"]
+		r.Phase, r.Token = PhaseFired, "tok"
+		return r
+	}()
+
+	for _, e := range st.Queue(now, 0) {
+		if e.Why != WaitSlotBusy {
+			t.Errorf("entry %d: Why = %q, want %q while the slot is held", e.PR, e.Why, WaitSlotBusy)
+		}
+		if !e.ReadyAt.IsZero() {
+			t.Errorf("entry %d: ReadyAt = %s, want no promised time", e.PR, e.ReadyAt)
+		}
+	}
+}
+
+// In flight is ordered by fire time, so an older reviewing round would hide a
+// later stranded reservation — and that pairing is the normal shape.
+func TestRenderFindsAStrandedReservationBehindAReviewingRound(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(queuedRound("kristofferr/a", 1, 1, now), queuedRound("kristofferr/b", 2, 2, now))
+	fired := now.Add(-10 * time.Minute)
+	st.Rounds["kristofferr/a#1"] = func() Round {
+		r := st.Rounds["kristofferr/a#1"]
+		r.Phase, r.FiredAt = PhaseReviewing, &fired
+		return r
+	}()
+	reserved := now.Add(-time.Minute)
+	st.Rounds["kristofferr/b#2"] = func() Round {
+		r := st.Rounds["kristofferr/b#2"]
+		r.Phase, r.ReservedAt = PhaseReserved, &reserved
+		return r
+	}()
+
+	got := RenderDashboard(st, StoreConfig{})
+	if !strings.Contains(got, "Stranded reservation on kristofferr/b#2") {
+		t.Errorf("the stranded reservation must be named even behind a reviewing round, got:\n%s", got)
+	}
+}

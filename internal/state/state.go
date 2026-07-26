@@ -680,12 +680,6 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 		gate(roundReadyAt(r), WaitCoolingDown)
 		gate(blocked, WaitAccountBlocked)
 		gate(paced, WaitPacing)
-		if e.ReadyAt.IsZero() && slotBusy {
-			// No time gate binds, but another PR holds the account-wide slot and
-			// its release time is unknowable. The Why column carries that; the
-			// ready column must stay empty rather than claim "now".
-			e.Why = WaitSlotBusy
-		}
 		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -694,6 +688,32 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 		}
 		return out[i].Seq < out[j].Seq
 	})
+
+	// Pacing is serial, so it has to be projected along the queue rather than
+	// applied to each entry independently. With a free slot and two ready rounds,
+	// both looked "ready now" — but firing the first pushes the second out by a
+	// whole interval, so only the front of the queue was telling the truth.
+	if minInterval > 0 {
+		earliest := paced
+		for i := range out {
+			if earliest.After(now) && earliest.After(out[i].ReadyAt) {
+				out[i].ReadyAt, out[i].Why = earliest, WaitPacing
+			}
+			start := out[i].ReadyAt
+			if start.Before(now) || start.IsZero() {
+				start = now
+			}
+			earliest = start.Add(minInterval)
+		}
+	}
+
+	// A slot held by another PR outranks every projected time: its release is
+	// unknowable, so any timestamp here would be a guess presented as a promise.
+	if slotBusy {
+		for i := range out {
+			out[i].ReadyAt, out[i].Why = time.Time{}, WaitSlotBusy
+		}
+	}
 	return out
 }
 
