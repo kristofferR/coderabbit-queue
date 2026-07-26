@@ -628,21 +628,40 @@ func shareCLIQuota(ctx context.Context, report crq.PreflightReport) *crq.CLIQuot
 	if err != nil {
 		return &crq.CLIQuotaResult{Reason: "no github credentials available to record the block"}
 	}
+	// Bounded on purpose. The transport rides out a network outage indefinitely by
+	// default, which is right for a review loop and wrong here: a finished local
+	// review would hang before printing its findings, waiting on a best-effort
+	// state write. Give up quickly and say so instead.
+	shareCtx, cancel := context.WithTimeout(ctx, cliQuotaShareTimeout)
+	defer cancel()
 	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
 	service := crq.NewService(cfg, gh, store, stderrLogger{})
-	result, err := service.RecordCLIQuota(ctx, report, codeRabbitOrg(ctx))
+	result, err := service.RecordCLIQuota(shareCtx, report, codeRabbitOrg(shareCtx, report.Tool))
 	if err != nil {
 		return &crq.CLIQuotaResult{Reason: "could not record the block: " + err.Error()}
 	}
 	return &result
 }
 
-// codeRabbitOrg reads which CodeRabbit organisation the local CLI is signed in
-// to, so a block is only ever applied to the account it belongs to.
-func codeRabbitOrg(ctx context.Context) string {
-	tools := map[string]toolInfo{
-		"cr":         checkTool(ctx, "cr", "--version"),
-		"coderabbit": checkTool(ctx, "coderabbit", "--version"),
+// cliQuotaShareTimeout bounds the best-effort state write. Local preflight is not
+// allowed to become slower or less reliable because crq also wants to share what
+// it learned.
+const cliQuotaShareTimeout = 20 * time.Second
+
+// codeRabbitOrg reads which CodeRabbit organisation produced this block, so it is
+// only ever applied to the account it belongs to.
+//
+// It asks the SAME executable preflight ran. Probing cr/coderabbit from PATH
+// instead discarded a valid block as "unknown organisation" whenever --bin or
+// CRQ_CODERABBIT_BIN pointed elsewhere — and, worse, could read a different
+// install's login and attribute the block to the wrong account.
+func codeRabbitOrg(ctx context.Context, binary string) string {
+	tools := map[string]toolInfo{}
+	if strings.TrimSpace(binary) != "" {
+		tools["cr"] = toolInfo{Found: true, Path: binary}
+	} else {
+		tools["cr"] = checkTool(ctx, "cr", "--version")
+		tools["coderabbit"] = checkTool(ctx, "coderabbit", "--version")
 	}
 	return checkCodeRabbitAuth(ctx, tools).CurrentOrg
 }

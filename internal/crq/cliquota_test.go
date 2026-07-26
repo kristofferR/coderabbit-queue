@@ -2,18 +2,36 @@ package crq
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
 
-func blockedReport(wait string) PreflightReport {
-	return PreflightReport{
-		Status:      "rate_limited",
-		Error:       "Rate limit exceeded",
-		ErrorType:   "rate_limit",
-		Recoverable: true,
-		RetryAfter:  wait,
+// blockedReport builds the report from the CAPTURED CLI event rather than
+// hand-written strings, so this test cannot keep passing against wording the
+// classifier no longer recognises. dialect owns the vocabulary; this only
+// consumes it.
+func blockedReport(t *testing.T, wait string) PreflightReport {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "dialect", "testdata", "coderabbit", "cli-rate-limit.json"))
+	if err != nil {
+		t.Fatal(err)
 	}
+	var event map[string]any
+	if err := json.Unmarshal(raw, &event); err != nil {
+		t.Fatal(err)
+	}
+	report := PreflightReport{Status: "rate_limited"}
+	applyPreflightEvent(&report, event)
+	if !IsCLIAccountBlock(report) {
+		t.Fatalf("the captured fixture must classify as an account block: %+v", report)
+	}
+	if wait != "" {
+		report.RetryAfter = wait
+	}
+	return report
 }
 
 func cliQuotaService(t *testing.T, now time.Time) (*Service, StateStore) {
@@ -35,7 +53,7 @@ func TestRecordCLIQuotaAppliesTheBlock(t *testing.T) {
 	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
 	svc, store := cliQuotaService(t, now)
 
-	got, err := svc.RecordCLIQuota(context.Background(), blockedReport("32 minutes"), "kristofferR")
+	got, err := svc.RecordCLIQuota(context.Background(), blockedReport(t, "32 minutes"), "kristofferR")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +78,7 @@ func TestRecordCLIQuotaRefusesAnotherAccount(t *testing.T) {
 	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
 	for _, org := range []string{"someone-else", ""} {
 		svc, store := cliQuotaService(t, now)
-		got, err := svc.RecordCLIQuota(context.Background(), blockedReport("32 minutes"), org)
+		got, err := svc.RecordCLIQuota(context.Background(), blockedReport(t, "32 minutes"), org)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -91,7 +109,7 @@ func TestRecordCLIQuotaNeverShortensAStandingBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := svc.RecordCLIQuota(context.Background(), blockedReport("5 minutes"), "kristofferR")
+	got, err := svc.RecordCLIQuota(context.Background(), blockedReport(t, "5 minutes"), "kristofferR")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +129,7 @@ func TestRecordCLIQuotaFallsBackWhenTheWindowIsUnreadable(t *testing.T) {
 	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
 	svc, store := cliQuotaService(t, now)
 
-	got, err := svc.RecordCLIQuota(context.Background(), blockedReport("soon"), "kristofferR")
+	got, err := svc.RecordCLIQuota(context.Background(), blockedReport(t, "soon"), "kristofferR")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +147,7 @@ func TestRecordCLIQuotaIgnoresOtherFailures(t *testing.T) {
 	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
 	svc, store := cliQuotaService(t, now)
 
-	report := blockedReport("32 minutes")
+	report := blockedReport(t, "32 minutes")
 	report.ErrorType = "auth"
 	if got, err := svc.RecordCLIQuota(context.Background(), report, "kristofferR"); err != nil {
 		t.Fatal(err)
@@ -139,5 +157,71 @@ func TestRecordCLIQuotaIgnoresOtherFailures(t *testing.T) {
 	st, _, _ := store.Load(context.Background())
 	if st.Account.BlockedUntil != nil {
 		t.Errorf("BlockedUntil = %s, want none", st.Account.BlockedUntil)
+	}
+}
+
+// A block the CLI reported is no longer the block a PR comment produced, so the
+// comment identity must not survive it. Left behind, a later edit of that same
+// comment is matched as a repeat of the standing block and its window is reused
+// instead of read afresh.
+func TestRecordCLIQuotaClearsThePRCommentIdentity(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	svc, store := cliQuotaService(t, now)
+	earlier := now.Add(-time.Hour)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.Account.RLCommentID = 4242
+		st.Account.RLCommentUpdated = &earlier
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.RecordCLIQuota(context.Background(), blockedReport(t, "32 minutes"), "kristofferR"); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ := store.Load(context.Background())
+	if st.Account.RLCommentID != 0 || st.Account.RLCommentUpdated != nil {
+		t.Errorf("the pr-comment identity must not outlive a CLI block: id=%d updated=%v",
+			st.Account.RLCommentID, st.Account.RLCommentUpdated)
+	}
+}
+
+// The gate repo's owner is not automatically the account being queued. Accepting
+// it let a personal CodeRabbit org stall an unrelated scope.
+func TestRecordCLIQuotaIgnoresTheGateRepoOwner(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	svc, store := cliQuotaService(t, now)
+	svc.cfg.GateRepo = "alice/crq-state"
+	svc.cfg.Scope = []string{"acme"}
+
+	got, err := svc.RecordCLIQuota(context.Background(), blockedReport(t, "32 minutes"), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Applied {
+		t.Error("alice's personal limit must not block the acme scope")
+	}
+	st, _, _ := store.Load(context.Background())
+	if st.Account.BlockedUntil != nil {
+		t.Errorf("BlockedUntil = %s, want none", st.Account.BlockedUntil)
+	}
+}
+
+// An explicit block with an unreadable window must never land at or before now,
+// however CRQ_RL_FALLBACK is configured — that reads as "not blocked" and
+// re-fires immediately.
+func TestRecordCLIQuotaFallbackIsAlwaysInTheFuture(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	for _, configured := range []time.Duration{0, -5 * time.Minute} {
+		svc, store := cliQuotaService(t, now)
+		svc.cfg.RateLimitFallback = configured
+
+		if _, err := svc.RecordCLIQuota(context.Background(), blockedReport(t, "soon"), "kristofferR"); err != nil {
+			t.Fatal(err)
+		}
+		st, _, _ := store.Load(context.Background())
+		if st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.After(now) {
+			t.Errorf("fallback %s produced %v, want a block in the future", configured, st.Account.BlockedUntil)
+		}
 	}
 }

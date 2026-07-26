@@ -65,7 +65,7 @@ func (s *Service) RecordCLIQuota(ctx context.Context, report PreflightReport, cl
 		// conservative fallback is right: treating an unreadable window as "not
 		// blocked" is what let the daemon re-fire every couple of minutes against
 		// a limit measured in tens of minutes.
-		fallback := now.Add(s.cfg.RateLimitFallback)
+		fallback := now.Add(cliQuotaFallback(s.cfg.RateLimitFallback))
 		until = &fallback
 	}
 
@@ -92,6 +92,12 @@ func (s *Service) RecordCLIQuota(ctx context.Context, report PreflightReport, cl
 		// A local reading says nothing about how many PR reviews are left, and
 		// leaving a stale count beside a fresh block would read as authoritative.
 		st.Account.Remaining = nil
+		// The standing block is no longer the one a PR comment produced, so its
+		// comment identity must not survive. Left in place, a later edit of that
+		// same comment is matched as a repeat of the block crq already holds and
+		// its window is reused instead of read afresh.
+		st.Account.RLCommentID = 0
+		st.Account.RLCommentUpdated = nil
 		return nil
 	})
 	if err != nil {
@@ -115,12 +121,27 @@ func (s *Service) cliOrgMatches(cliOrg string) bool {
 	if org == "" {
 		return false
 	}
+	// ONLY the configured scope counts. Accepting the gate repo's owner as well
+	// let a personal CodeRabbit org stall an unrelated scope: with
+	// CRQ_REPO=alice/crq-state and CRQ_SCOPE=acme, Alice's local limit would have
+	// blocked every review for acme.
 	for _, scope := range s.cfg.Scope {
 		if strings.EqualFold(strings.TrimSpace(scope), org) {
 			return true
 		}
 	}
-	return strings.EqualFold(ownerOf(s.cfg.GateRepo), org)
+	return false
+}
+
+// cliQuotaFallback is the window to record when the CLI reports a block without a
+// readable duration. A zero or negative CRQ_RL_FALLBACK would place the block at
+// or before now, which reads as "not blocked" and re-fires immediately — the
+// opposite of what an explicit block means. Mirrors the engine's own floor.
+func cliQuotaFallback(configured time.Duration) time.Duration {
+	if configured > 0 {
+		return configured
+	}
+	return 15 * time.Minute
 }
 
 func orDash(value string) string {
