@@ -1692,7 +1692,7 @@ func (s *Service) isCalibrationNoise(c ghapi.IssueComment) bool {
 	if strings.TrimSpace(c.Body) == strings.TrimSpace(s.cfg.RateLimitCommand) {
 		return true
 	}
-	return s.isConfiguredBot(c.User.Login) && strings.Contains(c.Body, s.cfg.CalibrationMarker)
+	return s.cfg.isConfiguredBot(c.User.Login) && strings.Contains(c.Body, s.cfg.CalibrationMarker)
 }
 
 func (s *Service) latestCalibrationReply(ctx context.Context, issue int, after time.Time) (ghapi.IssueComment, bool, error) {
@@ -1703,7 +1703,7 @@ func (s *Service) latestCalibrationReply(ctx context.Context, issue int, after t
 	var best ghapi.IssueComment
 	ok := false
 	for _, comment := range comments {
-		if !s.isConfiguredBot(comment.User.Login) || !comment.UpdatedAt.After(after) {
+		if !s.cfg.isConfiguredBot(comment.User.Login) || !comment.UpdatedAt.After(after) {
 			continue
 		}
 		if !strings.Contains(comment.Body, s.cfg.CalibrationMarker) {
@@ -1733,8 +1733,8 @@ func reviewedByConfiguredBot(reviewedBy map[string]bool, bot string) bool {
 	return false
 }
 
-func (s *Service) isConfiguredBot(login string) bool {
-	return dialect.NormalizeBotName(login) == dialect.NormalizeBotName(s.cfg.Bot)
+func (c Config) isConfiguredBot(login string) bool {
+	return dialect.NormalizeBotName(login) == dialect.NormalizeBotName(c.Bot)
 }
 
 // notBefore reports whether t is at or after baseline. GitHub timestamps are

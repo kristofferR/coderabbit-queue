@@ -68,7 +68,7 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 		// filter to the configured reviewer — only CodeRabbit posts these
 		// carriers, and dropping another bot's empty review could discard real
 		// evidence a Codex-gated round waits on.
-		if s.isConfiguredBot(review.User.Login) && strings.TrimSpace(review.Body) == "" && strings.EqualFold(review.State, "COMMENTED") {
+		if cfg.isConfiguredBot(review.User.Login) && strings.TrimSpace(review.Body) == "" && strings.EqualFold(review.State, "COMMENTED") {
 			continue
 		}
 		o.eng.Reviews = append(o.eng.Reviews, engine.ReviewSeen{
@@ -114,7 +114,7 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 		} else {
 			for _, run := range runs {
 				login, verdict := dialect.ClassifyCheckRun(run.App.Slug, run.Name, run.Output.Title, run.Output.Summary, run.Status, run.Conclusion)
-				if verdict == dialect.CheckUnrelated || !s.cfg.coBotEnabled(login) {
+				if verdict == dialect.CheckUnrelated || !cfg.coBotEnabled(login) {
 					continue
 				}
 				o.eng.Checks = append(o.eng.Checks, engine.CheckSeen{Bot: login, Name: run.Name, Verdict: verdict, CompletedAt: run.CompletedAt})
@@ -131,7 +131,7 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 				return observation{}, err
 			}
 			for _, reaction := range reactions {
-				if s.isConfiguredBot(reaction.User.Login) {
+				if cfg.isConfiguredBot(reaction.User.Login) {
 					o.eng.Reacted = true
 				}
 				if isCurrentCodexThumbsUp(reaction, cutoff) {
@@ -172,7 +172,7 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 
 	// Adoptable commands are only consulted for a fire-eligible round.
 	if round != nil && round.FireEligible(now) {
-		cr, co, err := s.reviewCommands(ctx, repo, pr, o.eng, adoptCutoff(*round), pull, comments, reviews)
+		cr, co, err := s.reviewCommands(ctx, cfg, repo, pr, o.eng, adoptCutoff(*round), pull, comments, reviews)
 		if err != nil {
 			return observation{}, err
 		}
@@ -260,10 +260,10 @@ func (c Config) codexRelevant(obs engine.Observation) bool {
 // computation (LastAttemptAt floor, head-commit date, force-push) so a stale
 // command from a previous head is excluded everywhere, and the head-guard/
 // cutoff lookups are skipped entirely when no command is on the PR.
-func (s *Service) reviewCommands(ctx context.Context, repo string, pr int, obs engine.Observation, notBeforeCutoff time.Time, pull ghapi.Pull, comments []ghapi.IssueComment, reviews []ghapi.Review) (cr []engine.CommandSeen, co map[string][]engine.CommandSeen, err error) {
-	command := strings.TrimSpace(s.cfg.ReviewCommand)
+func (s *Service) reviewCommands(ctx context.Context, cfg Config, repo string, pr int, obs engine.Observation, notBeforeCutoff time.Time, pull ghapi.Pull, comments []ghapi.IssueComment, reviews []ghapi.Review) (cr []engine.CommandSeen, co map[string][]engine.CommandSeen, err error) {
+	command := strings.TrimSpace(cfg.ReviewCommand)
 	hasCR := command != "" && hasCommentBody(comments, command)
-	coBodies := s.cfg.coCommandBodies()
+	coBodies := cfg.coCommandBodies()
 	present := map[string][]string{}
 	for key, bodies := range coBodies {
 		for _, body := range bodies {
@@ -310,7 +310,7 @@ func (s *Service) reviewCommands(ctx context.Context, repo string, pr int, obs e
 		cutoff = fp
 	}
 	if hasCR {
-		cr = s.adoptableCR(obs, cutoff, command, comments, reviews)
+		cr = s.adoptableCR(cfg, obs, cutoff, command, comments, reviews)
 	}
 	for key, bodies := range present {
 		if cmds := adoptableCo(obs, key, cutoff, bodies, comments, reviews); len(cmds) > 0 {
@@ -399,7 +399,7 @@ func adoptableCo(obs engine.Observation, loginKey string, cutoff time.Time, bodi
 // already-posted fire, or none. A command the bot already answered with a review
 // or a completion reply belongs to a finished round for an earlier head and is
 // never adopted (adopting it would mark the new head fired without reviewing it).
-func (s *Service) adoptableCR(obs engine.Observation, cutoff time.Time, command string, comments []ghapi.IssueComment, reviews []ghapi.Review) []engine.CommandSeen {
+func (s *Service) adoptableCR(cfg Config, obs engine.Observation, cutoff time.Time, command string, comments []ghapi.IssueComment, reviews []ghapi.Review) []engine.CommandSeen {
 	best := newestCommandSince(command, cutoff, comments)
 	if len(best) == 0 {
 		return nil
@@ -409,11 +409,11 @@ func (s *Service) adoptableCR(obs engine.Observation, cutoff time.Time, command 
 		bestAt = best[0].UpdatedAt
 	}
 	for _, review := range reviews {
-		if s.isConfiguredBot(review.User.Login) && !review.SubmittedAt.Before(bestAt) {
+		if cfg.isConfiguredBot(review.User.Login) && !review.SubmittedAt.Before(bestAt) {
 			return nil
 		}
 	}
-	if engine.CommandHasCompletionReply(obs, s.cfg.policy(), best[0].ID) {
+	if engine.CommandHasCompletionReply(obs, cfg.policy(), best[0].ID) {
 		return nil
 	}
 	return best

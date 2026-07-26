@@ -842,7 +842,7 @@ func TestAdoptableCommandsRequiresExpectedHead(t *testing.T) {
 
 	comments, _ := gh.ListIssueComments(ctx, "owner/repo", 12)
 	reviews, _ := gh.ListReviews(ctx, "owner/repo", 12)
-	cmds, _, err := service.reviewCommands(ctx, "owner/repo", 12, engine.Observation{Head: "abcdef123", Open: true}, time.Time{}, pull, comments, reviews)
+	cmds, _, err := service.reviewCommands(ctx, service.cfg, "owner/repo", 12, engine.Observation{Head: "abcdef123", Open: true}, time.Time{}, pull, comments, reviews)
 	if err != nil || len(cmds) != 0 {
 		t.Fatalf("must not adopt a review command after the PR head changed, cmds=%v err=%v", cmds, err)
 	}
