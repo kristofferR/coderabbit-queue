@@ -1931,6 +1931,8 @@ func TestThreadRebuttalSurfacesContestedResolvedThreads(t *testing.T) {
 		t.Fatal("a contested bot reply on a resolved thread must surface")
 	} else if got.Source != "review_reply" || got.ThreadID != "PRRT_x" || got.CommentID != 3 {
 		t.Fatalf("rebuttal finding mismatch: %#v", got)
+	} else if !strings.Contains(got.Title, "contests your reply") {
+		t.Errorf("a reply that really retains the finding must be reported as a contest, got %q", got.Title)
 	}
 
 	// Withdrawn rebuttal → not surfaced.
@@ -1947,10 +1949,18 @@ func TestThreadRebuttalSurfacesContestedResolvedThreads(t *testing.T) {
 	addThreadComment(&th, 1, "coderabbitai", "**Nitpick** rename this")
 	addThreadComment(&th, 2, "kristofferR", "Declined: name is intentional.")
 	addThreadComment(&th, 3, "coderabbitai", "Here is some additional context on the naming convention.")
+	// It surfaces at the same severity — never bury a possible rebuttal — but it
+	// must NOT be announced as a contest. Asserting one for every non-withdrawal
+	// reply meant a bot AGREEING with the decline read as standing its ground,
+	// and an agent told to re-address a rebuttal that did not exist looped on it.
 	if got := threadRebuttal(th, bots); got == nil {
 		t.Fatal("an ambiguous (non-withdrawal) reply must surface by default")
 	} else if got.Severity != "major" {
 		t.Fatalf("an unknown-severity rebuttal must floor at major, got %q", got.Severity)
+	} else if strings.Contains(got.Title, "contests your reply") {
+		t.Errorf("an ambiguous reply must not be asserted as a contest, got %q", got.Title)
+	} else if !strings.Contains(got.Title, "read it") {
+		t.Errorf("an ambiguous reply should tell the caller to read it, got %q", got.Title)
 	}
 
 	// No agent reply (just the bot's finding) → not a rebuttal.

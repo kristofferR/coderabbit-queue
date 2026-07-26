@@ -16,6 +16,46 @@ import "strings"
 // a rebuttal re-surfaces a settled finding and blocks convergence.
 const reviewWithdrawnMarker = "<review_comment_withdrawn>"
 
+// ReplyVerdict is what a bot's reply to a declined finding amounts to. It exists
+// so the CLASSIFICATION and the wording that describes it stay together: the
+// caller orchestrates, and does not decide how a verdict reads.
+type ReplyVerdict int
+
+const (
+	// ReplyUnclear is neither a withdrawal nor a stated rebuttal. It is still
+	// surfaced — a buried rebuttal is the worse failure — but it must not be
+	// announced as a contest, which is what made an agent re-address a rebuttal
+	// that did not exist.
+	ReplyUnclear ReplyVerdict = iota
+	// ReplyWithdrawn concedes: the decline stands and the thread is done.
+	ReplyWithdrawn
+	// ReplyRetained contests: the finding stands and the agent must answer it.
+	ReplyRetained
+)
+
+// ClassifyDeclineReply reads a bot's reply to a declined finding.
+func ClassifyDeclineReply(text string) ReplyVerdict {
+	switch {
+	case IsReviewFindingWithdrawn(text):
+		return ReplyWithdrawn
+	case IsReviewFindingRetained(text):
+		return ReplyRetained
+	default:
+		return ReplyUnclear
+	}
+}
+
+// TitlePrefix is how a verdict introduces itself in a finding title. Only a
+// stated rebuttal claims to contest; anything else asks the caller to read it.
+func (v ReplyVerdict) TitlePrefix() string {
+	switch v {
+	case ReplyRetained:
+		return "Reviewer contests your reply — re-address or reply again: "
+	default:
+		return "Reviewer replied after your decline — read it and confirm the decline stands: "
+	}
+}
+
 // IsReviewFindingWithdrawn reports whether a bot's reply concedes and withdraws
 // its finding — the agent's decline stands and the thread is done.
 func IsReviewFindingWithdrawn(text string) bool {

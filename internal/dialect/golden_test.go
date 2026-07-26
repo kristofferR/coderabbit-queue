@@ -257,6 +257,18 @@ func TestGoldenReplyVerdict(t *testing.T) {
 			if got := IsReviewFindingRetained(body); got != tc.retained {
 				t.Errorf("IsReviewFindingRetained = %v, want %v", got, tc.retained)
 			}
+			// The verdict is what callers act on, and its wording travels with it:
+			// only a stated rebuttal may claim to contest the decline.
+			verdict := ClassifyDeclineReply(body)
+			switch {
+			case tc.withdrawn && verdict != ReplyWithdrawn:
+				t.Errorf("ClassifyDeclineReply = %v, want ReplyWithdrawn", verdict)
+			case tc.retained && verdict != ReplyRetained:
+				t.Errorf("ClassifyDeclineReply = %v, want ReplyRetained", verdict)
+			}
+			if contests := strings.Contains(verdict.TitlePrefix(), "contests"); contests != (verdict == ReplyRetained) {
+				t.Errorf("TitlePrefix for %v claims contest=%v", verdict, contests)
+			}
 		})
 	}
 }
