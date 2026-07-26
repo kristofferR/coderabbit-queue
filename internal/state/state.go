@@ -285,6 +285,17 @@ type State struct {
 	// one. Persisted in the shared state so the whole fleet uses the new issue.
 	CalibrationIssue int `json:"calibration_issue,omitempty"`
 
+	// Repos holds per-repository reviewer overrides, keyed by normalized
+	// "owner/name".
+	//
+	// It lives HERE, in the shared state ref, rather than in a .crq.yaml the
+	// repository carries. The daemon has no checkout of any repository it
+	// reviews, so an in-repo file would be invisible to it or cost a REST fetch
+	// per PR — and a daemon and an agent reading different configurations while
+	// writing one shared state ref is a new class of divergence. Both already
+	// read this ref, so both cannot disagree about it.
+	Repos map[string]RepoReviewers `json:"repos,omitempty"`
+
 	// Archive keeps recently finished rounds (superseded, closed, cancelled)
 	// for the dashboard and debugging. Bounded by ArchiveMax.
 	Archive []Round `json:"archive,omitempty"`
@@ -296,6 +307,51 @@ type State struct {
 	// unknown carries top-level JSON members this binary has no field for. See
 	// tolerant.go.
 	unknown unknownFields
+}
+
+// RepoReviewers overrides which reviewers run on one repository. A nil slice
+// means "no override, use the fleet default"; an empty non-nil slice means
+// "none here" — the difference is why these are pointers to slices in JSON
+// terms and why SetRepoReviewers takes explicit values.
+type RepoReviewers struct {
+	// CoBots are the co-reviewer logins enabled here, replacing the fleet list.
+	CoBots []string `json:"cobots,omitempty"`
+	// Required are the logins that gate convergence here.
+	Required []string `json:"required,omitempty"`
+	// SetCoBots/SetRequired record whether each list was set at all, so
+	// "explicitly none" survives a JSON round trip that drops empty slices.
+	SetCoBots   bool       `json:"set_cobots,omitempty"`
+	SetRequired bool       `json:"set_required,omitempty"`
+	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
+	By          string     `json:"by,omitempty"`
+}
+
+// RepoOverride returns the override for repo, and whether one exists.
+func (s *State) RepoOverride(repo string) (RepoReviewers, bool) {
+	ov, ok := s.Repos[normalizeRepoKey(repo)]
+	return ov, ok
+}
+
+// SetRepoOverride records repo's reviewer override, replacing any earlier one.
+func (s *State) SetRepoOverride(repo string, ov RepoReviewers) {
+	if s.Repos == nil {
+		s.Repos = map[string]RepoReviewers{}
+	}
+	s.Repos[normalizeRepoKey(repo)] = ov
+}
+
+// ClearRepoOverride drops repo's override, returning it to the fleet default.
+func (s *State) ClearRepoOverride(repo string) bool {
+	key := normalizeRepoKey(repo)
+	if _, ok := s.Repos[key]; !ok {
+		return false
+	}
+	delete(s.Repos, key)
+	return true
+}
+
+func normalizeRepoKey(repo string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(repo), ".git"))
 }
 
 const SchemaVersion = 3

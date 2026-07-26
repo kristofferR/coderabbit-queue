@@ -2361,7 +2361,7 @@ func TestFireCoDeferredAdoptionHonorsDryRunAndActiveClaim(t *testing.T) {
 	round := *st.Round("o/carrier", 95)
 
 	svc.cfg.DryRun = true
-	res, err := svc.fireCoDeferred(ctx, round, engine.FireDecision{Verdict: engine.FireCoDeferred, Reason: "dry run adopt", AdoptCo: map[string]engine.CommandSeen{dialect.CodexBotLogin: {ID: 703, CreatedAt: now.Add(-time.Minute)}}}, now)
+	res, err := svc.fireCoDeferred(ctx, svc.cfg, round, engine.FireDecision{Verdict: engine.FireCoDeferred, Reason: "dry run adopt", AdoptCo: map[string]engine.CommandSeen{dialect.CodexBotLogin: {ID: 703, CreatedAt: now.Add(-time.Minute)}}}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2382,7 +2382,7 @@ func TestFireCoDeferredAdoptionHonorsDryRunAndActiveClaim(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	res, err = svc.fireCoDeferred(ctx, round, engine.FireDecision{Verdict: engine.FireCoDeferred, Reason: "claimed adopt", AdoptCo: map[string]engine.CommandSeen{dialect.CodexBotLogin: {ID: 703, CreatedAt: now.Add(-time.Minute)}}}, now)
+	res, err = svc.fireCoDeferred(ctx, svc.cfg, round, engine.FireDecision{Verdict: engine.FireCoDeferred, Reason: "claimed adopt", AdoptCo: map[string]engine.CommandSeen{dialect.CodexBotLogin: {ID: 703, CreatedAt: now.Add(-time.Minute)}}}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2395,7 +2395,7 @@ func TestFireCoDeferredAdoptionHonorsDryRunAndActiveClaim(t *testing.T) {
 	}
 
 	staleNow := now.Add(triggerClaimTTL + time.Second)
-	res, err = svc.fireCoDeferred(ctx, round, engine.FireDecision{Verdict: engine.FireCoDeferred, Reason: "stale claim adopt", AdoptCo: map[string]engine.CommandSeen{dialect.CodexBotLogin: {ID: 703, CreatedAt: now.Add(-time.Minute)}}}, staleNow)
+	res, err = svc.fireCoDeferred(ctx, svc.cfg, round, engine.FireDecision{Verdict: engine.FireCoDeferred, Reason: "stale claim adopt", AdoptCo: map[string]engine.CommandSeen{dialect.CodexBotLogin: {ID: 703, CreatedAt: now.Add(-time.Minute)}}}, staleNow)
 	if err != nil {
 		t.Fatal(err)
 	}

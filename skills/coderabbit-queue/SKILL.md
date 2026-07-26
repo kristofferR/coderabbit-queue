@@ -171,6 +171,20 @@ thread left open keeps its finding actionable and `crq next` would repeat `fix` 
 disagreement is not lost: if the bot contests the decline, crq re-surfaces that reply as its own
 finding. Pass `--keep-open` to leave it unresolved deliberately.
 
+## Which Bots Review Which Project
+
+```bash
+crq reviewers "$REPO"                                   # who runs here, and what each costs
+crq reviewers set "$REPO" --bots codex --required codex # only Codex here
+crq reviewers clear "$REPO"                             # back to the fleet default
+```
+
+Each reviewer reports its `budget`: `account` is serialized against the shared CodeRabbit allowance,
+`none` runs immediately and waits for nobody. That is the only property the queue cares about.
+
+The setting lives in the shared state ref, so the daemon and every agent read the same one. The
+primary reviewer is fleet-wide and cannot be set per repository.
+
 ## Fleet Auto-Review
 
 To keep all open PRs in scope reviewed while CodeRabbit native auto-review is off:
