@@ -8,7 +8,17 @@ set -euo pipefail
 
 REPO="${REPO:?set REPO=owner/name}"
 PR="${PR:?set PR=<number>}"
-OUT="${OUT:-crq-next.json}"
+# Default OUT lives OUTSIDE the checkout on purpose. crq decides push-vs-done by
+# asking whether the working tree holds changes the PR head lacks, so a report
+# written into the repository is itself uncommitted work: the loop would then
+# read as "push" forever and could never reach "done".
+if [ -n "${OUT:-}" ]; then
+  # A caller-provided path is theirs to keep; only clean up what we created.
+  :
+else
+  OUT="$(mktemp -t crq-next.XXXXXX.json)"
+  trap 'rm -f "$OUT"' EXIT
+fi
 
 crq next "$REPO" "$PR" > "$OUT"
 action=$(jq -r .action "$OUT")
@@ -21,8 +31,8 @@ case "$action" in
   fix)
     echo "fix the findings in $OUT and validate locally, then resolve each addressed thread:"
     echo "  jq -r '.findings[] | select(.thread_id != null) | .thread_id' '$OUT'"
-    echo "  crq resolve '$REPO' '$PR' --thread THREAD_ID"
-    echo "  crq decline '$REPO' '$PR' --thread THREAD_ID --reason 'why not addressed'"
+    echo "  crq resolve THREAD_ID [THREAD_ID...]"
+    echo "  crq decline THREAD_ID --reason 'why not addressed'"
     ;;
   hold)
     echo "DO NOT commit or push — moving the head restarts the pending review"

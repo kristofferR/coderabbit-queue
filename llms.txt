@@ -164,14 +164,14 @@ Resolve addressed threads on GitHub (crq keys off GitHub resolution state; a fin
 reappearing until its thread is resolved there):
 
 ```bash
-crq resolve OWNER/REPO PR_NUMBER --thread THREAD_ID
+crq resolve THREAD_ID [THREAD_ID...]
 ```
 
 Decline a finding you are not addressing: post the reason on its thread (left unresolved; add
 `--resolve` to also close it) instead of leaving it silently open:
 
 ```bash
-crq decline OWNER/REPO PR_NUMBER --thread THREAD_ID --reason "why declined"
+crq decline THREAD_ID [THREAD_ID...] --reason "why declined"
 ```
 
 If the bot replies contesting a decline you resolved ("I'm retaining the finding: ..."), crq

@@ -118,6 +118,10 @@ func run(ctx context.Context, args []string) int {
 		printJSON(report)
 		return 0
 	case "next":
+		if bad, found := unknownFlag(args[1:], "--wait"); found {
+			fatal(fmt.Errorf("unknown flag %s (usage: crq next <repo> <pr> [--wait])", bad))
+			return 1
+		}
 		repo, pr, ok := repoPR(positional(args[1:]))
 		if !ok {
 			fatal(errors.New("usage: crq next <repo> <pr> [--wait]"))
@@ -162,11 +166,11 @@ func run(ctx context.Context, args []string) int {
 	case "resolve":
 		threads, ok := parseResolveArgs(args[1:])
 		if !ok {
-			fatal(errors.New("usage: crq resolve <repo> <pr> --thread <id> [--thread <id>...]"))
+			fatal(errors.New("usage: crq resolve <thread-id> [<thread-id>...]"))
 			return 1
 		}
 		if len(threads) == 0 {
-			fatal(errors.New("usage: crq resolve <repo> <pr> --thread <id> [--thread <id>...]"))
+			fatal(errors.New("usage: crq resolve <thread-id> [<thread-id>...]"))
 			return 1
 		}
 		result, err := service.ResolveThreads(ctx, threads)
@@ -179,7 +183,7 @@ func run(ctx context.Context, args []string) int {
 	case "decline":
 		threads, reason, resolve, ok := parseDeclineArgs(args[1:])
 		if !ok || len(threads) == 0 || strings.TrimSpace(reason) == "" {
-			fatal(errors.New(`usage: crq decline <repo> <pr> --thread <id> [--thread <id>...] --reason "<why>" [--resolve]`))
+			fatal(errors.New(`usage: crq decline <thread-id> [<thread-id>...] --reason "<why>" [--resolve]`))
 			return 1
 		}
 		result, err := service.DeclineThreads(ctx, threads, reason, resolve)
@@ -310,9 +314,9 @@ USAGE
   crq next <repo> <pr> [--wait]    emit the single next action as JSON (--wait blocks)
   crq loop <repo> <pr>             coordinated trigger -> wait -> JSON feedback/convergence
   crq feedback <repo> <pr>         emit normalized actionable review findings as JSON
-  crq resolve <repo> <pr> --thread <id> [...]
+  crq resolve <thread-id> [<thread-id>...]
                                    resolve addressed GitHub review threads
-  crq decline <repo> <pr> --thread <id> [...] --reason "<why>" [--resolve]
+  crq decline <thread-id> [...] --reason "<why>" [--resolve]
                                    reply on a thread to record why a finding is declined
   crq autoreview [--once] [--no-incremental]
                                    keep open PRs reviewed, rate-coordinated
@@ -422,7 +426,7 @@ Each finding has:
 Sources include review_thread, review_comment, review_body, review_prompt, and issue_comment.
 `)
 	case "resolve":
-		fmt.Print(`crq resolve <repo> <pr> --thread <id> [--thread <id>...]
+		fmt.Print(`crq resolve <thread-id> [<thread-id>...]
 
 Resolve only GitHub review threads that were actually addressed by the latest fix.
 Leave declined, stale, incorrect, or deferred findings unresolved.
@@ -430,7 +434,7 @@ Leave declined, stale, incorrect, or deferred findings unresolved.
 Thread IDs come from .findings[].thread_id in crq loop/feedback output.
 `)
 	case "decline":
-		fmt.Print(`crq decline <repo> <pr> --thread <id> [--thread <id>...] --reason "<why>" [--resolve]
+		fmt.Print(`crq decline <thread-id> [<thread-id>...] --reason "<why>" [--resolve]
 
 Record on the PR why a finding is being declined: posts the reason as a reply on
 each review thread. Use this instead of silently leaving a finding unaddressed, so
@@ -569,6 +573,30 @@ func hasFlag(args []string, flag string) bool {
 	return false
 }
 
+// unknownFlag returns the first flag in args that is not in allowed.
+//
+// positional() drops anything starting with "-", so without this a mistyped
+// --wiat silently ran the non-blocking form: the caller gets a plausible report
+// and waits forever for a blocking call that never happened. A typo must fail.
+func unknownFlag(args []string, allowed ...string) (string, bool) {
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			continue
+		}
+		known := false
+		for _, candidate := range allowed {
+			if arg == candidate {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return arg, true
+		}
+	}
+	return "", false
+}
+
 // positional drops flag arguments so repoPR sees only <repo> <pr>.
 func positional(args []string) []string {
 	out := make([]string, 0, len(args))
@@ -581,58 +609,62 @@ func positional(args []string) []string {
 }
 
 func parseResolveArgs(args []string) ([]string, bool) {
-	var positional []string
-	var threads []string
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--thread":
-			if i+1 >= len(args) {
-				return nil, false
-			}
-			threads = append(threads, args[i+1])
-			i++
-		default:
-			positional = append(positional, args[i])
-		}
-	}
-	if len(positional) != 0 && len(positional) < 2 {
-		return nil, false
-	}
-	if len(positional) > 2 {
-		threads = append(threads, positional[2:]...)
-	}
-	return threads, true
+	threads, _, _, ok := parseThreadCommand(args, false)
+	return threads, ok
 }
 
 func parseDeclineArgs(args []string) (threads []string, reason string, resolve, ok bool) {
+	return parseThreadCommand(args, true)
+}
+
+// parseThreadCommand parses the shape shared by `crq resolve` and `crq decline`:
+// any number of thread IDs, written bare or behind --thread.
+//
+// Thread node IDs are globally unique, so the <repo> <pr> this command used to
+// demand never identified anything — ResolveThreads discarded them. They are
+// still accepted so existing call sites keep working, and dropped here. Taking
+// IDs bare is what lets a caller clear a whole round in one process instead of
+// one subprocess per thread.
+//
+// An unrecognized flag is an error rather than a positional: a typo like
+// `--resove` must fail loudly, not silently become a thread ID.
+func parseThreadCommand(args []string, allowReason bool) (threads []string, reason string, resolve, ok bool) {
 	var positional []string
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--thread":
+		arg := args[i]
+		switch {
+		case arg == "--thread":
 			if i+1 >= len(args) {
 				return nil, "", false, false
 			}
 			threads = append(threads, args[i+1])
 			i++
-		case "--reason":
+		case allowReason && arg == "--reason":
 			if i+1 >= len(args) {
 				return nil, "", false, false
 			}
 			reason = args[i+1]
 			i++
-		case "--resolve":
+		case allowReason && arg == "--resolve":
 			resolve = true
+		case strings.HasPrefix(arg, "-"):
+			return nil, "", false, false
 		default:
-			positional = append(positional, args[i])
+			positional = append(positional, arg)
 		}
 	}
-	if len(positional) != 0 && len(positional) < 2 {
-		return nil, "", false, false
+	return append(threads, dropLegacyTarget(positional)...), reason, resolve, true
+}
+
+// dropLegacyTarget removes a leading "owner/repo" plus its PR number — the
+// arguments these commands used to require — leaving only thread IDs.
+func dropLegacyTarget(positional []string) []string {
+	if len(positional) >= 2 && strings.Contains(positional[0], "/") {
+		if _, err := strconv.Atoi(positional[1]); err == nil {
+			return positional[2:]
+		}
 	}
-	if len(positional) > 2 {
-		threads = append(threads, positional[2:]...)
-	}
-	return threads, reason, resolve, true
+	return positional
 }
 
 func printJSON(value any) {
@@ -728,7 +760,7 @@ func doctor(ctx context.Context) doctorReport {
 			"crq preflight --type uncommitted",
 			"crq loop <repo> <pr>",
 			"crq feedback <repo> <pr>",
-			"crq resolve <repo> <pr> --thread <thread_id>",
+			"crq resolve <thread-id>",
 			"crq autoreview --once",
 		},
 		Recommendations: []string{},

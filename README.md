@@ -336,9 +336,10 @@ while :; do
       #   ... apply fixes and validate ...
 
       # Resolve the threads you addressed; record why for any you decline.
-      jq -r '.findings[] | select(.thread_id != null) | .thread_id' crq-next.json \
-        | xargs -r -I{} crq resolve "$REPO" "$PR" --thread {}
-      # crq decline "$REPO" "$PR" --thread <id> --reason "why this one is declined"
+      threads=$(jq -r '.findings[] | select(.thread_id != null) | .thread_id' crq-next.json)
+      # shellcheck disable=SC2086 -- thread ids are opaque tokens with no spaces
+      [ -n "$threads" ] && crq resolve $threads
+      # crq decline <id> --reason "why this one is declined"
       ;;
 
     push)    git commit -am "address review feedback" && git push ;;
@@ -378,8 +379,8 @@ least 10 minutes of silence.
 crq next <repo> <pr>      # ⭐ the agent loop: emit the single next action as JSON (--wait blocks)
 crq loop <repo> <pr>      # blocking one-shot round: fire + wait + emit JSON findings
 crq feedback <repo> <pr>  # current normalized findings as JSON, WITHOUT triggering a review
-crq resolve <repo> <pr> --thread <id> [...]                 # resolve addressed review threads
-crq decline <repo> <pr> --thread <id> --reason "<why>" [--resolve]   # record why a finding is declined
+crq resolve <thread-id> [<thread-id>...]                    # resolve addressed review threads
+crq decline <thread-id> [...] --reason "<why>" [--resolve]  # record why a finding is declined
 crq autoreview            # ⭐ review ALL open PRs automatically, rate-coordinated
                           #    (--no-incremental = first review only; --once = single pass for cron)
 crq status                # show the dashboard: queue, in-flight, quota, next slot
@@ -588,8 +589,8 @@ If you're an autonomous agent running a PR-review loop, here's everything you ne
   head**—do not commit or push. After all required bots are true, fix/resolve the rest, commit/push
   once, then loop again;
   `2` → timed out, don't push stale-feedback fixes.
-- **Resolve / decline:** after fixing a finding, `crq resolve <repo> <pr> --thread <id>`. If you're
-  declining one, record why with `crq decline <repo> <pr> --thread <id> --reason "…"` instead of
+- **Resolve / decline:** after fixing a finding, `crq resolve <thread-id>...`. If you're
+  declining one, record why with `crq decline <thread-id> --reason "…"` instead of
   leaving it silently open.
 - **A long wait is not a hang.** During queue/rate-limit waits, feedback waits, and network
   outages, crq logs progress to **stderr** (queue reason, per-bot `reviewed` status, `github

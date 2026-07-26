@@ -132,8 +132,12 @@ resolvable `thread_id`.
 After fixing a finding that has a `thread_id`, resolve that thread **on GitHub**:
 
 ```bash
-crq resolve "$REPO" "$PR" --thread "$THREAD_ID"
+crq resolve "$THREAD_ID"
+crq resolve PRRT_one PRRT_two PRRT_three   # resolve a whole round in one call
 ```
+
+Thread IDs are globally unique, so no repo or PR is needed. Pass every addressed thread to one
+call rather than looping a subprocess per thread.
 
 crq keys off GitHub's resolution state: an addressed finding keeps reappearing in `crq feedback`
 until its thread is resolved on GitHub. Resolve only threads you actually addressed; leave the rest open.
@@ -141,7 +145,7 @@ until its thread is resolved on GitHub. Resolve only threads you actually addres
 For a finding you are **not** addressing, record why instead of leaving it silently open:
 
 ```bash
-crq decline "$REPO" "$PR" --thread "$THREAD_ID" --reason "why this is declined"
+crq decline "$THREAD_ID" --reason "why this is declined"
 ```
 
 This replies on the thread with your reason and leaves it unresolved (add `--resolve` to also close it

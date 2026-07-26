@@ -8,7 +8,11 @@ import (
 	"github.com/kristofferR/coderabbit-queue/internal/state"
 )
 
-const nextHead = "a21da4aeb"
+const (
+	nextHead    = "a21da4aeb"
+	nextPrimary = "coderabbitai[bot]"
+	nextCoBot   = "bugbot[bot]"
+)
 
 func completionOf(reviewed map[string]bool) CompletionStatus {
 	done := true
@@ -30,7 +34,7 @@ func finding(commit string) dialect.Finding {
 // together they are the whole contract `crq next` exposes.
 func TestNextAction(t *testing.T) {
 	both := func(cr, codex bool) CompletionStatus {
-		return completionOf(map[string]bool{"coderabbitai[bot]": cr, "chatgpt-codex-connector[bot]": codex})
+		return completionOf(map[string]bool{nextPrimary: cr, "chatgpt-codex-connector[bot]": codex})
 	}
 	deferredUntil := t0.Add(30 * time.Minute)
 
@@ -100,6 +104,38 @@ func TestNextAction(t *testing.T) {
 			pending: []string{"coderabbitai[bot]"},
 		},
 		{
+			// The degrade releases the head from the PRIMARY only. Another
+			// required reviewer is still mid-review, and pushing would restart it.
+			name: "rate-limit degrade still holds for a pending co-reviewer",
+			in: NextInput{
+				Obs: openObs(),
+				Completion: completionOf(map[string]bool{
+					nextPrimary: false, "chatgpt-codex-connector[bot]": true, nextCoBot: false,
+				}),
+				LocalWork: true,
+				Deferred:  true, DeferredUntil: &deferredUntil, MinDelay: time.Minute,
+			},
+			want: ActionHold, wantAt: t0.Add(time.Minute),
+			pending: []string{nextCoBot, nextPrimary},
+		},
+		{
+			// ...and it must keep the short cadence while doing so. The account
+			// window has no hold over a co-reviewer, so sleeping until it opens
+			// would miss the very findings the degrade exists to deliver.
+			name: "rate-limit degrade rechecks soon while a co-reviewer is owed",
+			in: NextInput{
+				Round: state.Round{Phase: state.PhaseQueued},
+				Obs:   openObs(),
+				Completion: completionOf(map[string]bool{
+					nextPrimary: false, "chatgpt-codex-connector[bot]": true, nextCoBot: false,
+				}),
+				Global:   Global{BlockedUntil: &deferredUntil},
+				Deferred: true, DeferredUntil: &deferredUntil, MinDelay: time.Minute,
+			},
+			want: ActionWait, wantAt: t0.Add(time.Minute),
+			pending: []string{nextCoBot, nextPrimary},
+		},
+		{
 			name: "all answered with staged work means push",
 			in: NextInput{
 				Obs: openObs(), Completion: both(true, true), LocalWork: true,
@@ -117,6 +153,11 @@ func TestNextAction(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Primary is configuration, not scenario: default it so each row
+			// stays a statement about the review state alone.
+			if tc.in.Primary == "" {
+				tc.in.Primary = nextPrimary
+			}
 			got := NextAction(tc.in, t0)
 			if got.Kind != tc.want {
 				t.Fatalf("NextAction = %q (%s), want %q", got.Kind, got.Reason, tc.want)
@@ -180,13 +221,14 @@ func TestNextActionNeverWaitsLessThanMinDelay(t *testing.T) {
 func TestNextActionGatesOnlyApplyToWaitingRounds(t *testing.T) {
 	blocked := t0.Add(40 * time.Minute)
 	retry := t0.Add(20 * time.Minute)
-	pending := completionOf(map[string]bool{"coderabbitai[bot]": false})
+	pending := completionOf(map[string]bool{nextPrimary: false})
 
 	waiting := NextAction(NextInput{
 		Round:      state.Round{Phase: state.PhaseAwaitingRetry, RetryAt: &retry},
 		Obs:        openObs(),
 		Global:     Global{BlockedUntil: &blocked},
 		Completion: pending,
+		Primary:    nextPrimary,
 		MinDelay:   time.Minute,
 	}, t0)
 	if !waiting.At.Equal(blocked) {
@@ -198,10 +240,35 @@ func TestNextActionGatesOnlyApplyToWaitingRounds(t *testing.T) {
 		Obs:        openObs(),
 		Global:     Global{BlockedUntil: &blocked},
 		Completion: pending,
+		Primary:    nextPrimary,
 		MinDelay:   time.Minute,
 	}, t0)
 	if !reviewing.At.Equal(t0.Add(time.Minute)) {
 		t.Errorf("reviewing round: At = %s, want a poll-interval recheck, not the account block", reviewing.At)
+	}
+}
+
+// Those same gates belong to the primary alone. A queued round that is also
+// waiting on a co-reviewer must keep the short cadence: neither the account
+// window nor this round's fire cooldown has any hold over that bot, so sleeping
+// until they clear would sleep through its answer.
+func TestNextActionKeepsShortCadenceForPendingCoReviewers(t *testing.T) {
+	blocked := t0.Add(40 * time.Minute)
+	retry := t0.Add(20 * time.Minute)
+
+	got := NextAction(NextInput{
+		Round:      state.Round{Phase: state.PhaseAwaitingRetry, RetryAt: &retry},
+		Obs:        openObs(),
+		Global:     Global{BlockedUntil: &blocked},
+		Completion: completionOf(map[string]bool{nextPrimary: false, nextCoBot: false}),
+		Primary:    nextPrimary,
+		MinDelay:   time.Minute,
+	}, t0)
+	if got.Kind != ActionWait {
+		t.Fatalf("NextAction = %q (%s), want %q", got.Kind, got.Reason, ActionWait)
+	}
+	if !got.At.Equal(t0.Add(time.Minute)) {
+		t.Errorf("At = %s, want a poll-interval recheck while %s is still owed", got.At, nextCoBot)
 	}
 }
 

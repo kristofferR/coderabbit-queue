@@ -64,18 +64,16 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 		return report, err
 	}
 
+	// ONE observation drives the whole decision. Feedback already reads the
+	// pull, so head, open, per-bot evidence and findings all describe the same
+	// instant. Re-reading the head separately used to let a push land between
+	// the two calls and answer "done" for a head nobody had reviewed.
 	feedback, err := s.Feedback(ctx, repo, pr)
 	if err != nil {
 		return report, err
 	}
 	report.Head = feedback.Head
 	report.ReviewedBy = feedback.ReviewedBy
-
-	// One queue step. Not fatal if it fails: the instruction below is derived
-	// from the observation we already have, and the next call pumps again.
-	if _, perr := s.Pump(ctx); perr != nil && s.log != nil {
-		s.log.Printf("warning: pump during next for %s: %v", QueueKey(repo, pr), perr)
-	}
 
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
@@ -84,25 +82,14 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 	now := s.clock()
 	round := st.Round(repo, pr)
 
-	// NextAction needs only "is it open" and "what is the head" from the
-	// observation — the findings and per-bot evidence come from Feedback above.
-	// pullHead is the ETag-cached read for exactly that, so this call costs a
-	// 304 instead of a second full observation on the shared REST quota.
-	head, open, err := s.pullHead(ctx, repo, pr)
-	if err != nil {
-		return report, err
-	}
-	if head != "" {
-		report.Head = head
-	}
-
 	report.LocalWork, report.LocalWorkReason = s.checkLocalWork(ctx, repo, report.Head)
 
 	in := engine.NextInput{
-		Obs:           engine.Observation{Head: head, Open: open},
+		Obs:           engine.Observation{Head: feedback.Head, Open: feedback.Open},
 		Completion:    engine.CompletionStatus{ReviewedBy: feedback.ReviewedBy, Done: allReviewed(feedback.ReviewedBy)},
 		Findings:      feedback.Findings,
 		Global:        s.global(st, now),
+		Primary:       s.cfg.Bot,
 		LocalWork:     report.LocalWork,
 		Deferred:      feedback.CodeRabbitDeferred,
 		DeferredUntil: feedback.DeferredUntil,
@@ -122,6 +109,27 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 	if !action.At.IsZero() {
 		at := action.At.UTC()
 		report.RecheckAfter = &at
+	}
+
+	// One queue step, AFTER the decision. Pump owns DecideFire, whose gate list
+	// has no "unresolved findings exist" step, so pumping first let this command
+	// spend account quota on a round the caller had not drained yet — the very
+	// rule `next` exists to enforce.
+	//
+	// The gate is deliberately narrow: only feedback for THIS head means a fire
+	// would buy nothing. Findings CARRIED from an older commit — an unresolved
+	// thread the caller may well have already fixed — must not stop a new head
+	// from being reviewed, or an unresolvable one deadlocks the PR forever and
+	// no review is ever requested for the code that replaced it. DecideFire
+	// separately refuses a head it has already reviewed, so this only has to
+	// answer "is the feedback I am holding about the head I would fire on".
+	//
+	// Not fatal if it fails: the instruction above stands on the observation
+	// already taken, and the next call pumps again.
+	if len(engine.FindingsOnHead(action.Findings, report.Head)) == 0 {
+		if _, perr := s.Pump(ctx); perr != nil && s.log != nil {
+			s.log.Printf("warning: pump during next for %s: %v", QueueKey(repo, pr), perr)
+		}
 	}
 	return report, nil
 }
@@ -198,7 +206,7 @@ func localWork(ctx context.Context, repo, head string) (bool, string) {
 		return false, "not run inside a git checkout"
 	}
 	remotes, ok := git("remote", "-v")
-	if !ok || !strings.Contains(strings.ToLower(remotes), strings.ToLower(repo)) {
+	if !ok || !remoteMatchesRepo(remotes, repo) {
 		// Match on any remote, not just origin, so a fork checkout whose upstream
 		// is the PR's repository still counts.
 		return false, "this checkout has no remote for " + repo
@@ -210,10 +218,64 @@ func localWork(ctx context.Context, repo, head string) (bool, string) {
 	if !ok {
 		return false, "could not read local HEAD"
 	}
-	if head != "" && !strings.HasPrefix(local, head) {
-		return true, "local HEAD " + shortSHA(local) + " is not the pr head " + head
+	if head == "" || strings.HasPrefix(local, head) {
+		return false, ""
 	}
-	return false, ""
+	// A local HEAD that differs from the PR head means one of two opposite
+	// things: unpushed commits (real work), or a checkout that is simply behind
+	// (nothing to push). Reporting work for the second produces a `push` the
+	// caller cannot land — a rejected non-fast-forward, every round — so only an
+	// ancestry check settles it, and anything unprovable answers false.
+	if _, known := git("rev-parse", "--verify", "--quiet", head+"^{commit}"); !known {
+		return false, "the pr head " + head + " is not in this checkout, so ahead and behind are indistinguishable"
+	}
+	if _, ahead := git("merge-base", "--is-ancestor", head, "HEAD"); !ahead {
+		return false, "local HEAD " + shortSHA(local) + " is behind the pr head " + head
+	}
+	return true, "local HEAD " + shortSHA(local) + " is ahead of the pr head " + head
+}
+
+// remoteMatchesRepo reports whether any configured remote points at repo.
+//
+// It compares the owner/name slug exactly. Substring-matching the raw
+// `git remote -v` output made "owner/app" match a checkout of
+// "owner/application", which then had its unrelated HEAD read as unlanded work.
+func remoteMatchesRepo(remotes, repo string) bool {
+	want := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(repo), ".git"))
+	if want == "" {
+		return false
+	}
+	for _, line := range strings.Split(remotes, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if repoSlugFromRemote(fields[1]) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// repoSlugFromRemote reduces a git remote URL to its lowercase "owner/name",
+// covering https, ssh:// and scp-style forms — including the host aliases
+// (git@github.com-work:owner/name.git) a multi-account setup produces.
+func repoSlugFromRemote(remote string) string {
+	url := strings.ToLower(strings.TrimSpace(remote))
+	url = strings.TrimSuffix(url, ".git")
+	// scp-style separates the path with ":" rather than "/"; flattening both
+	// lets one segment walk handle every form.
+	url = strings.ReplaceAll(url, ":", "/")
+	var segments []string
+	for _, segment := range strings.Split(url, "/") {
+		if segment != "" {
+			segments = append(segments, segment)
+		}
+	}
+	if len(segments) < 2 {
+		return ""
+	}
+	return segments[len(segments)-2] + "/" + segments[len(segments)-1]
 }
 
 func shortSHA(sha string) string {

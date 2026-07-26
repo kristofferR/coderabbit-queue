@@ -59,6 +59,11 @@ type NextInput struct {
 	// observation, already filtered to what can still be acted on.
 	Findings []dialect.Finding
 	Global   Global
+	// Primary is the configured primary reviewer's login — the one whose review
+	// spends account quota. It is the only bot an account block can delay, so
+	// both the rate-limit degrade and the recheck arithmetic need to tell it
+	// apart from the co-reviewers.
+	Primary string
 	// LocalWork reports that the caller holds changes the PR head does not have
 	// yet (uncommitted, or committed but unpushed). It is what separates "push
 	// your fixes" from "nothing left to do".
@@ -95,7 +100,7 @@ func NextAction(in NextInput, now time.Time) Action {
 	}
 	if in.Obs.Head == "" {
 		// A transient read failure, not a terminal state — come back shortly.
-		return Action{Kind: ActionWait, Reason: "could not read head", At: in.nextCheck(now, nil)}
+		return Action{Kind: ActionWait, Reason: "could not read head", At: in.nextCheck(now, nil, nil)}
 	}
 
 	pending := pendingBots(in.Completion)
@@ -111,23 +116,38 @@ func NextAction(in NextInput, now time.Time) Action {
 		}
 	}
 
-	// 2. A rate-limit degrade releases the head deliberately. CodeRabbit's
+	// 2. A rate-limit degrade releases the head deliberately. The primary's
 	//    review is still owed, but it is queued and will fire against whatever
 	//    head exists when the window opens — so holding the current head buys
 	//    nothing and costs a whole window. This is checked BEFORE the generic
 	//    hold below, which would otherwise stall the loop for the full block.
+	//
+	//    "Released" means released from the PRIMARY only. Every other required
+	//    reviewer still gates the head exactly as it always does, so the degrade
+	//    uses the same DoneExceptWithEvidence rule Feedback applies to
+	//    convergence — otherwise a degraded round pushes out from under a Bugbot
+	//    or Macroscope review that is still running.
 	if in.Deferred {
-		if in.LocalWork {
+		releasedByDegrade := DoneExceptWithEvidence(in.Completion.ReviewedBy, in.Primary, dialect.CodexBotLogin)
+		switch {
+		case in.LocalWork && releasedByDegrade:
 			return Action{
 				Kind:    ActionPush,
-				Reason:  "co-reviewers answered; coderabbit review deferred and will fire on the new head",
+				Reason:  "co-reviewers answered; primary review deferred and will fire on the new head",
+				Pending: pending,
+			}
+		case in.LocalWork:
+			return Action{
+				Kind:    ActionHold,
+				Reason:  "do not push: the primary review is deferred but another required reviewer has not answered for this head",
+				At:      in.nextCheck(now, in.DeferredUntil, pending),
 				Pending: pending,
 			}
 		}
 		return Action{
 			Kind:    ActionWait,
-			Reason:  "coderabbit review deferred while the account is rate-limited",
-			At:      in.nextCheck(now, in.DeferredUntil),
+			Reason:  "primary review deferred while the account is rate-limited",
+			At:      in.nextCheck(now, in.DeferredUntil, pending),
 			Pending: pending,
 		}
 	}
@@ -139,7 +159,7 @@ func NextAction(in NextInput, now time.Time) Action {
 		if in.LocalWork {
 			kind, reason = ActionHold, "do not push: a required reviewer has not answered for this head"
 		}
-		return Action{Kind: kind, Reason: reason, At: in.nextCheck(now, nil), Pending: pending}
+		return Action{Kind: kind, Reason: reason, At: in.nextCheck(now, nil, pending), Pending: pending}
 	}
 
 	// 4. Everything answered. Land the work, or report convergence.
@@ -154,11 +174,21 @@ func NextAction(in NextInput, now time.Time) Action {
 // definitely prevents progress — the account-quota window and this round's own
 // retry cooldown, both of which DecideFire enforces anyway.
 //
-// Those gates only apply to a round still waiting to fire. A fired or reviewing
-// round's answer can land at any moment, so waiting out an unrelated account
-// block there would sleep through the very review being waited on.
-func (in NextInput) nextCheck(now time.Time, extra *time.Time) time.Time {
+// Two things narrow those gates, and both exist because sleeping through
+// feedback is worse than one extra call:
+//
+//   - They only apply to a round still waiting to fire. A fired or reviewing
+//     round's answer can land at any moment.
+//   - They only apply when the primary is the ONLY reviewer still owed. Neither
+//     the account window nor this round's fire cooldown has any hold over a
+//     co-reviewer, so a round waiting on one must keep the short cadence — a
+//     degraded round otherwise sleeps for the whole block and misses the very
+//     co-reviewer findings the degrade exists to deliver.
+func (in NextInput) nextCheck(now time.Time, extra *time.Time, pending []string) time.Time {
 	at := now.Add(in.minDelay()).UTC()
+	if !in.onlyPrimaryPending(pending) {
+		return at
+	}
 	gate := func(t *time.Time) {
 		if t != nil && t.After(at) {
 			at = t.UTC()
@@ -173,6 +203,19 @@ func (in NextInput) nextCheck(now time.Time, extra *time.Time) time.Time {
 		}
 	}
 	return at
+}
+
+// onlyPrimaryPending reports whether every reviewer still owed for this head is
+// the primary. An empty pending set counts: there is nobody a short cadence
+// would catch.
+func (in NextInput) onlyPrimaryPending(pending []string) bool {
+	primary := dialect.NormalizeBotName(in.Primary)
+	for _, bot := range pending {
+		if dialect.NormalizeBotName(bot) != primary {
+			return false
+		}
+	}
+	return true
 }
 
 // pendingBots lists the required bots with no review evidence yet, sorted for a

@@ -2,6 +2,8 @@ package crq
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,6 +107,48 @@ func TestNextDrivesAReviewRound(t *testing.T) {
 	}
 }
 
+// `next` advances the queue as a side effect, and that step owns the review
+// fire — so the two halves of drain-first are both properties of ONE decision:
+// undrained feedback for the current head must not buy another review of that
+// same head, and feedback carried from an older commit must not stop the new
+// head from being reviewed at all.
+func TestNextDrainsCurrentHeadWithoutDeadlockingTheNextOne(t *testing.T) {
+	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr := "owner/repo", 504
+	head := "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+
+	f.next(repo, pr)
+	if got := f.reviewsPosted(repo, pr); got != 1 {
+		t.Fatalf("the first call must fire exactly one review, got %d", got)
+	}
+
+	// Feedback lands ON this head. Until the caller drains it, another review of
+	// the same head would spend account quota to be told the same thing.
+	f.clk.advance(2 * time.Minute)
+	f.botReview(repo, pr, 900, head, f.clk.now())
+	f.botReviewComment(repo, pr, 901, head, "internal/state/state.go", 42,
+		"_⚠️ Potential issue_\n\nThis dereferences a nil round.")
+	f.wantAction(f.next(repo, pr), engine.ActionFix)
+	if got := f.reviewsPosted(repo, pr); got != 1 {
+		t.Fatalf("undrained feedback for this head must not buy another review, posted %d", got)
+	}
+
+	// The caller pushes a fix. The old finding belongs to the previous commit,
+	// so it can no longer be acted on here — and must not keep the new head from
+	// being reviewed. This is the deadlock the narrow gate exists to avoid.
+	f.clk.advance(time.Minute)
+	f.setHead(repo, pr, "bbbbbbbb2")
+	f.setCommitDate("bbbbbbbb2", f.clk.now())
+	f.next(repo, pr)
+	if got := f.reviewsPosted(repo, pr); got != 2 {
+		t.Fatalf("the new head must still get its own review, posted %d", got)
+	}
+}
+
 // A closed PR is not something a loop can resolve by waiting.
 func TestNextBlocksOnClosedPR(t *testing.T) {
 	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
@@ -137,5 +181,44 @@ func TestNextNeverSchedulesAHotLoop(t *testing.T) {
 		if got := report.RecheckAfter.Sub(f.clk.now()); got < f.cfg.PollInterval {
 			t.Fatalf("recheck in %s, want at least the poll interval %s", got, f.cfg.PollInterval)
 		}
+	}
+}
+
+// The local-work probe decides push-vs-done, so "is this checkout even the
+// PR's repository" has to be exact. Substring matching made owner/app match a
+// checkout of owner/application and read its HEAD as unlanded work.
+func TestRemoteMatchesRepo(t *testing.T) {
+	remotes := func(urls ...string) string {
+		var b strings.Builder
+		for i, u := range urls {
+			fmt.Fprintf(&b, "r%d\t%s (fetch)\nr%d\t%s (push)\n", i, u, i, u)
+		}
+		return b.String()
+	}
+	cases := []struct {
+		name    string
+		remotes string
+		repo    string
+		want    bool
+	}{
+		{"https", remotes("https://github.com/owner/app.git"), "owner/app", true},
+		{"scp form", remotes("git@github.com:owner/app.git"), "owner/app", true},
+		{"ssh url", remotes("ssh://git@github.com/owner/app"), "owner/app", true},
+		{"host alias for a second account", remotes("git@github.com-work:owner/app.git"), "owner/app", true},
+		{"case insensitive", remotes("https://github.com/Owner/App.git"), "owner/app", true},
+		{"fork checkout with the upstream as a second remote",
+			remotes("git@github.com:me/app.git", "https://github.com/owner/app.git"), "owner/app", true},
+		{"prefix of a longer name does not match",
+			remotes("https://github.com/owner/application.git"), "owner/app", false},
+		{"same name under another owner does not match",
+			remotes("https://github.com/other/app.git"), "owner/app", false},
+		{"no remotes", "", "owner/app", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := remoteMatchesRepo(tc.remotes, tc.repo); got != tc.want {
+				t.Errorf("remoteMatchesRepo(%q) = %v, want %v", tc.repo, got, tc.want)
+			}
+		})
 	}
 }

@@ -26,6 +26,11 @@ type FeedbackReport struct {
 	ReviewedBy map[string]bool   `json:"reviewed_by"`
 	Findings   []dialect.Finding `json:"findings"`
 	CheckedAt  time.Time         `json:"checked_at"`
+	// Open is whether the PR was open in the same observation Head and
+	// ReviewedBy came from. It is deliberately not serialized — the feedback
+	// JSON contract is frozen — and exists so a caller deciding an action reads
+	// head, open and evidence from ONE snapshot rather than re-reading the pull.
+	Open bool `json:"-"`
 	// CodeRabbitDeferred marks a round degraded to Codex-only while the
 	// CodeRabbit account is rate-limited: Codex feedback is authoritative for
 	// this round, the CodeRabbit review stays queued and fires after
@@ -87,6 +92,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		Repo:       repo,
 		PR:         pr,
 		Head:       head,
+		Open:       obs.eng.Open,
 		ReviewedBy: map[string]bool{},
 		Findings:   []dialect.Finding{},
 		CheckedAt:  now,
