@@ -596,6 +596,89 @@ func (s *State) QueuedRounds(now time.Time) []Round {
 	return out
 }
 
+// Queue-entry wait reasons. A waiting round is held by exactly one of these
+// (or by nothing, in which case it is next up).
+const (
+	WaitCoolingDown    = "cooling down"    // this round's own RetryAt has not passed
+	WaitAccountBlocked = "account blocked" // the CodeRabbit account quota window dominates
+	WaitSlotBusy       = "slot busy"       // another PR's review holds the fire slot
+)
+
+// QueueEntry is one round waiting for a fire, plus when it can actually fire
+// and what is holding it. It is a VIEW over Rounds + Account — never persisted,
+// so it carries no schema obligations.
+type QueueEntry struct {
+	Round
+	// ReadyAt is the earliest time this round may fire. Zero means "now".
+	ReadyAt time.Time
+	// Why is the gate holding it: one of the Wait* constants, or "" when the
+	// round is simply next up.
+	Why string
+}
+
+// roundReadyAt is a waiting round's OWN not-before time: RetryAt while it is
+// cooling down, zero (ready now) while it is merely queued.
+func roundReadyAt(r Round) time.Time {
+	if r.Phase == PhaseAwaitingRetry && r.RetryAt != nil {
+		return r.RetryAt.UTC()
+	}
+	return time.Time{}
+}
+
+// Queue returns every round waiting for a fire — queued AND awaiting_retry — in
+// the order they will actually reach the slot: by ready time, then by Seq.
+//
+// There is only one queue. A cooling-down round is not a different species of
+// work, it is a queued round with a not-before time, and rendering it as a
+// separate list left "nothing queued" and "two PRs parked until 00:07Z" looking
+// identical. Ordering by (ReadyAt, Seq) reproduces what firing actually does: a
+// round whose window has not opened cannot precede a ready one, and among ready
+// rounds NextEligible takes the lowest Seq.
+//
+// ReadyAt folds in the account-wide quota block, because DecideFire gates on it
+// too — showing a round's own RetryAt alone promises a time the fire gate will
+// not honour once CodeRabbit extends the window. This is the same max() that
+// AccountBlockedUntil computes for the wait path.
+//
+// MinInterval is deliberately NOT reflected: it is sub-minute pacing, so
+// surfacing it would only churn DashboardSHA on every render.
+func (s *State) Queue(now time.Time) []QueueEntry {
+	var blocked time.Time
+	if s.Account.BlockedUntil != nil && s.Account.BlockedUntil.After(now) {
+		blocked = s.Account.BlockedUntil.UTC()
+	}
+	slotBusy := s.SlotRound() != nil
+
+	var out []QueueEntry
+	for _, r := range s.Rounds {
+		if r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry {
+			continue
+		}
+		own := roundReadyAt(r)
+		e := QueueEntry{Round: r, ReadyAt: own}
+		switch {
+		case blocked.After(own) && blocked.After(now):
+			e.ReadyAt = blocked
+			e.Why = WaitAccountBlocked
+		case own.After(now):
+			e.Why = WaitCoolingDown
+		case slotBusy:
+			e.Why = WaitSlotBusy
+		}
+		if !e.ReadyAt.After(now) {
+			e.ReadyAt = time.Time{} // ready now
+		}
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].ReadyAt.Equal(out[j].ReadyAt) {
+			return out[i].ReadyAt.Before(out[j].ReadyAt)
+		}
+		return out[i].Seq < out[j].Seq
+	})
+	return out
+}
+
 // Normalize repairs invariants after load: map init, expired retry windows
 // (awaiting_retry with a passed RetryAt is simply fire-eligible; nothing to
 // do), and a FireSlot pointing at a round that no longer holds it.

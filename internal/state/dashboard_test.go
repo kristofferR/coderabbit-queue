@@ -10,9 +10,9 @@ const nothingQueued = "_Nothing queued._"
 
 func ptime(t time.Time) *time.Time { return &t }
 
-// parkedRound is the shape that used to vanish from the dashboard: an
-// awaiting_retry round whose RetryAt has not passed yet.
-func parkedRound(repo string, pr int, seq int64, now time.Time) Round {
+// coolingRound is the shape that used to vanish from the dashboard: a waiting
+// round whose own RetryAt has not passed yet.
+func coolingRound(repo string, pr int, seq int64, now time.Time, retryIn time.Duration) Round {
 	return Round{
 		Repo:       repo,
 		PR:         pr,
@@ -22,7 +22,19 @@ func parkedRound(repo string, pr int, seq int64, now time.Time) Round {
 		Attempts:   1,
 		EnqueuedAt: now.Add(-10 * time.Minute),
 		FiredAt:    ptime(now.Add(-9 * time.Minute)),
-		RetryAt:    ptime(now.Add(11 * time.Minute)),
+		RetryAt:    ptime(now.Add(retryIn)),
+		ByHost:     "cachyos",
+	}
+}
+
+func queuedRound(repo string, pr int, seq int64, now time.Time) Round {
+	return Round{
+		Repo:       repo,
+		PR:         pr,
+		Head:       "beefbeef1",
+		Seq:        seq,
+		Phase:      PhaseQueued,
+		EnqueuedAt: now.Add(-time.Minute),
 		ByHost:     "cachyos",
 	}
 }
@@ -35,32 +47,54 @@ func stateWith(rounds ...Round) State {
 	return st
 }
 
-// A parked-only state must not render as an empty queue: that is the bug this
-// section exists to prevent (a reader concluded their enqueue was dropped).
-func TestRenderDashboardParkedOnly(t *testing.T) {
+// queueSection returns just the "## ⏳ Queue" section of a rendered dashboard,
+// so a match cannot come from the in-flight table or the requested history.
+func queueSection(t *testing.T, out string) string {
+	t.Helper()
+	_, after, ok := strings.Cut(out, "## ⏳ Queue")
+	if !ok {
+		t.Fatalf("no queue section:\n%s", out)
+	}
+	before, _, _ := strings.Cut(after, "\n## ")
+	return before
+}
+
+// A queue whose rounds are all cooling down must not render as an empty queue:
+// that is the bug this design exists to prevent (a reader concluded their
+// enqueue had been dropped).
+func TestRenderDashboardCoolingDownOnly(t *testing.T) {
 	now := time.Now().UTC()
-	r := parkedRound("kristofferr/ha-adjustable-bed", 480, 1, now)
-	st := stateWith(r)
+	a := coolingRound("kristofferr/ha-adjustable-bed", 480, 1, now, 11*time.Minute)
+	b := coolingRound("kristofferr/ha-adjustable-bed", 481, 2, now, 12*time.Minute)
+	st := stateWith(a, b)
 
 	out := RenderDashboard(st, StoreConfig{})
 	if strings.Contains(out, nothingQueued) {
-		t.Fatalf("parked round rendered as an empty queue:\n%s", out)
+		t.Fatalf("cooling-down rounds rendered as an empty queue:\n%s", out)
 	}
+	if !strings.Contains(out, "## ⏳ Queue — 2 waiting") {
+		t.Errorf("queue heading does not count cooling-down rounds:\n%s", out)
+	}
+	q := queueSection(t, out)
 	for _, want := range []string{
 		"kristofferr/ha-adjustable-bed#480",
 		"https://github.com/kristofferr/ha-adjustable-bed/pull/480",
 		"`a9c688a1c`",
-		fmtStamp(r.RetryAt, time.UTC), // absolute retry_at, not a relative "in 11m"
+		fmtStamp(a.RetryAt, time.UTC), // absolute ready time, not a relative "in 11m"
+		WaitCoolingDown,
 		"`cachyos`",
-		"1 parked",
 	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("dashboard missing %q:\n%s", want, out)
+		if !strings.Contains(q, want) {
+			t.Errorf("queue section missing %q:\n%s", want, q)
 		}
 	}
+	// The header must say when the front of the queue opens.
+	if !strings.Contains(out, "2 queued — next at "+fmtStamp(a.RetryAt, time.UTC)) {
+		t.Errorf("header does not report the next ready time:\n%s", out)
+	}
 
-	if title := RenderTitle(st); strings.Contains(title, "idle") {
-		t.Errorf("parked-only state titled idle: %q", title)
+	if got, want := RenderTitle(st), "🐰 crq — 2 queued"; got != want {
+		t.Errorf("RenderTitle = %q, want %q", got, want)
 	}
 }
 
@@ -73,81 +107,106 @@ func TestRenderDashboardEmpty(t *testing.T) {
 	if !strings.Contains(out, nothingQueued) {
 		t.Errorf("empty state lost its empty-state text:\n%s", out)
 	}
-	if strings.Contains(out, "Parked") {
-		t.Errorf("empty state rendered a parked section:\n%s", out)
+	if !strings.Contains(out, "## 🔬 In flight — 0\n\n_None._") {
+		t.Errorf("empty state lost its empty in-flight section:\n%s", out)
 	}
 	if got, want := RenderTitle(st), "🐰 crq — idle"; got != want {
 		t.Errorf("RenderTitle = %q, want %q", got, want)
 	}
 }
 
-// A fire-eligible round and a parked one land in their own sections, each
-// counted exactly once.
-func TestRenderDashboardMixed(t *testing.T) {
+// The queue is ordered the way rounds will actually fire: ready rounds first
+// (by Seq), then by when each window opens — regardless of Seq.
+func TestQueueOrdersByReadyThenSeq(t *testing.T) {
 	now := time.Now().UTC()
-	queued := Round{
-		Repo:       "kristofferr/coderabbit-queue",
-		PR:         12,
-		Head:       "beefbeef1",
-		Seq:        1,
-		Phase:      PhaseQueued,
-		EnqueuedAt: now.Add(-time.Minute),
-		ByHost:     "cachyos",
-	}
-	st := stateWith(queued, parkedRound("kristofferr/ha-adjustable-bed", 480, 2, now))
+	st := stateWith(
+		coolingRound("kristofferr/a", 1, 1, now, 20*time.Minute), // lowest Seq, latest window
+		coolingRound("kristofferr/b", 2, 2, now, 5*time.Minute),
+		queuedRound("kristofferr/c", 3, 3, now),                  // ready now, highest Seq
+		coolingRound("kristofferr/d", 4, 4, now, -2*time.Minute), // window already open
+	)
 
-	out := RenderDashboard(st, StoreConfig{})
-	if !strings.Contains(out, "## ⏳ Queue — 1 waiting · 1 parked") {
-		t.Errorf("queue heading does not report both counts:\n%s", out)
+	q := st.Queue(now)
+	var got []int
+	for _, e := range q {
+		got = append(got, e.PR)
 	}
-	if strings.Contains(out, nothingQueued) {
-		t.Errorf("non-empty queue rendered the empty state:\n%s", out)
+	// Ready now: c (Seq 3) and d (Seq 4, elapsed RetryAt) — Seq order among them.
+	// Then b (+5m), then a (+20m).
+	want := []int{3, 4, 2, 1}
+	if len(got) != len(want) {
+		t.Fatalf("Queue returned %v, want %v", got, want)
 	}
-
-	queueBody, parkedBody, ok := strings.Cut(out, "### 🅿️ Parked — 1 not yet eligible")
-	if !ok {
-		t.Fatalf("no parked section:\n%s", out)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Queue order = %v, want %v", got, want)
+		}
 	}
-	if !strings.Contains(queueBody, "coderabbit-queue#12") {
-		t.Errorf("fire-eligible round missing from the queue table:\n%s", queueBody)
+	// An elapsed RetryAt is ready, not cooling down.
+	if q[1].Why != "" || !q[1].ReadyAt.IsZero() {
+		t.Errorf("elapsed retry window not treated as ready: %+v", q[1])
 	}
-	if strings.Contains(queueBody, "ha-adjustable-bed#480") {
-		t.Errorf("parked round leaked into the queue table:\n%s", queueBody)
-	}
-	if strings.Contains(parkedBody, "coderabbit-queue#12") {
-		t.Errorf("fire-eligible round double-counted in the parked table:\n%s", parkedBody)
-	}
-
-	if got, want := RenderTitle(st), "🐰 crq — 1 queued · 1 parked"; got != want {
-		t.Errorf("RenderTitle = %q, want %q", got, want)
+	if q[2].Why != WaitCoolingDown {
+		t.Errorf("q[2].Why = %q, want %q", q[2].Why, WaitCoolingDown)
 	}
 }
 
-// An awaiting_retry round whose window has opened is fire-eligible: it belongs
-// in the normal queue, not the parked view.
-func TestRenderDashboardRetryWindowOpen(t *testing.T) {
+// The account-wide quota block gates firing too, so a round whose own RetryAt
+// falls inside a longer block must display the block's end, not its own — the
+// dashboard must not promise a time DecideFire will refuse.
+func TestQueueAccountBlockDominatesRetryAt(t *testing.T) {
 	now := time.Now().UTC()
-	r := parkedRound("kristofferr/ha-adjustable-bed", 480, 1, now)
-	r.RetryAt = ptime(now.Add(-time.Minute))
+	r := coolingRound("kristofferr/ha-adjustable-bed", 480, 1, now, 11*time.Minute)
 	st := stateWith(r)
+	blockedUntil := now.Add(44 * time.Minute)
+	st.Account.BlockedUntil = &blockedUntil
 
-	out := RenderDashboard(st, StoreConfig{})
-	if !strings.Contains(out, "## ⏳ Queue — 1 waiting\n") {
-		t.Errorf("elapsed retry window not counted as waiting:\n%s", out)
+	q := st.Queue(now)
+	if len(q) != 1 {
+		t.Fatalf("Queue returned %d entries, want 1", len(q))
 	}
-	if strings.Contains(out, "Parked") {
-		t.Errorf("fire-eligible round rendered as parked:\n%s", out)
+	if !q[0].ReadyAt.Equal(blockedUntil.UTC()) {
+		t.Errorf("ReadyAt = %s, want the account block end %s", q[0].ReadyAt, blockedUntil.UTC())
 	}
-	if got, want := RenderTitle(st), "🐰 crq — 1 queued"; got != want {
-		t.Errorf("RenderTitle = %q, want %q", got, want)
+	if q[0].Why != WaitAccountBlocked {
+		t.Errorf("Why = %q, want %q", q[0].Why, WaitAccountBlocked)
+	}
+
+	out := queueSection(t, RenderDashboard(st, StoreConfig{}))
+	if !strings.Contains(out, fmtStamp(&blockedUntil, time.UTC)) {
+		t.Errorf("queue does not show the account-block end:\n%s", out)
+	}
+	if strings.Contains(out, fmtStamp(r.RetryAt, time.UTC)) {
+		t.Errorf("queue shows the round's own RetryAt, which the fire gate would refuse:\n%s", out)
 	}
 }
 
-// Every active round must appear in one of "In flight", "Feedback wait",
-// "Queue" or "Parked" — the blind spot that hid parked rounds also hid a
-// reserved round whose fire slot was cleared and every reviewing round past
-// the first.
-func TestRenderDashboardAccountsForEveryActiveRound(t *testing.T) {
+// A round waiting only because another PR holds the fire slot is ready now; the
+// slot is what it waits on.
+func TestQueueSlotBusy(t *testing.T) {
+	now := time.Now().UTC()
+	holder := Round{
+		Repo: "kristofferr/a", PR: 1, Head: "aaaaaaaa1", Seq: 1,
+		Phase: PhaseReserved, EnqueuedAt: now.Add(-2 * time.Minute),
+		ReservedAt: ptime(now.Add(-time.Minute)), Token: "tok", ByHost: "cachyos",
+	}
+	st := stateWith(holder, queuedRound("kristofferr/b", 2, 2, now))
+	st.FireSlot = &FireSlot{Key: Key(holder.Repo, holder.PR), Token: "tok"}
+
+	q := st.Queue(now)
+	if len(q) != 1 || q[0].PR != 2 {
+		t.Fatalf("Queue = %+v, want only the queued round", q)
+	}
+	if q[0].Why != WaitSlotBusy {
+		t.Errorf("Why = %q, want %q", q[0].Why, WaitSlotBusy)
+	}
+}
+
+// In flight (reserved/fired/reviewing) and Queue (queued/awaiting_retry)
+// partition Active(), so every active round is on the dashboard exactly once.
+// The old single "Feedback wait" row hid every reviewing round past the first
+// and any reserved round whose fire slot had been cleared.
+func TestRenderDashboardPartitionsActiveRounds(t *testing.T) {
 	now := time.Now().UTC()
 	fired := Round{
 		Repo: "kristofferr/a", PR: 1, Head: "aaaaaaaa1", Seq: 1,
@@ -164,30 +223,75 @@ func TestRenderDashboardAccountsForEveryActiveRound(t *testing.T) {
 		Phase: PhaseReserved, EnqueuedAt: now.Add(-time.Minute),
 		ReservedAt: ptime(now), ByHost: "cachyos",
 	}
-	st := stateWith(fired, reviewing, reserved,
-		parkedRound("kristofferr/d", 4, 4, now))
+	completed := Round{ // not active: the reviewed-head dedup marker
+		Repo: "kristofferr/e", PR: 5, Head: "eeeeeeee5", Seq: 5,
+		Phase: PhaseCompleted, EnqueuedAt: now.Add(-time.Hour), ByHost: "cachyos",
+	}
+	st := stateWith(fired, reviewing, reserved, completed,
+		coolingRound("kristofferr/d", 4, 4, now, 30*time.Minute),
+		queuedRound("kristofferr/f", 6, 6, now))
 
 	out := RenderDashboard(st, StoreConfig{})
-	// The "Recently requested" history lists fired rounds regardless of phase,
-	// so it must not count as accounting for a live round.
+	// The "Recently requested" history lists fired rounds regardless of phase, so
+	// it must not count as accounting for a live round.
 	live, _, _ := strings.Cut(out, "## 📨 Recently requested")
+	inFlight, queue, ok := strings.Cut(live, "## ⏳ Queue")
+	if !ok {
+		t.Fatalf("no queue section:\n%s", out)
+	}
 	for _, r := range st.Rounds {
+		key := Key(r.Repo, r.PR)
+		inA, inB := strings.Contains(inFlight, key), strings.Contains(queue, key)
 		if !r.Active() {
+			if inA || inB {
+				t.Errorf("inactive round %s rendered as live work", key)
+			}
 			continue
 		}
-		if !strings.Contains(live, Key(r.Repo, r.PR)) {
-			t.Errorf("active round %s appears nowhere on the dashboard:\n%s", Key(r.Repo, r.PR), out)
+		if inA == inB {
+			t.Errorf("active round %s is in %d sections, want exactly 1:\n%s", key, btoi(inA)+btoi(inB), live)
 		}
 	}
-	if !strings.Contains(out, "3 not yet eligible") {
-		t.Errorf("want reviewing tail + reserved + parked in the parked table:\n%s", out)
+	if !strings.Contains(out, "## 🔬 In flight — 3") {
+		t.Errorf("want 3 in-flight rounds:\n%s", out)
+	}
+	if !strings.Contains(out, "## ⏳ Queue — 2 waiting") {
+		t.Errorf("want 2 waiting rounds:\n%s", out)
 	}
 }
 
-// The parked table honours CRQ_TZ via the shared fmtStamp helper.
-func TestRenderDashboardParkedHonoursTimezone(t *testing.T) {
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// The in-flight table carries each round's co-reviewer trigger marks.
+func TestRenderDashboardInFlightTriggers(t *testing.T) {
 	now := time.Now().UTC()
-	r := parkedRound("kristofferr/ha-adjustable-bed", 480, 1, now)
+	r := Round{
+		Repo: "kristofferr/a", PR: 1, Head: "aaaaaaaa1", Seq: 1,
+		Phase: PhaseReviewing, EnqueuedAt: now.Add(-3 * time.Minute),
+		FiredAt: ptime(now.Add(-2 * time.Minute)), WaitDeadline: ptime(now.Add(18 * time.Minute)),
+		ByHost: "cachyos",
+	}
+	r.SetCoCommand("chatgpt-codex-connector", 42, now.Add(-2*time.Minute))
+	st := stateWith(r)
+
+	out := RenderDashboard(st, StoreConfig{})
+	if !strings.Contains(out, "chatgpt-codex-connector ✓") {
+		t.Errorf("in-flight row missing trigger marks:\n%s", out)
+	}
+	if !strings.Contains(out, fmtStamp(r.WaitDeadline, time.UTC)) {
+		t.Errorf("in-flight row missing the wait deadline:\n%s", out)
+	}
+}
+
+// The ready column honours CRQ_TZ via the shared fmtStamp helper.
+func TestRenderDashboardQueueHonoursTimezone(t *testing.T) {
+	now := time.Now().UTC()
+	r := coolingRound("kristofferr/ha-adjustable-bed", 480, 1, now, 11*time.Minute)
 	st := stateWith(r)
 
 	loc, err := time.LoadLocation("Europe/Oslo")
@@ -196,6 +300,6 @@ func TestRenderDashboardParkedHonoursTimezone(t *testing.T) {
 	}
 	out := RenderDashboard(st, StoreConfig{Timezone: "Europe/Oslo"})
 	if !strings.Contains(out, fmtStamp(r.RetryAt, loc)) {
-		t.Errorf("parked retry_at not rendered in Europe/Oslo:\n%s", out)
+		t.Errorf("ready time not rendered in Europe/Oslo:\n%s", out)
 	}
 }
