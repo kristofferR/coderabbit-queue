@@ -36,6 +36,8 @@ const (
 
 	// DispatchTTL is how long a watcher's fix claim survives without a heartbeat.
 	DispatchTTL = crqstate.DispatchTTL
+	// DrainUnhealthyAfter is how many passes may fail to dispatch before crq says so.
+	DrainUnhealthyAfter = crqstate.DrainUnhealthyAfter
 )
 
 var (

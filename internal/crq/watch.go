@@ -101,6 +101,10 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 
 func (s *Service) watchPass(ctx context.Context, opts WatchOptions, emit func(WatchEvent) error) error {
 	var failures []string
+	// Whether any fix session actually STARTED this pass. A dispatcher that
+	// cannot start one — a wedged mirror, a missing command — otherwise fails
+	// silently while the queue looks busy.
+	attempted, started, lastFailure := false, false, ""
 	repos := opts.Repos
 	if len(repos) == 0 {
 		for repo := range s.cfg.AllowRepos {
@@ -150,6 +154,13 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, emit func(Wa
 			}
 			if opts.Dispatch && report.Action == string(engine.ActionFix) {
 				event.Dispatched, event.Skipped = s.dispatch(ctx, opts, report)
+				// A claim somebody else holds is not a failure of this pass.
+				if event.Dispatched {
+					attempted, started = true, true
+				} else if event.Skipped != "" && !strings.Contains(event.Skipped, "already fixing") {
+					attempted = true
+					lastFailure = event.Skipped
+				}
 			}
 			if emit != nil {
 				// A consumer that has gone away (a closed pipe, a full
@@ -161,10 +172,34 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, emit func(Wa
 			}
 		}
 	}
+	if opts.Dispatch && attempted {
+		s.noteDispatchHealth(ctx, started, lastFailure)
+	}
 	if len(failures) > 0 {
 		return fmt.Errorf("%d pull request(s) could not be checked: %s", len(failures), strings.Join(failures, "; "))
 	}
 	return nil
+}
+
+// noteDispatchHealth records whether fix sessions are starting, and says so
+// loudly the first time it is clear they are not.
+//
+// The failure this exists for looked exactly like success from the outside: the
+// watcher ran, the queue moved, PRs reported findings — and every dispatch died
+// on a wedged git mirror, in a log line nobody was reading.
+func (s *Service) noteDispatchHealth(ctx context.Context, started bool, reason string) {
+	var unhealthy bool
+	if _, err := s.store.Update(ctx, func(st *State) error {
+		was := st.Drain.Unhealthy()
+		st.NoteDispatch(s.cfg.Host, started, reason, s.clock())
+		unhealthy = st.Drain.Unhealthy() && !was
+		return nil
+	}); err != nil {
+		return
+	}
+	if unhealthy && s.log != nil {
+		s.log.Printf("ALERT: no fix session has started in %d passes — %s", DrainUnhealthyAfter, reason)
+	}
 }
 
 // dispatch claims the round, checks the head out, and runs the fix session.

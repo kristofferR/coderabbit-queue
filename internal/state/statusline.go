@@ -29,6 +29,10 @@ func StatusLine(st State, cfg StoreConfig) string {
 	var parts []string
 	stranded := firstStranded(st, inFlight)
 	switch {
+	case st.Drain.Unhealthy():
+		// Above everything else: a queue that looks busy while no session can
+		// start is the state that hid a wedged dispatcher for hours.
+		parts = append(parts, fmt.Sprintf("🚨 dispatch failing (%d)", st.Drain.ConsecutiveFailures))
 	case stranded != nil:
 		parts = append(parts, fmt.Sprintf("⚠ #%d stranded", stranded.PR))
 	case !ready && st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now):

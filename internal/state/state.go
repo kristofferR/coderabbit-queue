@@ -295,6 +295,12 @@ type State struct {
 	// for the dashboard and debugging. Bounded by ArchiveMax.
 	Archive []Round `json:"archive,omitempty"`
 
+	// Drain records the watcher's dispatch health. It is separate from Warn
+	// because Warn is cleared by the next successful fire — a dispatcher that
+	// has been failing for hours would be wiped by unrelated progress, which is
+	// exactly how the failure stayed invisible.
+	Drain *DrainHealth `json:"drain,omitempty"`
+
 	Warn         string     `json:"warn,omitempty"`
 	UpdatedAt    *time.Time `json:"wrote_at,omitempty"`
 	DashboardSHA string     `json:"dashboard_sha,omitempty"`
@@ -674,6 +680,50 @@ func (r *Round) ReleaseDispatch(token string) bool {
 	r.Dispatch.Heartbeat = time.Time{}
 	r.Dispatch.Token = ""
 	return true
+}
+
+// DrainUnhealthyAfter is how many consecutive passes may fail to dispatch
+// anything before crq says so out loud. One failure is a transient; three in a
+// row is a dispatcher that is not working.
+const DrainUnhealthyAfter = 3
+
+// DrainHealth is the watcher's dispatch record: whether fix sessions are
+// actually starting.
+//
+// A dispatch failure used to be a line in a log nobody read, so a wedged git
+// mirror stopped every session for hours while the queue looked busy. Counting
+// it here puts it on the dashboard and in the status line instead.
+type DrainHealth struct {
+	Host                string     `json:"host,omitempty"`
+	ConsecutiveFailures int        `json:"consecutive_failures,omitempty"`
+	LastError           string     `json:"last_error,omitempty"`
+	LastFailureAt       *time.Time `json:"last_failure_at,omitempty"`
+	LastSuccessAt       *time.Time `json:"last_success_at,omitempty"`
+}
+
+// Unhealthy reports whether dispatch has failed enough times in a row to be
+// worth someone's attention.
+func (d *DrainHealth) Unhealthy() bool {
+	return d != nil && d.ConsecutiveFailures >= DrainUnhealthyAfter
+}
+
+// NoteDispatch records one pass's outcome: whether any session started, and the
+// reason if none did.
+func (s *State) NoteDispatch(host string, started bool, reason string, now time.Time) {
+	if s.Drain == nil {
+		s.Drain = &DrainHealth{}
+	}
+	at := now.UTC()
+	s.Drain.Host = host
+	if started {
+		s.Drain.ConsecutiveFailures = 0
+		s.Drain.LastError = ""
+		s.Drain.LastSuccessAt = &at
+		return
+	}
+	s.Drain.ConsecutiveFailures++
+	s.Drain.LastError = reason
+	s.Drain.LastFailureAt = &at
 }
 
 // Queue-entry wait reasons. A waiting round is held by exactly one of these
