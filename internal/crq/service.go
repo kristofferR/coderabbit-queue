@@ -37,6 +37,10 @@ type GitHubAPI interface {
 	SearchOpenPRs(context.Context, string, bool, int) ([]ghapi.SearchPR, error)
 	EachOpenPR(context.Context, string, bool, func(ghapi.SearchPR) (bool, error)) error
 	GraphQL(context.Context, string, map[string]any, any) error
+	// GetRef reads a ref's SHA. It is the cheapest "did anything change?" probe
+	// crq has — a conditional GET that costs no quota while the ref is
+	// unchanged — which is what `crq wait` idles on.
+	GetRef(context.Context, string, string) (string, error)
 }
 
 type Service struct {
@@ -57,6 +61,14 @@ type Service struct {
 	// deterministically. It intentionally does NOT reach logging/jitter/token or
 	// the fake GitHub timestamps, which stay on real time.
 	now func() time.Time
+	// localWorkFn overrides Next's "does the caller hold changes the PR head
+	// lacks" probe, which otherwise shells out to git in the process's working
+	// directory. nil in production; tests inject an answer instead of depending
+	// on the checkout they happen to run in.
+	localWorkFn func(ctx context.Context, head string) (bool, string)
+	// sleepFn overrides how the waiter idles. Only tests set it — a replay must
+	// not spend real seconds to prove what the injected clock already decides.
+	sleepFn func(ctx context.Context, d time.Duration) error
 }
 
 func NewService(cfg Config, gh GitHubAPI, store StateStore, log Logger) *Service {
@@ -104,6 +116,10 @@ func (s *Service) Enqueue(ctx context.Context, repo string, pr int) (EnqueueResu
 	if err != nil {
 		return result, err
 	}
+	// Always report the head this actually read. It used to be set only on the
+	// deduped path, so a caller comparing it against its own observation could
+	// not detect the very case that matters — a head that moved between the two.
+	result.Head = head
 	state, err := s.store.Update(ctx, func(st *State) error {
 		now := s.clock()
 		r := st.Round(repo, pr)

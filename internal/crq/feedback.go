@@ -26,6 +26,21 @@ type FeedbackReport struct {
 	ReviewedBy map[string]bool   `json:"reviewed_by"`
 	Findings   []dialect.Finding `json:"findings"`
 	CheckedAt  time.Time         `json:"checked_at"`
+	// Open is whether the PR was open in the same observation Head and
+	// ReviewedBy came from. It is deliberately not serialized — the feedback
+	// JSON contract is frozen — and exists so a caller deciding an action reads
+	// head, open and evidence from ONE snapshot rather than re-reading the pull.
+	Open bool `json:"-"`
+	// HeadRef and HeadRepo describe where the PR's branch actually lives. On a
+	// fork PR that repository is not the one the PR is filed against, and a
+	// contributor's checkout only has a remote for it. Not serialized: the
+	// feedback JSON contract is frozen.
+	HeadRef  string `json:"-"`
+	HeadRepo string `json:"-"`
+	// LastEvidenceAt is when the newest review from a feedback bot landed. It
+	// anchors the settle window for a caller that holds no state between calls:
+	// "quiet since" is derivable, where the loop's in-process settledAt is not.
+	LastEvidenceAt time.Time `json:"-"`
 	// CodeRabbitDeferred marks a round degraded to Codex-only while the
 	// CodeRabbit account is rate-limited: Codex feedback is authoritative for
 	// this round, the CodeRabbit review stays queued and fires after
@@ -87,6 +102,9 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		Repo:       repo,
 		PR:         pr,
 		Head:       head,
+		Open:       obs.eng.Open,
+		HeadRef:    pull.Head.Ref,
+		HeadRepo:   NormalizeRepo(pull.Head.Repo.FullName),
 		ReviewedBy: map[string]bool{},
 		Findings:   []dialect.Finding{},
 		CheckedAt:  now,
@@ -107,6 +125,29 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	}
 	completion := engine.Completion(completionRound, obs.eng, s.policy())
 	report.ReviewedBy = completion.ReviewedBy
+	// Completion does not always arrive as a review: a clean-summary comment, a
+	// paired completion reply and a co-reviewer check run all satisfy it. Anchor
+	// the settle window on the newest of ANY of them, or a round completed by a
+	// comment would settle against a stale timestamp and converge instantly.
+	evidenceBots := dialect.BotSet(unionBots(s.cfg.FeedbackBots, s.cfg.RequiredBots))
+	noteEvidence := func(at time.Time) {
+		if at.After(report.LastEvidenceAt) {
+			report.LastEvidenceAt = at
+		}
+	}
+	for _, review := range obs.reviews {
+		if dialect.InBots(evidenceBots, review.User.Login) {
+			noteEvidence(review.SubmittedAt)
+		}
+	}
+	for _, comment := range obs.comments {
+		if dialect.InBots(evidenceBots, comment.User.Login) {
+			noteEvidence(comment.UpdatedAt)
+		}
+	}
+	for _, check := range obs.eng.Checks {
+		noteEvidence(check.CompletedAt)
+	}
 	verdictCutoff := anchorCutoff
 	if verdictCutoff.IsZero() {
 		// Not fired yet (queued behind another PR): without a fire anchor the

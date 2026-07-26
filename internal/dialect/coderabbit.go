@@ -399,3 +399,19 @@ func ParsePromptReviewFindings(body string, review ReviewMeta, bot string) []Fin
 	}
 	return out
 }
+
+// CLIRateLimitErrorType is the local CodeRabbit CLI's own name for an account
+// quota block, as emitted on its --agent JSON stream.
+//
+// The CLI spends the SAME account quota as the PR reviews crq queues, so this
+// string is quota evidence — but it is still CodeRabbit's vocabulary, and this
+// package is the only place allowed to know it. Orchestration asks
+// IsCLIRateLimit instead of matching the literal, so a renamed or added error
+// type is a one-line change here plus a corpus row, not a silent fallback to a
+// generic failure.
+const CLIRateLimitErrorType = "rate_limit"
+
+// IsCLIRateLimit reports whether a CLI error type means the account is blocked.
+func IsCLIRateLimit(errorType string) bool {
+	return strings.EqualFold(strings.TrimSpace(errorType), CLIRateLimitErrorType)
+}

@@ -1,3 +1,8 @@
 dist/
 *.log
 .DS_Store
+
+# crq report output. Anything left in the working tree reads as unlanded work,
+# which would make `crq next` answer "push" forever instead of "done".
+crq-next.json
+crq-feedback.json

@@ -1,36 +1,54 @@
 #!/usr/bin/env bash
-# Minimal agent wrapper around crq's JSON/exit-code contract.
+# Minimal agent wrapper around crq's next-action contract.
+#
+# One step of the loop: ask crq what to do about this PR and print it. There is
+# no exit code to interpret and no delay to invent — `crq next` answers both.
+# Drop this inside your own while-loop, or let your agent drive it.
 set -euo pipefail
 
 REPO="${REPO:?set REPO=owner/name}"
 PR="${PR:?set PR=<number>}"
-OUT="${OUT:-crq-feedback.json}"
+# Default OUT lives OUTSIDE the checkout on purpose. crq decides push-vs-done by
+# asking whether the working tree holds changes the PR head lacks, so a report
+# written into the repository is itself uncommitted work: the loop would then
+# read as "push" forever and could never reach "done".
+if [ -n "${OUT:-}" ]; then
+  # A caller-provided path is theirs to keep; only clean up what we created.
+  :
+else
+  OUT="$(mktemp -t crq-next.XXXXXX.json)"
+  trap 'rm -f "$OUT"' EXIT
+fi
 
-set +e
-crq loop "$REPO" "$PR" > "$OUT"
-rc=$?
-set -e
+crq next "$REPO" "$PR" > "$OUT"
+action=$(jq -r .action "$OUT")
+reason=$(jq -r '.reason // ""' "$OUT")
+recheck=$(jq -r '.recheck_after // ""' "$OUT")
 
-case "$rc" in
-  0)
-    echo "converged or no actionable findings; see $OUT"
-    ;;
-  10)
-    echo "actionable findings written to $OUT"
-    echo "fix valid findings and validate locally"
-    echo "resolve each addressed thread immediately after its local fix:"
+echo "action: $action${reason:+ — $reason}"
+
+case "$action" in
+  fix)
+    echo "fix the findings in $OUT and validate locally, then resolve each addressed thread:"
     echo "  jq -r '.findings[] | select(.thread_id != null) | .thread_id' '$OUT'"
-    echo "  crq resolve '$REPO' '$PR' --thread THREAD_ID"
-    echo "if any .reviewed_by value is false: HOLD THE HEAD; do not commit or push"
-    echo "after every required bot is true: fix/resolve the rest, then commit/push once"
+    echo "  crq resolve THREAD_ID [THREAD_ID...]"
+    echo "  crq decline THREAD_ID --reason 'why not addressed'"
     ;;
-  2)
-    echo "timed out waiting for feedback; do not push a stale-feedback round; see $OUT"
+  hold)
+    echo "DO NOT commit or push — moving the head restarts the pending review"
+    echo "pending reviewers: $(jq -r '(.pending // []) | join(", ")' "$OUT")"
+    echo "call crq next again at $recheck"
     ;;
-  *)
-    echo "crq loop failed with exit $rc"
+  push)
+    echo "the head is released; commit and push your accumulated fixes once, then call crq next again"
+    ;;
+  wait)
+    echo "nothing to do; call crq next again at $recheck"
+    ;;
+  done)
+    echo "converged"
+    ;;
+  blocked)
+    echo "needs a human"
     ;;
 esac
-
-# Propagate crq's exit code so automation can branch on findings/timeout/convergence.
-exit "$rc"

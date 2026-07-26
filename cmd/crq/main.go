@@ -117,6 +117,53 @@ func run(ctx context.Context, args []string) int {
 		}
 		printJSON(report)
 		return 0
+	case "next":
+		if bad, found := unknownFlag(args[1:], "--wait"); found {
+			fatal(fmt.Errorf("unknown flag %s (usage: crq next <repo> <pr> [--wait])", bad))
+			return 1
+		}
+		repo, pr, ok := repoPR(positional(args[1:]))
+		if !ok {
+			fatal(errors.New("usage: crq next <repo> <pr> [--wait]"))
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		var report crq.NextReport
+		var err error
+		if hasFlag(args[1:], "--wait") {
+			report, err = service.NextWaiting(ctx, repo, pr)
+		} else {
+			report, err = service.Next(ctx, repo, pr)
+		}
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		printJSON(report)
+		// The action field is the whole contract: exit 0 for every action so a
+		// caller never has to interpret two things at once.
+		return 0
+	case "wait":
+		repo, pr, ok := repoPR(args[1:])
+		if !ok {
+			fatal(errors.New("usage: crq wait <repo> <pr>"))
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		report, err := service.WaitForAction(ctx, repo, pr)
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		printJSON(report)
+		// Same contract as next: the action is the answer, the exit code is not.
+		return 0
 	case "loop":
 		repo, pr, ok := repoPR(args[1:])
 		if !ok {
@@ -137,11 +184,11 @@ func run(ctx context.Context, args []string) int {
 	case "resolve":
 		threads, ok := parseResolveArgs(args[1:])
 		if !ok {
-			fatal(errors.New("usage: crq resolve <repo> <pr> --thread <id> [--thread <id>...]"))
+			fatal(errors.New("usage: crq resolve <thread-id> [<thread-id>...]"))
 			return 1
 		}
 		if len(threads) == 0 {
-			fatal(errors.New("usage: crq resolve <repo> <pr> --thread <id> [--thread <id>...]"))
+			fatal(errors.New("usage: crq resolve <thread-id> [<thread-id>...]"))
 			return 1
 		}
 		result, err := service.ResolveThreads(ctx, threads)
@@ -154,7 +201,7 @@ func run(ctx context.Context, args []string) int {
 	case "decline":
 		threads, reason, resolve, ok := parseDeclineArgs(args[1:])
 		if !ok || len(threads) == 0 || strings.TrimSpace(reason) == "" {
-			fatal(errors.New(`usage: crq decline <repo> <pr> --thread <id> [--thread <id>...] --reason "<why>" [--resolve]`))
+			fatal(errors.New(`usage: crq decline <thread-id> [<thread-id>...] --reason "<why>" [--keep-open]`))
 			return 1
 		}
 		result, err := service.DeclineThreads(ctx, threads, reason, resolve)
@@ -262,26 +309,38 @@ func usage() {
 	fmt.Print(`crq - CodeRabbit review queue for humans and automation
 
 QUEUE WORKFLOWS
+  crq next <repo> <pr>             ask what to do next about a PR (the agent loop)
+  crq wait <repo> <pr>             block until there IS something to do, then say what
   crq loop <repo> <pr>             queue one PR review round, then emit JSON feedback
   crq autoreview                   keep open PRs reviewed through the same queue
   crq status                       show the queue, in-flight review, and quota state
 
-ONE PR ROUND
-  1. Run: crq loop <repo> <pr> > crq-feedback.json
-  2. If exit 10, read .findings[], fix only valid findings, and validate locally.
-  3. Resolve each addressed thread immediately after its local fix; do not wait for a push.
-  4. If any .reviewed_by value is false, HOLD THE HEAD: do not commit or push.
-  5. After every required bot is true, fix/resolve the rest, then commit and push once.
-  6. Repeat crq loop until exit 0. Never post @coderabbitai review directly.
+DRIVING A PR REVIEW
+  Call crq next, do exactly what .action says, call it again. That is the whole loop.
+
+    fix      fix .findings[], validate, then crq resolve (or crq decline) each thread
+    hold     do NOT push: a required reviewer is pending; call again at .recheck_after
+    push     the head is released — commit and push your fixes once
+    wait     nothing to do; call again at .recheck_after
+    done     converged
+    blocked  needs a human; .reason says why
+
+  crq next is non-blocking and idempotent, so nothing is lost if it is interrupted.
+  On wait or hold, hand the delay to crq wait — run it as your harness's background
+  task and let its EXIT wake you. It owns nothing, so being killed costs only itself.
+  Never invent a delay of your own, and never post @coderabbitai review directly.
 
 USAGE
   crq init                         initialize state in CRQ_REPO
+  crq next <repo> <pr> [--wait]    emit the single next action as JSON (--wait blocks)
+  crq wait <repo> <pr>             block until actionable, then emit that action as JSON
   crq loop <repo> <pr>             coordinated trigger -> wait -> JSON feedback/convergence
   crq feedback <repo> <pr>         emit normalized actionable review findings as JSON
-  crq resolve <repo> <pr> --thread <id> [...]
+  crq resolve <thread-id> [<thread-id>...]
                                    resolve addressed GitHub review threads
-  crq decline <repo> <pr> --thread <id> [...] --reason "<why>" [--resolve]
+  crq decline <thread-id> [...] --reason "<why>" [--keep-open]
                                    reply on a thread to record why a finding is declined
+                                   (resolves it; --keep-open leaves it open)
   crq autoreview [--once] [--no-incremental]
                                    keep open PRs reviewed, rate-coordinated
   crq preflight [--type all|committed|uncommitted] [--base <branch>]
@@ -293,6 +352,7 @@ USAGE
                                    maintenance tools; not for normal review loops
 
 EXIT CODES
+  next: always 0 on success — read .action, not the exit code
   loop: 0 converged/no actionable findings/skipped, 10 actionable feedback, 2 timeout
 
 Configure with environment variables or ~/.config/crq/env. CRQ_REPO points at the gate repo.
@@ -303,6 +363,67 @@ Use "crq help <command>" for command-specific guidance.
 
 func commandHelp(command string) {
 	switch command {
+	case "next":
+		fmt.Print(`crq next <repo> <pr> [--wait]
+
+The agent loop, in one command: crq answers what to do next about this PR, you do
+exactly that, then you call it again. Non-blocking, idempotent, and it advances the
+queue by one step as a side effect — so a PR outside the autoreview fleet still
+progresses, and an interrupted caller loses nothing by calling again.
+
+Always exits 0 on success. Read .action; the exit code carries no information.
+
+  fix      .findings[] are actionable for the current head. Fix them, validate, then
+           crq resolve each addressed .thread_id (or crq decline with a reason).
+  hold     You have work to land but a required reviewer has not answered for this
+           head. Do NOT commit or push — that restarts the review. Resolving threads
+           is still fine. Call again at .recheck_after.
+  push     The head is released. Commit and push the accumulated fixes once.
+  wait     Nothing to do until .recheck_after.
+  done     Converged: no findings, every required reviewer answered.
+  blocked  Needs a human (.reason says why, e.g. the PR was closed).
+
+Fields:
+  action            the instruction — the entire contract
+  reason            why, in one line
+  recheck_after     when to call again (hold and wait). crq computes this from the
+                    account-quota window, the round's retry cooldown and the poll
+                    interval. Never substitute a delay of your own.
+  pending[]         required reviewers with no evidence for this head
+  findings[]        actionable feedback (fix); same shape as crq feedback
+  local_work        whether crq saw changes the PR head lacks — what separates push
+                    from done. Run crq next inside the repository checkout so this
+                    is accurate; local_work_reason says when it could not be.
+
+--wait blocks through the states you cannot act on and returns the first actionable
+instruction. It shares one code path with the non-blocking form.
+
+Never post @coderabbitai review directly; crq is the only trigger.
+`)
+	case "wait":
+		fmt.Print(`crq wait <repo> <pr>
+
+Block until there is something to DO about this PR, then print that instruction
+(the same JSON as crq next) and exit 0.
+
+This is how an ephemeral agent waits. Run it as your harness's background task and
+end your turn: its EXIT is the wake event, so you burn no tokens idling and invent
+no delay. It holds no round, so if it is killed the round is untouched — just run
+it again, or call crq next.
+
+It is read-only in the steady state, but NOT unconditionally: if nothing is
+advancing this PR (no round for the head, or no daemon holding the leader lease)
+it drives the queue itself rather than wait for nobody, which can request a
+review and spend account quota.
+
+It returns on fix, push, done and blocked. wait and hold are the two states it
+waits THROUGH, because they mean "come back later" and that is its whole job.
+
+While idle it watches the shared state ref with a conditional request, which costs
+no rate-limit quota, and re-evaluates when the queue moves. If no autoreview daemon
+holds the leader lease it drives the queue itself instead, which works but spends
+more of the shared budget — run the daemon.
+`)
 	case "loop":
 		fmt.Print(`crq loop <repo> <pr>
 
@@ -352,7 +473,7 @@ Each finding has:
 Sources include review_thread, review_comment, review_body, review_prompt, and issue_comment.
 `)
 	case "resolve":
-		fmt.Print(`crq resolve <repo> <pr> --thread <id> [--thread <id>...]
+		fmt.Print(`crq resolve <thread-id> [<thread-id>...]
 
 Resolve only GitHub review threads that were actually addressed by the latest fix.
 Leave declined, stale, incorrect, or deferred findings unresolved.
@@ -360,14 +481,19 @@ Leave declined, stale, incorrect, or deferred findings unresolved.
 Thread IDs come from .findings[].thread_id in crq loop/feedback output.
 `)
 	case "decline":
-		fmt.Print(`crq decline <repo> <pr> --thread <id> [--thread <id>...] --reason "<why>" [--resolve]
+		fmt.Print(`crq decline <thread-id> [<thread-id>...] --reason "<why>" [--keep-open]
 
 Record on the PR why a finding is being declined: posts the reason as a reply on
 each review thread. Use this instead of silently leaving a finding unaddressed, so
 the next reviewer (and CodeRabbit) can see the decision.
 
-By default the thread stays unresolved (an on-the-record disagreement). Pass
---resolve to also close it ("won't fix"). Thread IDs come from .findings[].thread_id.
+Declining RESOLVES the thread, because crq reads GitHub's resolution state: a
+thread left open keeps its finding actionable, so crq next would repeat "fix"
+forever and never reach push or done. The disagreement is not lost — if the bot
+replies contesting the decline, crq re-surfaces that reply as its own finding.
+
+Pass --keep-open to leave it unresolved anyway (an on-the-record disagreement you
+intend to keep working). Thread IDs come from .findings[].thread_id.
 `)
 	case "autoreview", "auto":
 		fmt.Print(`crq autoreview [--once] [--no-incremental]
@@ -400,7 +526,11 @@ Exit codes:
   0   clean/no local findings
   10  local findings returned in .findings[]
   1   setup, auth, CLI, or parsing error
-  2   timeout
+  2   come back later: a timeout, or the CodeRabbit account is rate-limited
+      (.status is "rate_limited", with .retry_after and .error_type)
+
+The local CLI spends the same account quota as PR reviews, so a local block is
+evidence about that shared quota — read .retry_after rather than re-running.
 
 Use crq loop for queued GitHub PR reviews.
 `)
@@ -489,59 +619,122 @@ func isHelpArg(arg string) bool {
 	return arg == "-h" || arg == "--help" || arg == "help"
 }
 
-func parseResolveArgs(args []string) ([]string, bool) {
-	var positional []string
-	var threads []string
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--thread":
-			if i+1 >= len(args) {
-				return nil, false
-			}
-			threads = append(threads, args[i+1])
-			i++
-		default:
-			positional = append(positional, args[i])
+// hasFlag reports whether args contains the exact flag.
+func hasFlag(args []string, flag string) bool {
+	for _, arg := range args {
+		if arg == flag {
+			return true
 		}
 	}
-	if len(positional) != 0 && len(positional) < 2 {
-		return nil, false
+	return false
+}
+
+// unknownFlag returns the first flag in args that is not in allowed.
+//
+// positional() drops anything starting with "-", so without this a mistyped
+// --wiat silently ran the non-blocking form: the caller gets a plausible report
+// and waits forever for a blocking call that never happened. A typo must fail.
+func unknownFlag(args []string, allowed ...string) (string, bool) {
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			continue
+		}
+		known := false
+		for _, candidate := range allowed {
+			if arg == candidate {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return arg, true
+		}
 	}
-	if len(positional) > 2 {
-		threads = append(threads, positional[2:]...)
+	return "", false
+}
+
+// positional drops flag arguments so repoPR sees only <repo> <pr>.
+func positional(args []string) []string {
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			out = append(out, arg)
+		}
 	}
-	return threads, true
+	return out
+}
+
+func parseResolveArgs(args []string) ([]string, bool) {
+	threads, _, _, ok := parseThreadCommand(args, false)
+	return threads, ok
 }
 
 func parseDeclineArgs(args []string) (threads []string, reason string, resolve, ok bool) {
+	return parseThreadCommand(args, true)
+}
+
+// parseThreadCommand parses the shape shared by `crq resolve` and `crq decline`:
+// any number of thread IDs, written bare or behind --thread.
+//
+// Thread node IDs are globally unique, so the <repo> <pr> this command used to
+// demand never identified anything — ResolveThreads discarded them. They are
+// still accepted so existing call sites keep working, and dropped here. Taking
+// IDs bare is what lets a caller clear a whole round in one process instead of
+// one subprocess per thread.
+//
+// An unrecognized flag is an error rather than a positional: a typo like
+// `--resove` must fail loudly, not silently become a thread ID.
+func parseThreadCommand(args []string, allowReason bool) (threads []string, reason string, resolve, ok bool) {
+	// Declining resolves the thread unless the caller asks to keep it open.
+	// Leaving it open by default made `crq next` repeat `fix` forever: crq keys
+	// off GitHub's resolution state, so a documented decline cleared nothing and
+	// the loop could never reach push or done. A bot that disagrees still gets
+	// heard — a contested reply is re-surfaced as its own finding.
+	resolve = allowReason
+	var keepOpen bool
 	var positional []string
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--thread":
+		arg := args[i]
+		switch {
+		case arg == "--thread":
 			if i+1 >= len(args) {
 				return nil, "", false, false
 			}
 			threads = append(threads, args[i+1])
 			i++
-		case "--reason":
+		case allowReason && arg == "--reason":
 			if i+1 >= len(args) {
 				return nil, "", false, false
 			}
 			reason = args[i+1]
 			i++
-		case "--resolve":
+		case allowReason && arg == "--resolve":
+			// Kept as an accepted no-op: resolving is now the default, and
+			// failing on a flag that used to be required would break callers.
 			resolve = true
+		case allowReason && arg == "--keep-open":
+			keepOpen = true
+		case strings.HasPrefix(arg, "-"):
+			return nil, "", false, false
 		default:
-			positional = append(positional, args[i])
+			positional = append(positional, arg)
 		}
 	}
-	if len(positional) != 0 && len(positional) < 2 {
-		return nil, "", false, false
+	if keepOpen {
+		resolve = false
 	}
-	if len(positional) > 2 {
-		threads = append(threads, positional[2:]...)
+	return append(threads, dropLegacyTarget(positional)...), reason, resolve, true
+}
+
+// dropLegacyTarget removes a leading "owner/repo" plus its PR number — the
+// arguments these commands used to require — leaving only thread IDs.
+func dropLegacyTarget(positional []string) []string {
+	if len(positional) >= 2 && strings.Contains(positional[0], "/") {
+		if _, err := strconv.Atoi(positional[1]); err == nil {
+			return positional[2:]
+		}
 	}
-	return threads, reason, resolve, true
+	return positional
 }
 
 func printJSON(value any) {
@@ -637,7 +830,7 @@ func doctor(ctx context.Context) doctorReport {
 			"crq preflight --type uncommitted",
 			"crq loop <repo> <pr>",
 			"crq feedback <repo> <pr>",
-			"crq resolve <repo> <pr> --thread <thread_id>",
+			"crq resolve <thread-id>",
 			"crq autoreview --once",
 		},
 		Recommendations: []string{},

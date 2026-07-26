@@ -40,9 +40,17 @@ type PreflightReport struct {
 	Findings      []PreflightFinding `json:"findings"`
 	Stderr        string             `json:"stderr,omitempty"`
 	Error         string             `json:"error,omitempty"`
-	ExitCode      int                `json:"exit_code"`
-	CheckedAt     time.Time          `json:"checked_at"`
-	DurationMS    int64              `json:"duration_ms"`
+	// ErrorType is the CLI's own classification of a failure ("rate_limit",
+	// ...). Recoverable and RetryAfter come with it. crq keeps them because the
+	// local CLI shares the SAME account quota as the PR reviews the queue
+	// serializes: a local rate limit is direct evidence about that quota, given
+	// for free, with no probe comment and no GitHub round trip.
+	ErrorType   string    `json:"error_type,omitempty"`
+	Recoverable bool      `json:"recoverable,omitempty"`
+	RetryAfter  string    `json:"retry_after,omitempty"`
+	ExitCode    int       `json:"exit_code"`
+	CheckedAt   time.Time `json:"checked_at"`
+	DurationMS  int64     `json:"duration_ms"`
 }
 
 type PreflightStatus struct {
@@ -149,7 +157,18 @@ func Preflight(ctx context.Context, opts PreflightOptions) (PreflightReport, int
 			code = exitErr.ExitCode()
 		}
 		report.Status = "error"
-		report.Error = waitErr.Error()
+		// Keep the CLI's own message. Overwriting it with "exit status 1" threw
+		// away the only useful part — a caller was told the command failed but
+		// not that the account was rate-limited, nor for how long.
+		if report.Error == "" {
+			report.Error = waitErr.Error()
+		}
+		// A rate limit is not a broken setup: nothing is misconfigured and the
+		// answer is to come back later, which is what exit 2 already means here.
+		if dialect.IsCLIRateLimit(report.ErrorType) {
+			report.Status = "rate_limited"
+			code = 2
+		}
 		report.ExitCode = code
 		return report, code, waitErr
 	}
@@ -234,6 +253,13 @@ func applyPreflightEvent(report *PreflightReport, event map[string]any) {
 	case "error":
 		if msg := firstNonEmpty(stringField(event, "message"), stringField(event, "error")); msg != "" {
 			report.Error = msg
+		}
+		report.ErrorType = stringField(event, "errorType")
+		if v, ok := event["recoverable"].(bool); ok {
+			report.Recoverable = v
+		}
+		if meta, ok := event["metadata"].(map[string]any); ok {
+			report.RetryAfter = stringField(meta, "waitTime")
 		}
 	}
 }

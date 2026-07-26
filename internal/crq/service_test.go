@@ -35,7 +35,11 @@ type fakeGitHub struct {
 	nextIssueNumber int
 	postErrs        map[string]error
 	graphQL         func(query string, vars map[string]any, out any) error
-	searchPRs       []ghapi.SearchPR
+	// stateRef is the SHA GetRef reports; tests that exercise `crq wait` move it
+	// to signal "the queue advanced".
+	stateRef  string
+	refReads  int
+	searchPRs []ghapi.SearchPR
 	// now, when set, timestamps posted comments off the same injected clock the
 	// service uses, so a fire's recorded FiredAt tracks the fake wall clock the
 	// replay suite advances. nil falls back to real time (all existing tests).
@@ -229,6 +233,24 @@ func (f *fakeGitHub) EachOpenPR(_ context.Context, _ string, _ bool, fn func(gha
 		}
 	}
 	return nil
+}
+
+// GetRef reports the fake state ref. It is what `crq wait` idles on, so tests
+// count the reads to assert the wait stays cheap.
+func (f *fakeGitHub) GetRef(_ context.Context, _, _ string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refReads++
+	if f.stateRef == "" {
+		return "ref0", nil
+	}
+	return f.stateRef, nil
+}
+
+func (f *fakeGitHub) setStateRef(sha string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stateRef = sha
 }
 
 func (f *fakeGitHub) GraphQL(_ context.Context, query string, vars map[string]any, out any) error {

@@ -86,6 +86,10 @@ type GitStateStore struct {
 	cfg StoreConfig
 	gh  *gh.GitHub
 	log Logger
+
+	// syncMu serializes the read-then-write in SyncDashboard, so concurrent
+	// syncs cannot both see a stale gate issue and both write it.
+	syncMu sync.Mutex
 }
 
 func NewGitStateStore(cfg StoreConfig, client *gh.GitHub, log Logger) *GitStateStore {
@@ -237,6 +241,24 @@ func (s *GitStateStore) compareAndSwap(ctx context.Context, st *State, rev Revis
 	return err
 }
 
+// SyncDashboard renders the gate issue and writes it only when the issue does
+// not already say exactly that.
+//
+// Every caller that touches state calls this, including read-mostly paths like
+// Enqueue that usually report ErrNoChange — so an unconditional PATCH here made
+// a plain `crq next` a write, and writes are the endpoint class that trips
+// GitHub's *secondary* rate limits (the reason enqueues were batched in the
+// first place).
+//
+// The check reads the issue rather than remembering what this process last
+// wrote. A memo would be cheaper still, but it would also stop the dashboard
+// ever self-healing: an issue edited by hand, or by a binary running different
+// code, would stay wrong until state happened to change. Reading costs nothing
+// to be right — GetIssue is a conditional GET, so an unchanged issue answers
+// 304 from cache and spends no quota.
+//
+// A read failure is never fatal: fall through and PATCH, which is the old
+// behavior.
 func (s *GitStateStore) SyncDashboard(ctx context.Context, st State) error {
 	if err := s.cfg.requireDashboard(); err != nil {
 		return err
@@ -245,7 +267,18 @@ func (s *GitStateStore) SyncDashboard(ctx context.Context, st State) error {
 	if err != nil {
 		return err
 	}
-	return s.gh.PatchIssue(ctx, s.cfg.GateRepo, s.cfg.DashboardIssue, RenderTitle(st), body)
+	title := RenderTitle(st)
+
+	// Held across read-then-write so two concurrent syncs cannot both observe a
+	// stale issue and both write it.
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+
+	if issue, err := s.gh.GetIssue(ctx, s.cfg.GateRepo, s.cfg.DashboardIssue); err == nil &&
+		issue.Body == body && issue.Title == title {
+		return nil
+	}
+	return s.gh.PatchIssue(ctx, s.cfg.GateRepo, s.cfg.DashboardIssue, title, body)
 }
 
 // MemoryStore is the in-memory store used by tests and the fake-GitHub harness.

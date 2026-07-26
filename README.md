@@ -45,10 +45,11 @@ yourself anymore — you ask `crq`, and `crq`:
   recent history, and when the next slot opens.
 - 🌍 **Works across machines** — all state lives on GitHub, so agents on your laptop, a server, and
   a CI box all share the same queue with zero extra infrastructure.
-- 🔁 **Drives the round** — `crq loop` doesn't just trigger; it waits for CodeRabbit *and* Codex on
-  the current head, returns every finding as normalized JSON, and reports convergence.
+- 🔁 **Drives the round** — `crq next` doesn't just trigger; it tracks CodeRabbit *and* Codex on the
+  current head and answers with the one thing to do now: fix these findings, hold the head, push,
+  wait until this time, or done.
 
-One agent changes one line — `gh pr comment ... @coderabbitai review` becomes `crq loop <repo> <pr>` —
+One agent changes one line — `gh pr comment ... @coderabbitai review` becomes `crq next <repo> <pr>` —
 and the chaos is gone.
 
 > ## ⚠️ Required: turn OFF CodeRabbit auto-review
@@ -78,7 +79,7 @@ and the chaos is gone.
 
 ```text
    agent A ─┐
-   agent B ─┼─►  crq loop <repo> <pr>
+   agent B ─┼─►  crq next <repo> <pr>
    agent C ─┘          │
                        ▼
         ┌──────────────────────────────┐     asks "any capacity?"
@@ -174,12 +175,16 @@ gh pr comment "$PR" --repo "$REPO" --body "@coderabbitai review"   # ❌ compete
 with this:
 
 ```bash
-crq loop "$REPO" "$PR" > crq-feedback.json   # ✅ queues, fires when ready, waits, emits findings
+crq next "$REPO" "$PR"   # ✅ tells you the one thing to do next
 ```
 
-`crq loop` gets in line, fires the review exactly once when CodeRabbit has capacity, waits for
-CodeRabbit and Codex on the current head, and writes the findings as JSON. Its exit code tells you
-what to do next: `0` converged, `10` actionable findings in the JSON, `2` timed out.
+`crq next` gets the PR in line, fires the review exactly once when CodeRabbit has capacity, and
+answers with a single instruction: `fix` (findings are attached), `hold` (a required reviewer is
+still pending — don't move the head), `push`, `wait` until a time crq computed, `done`, or `blocked`.
+Call it, do what it says, call it again. It is non-blocking and idempotent, so there is no long-lived
+process to babysit.
+
+`crq loop` is still there as the blocking one-shot form for humans and scripts.
 
 ---
 
@@ -269,31 +274,41 @@ Or, if you don't want a long-running process, run `crq autoreview --once` from c
 
 ## ⭐ The recommended PR-review loop
 
-This is the autonomous review loop crq was built for. First drain existing work with
-`crq feedback`: while `.findings` is non-empty, fix or explicitly decline it, validate locally, and
-resolve the addressed thread immediately. Do not wait for or trigger another review while actionable
-feedback is open.
-`crq loop` enforces that invariant by returning unresolved findings before it queues a fresh
-round, and actionable findings take precedence over a feedback timeout.
-If any configured feedback bot reports a finding while another required bot is still pending,
-`crq loop` returns immediately so you can fix it locally. **Hold the PR head:** do not commit or push,
-because changing the head restarts the pending checks. Resolve the addressed thread immediately after
-its local fix—thread resolution does not change the head. Leave the queued review alive and poll
-`crq feedback` with the same `CRQ_REQUIRED_BOTS`. After every `.reviewed_by` value is true, fix and
-resolve the rest, combine all fixes into one commit, and push once. The same policy applies while the
-PR is queued for an account-wide review slot.
+This is the autonomous review loop crq was built for, and it is one command:
+
+```bash
+crq next "$REPO" "$PR"
+```
+
+Read `.action`, do exactly that, call it again.
+
+| `.action` | what to do |
+|---|---|
+| `fix` | fix `.findings[]`, validate, then `crq resolve` (or `crq decline`) each thread |
+| `hold` | **do not commit or push** — a required reviewer hasn't answered for this head; call again at `.recheck_after` |
+| `push` | the head is released — commit and push your fixes once |
+| `wait` | nothing to do until `.recheck_after` |
+| `done` | converged |
+| `blocked` | needs a human; `.reason` says why |
+
+Every rule this used to spell out is now a value crq computes. Drain-before-review is `fix` coming
+before everything else. Hold-the-head is the `hold` action, including the exception where a
+CodeRabbit rate-limit degrade releases the head because the queued review will fire on whatever head
+exists when the window opens. The wait is `.recheck_after`, derived from the account-quota window,
+the round's retry cooldown and the poll interval — never a delay you invent. And because `crq next`
+returns immediately and is idempotent, an interrupted run loses nothing: call it again.
 
 Thread-less review-body summaries from an older commit are informational after a fix is pushed:
 they cannot be resolved on GitHub, so they do not block a current-head review. That review either
 re-reports a still-valid finding or supersedes the stale summary.
 
-`crq loop` *is* the review-round primitive — it
-enqueues, fires when unblocked, waits for both bots on the current head, and emits normalized JSON —
-so you never hand-poll the GitHub API (which would burn the shared REST quota). Run one per PR, on as
-many PRs and machines as you like; they all share the queue without competing.
+crq *is* the review-round primitive — it enqueues, fires when unblocked, tracks both bots on the
+current head, and emits normalized JSON — so you never hand-poll the GitHub API (which would burn the
+shared REST quota). Run it on as many PRs and machines as you like; they all share the queue without
+competing.
 
 If the fleet `crq autoreview` daemon is already running, leave it running and do not create another
-watcher. A manual `crq loop` and autoreview coordinate through the same idempotent queue entry. After
+watcher. A manual `crq next` and autoreview coordinate through the same idempotent queue entry. After
 a push, whichever path sees the new head first enqueues it; the other re-attaches without spending a
 second review or posting another CodeRabbit trigger.
 
@@ -301,37 +316,55 @@ second review or posting another CodeRabbit trigger.
 #!/usr/bin/env bash
 # review-loop.sh — autonomously address CodeRabbit + Codex feedback until a PR converges.
 #   REPO=owner/name PR=123 ./review-loop.sh
+#
+# The whole loop is: ask crq what to do, do it, ask again. No exit codes to
+# interpret, no sleep to guess, no rule about when the head may move.
 set -uo pipefail
 REPO="${REPO:?set REPO=owner/name}"; PR="${PR:?set PR=<number>}"
 
+# Keep the report OUT of the checkout: crq decides push-vs-done by asking whether
+# the working tree holds changes the PR head lacks, so a report written next to
+# your code is itself uncommitted work and the loop can never reach "done".
+OUT="$(mktemp -t crq-next.XXXXXX.json)"; trap 'rm -f "$OUT"' EXIT
+
 while :; do
-  # crq loop: enqueue + rate-coordinated trigger + wait for feedback. Exit codes:
-  #   0 = converged   10 = actionable findings in JSON   2 = timed out
-  crq loop "$REPO" "$PR" > crq-feedback.json; rc=$?
-  case "$rc" in
-    0) echo "✅ $REPO#$PR converged."; break ;;
-    2) echo "timed out; not pushing a stale-feedback round"; sleep 60; continue ;;
-    10) : ;;  # fall through and fix
-    *) echo "crq loop error ($rc)"; exit "$rc" ;;
+  crq next "$REPO" "$PR" > "$OUT" || exit 1
+  action=$(jq -r .action "$OUT")
+
+  case "$action" in
+    done)    echo "✅ $REPO#$PR converged."; break ;;
+    blocked) echo "⛔ $(jq -r .reason "$OUT")"; exit 1 ;;
+
+    fix)
+      # Read findings, fix the real ones, run your tests/linters.
+      jq -r '.findings[] | "\(.severity) \(.path // "-"):\(.line // 0) — \(.title)"' "$OUT"
+      #   ... apply fixes and validate ...
+
+      # Resolve the threads you addressed; record why for any you decline.
+      threads=$(jq -r '.findings[] | select(.thread_id != null) | .thread_id' "$OUT")
+      # shellcheck disable=SC2086 -- thread ids are opaque tokens with no spaces
+      [ -n "$threads" ] && crq resolve $threads
+      # crq decline <id> --reason "why this one is declined"
+      ;;
+
+    push)    git add -A && git commit -m "address review feedback" && git push ;;
+
+    hold|wait)
+      # Don't compute a delay — hand the wait over. crq wait blocks until there
+      # is something to do and exits, so there is no timestamp to parse and no
+      # sleep to guess. (Parsing .recheck_after yourself needs GNU date; this
+      # doesn't.)
+      echo "$action: $(jq -r .reason "$OUT")"
+      crq wait "$REPO" "$PR" > "$OUT" || exit 1
+      ;;
   esac
-
-  # Read findings, fix the real ones, run your tests/linters, then resolve them immediately.
-  jq -r '.findings[] | "\(.severity) \(.path // "-"):\(.line // 0) — \(.title)"' crq-feedback.json
-  #   ... apply fixes and validate ...
-
-  # Resolve the threads you addressed; record why for any you decline.
-  jq -r '.findings[] | select(.thread_id != null) | .thread_id' crq-feedback.json \
-    | xargs -I{} crq resolve "$REPO" "$PR" --thread {}
-  # crq decline "$REPO" "$PR" --thread <id> --reason "why this one is declined"
-  # If reviewers are still pending, keep the head frozen and resume with crq feedback.
-  # After all required reviewers finish: fix/resolve the rest, then git commit && git push once.
 done
 ```
 
 [`examples/review-loop.sh`](examples/review-loop.sh) is a minimal **one-shot wrapper** around the
-same contract — it runs `crq loop` once, prints what to do for each exit code, and exits with crq's
-code. It is the building block, not the full autonomous loop above: drop it inside your own
-`while`/fix/push/resolve cycle (or let your agent drive the loop).
+same contract — it runs `crq next` once and prints what to do for the action it returns. It is the
+building block, not the full autonomous loop above: drop it inside your own `while` cycle (or let
+your agent drive the loop).
 
 > 💡 **Watching the line:** run `crq status` any time to see the queue, what's in flight, and the
 > next slot. Or open the gate **issue** on GitHub — it **is** the live dashboard.
@@ -347,10 +380,11 @@ least 10 minutes of silence.
 ## Commands
 
 ```bash
-crq loop <repo> <pr>      # ⭐ enqueue + fire + wait for both bots + emit JSON findings (use in loops)
+crq next <repo> <pr>      # ⭐ the agent loop: emit the single next action as JSON (--wait blocks)
+crq loop <repo> <pr>      # blocking one-shot round: fire + wait + emit JSON findings
 crq feedback <repo> <pr>  # current normalized findings as JSON, WITHOUT triggering a review
-crq resolve <repo> <pr> --thread <id> [...]                 # resolve addressed review threads
-crq decline <repo> <pr> --thread <id> --reason "<why>" [--resolve]   # record why a finding is declined
+crq resolve <thread-id> [<thread-id>...]                    # resolve addressed review threads
+crq decline <thread-id> [...] --reason "<why>" [--resolve]  # record why a finding is declined
 crq autoreview            # ⭐ review ALL open PRs automatically, rate-coordinated
                           #    (--no-incremental = first review only; --once = single pass for cron)
 crq status                # show the dashboard: queue, in-flight, quota, next slot
@@ -358,12 +392,13 @@ crq doctor                # JSON readiness report (gh/auth/config/CLI) — never
 crq preflight [...]       # run the local CodeRabbit CLI pre-push and normalize its JSON
 crq cancel <repo> <pr>    # take a PR out of the line
 crq init                  # first-time setup of the gate repo
-crq debug <enqueue|pump|refresh|state>   # diagnosis only — review loops should use crq loop
+crq debug <enqueue|pump|refresh|state>   # diagnosis only — review loops should use crq next
 crq version               # print the version
 crq help [command]        # help, optionally for one command
 ```
 
-`<repo>` is `owner/name`; `<pr>` is the number. **`crq loop` exit codes:** `0` converged or no
+`<repo>` is `owner/name`; `<pr>` is the number. **`crq next` always exits 0** — read `.action`, not
+the exit code. **`crq loop` exit codes:** `0` converged or no
 actionable findings, `10` actionable findings returned in `.findings[]`, `2` timed out waiting for
 feedback. crq keys resolution off GitHub's own thread state, so a finding keeps reappearing in
 `feedback`/`loop` until its thread is resolved (or declined-and-resolved) on GitHub.
@@ -547,24 +582,24 @@ serialize reviews that don't actually compete.
 
 If you're an autonomous agent running a PR-review loop, here's everything you need:
 
-- **The one rule:** never post `@coderabbitai review` yourself. To run a review round, use
-  `crq loop "<owner/repo>" "<pr>"` — it blocks until feedback lands and writes findings to stdout.
-- **Never hand-poll GitHub for review status.** Don't loop `gh api .../pulls/N/reviews|comments`
-  waiting for a review — that drains the shared account-wide REST quota (also spent by the
-  `autoreview` daemon and every other agent) and competes with crq's own polling. Use `crq loop`
-  (waits + returns findings), `crq feedback` (current findings, no trigger), or `crq status`.
-- **Exit codes:** `0` converged → done; `10` → read `.findings[]`, fix valid ones, validate locally,
-  and resolve addressed threads immediately. If any `.reviewed_by` value is false, **hold the
-  head**—do not commit or push. After all required bots are true, fix/resolve the rest, commit/push
-  once, then loop again;
-  `2` → timed out, don't push stale-feedback fixes.
-- **Resolve / decline:** after fixing a finding, `crq resolve <repo> <pr> --thread <id>`. If you're
-  declining one, record why with `crq decline <repo> <pr> --thread <id> --reason "…"` instead of
-  leaving it silently open.
-- **A long wait is not a hang.** During queue/rate-limit waits, feedback waits, and network
-  outages, crq logs progress to **stderr** (queue reason, per-bot `reviewed` status, `github
-  unreachable … offline …` / `reachable again`). It keeps retrying through an internet drop until
-  connectivity returns (no timeout by default), so don't kill it — watch stderr.
+- **The loop is one command.** Call `crq next "<owner/repo>" "<pr>"`, do exactly what `.action`
+  says, call it again. Don't design a loop of your own, and don't read the exit code — `next`
+  always exits 0 on success and the answer is `.action`:
+  `fix` · `hold` · `push` · `wait` · `done` · `blocked`.
+- **Never post `@coderabbitai review` yourself.** crq is the only trigger, because the review limit
+  is account-wide and direct posts stampede it.
+- **On `wait` or `hold`, hand the wait over.** Run `crq wait "<owner/repo>" "<pr>"` as your
+  harness's background task and end your turn: it blocks until there is something to do and its
+  **exit is your wake event**. It holds no round, so killing it costs only the process. Never
+  invent a delay, never poll in-chat, and never loop `gh api .../pulls/N/reviews|comments` — that
+  drains the shared REST quota the daemon and every other agent are also spending.
+- **Never choose when to push.** `hold` vs `push` is crq's answer, and it already accounts for the
+  rate-limit degrade and the quiet period after a review lands.
+- **Resolve / decline:** after fixing a finding, `crq resolve <thread-id>...` (pass them all at
+  once). If you're declining one, `crq decline <thread-id> --reason "…"` — that resolves it too,
+  because a thread left open keeps its finding actionable; `--keep-open` overrides.
+- **Don't narrate the wait.** Report real state changes — findings, a push, convergence, a block —
+  not elapsed time.
 - **Setup check:** run `crq doctor`; if config is missing, do the Quick Start (install + `crq init`).
 
 The installer puts the **[Codex skill](skills/coderabbit-queue/SKILL.md)** on the local skill path
