@@ -267,16 +267,13 @@ func applyPreflightEvent(report *PreflightReport, event map[string]any) {
 		if msg := firstNonEmpty(stringField(event, "message"), stringField(event, "error")); msg != "" {
 			report.Error = msg
 		}
-		report.ErrorType = stringField(event, "errorType")
-		if v, ok := event["recoverable"].(bool); ok {
-			report.Recoverable = v
-		}
-		if meta, ok := event["metadata"].(map[string]any); ok {
-			report.RetryAfter = stringField(meta, "waitTime")
-			if v, ok := meta["orgAttributed"].(bool); ok {
-				report.OrgAttributed = v
-			}
-		}
+		// The event's shape is CodeRabbit's contract, so dialect reads it and this
+		// only records what it means.
+		cliErr := dialect.ParseCLIError(event)
+		report.ErrorType = cliErr.Type
+		report.Recoverable = cliErr.Recoverable
+		report.RetryAfter = cliErr.WaitTime
+		report.OrgAttributed = cliErr.OrgAttributed
 	}
 }
 

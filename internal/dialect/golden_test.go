@@ -594,6 +594,19 @@ func TestGoldenCLIRateLimit(t *testing.T) {
 	if !IsCLIRateLimit(event.ErrorType) {
 		t.Errorf("IsCLIRateLimit(%q) = false, want true", event.ErrorType)
 	}
+	// The whole event shape is dialect's contract, so parse the captured fixture
+	// through the real parser rather than re-reading its keys by hand here.
+	var asMap map[string]any
+	if err := json.Unmarshal(raw, &asMap); err != nil {
+		t.Fatal(err)
+	}
+	parsed := ParseCLIError(asMap)
+	if !parsed.IsAccountBlock() {
+		t.Errorf("ParseCLIError(%v).IsAccountBlock() = false, want true", parsed)
+	}
+	if !parsed.Recoverable || !parsed.OrgAttributed || parsed.WaitTime == "" {
+		t.Errorf("ParseCLIError lost fields: %+v", parsed)
+	}
 	// The window matters as much as the classification: crq records this block
 	// for the whole fleet, so parse the fixture's real waitTime rather than a
 	// hand-written string.

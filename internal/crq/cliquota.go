@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
 )
 
 // CLIQuotaResult reports what RecordCLIQuota did, so the caller can say so
@@ -39,9 +40,9 @@ func IsCLIAccountBlock(report PreflightReport) bool {
 //   - **The account must match.** The CLI can be authenticated to a different
 //     CodeRabbit organisation than the one crq queues for, and applying that
 //     block would stall reviews for an account that is not limited.
-//   - **A block is never shortened.** A standing window from a PR comment is
-//     authoritative about that account; a local reading may be a different,
-//     narrower limit, so it can only ever extend.
+//   - **A block is never shortened** (engine.AcceptAccountBlock). A standing
+//     window from a PR comment is authoritative about that account; a local
+//     reading may be a different, narrower limit, so it can only ever extend.
 func (s *Service) RecordCLIQuota(ctx context.Context, report PreflightReport, cliOrg string) (CLIQuotaResult, error) {
 	if !dialect.IsCLIRateLimit(report.ErrorType) {
 		return CLIQuotaResult{Reason: "the cli reported no account block"}, nil
@@ -90,7 +91,7 @@ func (s *Service) RecordCLIQuota(ctx context.Context, report PreflightReport, cl
 	// CAS conflict runs the closure again.
 	applied := false
 	state, err := s.store.Update(ctx, func(st *State) error {
-		if st.Account.BlockedUntil != nil && !until.After(*st.Account.BlockedUntil) {
+		if !engine.AcceptAccountBlock(st.Account.BlockedUntil, *until) {
 			applied = false
 			return ErrNoChange
 		}

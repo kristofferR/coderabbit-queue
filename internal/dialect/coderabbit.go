@@ -443,3 +443,47 @@ const CLIRateLimitErrorType = "rate_limit"
 func IsCLIRateLimit(errorType string) bool {
 	return strings.EqualFold(strings.TrimSpace(errorType), CLIRateLimitErrorType)
 }
+
+// CLIError is the local CodeRabbit CLI's structured failure, normalized. The
+// --agent stream's key names and their meanings are CodeRabbit's format contract,
+// so they are read here rather than in orchestration: a renamed key is then one
+// change in this package plus a corpus row, not a silent loss of meaning in a
+// caller that never knew the shape.
+type CLIError struct {
+	// Type is the CLI's own classification, e.g. rate_limit.
+	Type string
+	// Recoverable is whether waiting can clear it.
+	Recoverable bool
+	// WaitTime is the CLI's stated window, in its own prose ("32 minutes").
+	WaitTime string
+	// OrgAttributed distinguishes an organisation-wide limit from this user's
+	// own. Only the former says anything about the shared account.
+	OrgAttributed bool
+}
+
+// ParseCLIError reads an error event from the CLI's --agent JSON stream.
+func ParseCLIError(event map[string]any) CLIError {
+	out := CLIError{Type: cliStringField(event, "errorType")}
+	if v, ok := event["recoverable"].(bool); ok {
+		out.Recoverable = v
+	}
+	meta, _ := event["metadata"].(map[string]any)
+	if meta != nil {
+		out.WaitTime = cliStringField(meta, "waitTime")
+		if v, ok := meta["orgAttributed"].(bool); ok {
+			out.OrgAttributed = v
+		}
+	}
+	return out
+}
+
+// IsAccountBlock reports whether this failure means the shared account quota is
+// exhausted, rather than something local being wrong.
+func (e CLIError) IsAccountBlock() bool { return IsCLIRateLimit(e.Type) }
+
+func cliStringField(m map[string]any, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
