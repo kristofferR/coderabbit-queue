@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -15,6 +16,28 @@ const (
 	stateEnd      = "-->"
 	crqProjectURL = "https://github.com/kristofferR/coderabbit-queue"
 )
+
+// firstStranded finds an in-flight round that reserved the slot but no longer
+// holds it: it cannot receive feedback (no command was posted) and Pump cannot
+// advance it (no slot), so it needs naming wherever it sits in the list.
+//
+// Holding the slot is the whole distinction. Every normal fire passes through
+// PhaseReserved WITH a valid slot while the command is being posted, so testing
+// the phase alone reported the happy path as stuck — and loudly, since a stranded
+// round now outranks every other state.
+func firstStranded(st State, inFlight []Round) *Round {
+	slot := st.SlotRound()
+	for i := range inFlight {
+		if inFlight[i].Phase != PhaseReserved {
+			continue
+		}
+		if slot != nil && slot.Repo == inFlight[i].Repo && slot.PR == inFlight[i].PR {
+			continue // mid-fire, not stranded
+		}
+		return &inFlight[i]
+	}
+	return nil
+}
 
 func joinScope(scope []string) string {
 	return strings.Join(scope, ",")
@@ -44,13 +67,20 @@ func minutesUntil(t time.Time, now time.Time) int {
 	return mins
 }
 
-// reviewingRounds returns the rounds that fired and are still open (fired or
-// reviewing), ordered by fire time — the v3 equivalent of the "awaiting
-// feedback" set (a fired round whose slot may already be released).
-func reviewingRounds(st State) []Round {
+// inFlightRounds returns every round crq has already acted on and is still
+// carrying: reserved (slot held, command not yet posted), fired, or reviewing —
+// ordered by fire time.
+//
+// Together with State.Queue (queued + awaiting_retry) this PARTITIONS Active()
+// by phase, which is what makes "every active round is on the dashboard" true
+// by construction. The previous single "Feedback wait" row showed reviewing[0]
+// and silently dropped every round behind it, along with any reserved round
+// whose fire slot Normalize had cleared.
+func inFlightRounds(st State) []Round {
 	var out []Round
 	for _, r := range st.Rounds {
-		if r.Phase == PhaseFired || r.Phase == PhaseReviewing {
+		switch r.Phase {
+		case PhaseReserved, PhaseFired, PhaseReviewing:
 			out = append(out, r)
 		}
 	}
@@ -60,9 +90,39 @@ func reviewingRounds(st State) []Round {
 	return out
 }
 
+// firedAtOf is when a round entered its in-flight life, for ordering the in-flight
+// table. A reserved round has no FiredAt — the command is not posted yet — so
+// falling straight through to EnqueuedAt sorted a long-queued PR that was reserved
+// seconds ago ahead of reviews fired much earlier, contradicting the table's own
+// ordering.
+// firedTimeOf is what the in-flight table should print in its "fired" column: the
+// time THIS attempt posted its command, or nothing when it has not.
+//
+// A retry deliberately keeps the previous attempt's FiredAt as history and Reserve
+// does not clear it, so a reserved round would otherwise display an earlier
+// attempt's timestamp as though the current command had gone out — and if the post
+// hangs or the process dies, that misleading value is what stays on the dashboard
+// beside the stranded reservation.
+func firedTimeOf(r Round) *time.Time {
+	if r.Phase == PhaseReserved {
+		return nil
+	}
+	return r.FiredAt
+}
+
 func firedAtOf(r Round) time.Time {
+	// A reserved round is BETWEEN attempts: a retry deliberately preserves the
+	// previous FiredAt as history, so reading it here ordered the round by a fire
+	// that may be hours old — and printed that stale time in a column describing a
+	// command this attempt has not posted yet.
+	if r.Phase == PhaseReserved && r.ReservedAt != nil {
+		return *r.ReservedAt
+	}
 	if r.FiredAt != nil {
 		return *r.FiredAt
+	}
+	if r.ReservedAt != nil {
+		return *r.ReservedAt
 	}
 	return r.EnqueuedAt
 }
@@ -95,8 +155,9 @@ func requestedRounds(st State) []Round {
 }
 
 // coBotMarks renders a round's co-reviewer trigger bookkeeping for the
-// feedback-wait row: ✓ = trigger posted/adopted, ⏳ = post claimed but not
-// yet recorded. Empty (byte-identical row) when the round tracks no co-bots.
+// in-flight table's triggers column: ✓ = trigger posted/adopted, ⏳ = post
+// claimed but not yet recorded. Empty when the round tracks no co-bots; the
+// caller supplies the surrounding decoration.
 func coBotMarks(r Round) string {
 	if len(r.CoBots) == 0 {
 		return ""
@@ -119,7 +180,15 @@ func coBotMarks(r Round) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	return " · triggers: " + strings.Join(parts, ", ")
+	return strings.Join(parts, ", ")
+}
+
+// dash renders an empty cell as an em dash so a table row never collapses.
+func dash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
 }
 
 // RenderDashboard renders the human-facing dashboard for v3 state: rounds by
@@ -127,23 +196,36 @@ func coBotMarks(r Round) string {
 func RenderDashboard(st State, cfg StoreConfig) string {
 	loc := dashboardLoc(cfg)
 	now := time.Now().UTC()
-	queue := st.QueuedRounds(now)
-	reviewing := reviewingRounds(st)
+	queue := st.Queue(now, cfg.MinInterval)
+	inFlight := inFlightRounds(st)
 	slot := st.SlotRound()
 	blocked := st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "# 🐰 crq — CodeRabbit review queue\n\n")
 
+	stranded := firstStranded(st, inFlight)
 	switch {
+	case stranded != nil:
+		// Reported before the transient states: a quota window or another PR's
+		// review clears on its own, but a reserved round with no slot behind it
+		// cannot be advanced by Pump at all, so hiding it behind them leaves
+		// permanently stuck work looking ordinary.
+		fmt.Fprintf(&b, "### 🟠 Stranded reservation on %s#%d — no fire slot backs it\n\n", stranded.Repo, stranded.PR)
 	case blocked:
 		fmt.Fprintf(&b, "### 🔴 Blocked — next review in ~%dm\n\n", minutesUntil(*st.Account.BlockedUntil, now))
 	case slot != nil:
 		fmt.Fprintf(&b, "### 🟡 Reviewing %s#%d\n\n", slot.Repo, slot.PR)
-	case len(reviewing) > 0:
-		fmt.Fprintf(&b, "### 🟡 Awaiting feedback for %s#%d\n\n", reviewing[0].Repo, reviewing[0].PR)
+	case len(inFlight) > 0:
+		fmt.Fprintf(&b, "### 🟡 Awaiting feedback for %s#%d\n\n", inFlight[0].Repo, inFlight[0].PR)
 	case len(queue) > 0:
-		fmt.Fprintf(&b, "### 🟠 %d queued\n\n", len(queue))
+		// Nothing ready yet is still queued work, never idle — say when the front
+		// of the queue opens instead of leaving the reader to guess.
+		if next := queue[0].ReadyAt; !next.IsZero() {
+			fmt.Fprintf(&b, "### 🟠 %d queued — next at %s\n\n", len(queue), fmtStamp(&next, loc))
+		} else {
+			fmt.Fprintf(&b, "### 🟠 %d queued\n\n", len(queue))
+		}
 	default:
 		fmt.Fprintf(&b, "### 🟢 Idle\n\n")
 	}
@@ -172,31 +254,56 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 		fmt.Fprintf(&b, "| **Co-reviewers** | %s |\n", cfg.CoReviewers)
 	}
 	fmt.Fprintf(&b, "| **Last review fired** | %s |\n", fmtStamp(st.LastFired, loc))
-	if slot != nil {
-		fmt.Fprintf(&b, "| **In flight** | [%s#%d](https://github.com/%s/pull/%d) · fired %s · `%s` |\n",
-			slot.Repo, slot.PR, slot.Repo, slot.PR, fmtStamp(slot.FiredAt, loc), slot.ByHost)
-	} else {
-		fmt.Fprintf(&b, "| **In flight** | — |\n")
-	}
-	if len(reviewing) > 0 {
-		r := reviewing[0]
-		fmt.Fprintf(&b, "| **Feedback wait** | [%s#%d](https://github.com/%s/pull/%d) · `%s` · deadline %s%s |\n",
-			r.Repo, r.PR, r.Repo, r.PR, r.Head, fmtStamp(r.WaitDeadline, loc), coBotMarks(r))
-	} else {
-		fmt.Fprintf(&b, "| **Feedback wait** | — |\n")
-	}
 	if st.Warn != "" {
 		fmt.Fprintf(&b, "\n> ⚠️ %s\n", st.Warn)
+	}
+
+	fmt.Fprintf(&b, "\n## 🔬 In flight — %d\n\n", len(inFlight))
+	if len(inFlight) == 0 {
+		fmt.Fprintf(&b, "_None._\n")
+	} else {
+		fmt.Fprintf(&b, "| PR | commit | phase | fired | deadline | triggers | host |\n|---|---|---|---|---|---|---|\n")
+		for _, r := range inFlight {
+			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %s | %s | `%s` |\n",
+				r.Repo, r.PR, r.Repo, r.PR, r.Head, r.Phase,
+				fmtStamp(firedTimeOf(r), loc), fmtStamp(r.WaitDeadline, loc), dash(coBotMarks(r)), r.ByHost)
+		}
 	}
 
 	fmt.Fprintf(&b, "\n## ⏳ Queue — %d waiting\n\n", len(queue))
 	if len(queue) == 0 {
 		fmt.Fprintf(&b, "_Nothing queued._\n")
 	} else {
-		fmt.Fprintf(&b, "| # | PR | enqueued | host |\n|--:|---|---|---|\n")
-		for i, r := range queue {
-			fmt.Fprintf(&b, "| %d | [%s#%d](https://github.com/%s/pull/%d) | %s | `%s` |\n",
-				i+1, r.Repo, r.PR, r.Repo, r.PR, fmtStamp(&r.EnqueuedAt, loc), r.ByHost)
+		fmt.Fprintf(&b, "| # | PR | commit | ready | why | attempts | enqueued | host |\n|--:|---|---|---|---|--:|---|---|\n")
+		for i, e := range queue {
+			// Absolute stamps only: a relative "in 11m" would re-hash the dashboard
+			// on every render, and fmtStamp already honours CRQ_TZ.
+			// A zero ReadyAt means "now" only when nothing is holding the round.
+			// With a gate whose end is unknowable — a slot held elsewhere, or a
+			// round queued behind another — printing "now" contradicts the very
+			// column next to it.
+			ready := "now"
+			switch {
+			case !e.ReadyAt.IsZero():
+				at := e.ReadyAt
+				ready = fmtStamp(&at, loc)
+			case e.Why != "":
+				ready = "unknown"
+			}
+			// Only the front has a knowable position. What fires after it depends on
+			// when its slot releases — the bot acknowledging, or the in-flight
+			// timeout — so any number past the first is a guess. List them; do not
+			// rank them.
+			// A position is claimed only for a round that can fire now (see Queue):
+			// anything else depends on when a pump runs and which windows have
+			// opened by then.
+			position := "—"
+			if i == 0 && e.ReadyAt.IsZero() && e.Why == "" {
+				position = strconv.Itoa(1)
+			}
+			fmt.Fprintf(&b, "| %s | [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %d | %s | `%s` |\n",
+				position, e.Repo, e.PR, e.Repo, e.PR, e.Head, ready, dash(e.Why),
+				e.Attempts, fmtStamp(&e.EnqueuedAt, loc), e.ByHost)
 		}
 	}
 
@@ -218,15 +325,22 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	return b.String()
 }
 
-func RenderTitle(st State) string {
+// RenderTitle summarizes the state for the dashboard issue title. The queue
+// count is the WHOLE queue, cooling-down rounds included: a state whose only
+// work is not yet fire-eligible is queued, never idle.
+func RenderTitle(st State, cfg StoreConfig) string {
 	now := time.Now().UTC()
-	queue := len(st.QueuedRounds(now))
+	queue := len(st.Queue(now, cfg.MinInterval))
 	switch {
+	case firstStranded(st, inFlightRounds(st)) != nil:
+		// Same precedence as the body: permanently stuck work outranks states that
+		// clear by themselves.
+		return fmt.Sprintf("🐰 crq — stranded #%d · queue %d", firstStranded(st, inFlightRounds(st)).PR, queue)
 	case st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now):
 		return fmt.Sprintf("🐰 crq — blocked · queue %d", queue)
 	case st.SlotRound() != nil:
 		return fmt.Sprintf("🐰 crq — reviewing #%d · queue %d", st.SlotRound().PR, queue)
-	case len(reviewingRounds(st)) > 0:
+	case len(inFlightRounds(st)) > 0:
 		return fmt.Sprintf("🐰 crq — awaiting feedback · queue %d", queue)
 	case queue > 0:
 		return fmt.Sprintf("🐰 crq — %d queued", queue)

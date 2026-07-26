@@ -42,6 +42,9 @@ type StoreConfig struct {
 	// bots ("" hides the dashboard row, keeping co-bot-less dashboards
 	// byte-identical).
 	CoReviewers string
+	// MinInterval is DecideFire's pacing gate. The dashboard needs it so a queue
+	// entry is not advertised as ready before firing would actually accept it.
+	MinInterval time.Duration
 }
 
 func (c StoreConfig) requireState() error {
@@ -267,7 +270,7 @@ func (s *GitStateStore) SyncDashboard(ctx context.Context, st State) error {
 	if err != nil {
 		return err
 	}
-	title := RenderTitle(st)
+	title := RenderTitle(st, s.cfg)
 
 	// Held across read-then-write so two concurrent syncs cannot both observe a
 	// stale issue and both write it.

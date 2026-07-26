@@ -596,6 +596,185 @@ func (s *State) QueuedRounds(now time.Time) []Round {
 	return out
 }
 
+// Queue-entry wait reasons. A waiting round is held by exactly one of these
+// (or by nothing, in which case it is next up).
+const (
+	WaitCoolingDown    = "cooling down"    // this round's own RetryAt has not passed
+	WaitAccountBlocked = "account blocked" // the CodeRabbit account quota window dominates
+	WaitSlotBusy       = "slot busy"       // another PR's review holds the fire slot
+	WaitPacing         = "pacing"          // LastFired + CRQ_MIN_INTERVAL has not passed
+	WaitBehind         = "behind an earlier round"
+)
+
+// QueueEntry is one round waiting for a fire, plus when it can actually fire
+// and what is holding it. It is a VIEW over Rounds + Account — never persisted,
+// so it carries no schema obligations.
+type QueueEntry struct {
+	Round
+	// ReadyAt is the earliest time this round may fire. Zero means "now".
+	ReadyAt time.Time
+	// Why is the gate holding it: one of the Wait* constants, or "" when the
+	// round is simply next up.
+	Why string
+}
+
+// roundReadyAt is a waiting round's OWN not-before time: RetryAt while it is
+// cooling down, zero (ready now) while it is merely queued.
+func roundReadyAt(r Round) time.Time {
+	if r.Phase == PhaseAwaitingRetry && r.RetryAt != nil {
+		return r.RetryAt.UTC()
+	}
+	return time.Time{}
+}
+
+// Queue returns every round waiting for a fire — queued AND awaiting_retry — in
+// the order they will actually reach the slot: by ready time, then by Seq.
+//
+// There is only one queue. A cooling-down round is not a different species of
+// work, it is a queued round with a not-before time, and rendering it as a
+// separate list left "nothing queued" and "two PRs parked until 00:07Z" looking
+// identical. Ordering by (ReadyAt, Seq) reproduces what firing actually does: a
+// round whose window has not opened cannot precede a ready one, and among ready
+// rounds NextEligible takes the lowest Seq.
+//
+// ReadyAt folds in the account-wide quota block, because DecideFire gates on it
+// too — showing a round's own RetryAt alone promises a time the fire gate will
+// not honour once CodeRabbit extends the window. This is the same max() that
+// AccountBlockedUntil computes for the wait path.
+//
+// minInterval is folded in too. It is DecideFire's pacing gate, so leaving it out
+// rendered a round "ready: now" that firing would refuse for up to another
+// CRQ_MIN_INTERVAL — 90s by default and configurable far longer. It is an
+// absolute boundary (LastFired + minInterval), not a countdown, so surfacing it
+// does not churn DashboardSHA between renders.
+func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
+	var blocked time.Time
+	if s.Account.BlockedUntil != nil && s.Account.BlockedUntil.After(now) {
+		blocked = s.Account.BlockedUntil.UTC()
+	}
+	slotBusy := s.SlotRound() != nil
+	// The pacing gate applies to whichever round fires next, so it bounds every
+	// entry's earliest possible start.
+	var paced time.Time
+	if minInterval > 0 && s.LastFired != nil {
+		if at := s.LastFired.Add(minInterval).UTC(); at.After(now) {
+			paced = at
+		}
+	}
+
+	// Split by whether the round is waiting for anything the queue serializes.
+	//
+	// A co-only round is not. It spends no account quota, takes no fire slot, and
+	// DecideFire resolves it before either gate — so the account window, the slot,
+	// and its position behind other rounds are all irrelevant to it. Exempting it
+	// gate-by-gate was tried and missed a different spot three times running; the
+	// partition makes the exemption structural, so a gate added later cannot
+	// silently apply to work it does not govern.
+	var queued, freeRunning []QueueEntry
+	for _, r := range s.Rounds {
+		if r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry {
+			continue
+		}
+		e := QueueEntry{Round: r}
+		// Its own cooldown binds either way: that is the round's, not the queue's.
+		if own := roundReadyAt(r); own.After(now) {
+			e.ReadyAt, e.Why = own, WaitCoolingDown
+		}
+		if r.CoOnly {
+			freeRunning = append(freeRunning, e)
+			continue
+		}
+		// Every remaining gate is a lower bound on when firing will accept this
+		// round, so the ready time is the LATEST of them and the reason is
+		// whichever binds. Taking the first that matched let a one-minute cooldown
+		// hide a two-hour account block.
+		for _, g := range []struct {
+			at  time.Time
+			why string
+		}{{blocked, WaitAccountBlocked}, {paced, WaitPacing}} {
+			if g.at.After(now) && g.at.After(e.ReadyAt) {
+				e.ReadyAt, e.Why = g.at, g.why
+			}
+		}
+		queued = append(queued, e)
+	}
+
+	// A held slot stops EVERYTHING, free-running rounds included.
+	//
+	// Not because they need the slot — they do not — but because Pump returns as
+	// soon as it sees a slot holder, so the quota-free path that would advance
+	// them is never reached while one is held. The exemption above is about the
+	// account window, which genuinely does not apply to them; claiming they are
+	// ready here would promise action the daemon cannot take until the holder is
+	// acknowledged. (An agent's own `crq next` can still resolve such a round
+	// directly, which is why this describes the queue rather than forbidding it.)
+	if slotBusy {
+		for i := range queued {
+			queued[i].ReadyAt, queued[i].Why = time.Time{}, WaitSlotBusy
+		}
+		for i := range freeRunning {
+			freeRunning[i].ReadyAt, freeRunning[i].Why = time.Time{}, WaitSlotBusy
+		}
+	}
+
+	// One list, ordered by readiness then Seq — which is NextEligible's own rule
+	// among rounds that are eligible together. Concatenating the groups instead
+	// put a cooling co-only round ahead of work that could fire immediately.
+	out := append(freeRunning, queued...)
+	// An empty ReadyAt means two different things and they must not sort alike:
+	// nothing is holding this round, or something is holding it whose end is
+	// unknowable (a slot another PR holds). Rank them apart, or a slot-blocked
+	// round sorts as if it were ready and can take the front.
+	rank := func(e QueueEntry) int {
+		switch {
+		case e.ReadyAt.IsZero() && e.Why == "":
+			return 0 // fire-eligible now
+		case !e.ReadyAt.IsZero():
+			return 1 // waiting until a known time
+		default:
+			return 2 // waiting on something with no knowable end
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if ri, rj := rank(out[i]), rank(out[j]); ri != rj {
+			return ri < rj
+		}
+		if !out[i].ReadyAt.Equal(out[j].ReadyAt) {
+			return out[i].ReadyAt.Before(out[j].ReadyAt)
+		}
+		return out[i].Seq < out[j].Seq
+	})
+
+	// Say which round is next ONLY when one is eligible now — then it is the
+	// lowest-Seq ready round, exactly what NextEligible picks. With everything
+	// still cooling, which one fires depends on when a pump happens to run: if
+	// none runs between two retry times, both are eligible at the next pass and
+	// the lower Seq wins, not the earlier window. So no front is claimed, and the
+	// soonest opening is reported without saying whose it is.
+	//
+	// Only that front carries a time. Anything behind it starts when the front
+	// finishes, which is the unknowable part, so naming its own gate there would
+	// state a lower bound as if it were the answer.
+	front := len(out) > 0 && rank(out[0]) == 0
+	for i := range out {
+		if front && i == 0 {
+			continue // the front is the one round whose readiness is knowable
+		}
+		if !front && i == 0 {
+			continue // nothing is eligible; the soonest opening is still worth naming
+		}
+		// Drop the TIME but keep the reason. A round's own gate is real and worth
+		// reporting — "slot busy", "account blocked" — it just is not a start time,
+		// because the round ahead has to finish first. Only a round with nothing of
+		// its own holding it is purely behind.
+		out[i].ReadyAt = time.Time{}
+		if out[i].Why == "" {
+			out[i].Why = WaitBehind
+		}
+	}
+	return out
+}
+
 // Normalize repairs invariants after load: map init, expired retry windows
 // (awaiting_retry with a passed RetryAt is simply fire-eligible; nothing to
 // do), and a FireSlot pointing at a round that no longer holds it.

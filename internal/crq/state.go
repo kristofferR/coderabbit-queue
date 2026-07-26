@@ -49,6 +49,7 @@ func (c Config) storeConfig() StoreConfig {
 		Timezone:       c.Timezone,
 		Scope:          c.Scope,
 		CoReviewers:    c.coReviewerSummary(),
+		MinInterval:    c.MinInterval,
 	}
 }
 
@@ -96,7 +97,9 @@ func DefaultState(cfg Config) State {
 func renderDashboard(st State, cfg Config) string {
 	return crqstate.RenderDashboard(st, cfg.storeConfig())
 }
-func renderTitle(st State) string { return crqstate.RenderTitle(st) }
+func renderTitle(st State, cfg Config) string {
+	return crqstate.RenderTitle(st, cfg.storeConfig())
+}
 func issueBody(st State, cfg Config) (string, error) {
 	return crqstate.IssueBody(st, cfg.storeConfig())
 }
