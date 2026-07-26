@@ -119,3 +119,96 @@ func TestGitErrorsCarryStderr(t *testing.T) {
 		t.Errorf("error %q does not name the command that failed", err)
 	}
 }
+
+// Four ways a workspace could destroy or expose something it should not.
+func TestWorkspaceIsolatesCheckouts(t *testing.T) {
+	base := t.TempDir()
+	sha := originRepo(t, filepath.Join(base, "owner/thing"))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	root := t.TempDir()
+	ws := Workspace{Root: root}
+	ctx := context.Background()
+
+	// A stale handle must not delete the checkout that replaced it.
+	first, err := ws.Checkout(ctx, "owner/thing", 9, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ws.Checkout(ctx, "owner/thing", 9, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Dir == second.Dir {
+		t.Fatal("two checkouts of one PR share a directory, so either can delete the other")
+	}
+	if err := first.Remove(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(second.Dir); err != nil {
+		t.Errorf("the live checkout was removed by a stale handle: %v", err)
+	}
+
+	// Repo names that differ only in where the slash falls must not collide:
+	// "a-b/c" and "a/b-c" joined with a dash are the same string.
+	sha2 := originRepo(t, filepath.Join(base, "a-b/c"))
+	sha3 := originRepo(t, filepath.Join(base, "a/b-c"))
+	one, err := ws.Checkout(ctx, "a-b/c", 1, sha2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := ws.Checkout(ctx, "a/b-c", 1, sha3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(one.Dir); err != nil {
+		t.Errorf("checking out a/b-c destroyed a-b/c's worktree: %v", err)
+	}
+	if strings.HasPrefix(two.Dir, one.Dir) || strings.HasPrefix(one.Dir, two.Dir) {
+		t.Errorf("checkout paths overlap: %q and %q", one.Dir, two.Dir)
+	}
+
+	// A mirror of a private repository is private source: on a shared host the
+	// umask default would let any local user read it.
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Errorf("workspace root mode = %o, want 0700", perm)
+	}
+}
+
+// Two workers starting on the same repository at once must not clone into one
+// directory — the second used to fail with "destination path already exists".
+func TestMirrorSurvivesAConcurrentFirstClone(t *testing.T) {
+	base := t.TempDir()
+	originRepo(t, filepath.Join(base, "owner/thing"))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+
+	errs := make(chan error, 4)
+	for i := 0; i < 4; i++ {
+		go func() {
+			_, err := ws.Mirror(context.Background(), "owner/thing")
+			errs <- err
+		}()
+	}
+	for i := 0; i < 4; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent first clone: %v", err)
+		}
+	}
+}
+
+// The token must never reach argv: a process listing, a log line and this
+// package's own error strings would all carry it.
+func TestGitTokenTravelsInTheEnvironment(t *testing.T) {
+	ws := Workspace{Root: t.TempDir(), Token: "ghp_secret_value"}
+	_, err := ws.git(context.Background(), t.TempDir(), "rev-parse", "HEAD")
+	if err == nil {
+		t.Fatal("expected an error outside a repository")
+	}
+	if strings.Contains(err.Error(), "ghp_secret_value") {
+		t.Errorf("the token leaked into an error message: %v", err)
+	}
+}
