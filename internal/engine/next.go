@@ -144,6 +144,18 @@ func NextAction(in NextInput, now time.Time) Action {
 	//    or Macroscope review that is still running.
 	if in.Deferred {
 		releasedByDegrade := DoneExceptWithEvidence(in.Completion.ReviewedBy, in.Primary, dialect.CodexBotLogin)
+		// The co-reviewers' evidence is as fresh here as anywhere else, so the
+		// same quiet period applies: a review shell can satisfy the degrade while
+		// its inline findings are still arriving, and moving the head strands
+		// them on the old commit.
+		if in.LocalWork && releasedByDegrade && in.settling(now) {
+			return Action{
+				Kind:    ActionWait,
+				Reason:  "co-reviewers answered; holding briefly in case trailing findings are still landing",
+				At:      in.nextCheck(now, in.SettleUntil, pending),
+				Pending: pending,
+			}
+		}
 		switch {
 		case in.LocalWork && releasedByDegrade:
 			return Action{
@@ -176,7 +188,7 @@ func NextAction(in NextInput, now time.Time) Action {
 		// legacy Loop owned that deadline. Without an actionable verdict here a
 		// caller — and `crq wait` — would idle indefinitely on a bot that
 		// crashed. Say so instead, and never re-fire: the head was acknowledged.
-		if in.waitExpired(now) {
+		if in.waitExpired(now) && needsBotReview(in.Completion.ReviewedBy, in.Primary) {
 			return Action{
 				Kind:    ActionBlocked,
 				Reason:  "the review was acknowledged for this head but never delivered before the deadline",
@@ -205,7 +217,7 @@ func NextAction(in NextInput, now time.Time) Action {
 	//    declaring `done` early stops a loop moments before findings arrive, and
 	//    pushing early moves the head out from under a reviewer whose inline
 	//    comments are still landing, stranding them on the old commit.
-	if in.SettleUntil != nil && in.SettleUntil.After(now) {
+	if in.settling(now) {
 		return Action{
 			Kind:    ActionWait,
 			Reason:  "every required reviewer answered; holding briefly in case a trailing review is still landing",
@@ -219,8 +231,19 @@ func NextAction(in NextInput, now time.Time) Action {
 	return Action{Kind: ActionDone, Reason: "converged: no findings and every required reviewer answered"}
 }
 
+// settling reports whether the quiet period after the last evidence is still
+// running.
+func (in NextInput) settling(now time.Time) bool {
+	return in.SettleUntil != nil && in.SettleUntil.After(now)
+}
+
 // waitExpired reports whether this round's own wait deadline has passed while it
 // is still under review.
+//
+// Callers must also confirm the PRIMARY is the reviewer still missing: when its
+// review has landed and only a co-reviewer is silent, Progress completes the
+// round on the primary's word, so reporting a terminal `blocked` here would
+// contradict the round crq is about to close.
 func (in NextInput) waitExpired(now time.Time) bool {
 	switch in.Round.Phase {
 	case state.PhaseFired, state.PhaseReviewing:

@@ -100,6 +100,18 @@ func (s *Service) WaitForAction(ctx context.Context, repo string, pr int) (NextR
 		// this head is untracked, drive it regardless of who holds the lease.
 		st, _, err := s.store.Load(ctx)
 		if err != nil {
+			// The same shared-quota pressure this command exists to survive: the
+			// first load sleeps through throttling, so this one must too, or the
+			// waiter exits precisely when the fleet is busiest.
+			if wait, throttled := ghapi.ThrottleWait(err); throttled {
+				if wait <= 0 {
+					wait = s.waitTick()
+				}
+				if serr := s.sleep(ctx, wait); serr != nil {
+					return report, serr
+				}
+				continue
+			}
 			return report, err
 		}
 		now := s.clock()

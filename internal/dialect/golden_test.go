@@ -560,3 +560,34 @@ func TestAutoReviewsDisabledIsNotARefusal(t *testing.T) {
 		t.Fatal("a real refusal must still be recognised")
 	}
 }
+
+// The CLI's error vocabulary is CodeRabbit's, so it lives here with a verbatim
+// fixture like every other wording crq depends on. The fixture is the real
+// --agent stream event captured from a blocked account.
+func TestGoldenCLIRateLimit(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "coderabbit", "cli-rate-limit.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event struct {
+		ErrorType   string `json:"errorType"`
+		Recoverable bool   `json:"recoverable"`
+		Metadata    struct {
+			WaitTime string `json:"waitTime"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(raw, &event); err != nil {
+		t.Fatal(err)
+	}
+	if !IsCLIRateLimit(event.ErrorType) {
+		t.Errorf("IsCLIRateLimit(%q) = false, want true", event.ErrorType)
+	}
+	if !event.Recoverable || event.Metadata.WaitTime == "" {
+		t.Errorf("the fixture must carry the recoverable flag and a wait time: %+v", event)
+	}
+	for _, other := range []string{"", "auth", "network", "rate_limits"} {
+		if IsCLIRateLimit(other) {
+			t.Errorf("IsCLIRateLimit(%q) = true, want false", other)
+		}
+	}
+}

@@ -338,8 +338,9 @@ USAGE
   crq feedback <repo> <pr>         emit normalized actionable review findings as JSON
   crq resolve <thread-id> [<thread-id>...]
                                    resolve addressed GitHub review threads
-  crq decline <thread-id> [...] --reason "<why>" [--resolve]
+  crq decline <thread-id> [...] --reason "<why>" [--keep-open]
                                    reply on a thread to record why a finding is declined
+                                   (resolves it; --keep-open leaves it open)
   crq autoreview [--once] [--no-incremental]
                                    keep open PRs reviewed, rate-coordinated
   crq preflight [--type all|committed|uncommitted] [--base <branch>]
@@ -407,8 +408,13 @@ Block until there is something to DO about this PR, then print that instruction
 
 This is how an ephemeral agent waits. Run it as your harness's background task and
 end your turn: its EXIT is the wake event, so you burn no tokens idling and invent
-no delay. It writes nothing, holds no round and owns no state, so if it is killed
-the round is untouched — just run it again, or call crq next.
+no delay. It holds no round, so if it is killed the round is untouched — just run
+it again, or call crq next.
+
+It is read-only in the steady state, but NOT unconditionally: if nothing is
+advancing this PR (no round for the head, or no daemon holding the leader lease)
+it drives the queue itself rather than wait for nobody, which can request a
+review and spend account quota.
 
 It returns on fix, push, done and blocked. wait and hold are the two states it
 waits THROUGH, because they mean "come back later" and that is its whole job.

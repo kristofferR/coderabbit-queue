@@ -80,11 +80,13 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 		return report, nil
 	}
 
-	// The caller is about to move the head, so queueing a review now would spend
-	// a window on code that is being replaced — and the round would be
-	// superseded moments later anyway. Let the push land; the next call queues
-	// the head that actually matters.
-	if action.Kind == engine.ActionPush {
+	// The caller is mid-flight: it is about to move the head, or it is holding
+	// fixes for a finding it was just handed. Queueing a review now spends a
+	// window on code that is being replaced, and the round is superseded moments
+	// later anyway. A carried thread reaches here with FindingsOnHead empty, so
+	// this guard — not that one — is what stops a review firing ahead of the
+	// fixes for it.
+	if action.Kind == engine.ActionPush || (action.Kind == engine.ActionFix && report.LocalWork) {
 		return report, nil
 	}
 
@@ -114,7 +116,8 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 		report.RecheckAfter = &at
 		return report, nil
 	}
-	if err := s.advance(ctx, repo, pr, feedback); err != nil {
+	startedCoReview, err := s.advance(ctx, repo, pr, feedback)
+	if err != nil {
 		// Throttling is expected and self-clearing: the instruction above still
 		// stands on the observation already taken, and the next call advances.
 		// Anything else is a real failure — a token that cannot post the review
@@ -125,6 +128,16 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 		}
 		if s.log != nil {
 			s.log.Printf("throttled while advancing %s: %v", QueueKey(repo, pr), err)
+		}
+	}
+	// A co-review just started answers in minutes, but the schedule above was
+	// computed when nothing was in flight — for an account-blocked round that
+	// means the quota window, hours away. Bring the caller back on the short
+	// cadence instead of sleeping through the findings this call set in motion.
+	if startedCoReview {
+		at := s.clock().Add(s.waitTick()).UTC()
+		if report.RecheckAfter == nil || report.RecheckAfter.After(at) {
+			report.RecheckAfter = &at
 		}
 	}
 	return report, nil
@@ -155,16 +168,19 @@ func (s *Service) settleUntil(feedback FeedbackReport) *time.Time {
 // observation already taken, which is what keeps the bypass free: attempting it
 // unconditionally would re-observe this PR on every call for a case that applies
 // to a minority of rounds.
-func (s *Service) advance(ctx context.Context, repo string, pr int, feedback FeedbackReport) error {
+// It reports whether it resolved this round through the quota-free path, which
+// is how the caller knows a co-review was just set in motion and the schedule
+// computed before it is now too long.
+func (s *Service) advance(ctx context.Context, repo string, pr int, feedback FeedbackReport) (bool, error) {
 	if feedback.PrimaryUnavailable || feedback.CodeRabbitDeferred {
 		if _, handled, err := s.advanceQuotaFree(ctx, repo, pr); err != nil {
-			return err
+			return false, err
 		} else if handled {
-			return nil
+			return true, nil
 		}
 	}
 	_, err := s.Pump(ctx)
-	return err
+	return false, err
 }
 
 // nextFromState derives the instruction from what is already recorded and

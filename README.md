@@ -582,24 +582,24 @@ serialize reviews that don't actually compete.
 
 If you're an autonomous agent running a PR-review loop, here's everything you need:
 
-- **The one rule:** never post `@coderabbitai review` yourself. To run a review round, use
-  `crq loop "<owner/repo>" "<pr>"` — it blocks until feedback lands and writes findings to stdout.
-- **Never hand-poll GitHub for review status.** Don't loop `gh api .../pulls/N/reviews|comments`
-  waiting for a review — that drains the shared account-wide REST quota (also spent by the
-  `autoreview` daemon and every other agent) and competes with crq's own polling. Use `crq loop`
-  (waits + returns findings), `crq feedback` (current findings, no trigger), or `crq status`.
-- **Exit codes:** `0` converged → done; `10` → read `.findings[]`, fix valid ones, validate locally,
-  and resolve addressed threads immediately. If any `.reviewed_by` value is false, **hold the
-  head**—do not commit or push. After all required bots are true, fix/resolve the rest, commit/push
-  once, then loop again;
-  `2` → timed out, don't push stale-feedback fixes.
-- **Resolve / decline:** after fixing a finding, `crq resolve <thread-id>...`. If you're
-  declining one, record why with `crq decline <thread-id> --reason "…"` instead of
-  leaving it silently open.
-- **A long wait is not a hang.** During queue/rate-limit waits, feedback waits, and network
-  outages, crq logs progress to **stderr** (queue reason, per-bot `reviewed` status, `github
-  unreachable … offline …` / `reachable again`). It keeps retrying through an internet drop until
-  connectivity returns (no timeout by default), so don't kill it — watch stderr.
+- **The loop is one command.** Call `crq next "<owner/repo>" "<pr>"`, do exactly what `.action`
+  says, call it again. Don't design a loop of your own, and don't read the exit code — `next`
+  always exits 0 on success and the answer is `.action`:
+  `fix` · `hold` · `push` · `wait` · `done` · `blocked`.
+- **Never post `@coderabbitai review` yourself.** crq is the only trigger, because the review limit
+  is account-wide and direct posts stampede it.
+- **On `wait` or `hold`, hand the wait over.** Run `crq wait "<owner/repo>" "<pr>"` as your
+  harness's background task and end your turn: it blocks until there is something to do and its
+  **exit is your wake event**. It holds no round, so killing it costs only the process. Never
+  invent a delay, never poll in-chat, and never loop `gh api .../pulls/N/reviews|comments` — that
+  drains the shared REST quota the daemon and every other agent are also spending.
+- **Never choose when to push.** `hold` vs `push` is crq's answer, and it already accounts for the
+  rate-limit degrade and the quiet period after a review lands.
+- **Resolve / decline:** after fixing a finding, `crq resolve <thread-id>...` (pass them all at
+  once). If you're declining one, `crq decline <thread-id> --reason "…"` — that resolves it too,
+  because a thread left open keeps its finding actionable; `--keep-open` overrides.
+- **Don't narrate the wait.** Report real state changes — findings, a push, convergence, a block —
+  not elapsed time.
 - **Setup check:** run `crq doctor`; if config is missing, do the Quick Start (install + `crq init`).
 
 The installer puts the **[Codex skill](skills/coderabbit-queue/SKILL.md)** on the local skill path

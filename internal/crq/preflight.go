@@ -165,7 +165,7 @@ func Preflight(ctx context.Context, opts PreflightOptions) (PreflightReport, int
 		}
 		// A rate limit is not a broken setup: nothing is misconfigured and the
 		// answer is to come back later, which is what exit 2 already means here.
-		if report.ErrorType == "rate_limit" {
+		if dialect.IsCLIRateLimit(report.ErrorType) {
 			report.Status = "rate_limited"
 			code = 2
 		}
