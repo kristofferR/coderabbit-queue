@@ -318,3 +318,41 @@ func TestPruningMeasuresTheNewestFileNotTheDirectory(t *testing.T) {
 		t.Errorf("newest modification read as %s ago; a live session would be pruned", since)
 	}
 }
+
+// A mirror created before the refspec rule still fetches +refs/*:refs/*. One
+// branch created in a worktree then wedges every future fetch for the whole
+// repository — "refusing to fetch into branch ... checked out at" — which is how
+// a single fix session stopped every dispatch for hours.
+func TestMirrorMigratesAnOldRefspec(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Put it back the way an older crq left it.
+	if _, err := gitDir(ctx, mirror, "config", "remote.origin.fetch", "+refs/*:refs/*"); err != nil {
+		t.Fatal(err)
+	}
+	co, err := ws.Checkout(ctx, repo, 4, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := co.Git(ctx, "checkout", "-b", "session-branch"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The next dispatch of ANY pr in this repository fetches the same mirror.
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Fatalf("a branch in one worktree wedged the whole repository: %v", err)
+	}
+	got, err := gitDir(ctx, mirror, "config", "--get", "remote.origin.fetch")
+	if err != nil || got != originRefspec {
+		t.Errorf("refspec = %q err=%v, want it migrated to %q", got, err, originRefspec)
+	}
+}

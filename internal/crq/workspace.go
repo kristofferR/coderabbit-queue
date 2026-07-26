@@ -131,6 +131,13 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 		}
 	}
 	if _, err := os.Stat(filepath.Join(path, "HEAD")); err == nil {
+		// Enforce the refspec on EVERY call, not only at clone time. A mirror
+		// created before this rule still fetches +refs/*:refs/*, and one branch
+		// created in a worktree then wedges every future fetch for the whole
+		// repository with "refusing to fetch into branch ... checked out at".
+		if _, cerr := w.git(ctx, path, "config", "remote.origin.fetch", originRefspec); cerr != nil {
+			return "", fmt.Errorf("configuring %s: %w", repo, cerr)
+		}
 		// Two workers fetching one mirror race on git's ref locks, and the loser
 		// reports "cannot lock ref" even though the winner has just made the
 		// mirror current. Retry briefly, then accept the mirror as it stands
@@ -173,7 +180,7 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 	if _, err := w.git(ctx, "", "clone", "--bare", w.remoteURL(repo), pending); err != nil {
 		return "", fmt.Errorf("cloning %s: %w", repo, err)
 	}
-	if _, err := w.git(ctx, pending, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+	if _, err := w.git(ctx, pending, "config", "remote.origin.fetch", originRefspec); err != nil {
 		return "", fmt.Errorf("configuring %s: %w", repo, err)
 	}
 	if err := os.Rename(pending, path); err != nil {
@@ -195,6 +202,11 @@ func (w Workspace) remoteURL(repo string) string {
 	}
 	return strings.TrimRight(base, "/") + "/" + NormalizeRepo(repo)
 }
+
+// originRefspec keeps fetched refs out of refs/heads, which belongs to the
+// worktrees: a session's branch there must survive a fetch, and a branch checked
+// out in a worktree makes any fetch that would update it fail outright.
+const originRefspec = "+refs/heads/*:refs/remotes/origin/*"
 
 // Checkout is a worktree at one commit, and the directory git commands for that
 // PR run in.
