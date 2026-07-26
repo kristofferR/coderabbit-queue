@@ -127,9 +127,7 @@ func LoadConfig() (Config, error) {
 	for _, cb := range coBots {
 		coLogins = append(coLogins, cb.Login)
 	}
-	reviewers := buildReviewers(bot, requiredBots, coBots)
 	cfg := Config{
-		Reviewers:           reviewers,
 		GateRepo:            env["CRQ_REPO"],
 		DashboardIssue:      intEnv(env, "CRQ_ISSUE", 0),
 		CalibrationPR:       intEnv(env, "CRQ_CAL_PR", 0),
@@ -171,6 +169,9 @@ func LoadConfig() (Config, error) {
 	if len(cfg.Scope) == 0 && cfg.GateRepo != "" {
 		cfg.Scope = []string{ownerOf(cfg.GateRepo)}
 	}
+	// Built here, after the command is resolved, because the primary's trigger is
+	// part of describing it.
+	cfg.Reviewers = buildReviewers(cfg.Bot, cfg.ReviewCommand, requiredBots, coBots)
 	// The legacy lists are now VIEWS of cfg.Reviewers rather than parallel
 	// parses, so they cannot answer differently from it. An explicit
 	// CRQ_FEEDBACK_BOTS still wins: it is the one list an operator may widen

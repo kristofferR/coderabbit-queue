@@ -1,6 +1,7 @@
 package crq
 
 import (
+	"strings"
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
@@ -75,38 +76,75 @@ func (c Config) reviewerLogins(want func(Reviewer) bool) []string {
 }
 
 // buildReviewers assembles the one list from what the environment parsed: the
-// configured primary, which is the only account-metered reviewer, followed by the
-// enabled co-reviewers in registry order.
+// configured primary, the enabled co-reviewers, and any other login the operator
+// required that neither covers.
 //
-// It is built from the same inputs the four legacy lists were, so this describes
-// the existing configuration rather than changing it — the lists are then derived
-// back from here, which is what keeps them from drifting apart.
-func buildReviewers(primary string, required []string, coBots []CoBotConfig) []Reviewer {
+// It must describe the existing configuration exactly, not a tidier version of
+// it. Four ways of getting that wrong showed up in review, and each was a silent
+// behaviour change hiding inside a "pure refactor":
+//
+//   - a required bot outside the primary and the registry (say sonar[bot]) has no
+//     entry to build from, and dropping it would stop gating a reviewer the
+//     operator asked to wait for;
+//   - CRQ_REQUIRED_BOTS may deliberately exclude the primary, so requiredness is
+//     read, never assumed;
+//   - CRQ_BOT may name a registry bot, which would otherwise appear twice —
+//     once metered, once free-running;
+//   - the primary's trigger lives in ReviewCommand, and an empty Command means
+//     "crq cannot ask this reviewer", which is false for it.
+func buildReviewers(primary, primaryCommand string, required []string, coBots []CoBotConfig) []Reviewer {
 	requiredSet := map[string]bool{}
 	for _, login := range required {
-		requiredSet[dialect.NormalizeBotName(login)] = true
+		if login = strings.TrimSpace(login); login != "" {
+			requiredSet[dialect.NormalizeBotName(login)] = true
+		}
 	}
-	out := make([]Reviewer, 0, len(coBots)+1)
+	seen := map[string]bool{}
+	out := make([]Reviewer, 0, len(coBots)+len(required)+1)
+
 	if primary != "" {
+		key := dialect.NormalizeBotName(primary)
+		seen[key] = true
 		out = append(out, Reviewer{
-			Login:  primary,
-			Name:   dialect.NormalizeBotName(primary),
-			Budget: dialect.BudgetAccount,
-			// The primary always gates: a round is not reviewed until the reviewer
-			// whose quota it spent has answered.
-			Required: true,
+			Login:    primary,
+			Name:     key,
+			Budget:   dialect.BudgetAccount,
+			Required: requiredSet[key],
+			Command:  primaryCommand,
 			Trigger:  engine.TriggerAlways,
 		})
 	}
 	for _, cb := range coBots {
+		key := dialect.NormalizeBotName(cb.Login)
+		if seen[key] {
+			continue // already configured as the primary
+		}
+		seen[key] = true
 		out = append(out, Reviewer{
 			Login:         cb.Login,
 			Name:          cb.Name,
 			Budget:        dialect.BudgetNone,
-			Required:      cb.Required || requiredSet[dialect.NormalizeBotName(cb.Login)],
+			Required:      cb.Required || requiredSet[key],
 			Command:       cb.Command,
 			Trigger:       cb.Trigger,
 			SelfHealGrace: cb.SelfHealGrace,
+		})
+	}
+	// Whatever else the operator required. crq knows nothing about how to trigger
+	// it, but it still gates convergence, which is the whole reason it was listed.
+	for _, login := range required {
+		login = strings.TrimSpace(login)
+		key := dialect.NormalizeBotName(login)
+		if login == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, Reviewer{
+			Login:    login,
+			Name:     key,
+			Budget:   dialect.BudgetNone,
+			Required: true,
+			Trigger:  engine.TriggerNever,
 		})
 	}
 	return out

@@ -120,3 +120,60 @@ func TestExplicitFeedbackBotsSurviveTheDerivation(t *testing.T) {
 		t.Errorf("FeedbackBots = %v, want one per reviewer (%d)", cfg.FeedbackBots, len(cfg.Reviewers))
 	}
 }
+
+// The derivation has to describe the configuration that exists, not a tidier one.
+// Each row here was a silent behaviour change found in review, hiding inside a
+// change that claimed to be a pure refactor.
+func TestDerivationLosesNothing(t *testing.T) {
+	t.Run("a required bot outside the registry still gates", func(t *testing.T) {
+		cfg := isolatedConfig(t, map[string]string{
+			"CRQ_REQUIRED_BOTS": "coderabbitai[bot],sonar[bot]",
+		})
+		found := false
+		for _, login := range cfg.RequiredBots {
+			if login == "sonar[bot]" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("RequiredBots = %v, want sonar[bot] retained — dropping it stops gating a reviewer the operator asked to wait for", cfg.RequiredBots)
+		}
+	})
+
+	t.Run("the primary is not required unless it is listed", func(t *testing.T) {
+		cfg := isolatedConfig(t, map[string]string{
+			"CRQ_REQUIRED_BOTS": "chatgpt-codex-connector[bot]",
+		})
+		primary, _ := cfg.Primary()
+		if primary.Required {
+			t.Error("an explicit required list that omits the primary must be honoured")
+		}
+		for _, login := range cfg.RequiredBots {
+			if login == primary.Login {
+				t.Errorf("RequiredBots = %v, want the primary excluded", cfg.RequiredBots)
+			}
+		}
+	})
+
+	t.Run("a primary that is also a registry bot appears once", func(t *testing.T) {
+		cfg := isolatedConfig(t, map[string]string{"CRQ_BOT": "chatgpt-codex-connector[bot]"})
+		seen := 0
+		for _, r := range cfg.Reviewers {
+			if r.Login == "chatgpt-codex-connector[bot]" {
+				seen++
+			}
+		}
+		if seen != 1 {
+			t.Errorf("codex appears %d times; it cannot be both metered and free-running", seen)
+		}
+	})
+
+	t.Run("the primary knows how to be triggered", func(t *testing.T) {
+		cfg := isolatedConfig(t, nil)
+		primary, _ := cfg.Primary()
+		if primary.Command != cfg.ReviewCommand || primary.Command == "" {
+			t.Errorf("primary command = %q, want the resolved trigger %q — an empty one means crq cannot ask it at all",
+				primary.Command, cfg.ReviewCommand)
+		}
+	})
+}

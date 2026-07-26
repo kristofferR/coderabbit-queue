@@ -616,7 +616,16 @@ func TestLoopSettleWindowCatchesTrailingWave(t *testing.T) {
 			rep, code, _ := f.svc.Loop(f.ctx, repo, pr)
 			done <- out{code, len(rep.Findings)}
 		}()
-		time.Sleep(50 * time.Millisecond) // loop is now settling on real 1ms polls
+		// Wait for the loop to actually be polling before injecting, rather than
+		// sleeping and hoping. A fixed 50ms lost under parallel load, which made
+		// this the suite's one flaky test.
+		deadline := time.Now().Add(5 * time.Second)
+		for f.gh.reviewPolls() < 2 {
+			if time.Now().After(deadline) {
+				t.Fatal("the loop never reached its polling cycle")
+			}
+			time.Sleep(time.Millisecond)
+		}
 		if inject {
 			// The trailing wave: a fresh CodeRabbit review whose body carries an
 			// outside-diff finding (corpus shape), as after a push.
