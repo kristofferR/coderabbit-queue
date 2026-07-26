@@ -794,3 +794,54 @@ func TestCoOnlyRoundIsExemptFromEveryQueueGate(t *testing.T) {
 		t.Errorf("the metered round must report the held slot, got %q", q[1].Why)
 	}
 }
+
+// A retry keeps the previous attempt's FiredAt as history, and Reserve does not
+// clear it — so a reserved round would print an earlier attempt's timestamp as
+// though the current command had gone out. If the post then hangs, that
+// misleading value is what stays on the dashboard beside a stranded reservation.
+func TestInFlightPrintsNoFireTimeForAReservation(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(queuedRound("kristofferr/a", 1, 1, now))
+	previous := now.Add(-3 * time.Hour)
+	reserved := now.Add(-time.Second)
+	st.Rounds["kristofferr/a#1"] = func() Round {
+		r := st.Rounds["kristofferr/a#1"]
+		r.Phase, r.FiredAt, r.ReservedAt, r.Attempts = PhaseReserved, &previous, &reserved, 1
+		return r
+	}()
+
+	got := RenderDashboard(st, StoreConfig{})
+	if strings.Contains(got, fmtStamp(&previous, time.UTC)) {
+		t.Errorf("the previous attempt's fire time must not be shown for a reservation:\n%s", got)
+	}
+}
+
+// A held slot stops everything, free-running rounds included — not because they
+// need the slot, but because Pump returns as soon as it sees a holder, so the
+// quota-free path that would advance them is never reached.
+func TestHeldSlotStopsFreeRunningRoundsToo(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(queuedRound("kristofferr/free", 1, 1, now))
+	st.Rounds["kristofferr/free#1"] = func() Round {
+		r := st.Rounds["kristofferr/free#1"]
+		r.CoOnly = true
+		return r
+	}()
+	st.FireSlot = &FireSlot{Key: "kristofferr/other#9", Token: "tok", Since: now.Add(-time.Minute)}
+	fired := now.Add(-time.Minute)
+	st.Rounds["kristofferr/other#9"] = Round{
+		Repo: "kristofferr/other", PR: 9, Head: "999999999", Seq: 9,
+		Phase: PhaseFired, Token: "tok", EnqueuedAt: now.Add(-2 * time.Minute), FiredAt: &fired,
+	}
+
+	q := st.Queue(now, 0)
+	if len(q) != 1 {
+		t.Fatalf("Queue = %d entries, want 1", len(q))
+	}
+	if q[0].Why != WaitSlotBusy {
+		t.Errorf("a co-only round must report the held slot, got %q — the daemon cannot advance it either", q[0].Why)
+	}
+	if strings.Contains(RenderDashboard(st, StoreConfig{}), "| 1 | [kristofferr/free") {
+		t.Error("nothing may be numbered while the slot is held")
+	}
+}

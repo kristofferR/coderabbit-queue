@@ -95,6 +95,21 @@ func inFlightRounds(st State) []Round {
 // falling straight through to EnqueuedAt sorted a long-queued PR that was reserved
 // seconds ago ahead of reviews fired much earlier, contradicting the table's own
 // ordering.
+// firedTimeOf is what the in-flight table should print in its "fired" column: the
+// time THIS attempt posted its command, or nothing when it has not.
+//
+// A retry deliberately keeps the previous attempt's FiredAt as history and Reserve
+// does not clear it, so a reserved round would otherwise display an earlier
+// attempt's timestamp as though the current command had gone out — and if the post
+// hangs or the process dies, that misleading value is what stays on the dashboard
+// beside the stranded reservation.
+func firedTimeOf(r Round) *time.Time {
+	if r.Phase == PhaseReserved {
+		return nil
+	}
+	return r.FiredAt
+}
+
 func firedAtOf(r Round) time.Time {
 	// A reserved round is BETWEEN attempts: a retry deliberately preserves the
 	// previous FiredAt as history, so reading it here ordered the round by a fire
@@ -251,7 +266,7 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 		for _, r := range inFlight {
 			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %s | %s | `%s` |\n",
 				r.Repo, r.PR, r.Repo, r.PR, r.Head, r.Phase,
-				fmtStamp(r.FiredAt, loc), fmtStamp(r.WaitDeadline, loc), dash(coBotMarks(r)), r.ByHost)
+				fmtStamp(firedTimeOf(r), loc), fmtStamp(r.WaitDeadline, loc), dash(coBotMarks(r)), r.ByHost)
 		}
 	}
 

@@ -699,12 +699,21 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 		queued = append(queued, e)
 	}
 
-	// A held slot gates every queued round: nothing metered fires until it
-	// releases, and that moment is unknowable. Free-running rounds are untouched —
-	// they never wanted the slot.
+	// A held slot stops EVERYTHING, free-running rounds included.
+	//
+	// Not because they need the slot — they do not — but because Pump returns as
+	// soon as it sees a slot holder, so the quota-free path that would advance
+	// them is never reached while one is held. The exemption above is about the
+	// account window, which genuinely does not apply to them; claiming they are
+	// ready here would promise action the daemon cannot take until the holder is
+	// acknowledged. (An agent's own `crq next` can still resolve such a round
+	// directly, which is why this describes the queue rather than forbidding it.)
 	if slotBusy {
 		for i := range queued {
 			queued[i].ReadyAt, queued[i].Why = time.Time{}, WaitSlotBusy
+		}
+		for i := range freeRunning {
+			freeRunning[i].ReadyAt, freeRunning[i].Why = time.Time{}, WaitSlotBusy
 		}
 	}
 
