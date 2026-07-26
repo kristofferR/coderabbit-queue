@@ -116,6 +116,10 @@ func (s *Service) Enqueue(ctx context.Context, repo string, pr int) (EnqueueResu
 	if err != nil {
 		return result, err
 	}
+	// Always report the head this actually read. It used to be set only on the
+	// deduped path, so a caller comparing it against its own observation could
+	// not detect the very case that matters — a head that moved between the two.
+	result.Head = head
 	state, err := s.store.Update(ctx, func(st *State) error {
 		now := s.clock()
 		r := st.Round(repo, pr)

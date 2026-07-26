@@ -68,7 +68,8 @@ func TestNextAction(t *testing.T) {
 			// has not spoken, so the head must not move.
 			name: "pending reviewer holds the head when work is staged",
 			in: NextInput{
-				Obs: openObs(), Completion: both(false, true), LocalWork: true,
+				Round: state.Round{Phase: state.PhaseReviewing},
+				Obs:   openObs(), Completion: both(false, true), LocalWork: true,
 				MinDelay: time.Minute,
 			},
 			want: ActionHold, wantAt: t0.Add(time.Minute),
@@ -136,25 +137,26 @@ func TestNextAction(t *testing.T) {
 			pending: []string{nextCoBot, nextPrimary},
 		},
 		{
-			// A threadless finding has no lever: fixing it only dirties the tree,
-			// and only a push clears it. Repeating `fix` forever is how a PR ended
-			// up with no review ever requested for the code that replaced it.
-			name: "threadless finding stops repeating fix once the work is done",
+			// A threadless finding is repeated rather than suppressed. Hiding it
+			// once the tree is dirty was tried and is worse: an unrelated dirty
+			// file would then bury a finding the caller never saw, and a
+			// threadless review_skipped has no resolution state to recover from.
+			name: "threadless finding keeps being reported, not swallowed",
 			in: NextInput{
 				Obs: openObs(), Completion: both(true, true), LocalWork: true,
 				Findings: []dialect.Finding{{Bot: nextPrimary, Title: "body finding", Commit: nextHead}},
 			},
-			want: ActionPush,
+			want: ActionFix,
 		},
 		{
-			// ...but a finding the caller CAN resolve still gates: that lever
-			// exists, so drain-first still applies.
-			name: "resolvable finding keeps gating even with work done",
+			// Holding protects a review that is actually running. With no round,
+			// nothing was ever requested for this head, so holding would stall the
+			// caller and spend a window on code it is about to replace.
+			name: "no round means land the work rather than hold for nobody",
 			in: NextInput{
-				Obs: openObs(), Completion: both(true, true), LocalWork: true,
-				Findings: []dialect.Finding{finding(nextHead)},
+				Obs: openObs(), Completion: both(false, false), LocalWork: true,
 			},
-			want: ActionFix,
+			want: ActionPush,
 		},
 		{
 			name: "all answered with staged work means push",

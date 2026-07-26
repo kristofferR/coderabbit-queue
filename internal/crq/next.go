@@ -80,6 +80,14 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 		return report, nil
 	}
 
+	// The caller is about to move the head, so queueing a review now would spend
+	// a window on code that is being replaced — and the round would be
+	// superseded moments later anyway. Let the push land; the next call queues
+	// the head that actually matters.
+	if action.Kind == engine.ActionPush {
+		return report, nil
+	}
+
 	// A dry run reports decisions and writes nothing. Enqueue is a CAS write
 	// plus a dashboard sync, so it has to be skipped here rather than left to
 	// the dry-run-aware apply path further down.
@@ -319,8 +327,14 @@ func localWork(ctx context.Context, repos []string, head, headRef string) (bool,
 		return false, "could not read local HEAD"
 	}
 
-	// Sitting exactly on the PR head: only an uncommitted change is new work.
+	// Sitting exactly on the PR head: only an uncommitted change is new work —
+	// but the caller still has to be able to push it. A detached checkout at the
+	// PR SHA has no branch, so the prescribed push fails and the next call, now
+	// ahead of the head, reports no local work and can converge over the fix.
 	if head == "" || strings.HasPrefix(local, head) {
+		if why := branchMismatch(git, headRef); why != "" {
+			return false, why
+		}
 		if status, ok := git("status", "--porcelain"); ok && status != "" {
 			return true, "uncommitted changes in the working tree"
 		}
@@ -339,16 +353,26 @@ func localWork(ctx context.Context, repos []string, head, headRef string) (bool,
 	// Descending from the PR head is not the same as being the PR branch: a
 	// feature branch forked off it also descends, and reporting its commits as
 	// this PR's work invites a push that updates something else entirely.
-	if headRef != "" {
-		branch, ok := git("rev-parse", "--abbrev-ref", "HEAD")
-		if !ok || branch == "HEAD" {
-			return false, "this checkout is detached, so it cannot be confirmed as the pr branch " + headRef
-		}
-		if branch != headRef {
-			return false, "checked out " + branch + ", not the pr branch " + headRef
-		}
+	if why := branchMismatch(git, headRef); why != "" {
+		return false, why
 	}
 	return true, "local HEAD " + shortSHA(local) + " is ahead of the pr head " + head
+}
+
+// branchMismatch explains why this checkout is not the PR's branch, or "" when
+// it is. A detached checkout counts as a mismatch: there is nothing to push to.
+func branchMismatch(git func(...string) (string, bool), headRef string) string {
+	if headRef == "" {
+		return ""
+	}
+	branch, ok := git("rev-parse", "--abbrev-ref", "HEAD")
+	if !ok || branch == "HEAD" {
+		return "this checkout is detached, so there is no branch to push to " + headRef
+	}
+	if branch != headRef {
+		return "checked out " + branch + ", not the pr branch " + headRef
+	}
+	return ""
 }
 
 // nonEmpty drops blanks so a reason never reads "owner/repo or ".

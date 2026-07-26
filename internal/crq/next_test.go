@@ -80,17 +80,28 @@ func TestNextDrivesAReviewRound(t *testing.T) {
 		t.Fatal("fix must carry the findings to act on")
 	}
 
-	// 3. The fix landed on a new head. The old finding has no thread to resolve,
-	//    so it stops blocking, but the reviewer has not seen the new head — crq
-	//    must say HOLD (or wait), never push. This is the rule agents break;
-	//    here it is a value, not a paragraph.
+	// 3. The head moved and the caller still holds changes. No review has been
+	//    requested for this head, so holding would stall for nobody — and
+	//    queueing one now would spend a window on code about to be replaced.
+	//    Land it first.
 	f.setLocalWork(true, "uncommitted changes in the working tree")
 	f.clk.advance(time.Minute)
 	f.setHead(repo, pr, "bbbbbbbb2")
 	f.setCommitDate("bbbbbbbb2", f.clk.now())
+	postedBefore := f.reviewsPosted(repo, pr)
+	f.wantAction(f.next(repo, pr), engine.ActionPush)
+	if got := f.reviewsPosted(repo, pr); got != postedBefore {
+		t.Errorf("a head that is about to move must not buy a review: posted %d -> %d", postedBefore, got)
+	}
+
+	// Once a review IS running for this head, the head must not move.
+	f.setLocalWork(false, "")
+	f.enqueue(repo, pr)
+	f.pump()
+	f.setLocalWork(true, "uncommitted changes in the working tree")
 	held := f.next(repo, pr)
 	if held.Action != string(engine.ActionHold) && held.Action != string(engine.ActionWait) {
-		t.Fatalf("action = %q (%s), want hold or wait while the new head is unreviewed", held.Action, held.Reason)
+		t.Fatalf("action = %q (%s), want hold or wait while the review runs", held.Action, held.Reason)
 	}
 	if held.RecheckAfter == nil {
 		t.Error("a hold must say when to look again")

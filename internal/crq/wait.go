@@ -44,11 +44,17 @@ func (s *Service) waitTick() time.Duration {
 // branches are wrong, and every observed session wrapped the command in
 // `set +e … ; echo "CRQ_EXIT:$?"` to smuggle the exit code back out.
 //
-// This owns nothing. It writes nothing, holds no round, and has no exit-code
-// vocabulary of its own — killing it costs exactly the process. Its ONLY job is
-// to notice, so that its exit can be the wake event for an agent that ended its
-// turn. If it dies, the caller re-runs it (or calls `crq next`) and gets the
-// same answer from persisted state.
+// This owns nothing: it holds no round and has no exit-code vocabulary of its
+// own, so killing it costs exactly the process. Its ONLY job is to notice, so
+// that its exit can be the wake event for an agent that ended its turn. If it
+// dies, the caller re-runs it (or calls `crq next`) and gets the same answer
+// from persisted state.
+//
+// It is read-only in the steady state, but NOT unconditionally: when nothing is
+// advancing this PR — no round for the head, or no live leader — it drives the
+// queue itself through Next, which enqueues and can post the review command.
+// The alternative is idling forever on a queue nobody will put the PR in, so the
+// honest contract is "writes only when it must, to avoid waiting for nobody".
 //
 // Cost matters as much as correctness here: the account shares one REST budget
 // across the daemon and every agent, and seven concurrent waiters once

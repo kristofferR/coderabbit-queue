@@ -114,22 +114,20 @@ func NextAction(in NextInput, now time.Time) Action {
 	// 1. Findings first. An agent that starts a new review round on top of
 	//    unresolved feedback burns account quota to be told the same thing.
 	//
-	//    "Unresolved" has to mean something the caller can still act on, or the
-	//    loop cannot end. A finding with a thread is cleared by resolving or
-	//    declining it, so it keeps returning `fix` until that happens. A
-	//    THREADLESS one has no such lever: fixing it only dirties the working
-	//    tree, and nothing clears it but a push whose review supersedes it. So
-	//    once the caller has done the local work, threadless findings stop
-	//    repeating `fix` and the reviewer gates below decide when it may land —
-	//    otherwise a review-body finding pins the loop on `fix` forever.
+	//    A threadless finding has no lever the caller can pull — nothing clears
+	//    it but a push whose review supersedes it — so it can repeat. Suppressing
+	//    it once the tree is dirty was tried and is WORSE: any unrelated dirty
+	//    file then hides a finding the caller never saw at all, which for a
+	//    threadless `review_skipped` is unrecoverable. A repeated instruction is
+	//    visible and annoying; a swallowed finding is silent and harmful, so this
+	//    deliberately errs toward repeating. Clearing them properly needs an
+	//    explicit dismissal, not an inference from local state.
 	if blocking := BlockingFindings(in.Findings, in.Obs.Head); len(blocking) > 0 {
-		if !in.LocalWork || anyResolvable(blocking) {
-			return Action{
-				Kind:     ActionFix,
-				Reason:   "actionable findings for this head",
-				Pending:  pending,
-				Findings: blocking,
-			}
+		return Action{
+			Kind:     ActionFix,
+			Reason:   "actionable findings for this head",
+			Pending:  pending,
+			Findings: blocking,
 		}
 	}
 
@@ -187,24 +185,36 @@ func NextAction(in NextInput, now time.Time) Action {
 		}
 		kind, reason := ActionWait, "awaiting review"
 		if in.LocalWork {
+			// Holding protects a review that is actually happening. With no round
+			// at all, nothing has been requested for this head, so holding would
+			// stall the caller AND spend a review window on code it is about to
+			// replace. Land the work first; the round then covers the real head.
+			if in.Round.Phase == "" {
+				return Action{
+					Kind:   ActionPush,
+					Reason: "no review has been requested for this head yet; land your work before one is",
+				}
+			}
 			kind, reason = ActionHold, "do not push: a required reviewer has not answered for this head"
 		}
 		return Action{Kind: kind, Reason: reason, At: in.nextCheck(now, nil, pending), Pending: pending}
 	}
 
-	// 4. Everything answered. Land the work, or report convergence — but only
-	//    once the PR has been quiet long enough that a trailing wave would have
-	//    landed. Declaring `done` on the first clean observation is how a loop
-	//    stops moments before the findings arrive.
-	if in.LocalWork {
-		return Action{Kind: ActionPush, Reason: "all required reviewers answered on this head"}
-	}
+	// 4. Everything answered — but only once the PR has been quiet long enough
+	//    that a trailing wave would have landed. This gates BOTH outcomes:
+	//    declaring `done` early stops a loop moments before findings arrive, and
+	//    pushing early moves the head out from under a reviewer whose inline
+	//    comments are still landing, stranding them on the old commit.
 	if in.SettleUntil != nil && in.SettleUntil.After(now) {
 		return Action{
-			Kind:   ActionWait,
-			Reason: "every required reviewer answered; holding briefly in case a trailing review is still landing",
-			At:     in.nextCheck(now, in.SettleUntil, pending),
+			Kind:    ActionWait,
+			Reason:  "every required reviewer answered; holding briefly in case a trailing review is still landing",
+			At:      in.nextCheck(now, in.SettleUntil, pending),
+			Pending: pending,
 		}
+	}
+	if in.LocalWork {
+		return Action{Kind: ActionPush, Reason: "all required reviewers answered on this head"}
 	}
 	return Action{Kind: ActionDone, Reason: "converged: no findings and every required reviewer answered"}
 }
@@ -268,18 +278,6 @@ func (in NextInput) nextCheck(now time.Time, extra *time.Time, pending []string)
 func coReviewActive(r state.Round) bool {
 	for _, co := range r.CoBots {
 		if co.CommandedAt != nil {
-			return true
-		}
-	}
-	return false
-}
-
-// anyResolvable reports whether some finding carries a thread the caller can
-// resolve or decline. Without one, repeating `fix` asks for an action that does
-// not exist.
-func anyResolvable(findings []dialect.Finding) bool {
-	for _, f := range findings {
-		if f.ThreadID != "" {
 			return true
 		}
 	}

@@ -520,7 +520,11 @@ Exit codes:
   0   clean/no local findings
   10  local findings returned in .findings[]
   1   setup, auth, CLI, or parsing error
-  2   timeout
+  2   come back later: a timeout, or the CodeRabbit account is rate-limited
+      (.status is "rate_limited", with .retry_after and .error_type)
+
+The local CLI spends the same account quota as PR reviews, so a local block is
+evidence about that shared quota — read .retry_after rather than re-running.
 
 Use crq loop for queued GitHub PR reviews.
 `)

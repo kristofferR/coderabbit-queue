@@ -347,16 +347,15 @@ while :; do
       # crq decline <id> --reason "why this one is declined"
       ;;
 
-    push)    git commit -am "address review feedback" && git push ;;
+    push)    git add -A && git commit -m "address review feedback" && git push ;;
 
     hold|wait)
-      # crq computed this time from the quota window, the retry cooldown and the
-      # poll interval. Never substitute a delay of your own.
-      until=$(jq -r '.recheck_after // empty' "$OUT")
-      echo "$action: $(jq -r .reason "$OUT") — until ${until:-soon}"
-      secs=15
-      [ -n "$until" ] && secs=$(( $(date -d "$until" +%s) - $(date +%s) ))
-      sleep $(( secs > 0 ? secs : 15 ))
+      # Don't compute a delay — hand the wait over. crq wait blocks until there
+      # is something to do and exits, so there is no timestamp to parse and no
+      # sleep to guess. (Parsing .recheck_after yourself needs GNU date; this
+      # doesn't.)
+      echo "$action: $(jq -r .reason "$OUT")"
+      crq wait "$REPO" "$PR" > "$OUT" || exit 1
       ;;
   esac
 done

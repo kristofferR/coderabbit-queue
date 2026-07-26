@@ -65,9 +65,11 @@ It blocks until there IS something to do (`fix`, `push`, `done`, `blocked`), pri
 and exits 0. Run it as your harness's background task — its **exit is the wake event**, so you burn
 no tokens idling and never narrate a countdown.
 
-It owns nothing: no round, no state, no writes. Being killed costs only the process, so if that
-happens just run it again (or call `crq next`). While idle it watches the shared state ref with a
-conditional request that spends no rate-limit quota.
+It owns no round and holds no state, so being killed costs only the process — just run it again (or
+call `crq next`). While idle it watches the shared state ref with a conditional request that spends
+no rate-limit quota. It is read-only in the steady state, but if nothing is advancing your PR (no
+round for the head, or no daemon holding the leader lease) it drives the queue itself rather than
+wait for nobody — which can request a review.
 
 `crq next --wait` is the same wait inline, for a human at a terminal. All three share one decision
 function, so they cannot disagree.
