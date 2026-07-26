@@ -164,6 +164,12 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 // ClearReviewers returns repo to the fleet default.
 func (s *Service) ClearReviewers(ctx context.Context, repo string) (ReviewerView, error) {
 	repo = NormalizeRepo(repo)
+	// The same shape check set does. A typo like "owner-repo" would otherwise
+	// clear a key nothing uses and exit 0, so automation believes it restored the
+	// fleet default while the real override is still in force.
+	if !strings.Contains(repo, "/") {
+		return ReviewerView{}, fmt.Errorf("repo must be owner/name, got %q", repo)
+	}
 	now := s.clock().UTC()
 	state, err := s.store.Update(ctx, func(st *State) error {
 		before := s.cfg.ForRepo(mustOverride(st, repo))
@@ -217,6 +223,12 @@ func mustOverride(st *State, repo string) RepoReviewers {
 //
 // Only rounds whose required set actually changed are touched, and only
 // completed ones — an in-flight round is already going to answer.
+//
+// Known cost: DecideFire's already-reviewed gate reads submitted reviews, so a
+// round the primary finished with a completion REPLY and no Review object can be
+// asked once more. That is one duplicate review in an uncommon case, against a
+// PR stranded silently and permanently — the loud failure is the better one, and
+// the gate is where a real fix belongs.
 func (s *Service) reopenForChangedReviewers(st *State, repo string, before, after Config, now time.Time) {
 	if sameLogins(before.RequiredBots, after.RequiredBots) {
 		return
