@@ -106,6 +106,11 @@ type Round struct {
 	Token  string `json:"token,omitempty"` // reservation token (CAS race detection)
 	ByHost string `json:"by_host,omitempty"`
 	Note   string `json:"note,omitempty"` // human-readable reason for the last transition
+
+	// unknown carries JSON members this binary has no field for, so a newer
+	// binary's additions survive being read and rewritten here. Unexported, so
+	// it is never a member itself. See tolerant.go.
+	unknown unknownFields
 }
 
 // CoBotRound is one co-reviewer's bookkeeping inside a Round: the trigger
@@ -287,6 +292,10 @@ type State struct {
 	Warn         string     `json:"warn,omitempty"`
 	UpdatedAt    *time.Time `json:"wrote_at,omitempty"`
 	DashboardSHA string     `json:"dashboard_sha,omitempty"`
+
+	// unknown carries top-level JSON members this binary has no field for. See
+	// tolerant.go.
+	unknown unknownFields
 }
 
 const SchemaVersion = 3
