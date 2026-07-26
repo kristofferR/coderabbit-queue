@@ -108,6 +108,8 @@ type EnqueueResult struct {
 	Deduped       bool   `json:"deduped"`
 	Head          string `json:"head,omitempty"`
 	Seq           int64  `json:"seq,omitempty"`
+	// Reason explains a no-op, which today means the PR is held.
+	Reason string `json:"reason,omitempty"`
 }
 
 // Enqueue records a review round for repo#pr's current head. A round already
@@ -126,6 +128,12 @@ func (s *Service) Enqueue(ctx context.Context, repo string, pr int) (EnqueueResu
 	result.Head = head
 	state, err := s.store.Update(ctx, func(st *State) error {
 		now := s.clock()
+		if h, held := st.HeldPR(repo, pr); held {
+			// Enqueueing a held PR would queue a round nothing may fire, which
+			// reads on the dashboard as work waiting its turn.
+			result.Reason = "held: " + h.Reason
+			return ErrNoChange
+		}
 		r := st.Round(repo, pr)
 		if r != nil && r.Head == head {
 			switch r.Phase {

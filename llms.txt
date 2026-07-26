@@ -202,6 +202,14 @@ convergence never hides a rebuttal you have not answered. Address it or decline 
 reason; the loop clears it once the bot withdraws (or you stop declining and fix it). Ambiguous bot
 replies surface too — crq errs toward showing a possible rebuttal rather than burying it.
 
+Stop crq reviewing a PR (one write, no window for a daemon to fire in):
+
+```bash
+crq hold REPO PR --reason "why"
+crq unhold REPO PR
+crq hold                      # list
+```
+
 Current feedback without triggering a review:
 
 ```bash

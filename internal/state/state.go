@@ -285,6 +285,14 @@ type State struct {
 	// one. Persisted in the shared state so the whole fleet uses the new issue.
 	CalibrationIssue int `json:"calibration_issue,omitempty"`
 
+	// Holds are the PRs crq must not fire a review for, keyed by "owner/name#pr".
+	//
+	// Holding used to take two commands that could not be one: the skip marker
+	// stops fleet auto-review from enqueueing, `crq cancel` stops the pump, and
+	// between the two a daemon fired anyway. A hold is one fact, in the state
+	// every firing path already reads.
+	Holds map[string]Hold `json:"holds,omitempty"`
+
 	// Archive keeps recently finished rounds (superseded, closed, cancelled)
 	// for the dashboard and debugging. Bounded by ArchiveMax.
 	Archive []Round `json:"archive,omitempty"`
@@ -582,7 +590,10 @@ func (s *State) NextEligible(now time.Time) *Round {
 	var best *Round
 	for key := range s.Rounds {
 		r := s.Rounds[key]
-		if !r.FireEligible(now) {
+		// Held PRs are skipped HERE, in the one place a round is chosen to fire,
+		// rather than at each caller. An exemption that has to be remembered at
+		// every site is one that will be missed at one of them.
+		if !r.FireEligible(now) || s.isHeld(r) {
 			continue
 		}
 		if best == nil || r.Seq < best.Seq {
@@ -597,12 +608,58 @@ func (s *State) NextEligible(now time.Time) *Round {
 func (s *State) QueuedRounds(now time.Time) []Round {
 	var out []Round
 	for _, r := range s.Rounds {
-		if r.FireEligible(now) {
+		if r.FireEligible(now) && !s.isHeld(r) {
 			out = append(out, r)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
 	return out
+}
+
+// Hold records why a PR is held out of the review queue.
+type Hold struct {
+	Reason string    `json:"reason,omitempty"`
+	By     string    `json:"by,omitempty"`
+	At     time.Time `json:"at"`
+}
+
+// Hold marks repo#pr as not to be reviewed, replacing any earlier hold.
+func (s *State) Hold(repo string, pr int, reason, by string, now time.Time) {
+	if s.Holds == nil {
+		s.Holds = map[string]Hold{}
+	}
+	s.Holds[holdKey(repo, pr)] = Hold{Reason: reason, By: by, At: now.UTC()}
+}
+
+// Unhold releases a hold, reporting whether one was there.
+func (s *State) Unhold(repo string, pr int) bool {
+	key := holdKey(repo, pr)
+	if _, ok := s.Holds[key]; !ok {
+		return false
+	}
+	delete(s.Holds, key)
+	return true
+}
+
+// HeldPR reports whether repo#pr is held, and why.
+func (s *State) HeldPR(repo string, pr int) (Hold, bool) {
+	h, ok := s.Holds[holdKey(repo, pr)]
+	return h, ok
+}
+
+// normalizeRepoKey lowercases a repo slug so a hold set as Owner/Name matches a
+// round recorded as owner/name.
+func normalizeRepoKey(repo string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(repo), ".git"))
+}
+
+func (s *State) isHeld(r Round) bool {
+	_, held := s.HeldPR(r.Repo, r.PR)
+	return held
+}
+
+func holdKey(repo string, pr int) string {
+	return fmt.Sprintf("%s#%d", normalizeRepoKey(repo), pr)
 }
 
 // Queue-entry wait reasons. A waiting round is held by exactly one of these
