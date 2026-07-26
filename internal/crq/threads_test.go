@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // A listing exists to be read. Both bots wrap their title in badge images and
@@ -27,6 +28,18 @@ func TestThreadTitleReadsAsText(t *testing.T) {
 			"Reject flags supplied as option values.",
 		},
 		{"plain", "Just a sentence about the bug.", "Just a sentence about the bug."},
+		{
+			// A pipe is allowed in a title; only the fixed rubric header goes.
+			"pipe in the title",
+			"**Support A | B configuration**\n\nDetail.",
+			"Support A | B configuration",
+		},
+		{
+			// Underscores inside an identifier are content, not emphasis.
+			"identifier with underscores",
+			"**Handle user_id and api_key**\n\nDetail.",
+			"Handle user_id and api_key",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := threadTitle(tc.body); got != tc.want {
@@ -36,8 +49,18 @@ func TestThreadTitleReadsAsText(t *testing.T) {
 	}
 
 	long := threadTitle(strings.Repeat("x", 400))
-	if len(long) > 120 {
-		t.Errorf("title is %d chars; a listing line must stay short", len(long))
+	if len([]rune(long)) > 120 {
+		t.Errorf("title is %d chars; a listing line must stay short", len([]rune(long)))
+	}
+
+	// Truncation cuts runes, not bytes: splitting a multi-byte character leaves
+	// invalid UTF-8, which JSON renders as a replacement character.
+	wide := threadTitle(strings.Repeat("é", 400))
+	if !utf8.ValidString(wide) {
+		t.Errorf("truncated title is not valid UTF-8: %q", wide)
+	}
+	if strings.Contains(wide, "\uFFFD") {
+		t.Errorf("truncation split a character: %q", wide)
 	}
 }
 

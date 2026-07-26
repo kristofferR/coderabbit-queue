@@ -204,6 +204,10 @@ func run(ctx context.Context, args []string) int {
 			fatal(errors.New("usage: crq threads <repo> <pr>"))
 			return 1
 		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
 		threads, terr := service.OpenThreads(ctx, repo, pr)
 		if terr != nil {
 			fatal(terr)

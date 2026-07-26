@@ -74,32 +74,38 @@ func (s *Service) OpenThreads(ctx context.Context, repo string, pr int) ([]OpenT
 	return out, nil
 }
 
-// markup matches the badge images, HTML wrappers and emphasis a bot puts around
-// its title. Left in, a listing reads as `![P2 Badge](https://img.shields.io/...)`
-// instead of what the finding says.
-var markup = regexp.MustCompile(`!\[[^\]]*\]\([^)]*\)|<[^>]+>|[*_` + "`" + `#]+`)
+// markup matches the wrappers a bot puts AROUND its title: badge images, HTML
+// tags, and emphasis runs that delimit a span. Left in, a listing reads as
+// `![P2 Badge](https://img.shields.io/...)` instead of what the finding says.
+//
+// Emphasis is matched only where it delimits — at a boundary — so a literal
+// underscore inside a word survives. Stripping every `_` turned "Handle user_id"
+// into "Handle user id", which is a different identifier.
+var markup = regexp.MustCompile(`!\[[^\]]*\]\([^)]*\)|<[^>]+>|(^|\s)[*_` + "`" + `#]+|[*_` + "`" + `#]+(\s|$)`)
+
+// rubric matches CodeRabbit's fixed severity header — "🎯 Functional
+// Correctness | 🟡 Minor | ⚡ Quick win" — which is the same on every finding
+// and displaces the part that differs.
+//
+// It matches the SHAPE rather than any pipe, because a title is allowed to
+// contain one: "Support A | B configuration" must not become "B configuration".
+var rubric = regexp.MustCompile(`^[^|]*\b(Correctness|Maintainability|Security|Performance|Reliability|Quality)\b[^|]*\|[^|]*\|[^|]*\|?\s*`)
 
 // threadTitle reduces a comment body to one readable line. It prefers the bot's
 // own bold title, which is where both CodeRabbit and Codex put the summary.
 func threadTitle(body string) string {
 	title := dialect.TitleFromDetailedBlock(body)
-	if strings.TrimSpace(markup.ReplaceAllString(title, "")) == "" {
+	if strings.TrimSpace(markup.ReplaceAllString(title, " ")) == "" {
 		title = dialect.TitleOf(body)
 	}
 	title = strings.Join(strings.Fields(markup.ReplaceAllString(title, " ")), " ")
-	// Drop a leading severity/category rubric ("Functional Correctness | Minor |
-	// Quick win"): it is the same on every finding, so it displaces the part that
-	// differs.
-	if _, rest, ok := strings.Cut(title, "|"); ok {
-		if last := strings.LastIndex(rest, "|"); last >= 0 {
-			rest = rest[last+1:]
-		}
-		if trimmed := strings.TrimSpace(rest); trimmed != "" {
-			title = trimmed
-		}
+	if trimmed := strings.TrimSpace(rubric.ReplaceAllString(title, "")); trimmed != "" {
+		title = trimmed
 	}
-	if len(title) > 120 {
-		title = title[:117] + "..."
+	// By runes: cutting bytes can split a multi-byte character, and the invalid
+	// UTF-8 that leaves becomes a replacement character in the JSON.
+	if runes := []rune(title); len(runes) > 120 {
+		title = string(runes[:117]) + "..."
 	}
 	return title
 }
