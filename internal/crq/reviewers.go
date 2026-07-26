@@ -188,10 +188,44 @@ func (c Config) ForRepo(ov RepoReviewers) Config {
 	}
 	out := c
 	if ov.SetCoBots {
-		keep := make([]CoBotConfig, 0, len(c.CoBots))
+		// Required implies enabled, the same rule the fleet parse follows: a bot
+		// that gates but is never triggered waits forever.
+		wanted := append([]string(nil), ov.CoBots...)
+		if ov.SetRequired {
+			for _, login := range ov.Required {
+				if !containsBot(wanted, login) && !sameBot(login, c.Bot) {
+					wanted = append(wanted, login)
+				}
+			}
+		}
+		keep := make([]CoBotConfig, 0, len(wanted)+1)
+		have := map[string]bool{}
 		for _, cb := range c.CoBots {
-			if containsBot(ov.CoBots, cb.Login) {
+			// A primary that is itself a registry bot keeps its silenced entry
+			// whatever the override says: that entry is where its wording and
+			// check-run hooks come from, and dropping it costs the primary its
+			// evidence (see LoadConfig).
+			if sameBot(cb.Login, c.Bot) {
 				keep = append(keep, cb)
+				have[dialect.NormalizeBotName(cb.Login)] = true
+				continue
+			}
+			if containsBot(wanted, cb.Login) {
+				keep = append(keep, cb)
+				have[dialect.NormalizeBotName(cb.Login)] = true
+			}
+		}
+		// A repository may choose a bot the fleet default does not enable —
+		// otherwise "which bots for which project" only ever subtracts. Its
+		// configuration comes from the registry, since there is no per-bot
+		// environment for a repo.
+		for _, login := range wanted {
+			if have[dialect.NormalizeBotName(login)] {
+				continue
+			}
+			if co, ok := dialect.CoReviewerByName(login); ok {
+				keep = append(keep, defaultCoBot(co, containsBot(ov.Required, login)))
+				have[dialect.NormalizeBotName(login)] = true
 			}
 		}
 		out.CoBots = keep
@@ -205,6 +239,11 @@ func (c Config) ForRepo(ov RepoReviewers) Config {
 	out.RequiredBots = out.reviewerLogins(func(r Reviewer) bool { return r.Required })
 	out.FeedbackBots = out.reviewerLogins(func(r Reviewer) bool { return r.Required || !r.Metered() })
 	return out
+}
+
+// sameBot reports whether two spellings name the same reviewer.
+func sameBot(a, b string) bool {
+	return dialect.NormalizeBotName(a) == dialect.NormalizeBotName(b)
 }
 
 func containsBot(logins []string, login string) bool {

@@ -285,6 +285,12 @@ type State struct {
 	// one. Persisted in the shared state so the whole fleet uses the new issue.
 	CalibrationIssue int `json:"calibration_issue,omitempty"`
 
+	// Writers records which hosts have written this state and what they can do,
+	// so a feature that only SOME binaries understand can say so instead of
+	// pretending agreement. Sharing a ref stops an old binary erasing a new
+	// field; it does not make that binary act on it.
+	Writers map[string]WriterSeen `json:"writers,omitempty"`
+
 	// Repos holds per-repository reviewer overrides, keyed by normalized
 	// "owner/name".
 	//
@@ -307,6 +313,67 @@ type State struct {
 	// unknown carries top-level JSON members this binary has no field for. See
 	// tolerant.go.
 	unknown unknownFields
+}
+
+// WriterCaps is what THIS binary understands. Bump it when a state field starts
+// changing decisions, so a fleet running two versions can tell.
+const WriterCaps = 1
+
+// CapsRepoOverrides is the capability that makes per-repository reviewer
+// overrides safe to act on.
+const CapsRepoOverrides = 1
+
+// writerTTL is how long a host counts as still active for capability purposes.
+const writerTTL = 30 * time.Minute
+
+// WriterSeen is one host's last write.
+type WriterSeen struct {
+	Caps int       `json:"caps"`
+	At   time.Time `json:"at"`
+}
+
+// NoteWriter records that host wrote this state with the given capabilities.
+func (s *State) NoteWriter(host string, caps int, now time.Time) {
+	if host == "" {
+		return
+	}
+	if s.Writers == nil {
+		s.Writers = map[string]WriterSeen{}
+	}
+	s.Writers[host] = WriterSeen{Caps: caps, At: now.UTC()}
+	// Bounded: a host that has not written in a day is not part of the fleet's
+	// current behaviour, and the state ref is not an audit log.
+	for name, seen := range s.Writers {
+		if now.Sub(seen.At) > 24*time.Hour {
+			delete(s.Writers, name)
+		}
+	}
+}
+
+// LaggingWriters names the hosts that are DRIVING this queue — holding the
+// leader lease or the fire slot — without having announced the capability
+// needed for caps.
+//
+// It answers the question a shared config field cannot: "will everyone who acts
+// on this actually honour it?" An old binary loads an unknown field, writes it
+// back untouched, and keeps deciding from its own fleet-wide configuration.
+func (s *State) LaggingWriters(caps int, now time.Time) []string {
+	acting := map[string]bool{}
+	if s.Leader != nil && s.Leader.Owner != "" && s.Leader.ExpiresAt.After(now) {
+		acting[s.Leader.Owner] = true
+	}
+	if slot := s.SlotRound(); slot != nil && slot.ByHost != "" {
+		acting[slot.ByHost] = true
+	}
+	var out []string
+	for host := range acting {
+		if seen, ok := s.Writers[host]; ok && seen.Caps >= caps && now.Sub(seen.At) <= writerTTL {
+			continue
+		}
+		out = append(out, host)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // RepoReviewers overrides which reviewers run on one repository. A nil slice

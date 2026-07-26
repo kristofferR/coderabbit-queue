@@ -446,7 +446,11 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// quota block qualifies — a round's own awaiting_retry cooldown also
 	// covers non-quota retries (post failures, timeouts) that must keep their
 	// normal retry handling.
-	if s.cfg.RateLimitCoDegrade && !report.Converged && st.Account.BlockedUntil != nil {
+	// Gated on Codex being a reviewer HERE. The degrade releases the head on
+	// Codex's word while the primary's window is shut; on a repository that
+	// excluded Codex, an unsolicited auto-review would otherwise stand in for a
+	// bot nobody asked for.
+	if cfg.RateLimitCoDegrade && cfg.coBotEnabled(dialect.CodexBotLogin) && !report.Converged && st.Account.BlockedUntil != nil {
 		until := st.Account.BlockedUntil.UTC()
 		if until.After(now) && engine.CodexOnlyEligible(completionRound, obs.eng, &until, now) {
 			report.CodeRabbitDeferred = true
@@ -457,7 +461,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	case report.Converged:
 		report.Status = "converged"
 	case report.CodeRabbitDeferred && len(report.Findings) == 0 &&
-		engine.DoneExceptWithEvidence(report.ReviewedBy, s.cfg.Bot, dialect.CodexBotLogin):
+		engine.DoneExceptWithEvidence(report.ReviewedBy, cfg.Bot, dialect.CodexBotLogin):
 		report.Status = "deferred"
 		report.Reason = "codex reviewed clean; coderabbit review deferred until " +
 			report.DeferredUntil.UTC().Format(time.RFC3339) + " (account rate-limited)"
