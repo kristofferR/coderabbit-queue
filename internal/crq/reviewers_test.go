@@ -168,6 +168,43 @@ func TestDerivationLosesNothing(t *testing.T) {
 		}
 	})
 
+	t.Run("a primary that is also a registry bot is asked once", func(t *testing.T) {
+		// Appearing once in Reviewers is not enough: CoBots still drives the
+		// co-reviewer trigger post, so an entry left there means DecideFire posts
+		// the review command and fireCoOnly posts the co-reviewer command — the
+		// same reviewer asked twice. Pointing crq at Codex as the primary is a
+		// real configuration, so this is a live double-post, not a hypothetical.
+		cfg := isolatedConfig(t, map[string]string{"CRQ_BOT": "chatgpt-codex-connector[bot]"})
+		for _, cb := range cfg.CoBots {
+			if dialect.NormalizeBotName(cb.Login) == dialect.NormalizeBotName(cfg.Bot) {
+				t.Errorf("CoBots still holds the primary %q, so crq would trigger it twice", cb.Login)
+			}
+		}
+		// It is still a reviewer, and still the metered one.
+		if primary, ok := cfg.Primary(); !ok || primary.Login != cfg.Bot {
+			t.Errorf("Primary() = %+v ok=%v, want the configured primary", primary, ok)
+		}
+	})
+
+	t.Run("an omitted primary contributes no findings", func(t *testing.T) {
+		// Leaving the primary out of CRQ_REQUIRED_BOTS is how an operator says
+		// "do not wait for CodeRabbit here". Deriving feedback from every reviewer
+		// put it back, so its findings would return code 10 and start a new round
+		// over a reviewer nobody asked for.
+		cfg := isolatedConfig(t, map[string]string{
+			"CRQ_REQUIRED_BOTS": "chatgpt-codex-connector[bot]",
+		})
+		for _, login := range cfg.FeedbackBots {
+			if login == cfg.Bot {
+				t.Errorf("FeedbackBots = %v, want the omitted primary excluded", cfg.FeedbackBots)
+			}
+		}
+		// The co-reviewers it did ask for are still there.
+		if len(cfg.FeedbackBots) == 0 {
+			t.Error("FeedbackBots is empty; the required co-reviewer must still report")
+		}
+	})
+
 	t.Run("the primary knows how to be triggered", func(t *testing.T) {
 		cfg := isolatedConfig(t, nil)
 		primary, _ := cfg.Primary()

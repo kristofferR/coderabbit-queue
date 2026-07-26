@@ -635,7 +635,19 @@ func TestLoopSettleWindowCatchesTrailingWave(t *testing.T) {
 			r.User.Login = f.bot
 			key := fakeKey(repo, pr)
 			f.gh.reviews[key] = append(f.gh.reviews[key], r)
+			before := f.gh.reviewReads // read under the same lock as the append
 			f.gh.mu.Unlock()
+			// A poll count of 2 only proves the loop is running — those reads may
+			// both predate the injection (waitToFire polls too). Advancing the
+			// clock then closes the settle window on a snapshot taken before the
+			// wave, and the loop converges over a finding it never saw. Wait for a
+			// poll whose snapshot is provably after the append.
+			for f.gh.reviewPolls() <= before {
+				if time.Now().After(deadline) {
+					t.Fatal("no poll observed the injected review")
+				}
+				time.Sleep(time.Millisecond)
+			}
 		}
 		f.clk.advance(11 * time.Minute) // past the settle window either way
 		select {

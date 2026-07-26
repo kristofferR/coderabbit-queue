@@ -149,3 +149,20 @@ func buildReviewers(primary, primaryCommand string, required []string, coBots []
 	}
 	return out
 }
+
+// withoutLogin drops the co-reviewer entry matching login, if any. Used to keep a
+// primary that happens to be a registry bot out of the co-reviewer machinery.
+func withoutLogin(coBots []CoBotConfig, login string) []CoBotConfig {
+	if login == "" {
+		return coBots
+	}
+	key := dialect.NormalizeBotName(login)
+	out := make([]CoBotConfig, 0, len(coBots))
+	for _, cb := range coBots {
+		if dialect.NormalizeBotName(cb.Login) == key {
+			continue
+		}
+		out = append(out, cb)
+	}
+	return out
+}

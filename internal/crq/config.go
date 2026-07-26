@@ -121,6 +121,12 @@ func LoadConfig() (Config, error) {
 			requiredBots = unionBots(requiredBots, []string{cb.Login})
 		}
 	}
+	// CRQ_BOT may name a registry bot — pointing crq at Codex as the primary is a
+	// real configuration. It is then the primary and must not ALSO be driven as a
+	// co-reviewer: DecideFire posts its review command and fireCoOnly would post
+	// its co-reviewer trigger, asking the same reviewer twice. Requiredness is
+	// folded in above first, so dropping the entry cannot un-gate it.
+	coBots = withoutLogin(coBots, bot)
 	// Enabled co-reviewers surface findings without gating: their logins join
 	// the feedback set unless CRQ_FEEDBACK_BOTS overrides explicitly.
 	coLogins := make([]string, 0, len(coBots))
@@ -178,7 +184,11 @@ func LoadConfig() (Config, error) {
 	// beyond who reviews (to surface a bot's findings without waiting for it).
 	cfg.RequiredBots = cfg.reviewerLogins(func(r Reviewer) bool { return r.Required })
 	if _, explicit := env["CRQ_FEEDBACK_BOTS"]; !explicit {
-		cfg.FeedbackBots = cfg.reviewerLogins(func(Reviewer) bool { return true })
+		// Everyone except a primary the operator deliberately left out of
+		// CRQ_REQUIRED_BOTS. That omission is how you say "do not wait for
+		// CodeRabbit here", and surfacing its findings anyway would put the round
+		// back to work over a reviewer nobody asked for.
+		cfg.FeedbackBots = cfg.reviewerLogins(func(r Reviewer) bool { return r.Required || !r.Metered() })
 	}
 	return cfg, nil
 }
