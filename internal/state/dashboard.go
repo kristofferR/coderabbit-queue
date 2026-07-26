@@ -60,6 +60,57 @@ func reviewingRounds(st State) []Round {
 	return out
 }
 
+// headlineKeys returns the rounds the dashboard's summary table already names
+// in its "In flight" / "Feedback wait" rows — the only active rounds rendered
+// outside the Queue and Parked sections.
+func headlineKeys(st State) map[string]bool {
+	shown := map[string]bool{}
+	if slot := st.SlotRound(); slot != nil {
+		shown[Key(slot.Repo, slot.PR)] = true
+	}
+	if rev := reviewingRounds(st); len(rev) > 0 {
+		shown[Key(rev[0].Repo, rev[0].PR)] = true
+	}
+	return shown
+}
+
+// parkedRounds returns the active rounds that no other part of the dashboard
+// accounts for: not fire-eligible (so absent from the Queue section) and not
+// named in the "In flight"/"Feedback wait" rows. In practice that is an
+// awaiting_retry round whose RetryAt is still in the future, plus the tail of a
+// multi-round reviewing set and any reserved round whose fire slot was cleared.
+//
+// Without this, such rounds vanished entirely and a parked-only state rendered
+// byte-identically to an empty queue — "no work" and "two PRs parked until
+// 00:07Z" must not look the same. Ordered by Seq like the queue.
+func parkedRounds(st State, now time.Time) []Round {
+	shown := headlineKeys(st)
+	var out []Round
+	for _, r := range st.Rounds {
+		if !r.Active() || r.FireEligible(now) || shown[Key(r.Repo, r.PR)] {
+			continue
+		}
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+	return out
+}
+
+// nextRetry returns the earliest RetryAt among rounds, or nil when none of
+// them carries one (fmtStamp renders that as "—").
+func nextRetry(rounds []Round) *time.Time {
+	var best *time.Time
+	for _, r := range rounds {
+		if r.RetryAt == nil {
+			continue
+		}
+		if best == nil || r.RetryAt.Before(*best) {
+			best = r.RetryAt
+		}
+	}
+	return best
+}
+
 func firedAtOf(r Round) time.Time {
 	if r.FiredAt != nil {
 		return *r.FiredAt
@@ -128,6 +179,7 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	loc := dashboardLoc(cfg)
 	now := time.Now().UTC()
 	queue := st.QueuedRounds(now)
+	parked := parkedRounds(st, now)
 	reviewing := reviewingRounds(st)
 	slot := st.SlotRound()
 	blocked := st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now)
@@ -144,6 +196,8 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 		fmt.Fprintf(&b, "### 🟡 Awaiting feedback for %s#%d\n\n", reviewing[0].Repo, reviewing[0].PR)
 	case len(queue) > 0:
 		fmt.Fprintf(&b, "### 🟠 %d queued\n\n", len(queue))
+	case len(parked) > 0:
+		fmt.Fprintf(&b, "### 🅿️ %d parked — next retry %s\n\n", len(parked), fmtStamp(nextRetry(parked), loc))
 	default:
 		fmt.Fprintf(&b, "### 🟢 Idle\n\n")
 	}
@@ -189,14 +243,33 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 		fmt.Fprintf(&b, "\n> ⚠️ %s\n", st.Warn)
 	}
 
-	fmt.Fprintf(&b, "\n## ⏳ Queue — %d waiting\n\n", len(queue))
-	if len(queue) == 0 {
-		fmt.Fprintf(&b, "_Nothing queued._\n")
-	} else {
+	fmt.Fprintf(&b, "\n## ⏳ Queue — %d waiting", len(queue))
+	if len(parked) > 0 {
+		fmt.Fprintf(&b, " · %d parked", len(parked))
+	}
+	fmt.Fprintf(&b, "\n\n")
+	switch {
+	case len(queue) > 0:
 		fmt.Fprintf(&b, "| # | PR | enqueued | host |\n|--:|---|---|---|\n")
 		for i, r := range queue {
 			fmt.Fprintf(&b, "| %d | [%s#%d](https://github.com/%s/pull/%d) | %s | `%s` |\n",
 				i+1, r.Repo, r.PR, r.Repo, r.PR, fmtStamp(&r.EnqueuedAt, loc), r.ByHost)
+		}
+	case len(parked) > 0:
+		// Never the "nothing queued" empty state: work exists, it is just not
+		// fire-eligible yet. The parked table below is the honest answer.
+		fmt.Fprintf(&b, "_Nothing fire-eligible right now._\n")
+	default:
+		fmt.Fprintf(&b, "_Nothing queued._\n")
+	}
+
+	if len(parked) > 0 {
+		fmt.Fprintf(&b, "\n### 🅿️ Parked — %d not yet eligible\n\n", len(parked))
+		fmt.Fprintf(&b, "| PR | commit | phase | attempts | enqueued | retry at | host |\n|---|---|---|--:|---|---|---|\n")
+		for _, r := range parked {
+			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %d | %s | %s | `%s` |\n",
+				r.Repo, r.PR, r.Repo, r.PR, r.Head, r.Phase, r.Attempts,
+				fmtStamp(&r.EnqueuedAt, loc), fmtStamp(r.RetryAt, loc), r.ByHost)
 		}
 	}
 
@@ -221,15 +294,26 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 func RenderTitle(st State) string {
 	now := time.Now().UTC()
 	queue := len(st.QueuedRounds(now))
+	parked := len(parkedRounds(st, now))
+	// Parked rounds are real work; a state holding only those must never read
+	// as "idle" or "queue 0".
+	count := fmt.Sprintf("queue %d", queue)
+	if parked > 0 {
+		count += fmt.Sprintf(" · %d parked", parked)
+	}
 	switch {
 	case st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now):
-		return fmt.Sprintf("🐰 crq — blocked · queue %d", queue)
+		return fmt.Sprintf("🐰 crq — blocked · %s", count)
 	case st.SlotRound() != nil:
-		return fmt.Sprintf("🐰 crq — reviewing #%d · queue %d", st.SlotRound().PR, queue)
+		return fmt.Sprintf("🐰 crq — reviewing #%d · %s", st.SlotRound().PR, count)
 	case len(reviewingRounds(st)) > 0:
-		return fmt.Sprintf("🐰 crq — awaiting feedback · queue %d", queue)
+		return fmt.Sprintf("🐰 crq — awaiting feedback · %s", count)
+	case queue > 0 && parked > 0:
+		return fmt.Sprintf("🐰 crq — %d queued · %d parked", queue, parked)
 	case queue > 0:
 		return fmt.Sprintf("🐰 crq — %d queued", queue)
+	case parked > 0:
+		return fmt.Sprintf("🐰 crq — %d parked", parked)
 	default:
 		return "🐰 crq — idle"
 	}
