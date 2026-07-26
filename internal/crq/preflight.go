@@ -45,12 +45,15 @@ type PreflightReport struct {
 	// local CLI shares the SAME account quota as the PR reviews the queue
 	// serializes: a local rate limit is direct evidence about that quota, given
 	// for free, with no probe comment and no GitHub round trip.
-	ErrorType   string    `json:"error_type,omitempty"`
-	Recoverable bool      `json:"recoverable,omitempty"`
-	RetryAfter  string    `json:"retry_after,omitempty"`
-	ExitCode    int       `json:"exit_code"`
-	CheckedAt   time.Time `json:"checked_at"`
-	DurationMS  int64     `json:"duration_ms"`
+	ErrorType   string `json:"error_type,omitempty"`
+	Recoverable bool   `json:"recoverable,omitempty"`
+	RetryAfter  string `json:"retry_after,omitempty"`
+	// Quota reports whether the account block this run observed was shared with
+	// crq's queue, and why not when it was not.
+	Quota      *CLIQuotaResult `json:"quota,omitempty"`
+	ExitCode   int             `json:"exit_code"`
+	CheckedAt  time.Time       `json:"checked_at"`
+	DurationMS int64           `json:"duration_ms"`
 }
 
 type PreflightStatus struct {

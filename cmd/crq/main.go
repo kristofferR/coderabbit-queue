@@ -530,7 +530,11 @@ Exit codes:
       (.status is "rate_limited", with .retry_after and .error_type)
 
 The local CLI spends the same account quota as PR reviews, so a local block is
-evidence about that shared quota — read .retry_after rather than re-running.
+evidence about that shared quota. crq records it for the whole fleet — no probe
+comment, no GitHub round trip — and .quota says whether it did. It only ever
+EXTENDS a standing block, and only when the CLI is signed in to the account crq
+queues for; otherwise .quota.reason says why not. Read .retry_after rather than
+re-running.
 
 Use crq loop for queued GitHub PR reviews.
 `)
@@ -597,11 +601,50 @@ func preflight(ctx context.Context, args []string) int {
 		Timeout:    *timeout,
 		ExtraArgs:  fs.Args(),
 	})
+	// Before printing: a local block is evidence about the SHARED account quota,
+	// so hand it to the queue rather than letting it die in this process. Local
+	// preflight must keep working with no crq config and no GitHub token, so this
+	// is best-effort and its outcome is reported rather than enforced.
+	report.Quota = shareCLIQuota(ctx, report)
 	printJSON(report)
 	if err != nil {
 		fatal(err)
 	}
 	return code
+}
+
+// shareCLIQuota records a CLI-reported account block in crq's shared state.
+// Every failure path is a nil result with a reason, never an error: preflight is
+// a local review command and must not start depending on GitHub.
+func shareCLIQuota(ctx context.Context, report crq.PreflightReport) *crq.CLIQuotaResult {
+	if !crq.IsCLIAccountBlock(report) {
+		return nil
+	}
+	cfg, err := crq.LoadConfig()
+	if err != nil || cfg.RequireState() != nil {
+		return &crq.CLIQuotaResult{Reason: "no crq state configured, so there is no shared quota to update"}
+	}
+	gh, err := ghapi.NewGitHub(ctx)
+	if err != nil {
+		return &crq.CLIQuotaResult{Reason: "no github credentials available to record the block"}
+	}
+	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
+	service := crq.NewService(cfg, gh, store, stderrLogger{})
+	result, err := service.RecordCLIQuota(ctx, report, codeRabbitOrg(ctx))
+	if err != nil {
+		return &crq.CLIQuotaResult{Reason: "could not record the block: " + err.Error()}
+	}
+	return &result
+}
+
+// codeRabbitOrg reads which CodeRabbit organisation the local CLI is signed in
+// to, so a block is only ever applied to the account it belongs to.
+func codeRabbitOrg(ctx context.Context) string {
+	tools := map[string]toolInfo{
+		"cr":         checkTool(ctx, "cr", "--version"),
+		"coderabbit": checkTool(ctx, "coderabbit", "--version"),
+	}
+	return checkCodeRabbitAuth(ctx, tools).CurrentOrg
 }
 
 func repoPR(args []string) (string, int, bool) {

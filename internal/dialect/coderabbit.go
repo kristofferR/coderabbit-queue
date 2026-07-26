@@ -232,6 +232,22 @@ func ParseAvailableIn(text string, base time.Time) *time.Time {
 	if dot := strings.IndexByte(frag, '.'); dot >= 0 {
 		frag = frag[:dot]
 	}
+	d := scanDurationPhrase(frag)
+	if d <= 0 {
+		return nil
+	}
+	t := base.Add(d)
+	return &t
+}
+
+// scanDurationPhrase sums the "<n> <unit>" pairs in an already-normalised
+// fragment ("40 minutes", "1 hour 5 minutes"). Shared by every place CodeRabbit
+// states a window in prose, so a new phrasing is taught to one scanner.
+//
+// A non-positive total is not a window. Atoi accepts a leading minus, so a
+// mangled body really can scan negative — and every caller adds the result to
+// now, which would put a block in the past and read as "not blocked".
+func scanDurationPhrase(frag string) time.Duration {
 	fields := strings.Fields(frag)
 	var d time.Duration
 	for i := 0; i+1 < len(fields); i++ {
@@ -248,7 +264,19 @@ func ParseAvailableIn(text string, base time.Time) *time.Time {
 			d += time.Duration(n) * time.Second
 		}
 	}
-	if d == 0 {
+	return d
+}
+
+// ParseCLIWaitTime reads the local CLI's bare wait-time value ("32 minutes",
+// from the rate_limit error's metadata) and returns base+duration.
+//
+// The CLI states the window without the "available in" preamble its PR comments
+// use, so it needs its own entry point — but the same scanner, so both formats
+// stay in step. An unparseable value returns nil and the caller falls back to its
+// conservative window rather than inventing a short one.
+func ParseCLIWaitTime(waitTime string, base time.Time) *time.Time {
+	d := scanDurationPhrase(strings.ToLower(strings.TrimSpace(waitTime)))
+	if d <= 0 {
 		return nil
 	}
 	t := base.Add(d)
