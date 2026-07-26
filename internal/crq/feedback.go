@@ -189,7 +189,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		// before that round belongs to the previous head. Unresolved threads are
 		// still surfaced below across commits, while thread-less body findings
 		// must be re-reported by the current round instead of trapping the loop.
-		if anchorOK && s.isConfiguredBot(login) &&
+		if anchorOK && s.cfg.isConfiguredBot(login) &&
 			(head == "" || !strings.HasPrefix(review.CommitID, head)) &&
 			!notBefore(review.SubmittedAt, anchorCutoff) {
 			continue
@@ -363,7 +363,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		if !dialect.InBots(extractBots, comment.User.Login) {
 			continue
 		}
-		if s.cr.IsReviewSkipped(comment.Body) && s.isConfiguredBot(comment.User.Login) &&
+		if s.cr.IsReviewSkipped(comment.Body) && s.cfg.isConfiguredBot(comment.User.Login) &&
 			skipAppliesToHead(comment.Body, head) &&
 			!skipPredatesHead(comment, headCutoffOf) {
 			// Checked BEFORE the rate-limit guard below: the skip notice embeds
@@ -407,7 +407,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		if _, ok := coEventKinds[comment.ID]; ok {
 			continue
 		}
-		if s.isConfiguredBot(comment.User.Login) {
+		if s.cfg.isConfiguredBot(comment.User.Login) {
 			continue
 		}
 		if dialect.IsNonActionableText(comment.Body) {
