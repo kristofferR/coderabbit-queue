@@ -96,7 +96,7 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 		report.Head = head
 	}
 
-	report.LocalWork, report.LocalWorkReason = s.checkLocalWork(ctx, report.Head)
+	report.LocalWork, report.LocalWorkReason = s.checkLocalWork(ctx, repo, report.Head)
 
 	in := engine.NextInput{
 		Obs:           engine.Observation{Head: head, Open: open},
@@ -167,25 +167,28 @@ func (s *Service) NextWaiting(ctx context.Context, repo string, pr int) (NextRep
 	}
 }
 
-func (s *Service) checkLocalWork(ctx context.Context, head string) (bool, string) {
+func (s *Service) checkLocalWork(ctx context.Context, repo, head string) (bool, string) {
 	if s.localWorkFn != nil {
 		return s.localWorkFn(ctx, head)
 	}
-	return localWork(ctx, head)
+	return localWork(ctx, repo, head)
 }
 
 // localWork reports whether the working copy holds changes the PR head does not
 // have — a dirty tree, or a local HEAD that is not the PR head. It is the
 // difference between "push your fixes" and "nothing left to do".
 //
-// Outside a git checkout it answers false with a reason: crq then says `done`
-// rather than `push`, which is the safe direction — `push` is only ever emitted
-// once the head is released anyway, so a missed one costs a round trip, while a
-// spurious hold would stall the loop.
-func localWork(ctx context.Context, head string) (bool, string) {
+// It first checks that this checkout actually belongs to the PR's repository:
+// asking about owner/a from a checkout of owner/b would otherwise read that
+// unrelated HEAD as unlanded work.
+//
+// Anything it cannot establish answers false with a reason, which errs toward
+// `done` rather than `push`. That is the safe direction: `push` is only ever
+// emitted once the head is already released, so a missed one costs one extra
+// call, while a spurious `hold` would stall the loop.
+func localWork(ctx context.Context, repo, head string) (bool, string) {
 	git := func(args ...string) (string, bool) {
-		cmd := exec.CommandContext(ctx, "git", args...)
-		out, err := cmd.Output()
+		out, err := exec.CommandContext(ctx, "git", args...).Output()
 		if err != nil {
 			return "", false
 		}
@@ -193,6 +196,12 @@ func localWork(ctx context.Context, head string) (bool, string) {
 	}
 	if _, ok := git("rev-parse", "--is-inside-work-tree"); !ok {
 		return false, "not run inside a git checkout"
+	}
+	remotes, ok := git("remote", "-v")
+	if !ok || !strings.Contains(strings.ToLower(remotes), strings.ToLower(repo)) {
+		// Match on any remote, not just origin, so a fork checkout whose upstream
+		// is the PR's repository still counts.
+		return false, "this checkout has no remote for " + repo
 	}
 	if status, ok := git("status", "--porcelain"); ok && status != "" {
 		return true, "uncommitted changes in the working tree"
