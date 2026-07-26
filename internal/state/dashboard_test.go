@@ -767,16 +767,14 @@ func TestCoOnlyRoundIsExemptFromEveryQueueGate(t *testing.T) {
 		r.CoOnly = true
 		return r
 	}()
-	// Every gate the queue can impose, at once.
+	// Every gate the queue imposes on ITS OWN behalf, at once. The fire slot is
+	// deliberately not among them: it stops everything, co-only included, because
+	// Pump returns as soon as it sees a holder (see
+	// TestHeldSlotStopsFreeRunningRoundsToo).
 	blocked := now.Add(2 * time.Hour)
 	st.Account.BlockedUntil = &blocked
 	fired := now
 	st.LastFired = &fired
-	st.FireSlot = &FireSlot{Key: "kristofferr/other#9", Token: "tok", Since: now.Add(-time.Minute)}
-	st.Rounds["kristofferr/other#9"] = Round{
-		Repo: "kristofferr/other", PR: 9, Head: "999999999", Seq: 9,
-		Phase: PhaseFired, Token: "tok", EnqueuedAt: now.Add(-2 * time.Minute), FiredAt: &fired,
-	}
 
 	q := st.Queue(now, 90*time.Second)
 	if len(q) != 2 {
@@ -790,8 +788,8 @@ func TestCoOnlyRoundIsExemptFromEveryQueueGate(t *testing.T) {
 		t.Errorf("the co-only round is ready now, got ready=%v why=%q", free.ReadyAt, free.Why)
 	}
 	// The ordinary round is still governed by all of it.
-	if q[1].Why != WaitSlotBusy {
-		t.Errorf("the metered round must report the held slot, got %q", q[1].Why)
+	if q[1].Why != WaitAccountBlocked && q[1].Why != WaitPacing {
+		t.Errorf("the metered round must report a queue gate, got %q", q[1].Why)
 	}
 }
 
@@ -810,9 +808,14 @@ func TestInFlightPrintsNoFireTimeForAReservation(t *testing.T) {
 		return r
 	}()
 
-	got := RenderDashboard(st, StoreConfig{})
-	if strings.Contains(got, fmtStamp(&previous, time.UTC)) {
-		t.Errorf("the previous attempt's fire time must not be shown for a reservation:\n%s", got)
+	if at := firedTimeOf(st.Rounds["kristofferr/a#1"]); at != nil {
+		t.Errorf("a reservation reports no fire time for this attempt, got %s", at)
+	}
+	// And a round that really did fire still reports it.
+	fired := st.Rounds["kristofferr/a#1"]
+	fired.Phase = PhaseFired
+	if at := firedTimeOf(fired); at == nil || !at.Equal(previous) {
+		t.Errorf("a fired round must still report its fire time, got %v", at)
 	}
 }
 
