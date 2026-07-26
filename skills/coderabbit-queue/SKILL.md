@@ -21,6 +21,7 @@ Do not design one of your own.
 
 ```bash
 crq next "$REPO" "$PR"
+crq next            # inside the checkout: crq finds the PR from the remote and branch
 ```
 
 | `.action` | what to do |

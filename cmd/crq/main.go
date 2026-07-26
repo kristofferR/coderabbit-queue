@@ -93,14 +93,28 @@ func run(ctx context.Context, args []string) int {
 		fmt.Printf("export CRQ_STATE_REF=%q\n", result.StateRef)
 		return 0
 	case "status":
+		if bad, found := unknownFlag(args[1:], "--line"); found {
+			fatal(fmt.Errorf("unknown flag %s (usage: crq status [--line])", bad))
+			return 1
+		}
+		// status takes no target: silently ignoring one would let `crq status 41`
+		// look like it reported on that PR.
+		if extra := positional(args[1:]); len(extra) > 0 {
+			fatal(fmt.Errorf("crq status takes no arguments, got %q (usage: crq status [--line])", extra[0]))
+			return 1
+		}
 		if err := cfg.RequireState(); err != nil {
 			fatal(err)
 			return 1
 		}
-		_, dashboard, err := service.Status(ctx)
+		state, dashboard, err := service.Status(ctx)
 		if err != nil {
 			fatal(err)
 			return 1
+		}
+		if hasFlag(args[1:], "--line") {
+			fmt.Println(crq.StatusLine(state, cfg))
+			return 0
 		}
 		fmt.Print(dashboard)
 		return 0
@@ -122,17 +136,16 @@ func run(ctx context.Context, args []string) int {
 			fatal(fmt.Errorf("unknown flag %s (usage: crq next <repo> <pr> [--wait])", bad))
 			return 1
 		}
-		repo, pr, ok := repoPR(positional(args[1:]))
-		if !ok {
-			fatal(errors.New("usage: crq next <repo> <pr> [--wait]"))
-			return 1
-		}
 		if err := cfg.RequireState(); err != nil {
 			fatal(err)
 			return 1
 		}
+		repo, pr, err := target(ctx, service, positional(args[1:]), "crq next [<repo> <pr>] [--wait]")
+		if err != nil {
+			fatal(err)
+			return 1
+		}
 		var report crq.NextReport
-		var err error
 		if hasFlag(args[1:], "--wait") {
 			report, err = service.NextWaiting(ctx, repo, pr)
 		} else {
@@ -147,12 +160,12 @@ func run(ctx context.Context, args []string) int {
 		// caller never has to interpret two things at once.
 		return 0
 	case "wait":
-		repo, pr, ok := repoPR(args[1:])
-		if !ok {
-			fatal(errors.New("usage: crq wait <repo> <pr>"))
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
 			return 1
 		}
-		if err := cfg.RequireState(); err != nil {
+		repo, pr, err := target(ctx, service, args[1:], "crq wait [<repo> <pr>]")
+		if err != nil {
 			fatal(err)
 			return 1
 		}
@@ -309,11 +322,11 @@ func usage() {
 	fmt.Print(`crq - CodeRabbit review queue for humans and automation
 
 QUEUE WORKFLOWS
-  crq next <repo> <pr>             ask what to do next about a PR (the agent loop)
-  crq wait <repo> <pr>             block until there IS something to do, then say what
+  crq next [<repo> <pr>]           ask what to do next about a PR (the agent loop)
+  crq wait [<repo> <pr>]           block until there IS something to do, then say what
   crq loop <repo> <pr>             queue one PR review round, then emit JSON feedback
   crq autoreview                   keep open PRs reviewed through the same queue
-  crq status                       show the queue, in-flight review, and quota state
+  crq status [--line]              show the queue, in-flight review, and quota state
 
 DRIVING A PR REVIEW
   Call crq next, do exactly what .action says, call it again. That is the whole loop.
@@ -332,7 +345,9 @@ DRIVING A PR REVIEW
 
 USAGE
   crq init                         initialize state in CRQ_REPO
-  crq next <repo> <pr> [--wait]    emit the single next action as JSON (--wait blocks)
+  crq next [<repo> <pr>] [--wait]  emit the single next action as JSON (--wait blocks)
+                                   omit the target inside a checkout: crq reads the
+                                   remote and branch to find the pull request
   crq wait <repo> <pr>             block until actionable, then emit that action as JSON
   crq loop <repo> <pr>             coordinated trigger -> wait -> JSON feedback/convergence
   crq feedback <repo> <pr>         emit normalized actionable review findings as JSON
@@ -346,7 +361,7 @@ USAGE
   crq preflight [--type all|committed|uncommitted] [--base <branch>]
                                    local CodeRabbit CLI pre-push review as JSON
   crq doctor                       emit JSON readiness report for agents and humans
-  crq status                       print the dashboard
+  crq status [--line]              print the dashboard, or one line for a status bar
   crq cancel <repo> <pr>           remove queued/in-flight state for a PR
   crq debug <enqueue|pump|refresh|state>
                                    maintenance tools; not for normal review loops
@@ -560,7 +575,18 @@ Checks include:
 Use this before a human-run loop, background watcher, or autonomous agent.
 `)
 	case "status":
-		fmt.Print("crq status\n\nPrint the dashboard rendered from the CAS state ref.\n")
+		fmt.Print(`crq status [--line]
+
+Print the dashboard rendered from the CAS state ref.
+
+--line prints ONE line instead, for a harness status bar:
+
+    crq 🔬 #41 reviewing · 2 queued
+
+That answers "is it still going?" continuously, which is otherwise the question a
+session spends the most tool calls on. It names the next PR only when the queue
+actually knows which one that is.
+`)
 	case "cancel":
 		fmt.Print("crq cancel <repo> <pr>\n\nRemove a PR from queued/in-flight crq state.\n")
 	case "debug":
@@ -627,6 +653,21 @@ func hasFlag(args []string, flag string) bool {
 		}
 	}
 	return false
+}
+
+// target resolves which PR a command is about: the two arguments if given, and
+// otherwise the checkout the caller is standing in. Agents drive the loop from
+// inside the repository, so making them carry a repo and number they are already
+// standing in is two chances to name the wrong PR silently.
+func target(ctx context.Context, service *crq.Service, args []string, usage string) (string, int, error) {
+	switch repo, pr, ok := repoPR(args); {
+	case ok:
+		return repo, pr, nil
+	case len(args) == 0:
+		return service.InferTarget(ctx)
+	default:
+		return "", 0, fmt.Errorf("usage: %s", usage)
+	}
 }
 
 // unknownFlag returns the first flag in args that is not in allowed.

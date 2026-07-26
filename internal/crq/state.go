@@ -100,6 +100,12 @@ func renderDashboard(st State, cfg Config) string {
 func renderTitle(st State, cfg Config) string {
 	return crqstate.RenderTitle(st, cfg.storeConfig())
 }
+
+// StatusLine renders the queue as a single line for a harness status bar.
+func StatusLine(st State, cfg Config) string {
+	return crqstate.StatusLine(st, cfg.storeConfig())
+}
+
 func issueBody(st State, cfg Config) (string, error) {
 	return crqstate.IssueBody(st, cfg.storeConfig())
 }
