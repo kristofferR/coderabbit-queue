@@ -12,15 +12,15 @@ import (
 func TestLaggingWritersNamesWhoWillIgnoreTheOverride(t *testing.T) {
 	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
 	st := New()
-	st.Leader = &LeaderLease{Owner: "old-mac", Token: "t", ExpiresAt: now.Add(time.Minute)}
+	st.Leader = &LeaderLease{Owner: "host=old-mac pid=7", Token: "t", ExpiresAt: now.Add(time.Minute)}
 
 	// A leader that has never announced a capability is exactly the old binary.
-	if got := st.LaggingWriters(CapsRepoOverrides, now); len(got) != 1 || got[0] != "old-mac" {
+	if got := st.LaggingWriters(CapsRepoOverrides, now); len(got) != 1 || got[0] != "host=old-mac pid=7" {
 		t.Fatalf("lagging = %v, want the leader named", got)
 	}
 
 	// Once it writes with the capability, it is no longer lagging.
-	st.NoteWriter("old-mac", CapsRepoOverrides, now)
+	st.NoteWriter("host=old-mac pid=7", CapsRepoOverrides, now)
 	if got := st.LaggingWriters(CapsRepoOverrides, now); len(got) != 0 {
 		t.Errorf("lagging = %v, want none once the leader understands", got)
 	}
@@ -30,7 +30,7 @@ func TestLaggingWritersNamesWhoWillIgnoreTheOverride(t *testing.T) {
 		// The lease has expired by then, so nobody is acting.
 		t.Errorf("lagging = %v, want none when no lease is live", got)
 	}
-	st.Leader = &LeaderLease{Owner: "old-mac", Token: "t", ExpiresAt: now.Add(2*time.Hour + time.Minute)}
+	st.Leader = &LeaderLease{Owner: "host=old-mac pid=7", Token: "t", ExpiresAt: now.Add(2*time.Hour + time.Minute)}
 	if got := st.LaggingWriters(CapsRepoOverrides, now.Add(2*time.Hour)); len(got) != 1 {
 		t.Errorf("lagging = %v, want the leader named again once its stamp is stale", got)
 	}
@@ -46,13 +46,21 @@ func TestLaggingWritersNamesWhoWillIgnoreTheOverride(t *testing.T) {
 // The leader records itself as "host=<name> pid=<n>" while capabilities are
 // keyed by host alone. Comparing those directly reported every current-version
 // daemon as needing an upgrade — the warning would have been pure noise.
-func TestLaggingWritersMatchesTheLeadersHostForm(t *testing.T) {
+func TestLaggingWritersMatchesTheLeadersProcessIdentity(t *testing.T) {
 	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
 	st := New()
 	st.Leader = &LeaderLease{Owner: "host=cachyos pid=1234", ExpiresAt: now.Add(time.Minute)}
-	st.NoteWriter("cachyos", CapsRepoOverrides, now)
+	st.NoteWriter("host=cachyos pid=1234", CapsRepoOverrides, now)
 
 	if got := st.LaggingWriters(CapsRepoOverrides, now); len(got) != 0 {
 		t.Errorf("lagging = %v, want none — the leader IS the capable writer", got)
+	}
+
+	// A new CLI on the same machine must not vouch for an old daemon: that is
+	// the ordinary upgrade, and per-host keying would hide exactly it.
+	st.NoteWriter("host=cachyos pid=9999", CapsRepoOverrides, now)
+	st.Leader = &LeaderLease{Owner: "host=cachyos pid=1", ExpiresAt: now.Add(time.Minute)}
+	if got := st.LaggingWriters(CapsRepoOverrides, now); len(got) != 1 {
+		t.Errorf("lagging = %v, want the un-upgraded daemon named", got)
 	}
 }

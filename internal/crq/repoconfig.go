@@ -224,11 +224,10 @@ func mustOverride(st *State, repo string) RepoReviewers {
 // Only rounds whose required set actually changed are touched, and only
 // completed ones — an in-flight round is already going to answer.
 //
-// Known cost: DecideFire's already-reviewed gate reads submitted reviews, so a
-// round the primary finished with a completion REPLY and no Review object can be
-// asked once more. That is one duplicate review in an uncommon case, against a
-// PR stranded silently and permanently — the loud failure is the better one, and
-// the gate is where a real fix belongs.
+// The primary is not re-asked: DecideFire's already-reviewed gate now counts a
+// completion reply paired to the round's command, not only a submitted Review
+// object, so a reopened round that the primary already answered dedupes instead
+// of buying a second review.
 func (s *Service) reopenForChangedReviewers(st *State, repo string, before, after Config, now time.Time) {
 	if sameLogins(before.RequiredBots, after.RequiredBots) {
 		return

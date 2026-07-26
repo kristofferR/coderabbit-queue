@@ -332,7 +332,10 @@ type WriterSeen struct {
 	At   time.Time `json:"at"`
 }
 
-// NoteWriter records that host wrote this state with the given capabilities.
+// NoteWriter records that a process wrote this state with the given
+// capabilities. The key identifies the PROCESS, not the machine: a new CLI and
+// an old daemon on one host is the ordinary upgrade, and keying by hostname
+// would let the CLI's write vouch for the daemon that has not been upgraded.
 func (s *State) NoteWriter(host string, caps int, now time.Time) {
 	if host == "" {
 		return
@@ -359,13 +362,10 @@ func (s *State) NoteWriter(host string, caps int, now time.Time) {
 // back untouched, and keeps deciding from its own fleet-wide configuration.
 func (s *State) LaggingWriters(caps int, now time.Time) []string {
 	acting := map[string]bool{}
-	// The leader records itself as "host=<name> pid=<n>", while capabilities are
-	// keyed by host alone. Comparing the two directly would report every
-	// current-version daemon as lagging.
-	if s.Leader != nil && s.Leader.ExpiresAt.After(now) {
-		if host := ownerHost(s.Leader.Owner); host != "" {
-			acting[host] = true
-		}
+	// The leader identifies itself as "host=<name> pid=<n>", which is exactly the
+	// process identity capabilities are recorded under.
+	if s.Leader != nil && s.Leader.ExpiresAt.After(now) && strings.TrimSpace(s.Leader.Owner) != "" {
+		acting[s.Leader.Owner] = true
 	}
 	if slot := s.SlotRound(); slot != nil && slot.ByHost != "" {
 		acting[slot.ByHost] = true
@@ -379,17 +379,6 @@ func (s *State) LaggingWriters(caps int, now time.Time) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// ownerHost extracts the host from a leader owner string ("host=x pid=1"),
-// falling back to the whole value for an owner that is just a host.
-func ownerHost(owner string) string {
-	for _, field := range strings.Fields(owner) {
-		if rest, ok := strings.CutPrefix(field, "host="); ok {
-			return rest
-		}
-	}
-	return strings.TrimSpace(owner)
 }
 
 // RepoReviewers overrides which reviewers run on one repository. A nil slice

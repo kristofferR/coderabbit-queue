@@ -54,7 +54,7 @@ func (c Config) storeConfig() StoreConfig {
 		Timezone:       c.Timezone,
 		Scope:          c.Scope,
 		CoReviewers:    c.coReviewerSummary(),
-		Host:           c.Host,
+		Host:           c.WriterID(),
 		MinInterval:    c.MinInterval,
 	}
 }

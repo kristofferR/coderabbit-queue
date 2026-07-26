@@ -44,6 +44,11 @@ type Config struct {
 	// CRQ_COBOT_<NAME>_* keys). An entry exists for every wanted or required
 	// co-reviewer; required ones are already folded into RequiredBots.
 	CoBots []CoBotConfig
+	// KnownCoBots is every registry co-reviewer with the operator's per-bot
+	// environment applied, enabled here or not. A repository override picks from
+	// this, so enabling a bot the fleet disabled still honours CRQ_COBOT_<NAME>_*
+	// instead of silently falling back to registry defaults.
+	KnownCoBots []CoBotConfig
 	// Reviewers is the single description of who reviews and what they cost.
 	// Bot / RequiredBots / FeedbackBots / CoBots above are DERIVED from it and
 	// kept only so existing consumers keep compiling; new code should read this.
@@ -52,10 +57,13 @@ type Config struct {
 	// list an operator may widen beyond who reviews, so neither LoadConfig's
 	// derivation nor a per-repo override may quietly replace it.
 	FeedbackBotsExplicit bool
-	RateLimitCommand     string
-	RateLimitMarker      string
-	CalibrationMarker    string
-	ReviewDoneMarker     string
+	// OverrideAt is when the per-repo reviewer override this configuration was
+	// built from was last written, so a fire can tell whether it still holds.
+	OverrideAt        *time.Time
+	RateLimitCommand  string
+	RateLimitMarker   string
+	CalibrationMarker string
+	ReviewDoneMarker  string
 	// CompletionMarker identifies the bot's reply to a processed review command
 	// (CodeRabbit: "Review finished."). Feedback uses it to count a command
 	// round that produced no review object toward convergence.
@@ -188,6 +196,7 @@ func LoadConfig() (Config, error) {
 	}
 	// Built here, after the command is resolved, because the primary's trigger is
 	// part of describing it.
+	cfg.KnownCoBots = parseAllCoBots(env)
 	cfg.Reviewers = buildReviewers(cfg.Bot, cfg.ReviewCommand, requiredBots, coBots)
 	// The legacy lists are now VIEWS of cfg.Reviewers rather than parallel
 	// parses, so they cannot answer differently from it. An explicit
@@ -335,6 +344,44 @@ type CoBotConfig struct {
 // legacy alias of CRQ_COBOT_CODEX_CMD. Bugbot/Macroscope default to
 // `selfheal` — they auto-review pushes, so crq only nudges one that went
 // silent on a head it should have covered.
+// resolveCoBot applies the operator's per-bot environment to a registry entry.
+// Uniform across bots: the per-bot key wins, then the registry's legacy alias if
+// it declares one, then its default command. No bot is named here — the policy
+// travels as registry metadata.
+func resolveCoBot(env map[string]string, co dialect.CoReviewer, required bool) CoBotConfig {
+	key := strings.ToUpper(co.Name)
+	base := defaultCoBot(co, required)
+	command := base.Command
+	if v, ok := env["CRQ_COBOT_"+key+"_CMD"]; ok {
+		command = v
+	} else if co.LegacyCommandEnv != "" {
+		command = stringEnvAllowEmpty(env, co.LegacyCommandEnv, command)
+	}
+	command = strings.TrimSpace(command)
+	trigger := base.Trigger
+	switch v := engine.TriggerMode(strings.ToLower(strings.TrimSpace(env["CRQ_COBOT_"+key+"_TRIGGER"]))); v {
+	case engine.TriggerNever, engine.TriggerSelfHeal, engine.TriggerAlways:
+		trigger = v
+	}
+	if command == "" {
+		// No trigger command means crq can never post one, whatever the mode.
+		trigger = engine.TriggerNever
+	}
+	base.Command, base.Trigger = command, trigger
+	base.SelfHealGrace = durationEnv(env, "CRQ_COBOT_"+key+"_GRACE", defaultSelfHealGrace)
+	return base
+}
+
+// parseAllCoBots resolves every registry co-reviewer with the environment
+// applied, regardless of whether CRQ_COBOTS enables it.
+func parseAllCoBots(env map[string]string) []CoBotConfig {
+	out := make([]CoBotConfig, 0, 4)
+	for _, co := range dialect.KnownCoReviewers() {
+		out = append(out, resolveCoBot(env, co, false))
+	}
+	return out
+}
+
 func parseCoBots(env map[string]string, requiredBots []string) ([]CoBotConfig, error) {
 	enabled := map[string]bool{}
 	var unknown []string
@@ -368,29 +415,7 @@ func parseCoBots(env map[string]string, requiredBots []string) ([]CoBotConfig, e
 		if !enabled[co.Name] && !required {
 			continue
 		}
-		base := defaultCoBot(co, required)
-		// Uniform across bots: the per-bot key wins, then the registry's legacy
-		// alias if it declares one, then its default command. No bot is named
-		// here — the policy travels as registry metadata.
-		command := base.Command
-		if v, ok := env["CRQ_COBOT_"+key+"_CMD"]; ok {
-			command = v
-		} else if co.LegacyCommandEnv != "" {
-			command = stringEnvAllowEmpty(env, co.LegacyCommandEnv, command)
-		}
-		command = strings.TrimSpace(command)
-		trigger := base.Trigger
-		switch v := engine.TriggerMode(strings.ToLower(strings.TrimSpace(env["CRQ_COBOT_"+key+"_TRIGGER"]))); v {
-		case engine.TriggerNever, engine.TriggerSelfHeal, engine.TriggerAlways:
-			trigger = v
-		}
-		if command == "" {
-			// No trigger command means crq can never post one, whatever the mode.
-			trigger = engine.TriggerNever
-		}
-		base.Command, base.Trigger = command, trigger
-		base.SelfHealGrace = durationEnv(env, "CRQ_COBOT_"+key+"_GRACE", defaultSelfHealGrace)
-		out = append(out, base)
+		out = append(out, resolveCoBot(env, co, required))
 	}
 	return out, nil
 }
@@ -506,4 +531,12 @@ func authorSet(value string) map[string]bool {
 func ownerOf(repo string) string {
 	owner, _, _ := strings.Cut(repo, "/")
 	return owner
+}
+
+// WriterID identifies this PROCESS in the shared state, in the same form the
+// autoreview leader records. A new CLI and an old daemon commonly run on one
+// machine, so a per-host key would let the upgraded CLI's write vouch for the
+// daemon that has not been upgraded.
+func (c Config) WriterID() string {
+	return fmt.Sprintf("host=%s pid=%d", c.Host, os.Getpid())
 }
