@@ -530,7 +530,11 @@ Exit codes:
       (.status is "rate_limited", with .retry_after and .error_type)
 
 The local CLI spends the same account quota as PR reviews, so a local block is
-evidence about that shared quota — read .retry_after rather than re-running.
+evidence about that shared quota. crq records it for the whole fleet — no probe
+comment on the calibration PR, though the state write itself is a GitHub call —
+and .quota says whether it did. It only ever EXTENDS a standing block, and only
+when the CLI attributes the limit to the organisation crq queues for; otherwise
+.quota.reason says why not. Read .retry_after rather than re-running.
 
 Use crq loop for queued GitHub PR reviews.
 `)
@@ -597,11 +601,73 @@ func preflight(ctx context.Context, args []string) int {
 		Timeout:    *timeout,
 		ExtraArgs:  fs.Args(),
 	})
+	// Before printing: a local block is evidence about the SHARED account quota,
+	// so hand it to the queue rather than letting it die in this process. Local
+	// preflight must keep working with no crq config and no GitHub token, so this
+	// is best-effort and its outcome is reported rather than enforced.
+	report.Quota = shareCLIQuota(ctx, report)
 	printJSON(report)
 	if err != nil {
 		fatal(err)
 	}
 	return code
+}
+
+// shareCLIQuota records a CLI-reported account block in crq's shared state.
+// Every failure path is a nil result with a reason, never an error: preflight is
+// a local review command and must not start depending on GitHub.
+func shareCLIQuota(ctx context.Context, report crq.PreflightReport) *crq.CLIQuotaResult {
+	if !crq.IsCLIAccountBlock(report) {
+		return nil
+	}
+	cfg, err := crq.LoadConfig()
+	if err != nil {
+		return &crq.CLIQuotaResult{Reason: "could not read crq config: " + err.Error()}
+	}
+	if err := cfg.RequireState(); err != nil {
+		return &crq.CLIQuotaResult{Reason: "no crq state configured: " + err.Error()}
+	}
+	// Bound BEFORE resolving credentials. With no GITHUB_TOKEN/GH_TOKEN,
+	// NewGitHub shells out to `gh auth token`, and a wedged credential store
+	// would hang a preflight that has already produced its findings. The
+	// transport then rides out a network outage indefinitely by default, which is
+	// right for a review loop and wrong for a courtesy write.
+	shareCtx, cancel := context.WithTimeout(ctx, cliQuotaShareTimeout)
+	defer cancel()
+	gh, err := ghapi.NewGitHub(shareCtx)
+	if err != nil {
+		return &crq.CLIQuotaResult{Reason: "could not reach github to record the block: " + err.Error()}
+	}
+	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
+	service := crq.NewService(cfg, gh, store, stderrLogger{})
+	result, err := service.RecordCLIQuota(shareCtx, report, codeRabbitOrg(shareCtx, report.Tool))
+	if err != nil {
+		return &crq.CLIQuotaResult{Reason: "could not record the block: " + err.Error()}
+	}
+	return &result
+}
+
+// cliQuotaShareTimeout bounds the best-effort state write. Local preflight is not
+// allowed to become slower or less reliable because crq also wants to share what
+// it learned.
+const cliQuotaShareTimeout = 20 * time.Second
+
+// codeRabbitOrg reads which CodeRabbit organisation produced this block, so it is
+// only ever applied to the account it belongs to.
+//
+// It asks the SAME executable preflight ran. Probing cr/coderabbit from PATH
+// instead discarded a valid block as "unknown organisation" whenever --bin or
+// CRQ_CODERABBIT_BIN pointed elsewhere — and, worse, could read a different
+// install's login and attribute the block to the wrong account.
+func codeRabbitOrg(ctx context.Context, binary string) string {
+	tools := map[string]toolInfo{}
+	if strings.TrimSpace(binary) != "" {
+		tools["cr"] = toolInfo{Found: true, Path: binary}
+	} else {
+		tools["cr"] = checkTool(ctx, "cr", "--version")
+		tools["coderabbit"] = checkTool(ctx, "coderabbit", "--version")
+	}
+	return checkCodeRabbitAuth(ctx, tools).CurrentOrg
 }
 
 func repoPR(args []string) (string, int, bool) {

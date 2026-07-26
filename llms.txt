@@ -258,5 +258,8 @@ them (e.g. review-body / outside-diff findings have no `path`/`line`, and only
 inline review threads carry a `thread_id`) — parse them defensively.
 
 Optional local preflight: if CodeRabbit CLI is installed, `crq preflight --type uncommitted`
-can review local git changes before pushing and normalize the JSON stream. That does not replace
+can review local git changes before pushing and normalize the JSON stream. Exit 2 means "come back
+later" — either a timeout or `status: "rate_limited"`, with `.retry_after` and `.error_type`. That
+block is the SAME account quota PR reviews spend, so crq records it for the fleet and `.quota` says
+whether it did. That does not replace
 `crq loop`; only `crq loop` queues and waits for GitHub PR review feedback.

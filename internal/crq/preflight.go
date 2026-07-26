@@ -45,12 +45,24 @@ type PreflightReport struct {
 	// local CLI shares the SAME account quota as the PR reviews the queue
 	// serializes: a local rate limit is direct evidence about that quota, given
 	// for free, with no probe comment and no GitHub round trip.
-	ErrorType   string    `json:"error_type,omitempty"`
-	Recoverable bool      `json:"recoverable,omitempty"`
-	RetryAfter  string    `json:"retry_after,omitempty"`
-	ExitCode    int       `json:"exit_code"`
-	CheckedAt   time.Time `json:"checked_at"`
-	DurationMS  int64     `json:"duration_ms"`
+	ErrorType   string `json:"error_type,omitempty"`
+	Recoverable bool   `json:"recoverable,omitempty"`
+	RetryAfter  string `json:"retry_after,omitempty"`
+	// OrgAttributed is the CLI's own statement that the limit belongs to the
+	// organisation rather than to this user. The captured event distinguishes the
+	// two, and a personal limit must never become a fleet-wide block.
+	OrgAttributed bool `json:"org_attributed,omitempty"`
+	// CredentialsOverridden records that this run authenticated with credentials
+	// passed on the command line. The identity probe afterwards cannot reproduce
+	// them, so it would report the executable's STORED login instead — possibly a
+	// different account than the one that produced the block.
+	CredentialsOverridden bool `json:"credentials_overridden,omitempty"`
+	// Quota reports whether the account block this run observed was shared with
+	// crq's queue, and why not when it was not.
+	Quota      *CLIQuotaResult `json:"quota,omitempty"`
+	ExitCode   int             `json:"exit_code"`
+	CheckedAt  time.Time       `json:"checked_at"`
+	DurationMS int64           `json:"duration_ms"`
 }
 
 type PreflightStatus struct {
@@ -93,6 +105,7 @@ func Preflight(ctx context.Context, opts PreflightOptions) (PreflightReport, int
 	args := coderabbitArgs(opts)
 	report.Tool = binary
 	report.Command = redactSecrets(append([]string{binary}, args...))
+	report.CredentialsOverridden = carriesCredentials(opts.ExtraArgs)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	if opts.Timeout > 0 {
@@ -254,13 +267,13 @@ func applyPreflightEvent(report *PreflightReport, event map[string]any) {
 		if msg := firstNonEmpty(stringField(event, "message"), stringField(event, "error")); msg != "" {
 			report.Error = msg
 		}
-		report.ErrorType = stringField(event, "errorType")
-		if v, ok := event["recoverable"].(bool); ok {
-			report.Recoverable = v
-		}
-		if meta, ok := event["metadata"].(map[string]any); ok {
-			report.RetryAfter = stringField(meta, "waitTime")
-		}
+		// The event's shape is CodeRabbit's contract, so dialect reads it and this
+		// only records what it means.
+		cliErr := dialect.ParseCLIError(event)
+		report.ErrorType = cliErr.Type
+		report.Recoverable = cliErr.Recoverable
+		report.RetryAfter = cliErr.WaitTime
+		report.OrgAttributed = cliErr.OrgAttributed
 	}
 }
 
@@ -289,6 +302,20 @@ func preflightFinding(event map[string]any) PreflightFinding {
 		finding.ID = hex.EncodeToString(sum[:])
 	}
 	return finding
+}
+
+// carriesCredentials reports whether these arguments authenticate the run
+// themselves. If they do, the login the CLI would report afterwards is not
+// necessarily the account that produced the block.
+func carriesCredentials(args []string) bool {
+	for _, arg := range args {
+		name, _, _ := strings.Cut(arg, "=")
+		switch name {
+		case "--api-key", "--apikey", "--token":
+			return true
+		}
+	}
+	return false
 }
 
 // redactSecrets masks the values of secret-bearing flags (e.g. --api-key) so the

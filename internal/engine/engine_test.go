@@ -917,3 +917,30 @@ func codexCP(p Policy) CoReviewerPolicy {
 	}
 	return CoReviewerPolicy{Login: dialect.CodexBotLogin}
 }
+
+// A block only ever extends. Evidence comes from more than one place — a rate-limit
+// comment and the local CLI — and they can describe different limits, so a narrower
+// local reading must never shorten a standing account-wide window.
+func TestAcceptAccountBlock(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	standing := now.Add(time.Hour)
+	for _, tc := range []struct {
+		name     string
+		standing *time.Time
+		observed time.Time
+		want     bool
+	}{
+		{"first block is recorded", nil, now.Add(time.Minute), true},
+		{"a longer window extends", &standing, now.Add(2 * time.Hour), true},
+		{"a shorter window is refused", &standing, now.Add(time.Minute), false},
+		{"an equal window changes nothing", &standing, standing, false},
+		{"a zero observation is not evidence", &standing, time.Time{}, false},
+		{"a zero observation with no standing block is still nothing", nil, time.Time{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := AcceptAccountBlock(tc.standing, tc.observed); got != tc.want {
+				t.Errorf("AcceptAccountBlock = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

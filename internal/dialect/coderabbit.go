@@ -232,6 +232,22 @@ func ParseAvailableIn(text string, base time.Time) *time.Time {
 	if dot := strings.IndexByte(frag, '.'); dot >= 0 {
 		frag = frag[:dot]
 	}
+	d := scanDurationPhrase(frag)
+	if d <= 0 {
+		return nil
+	}
+	t := base.Add(d)
+	return &t
+}
+
+// scanDurationPhrase sums the "<n> <unit>" pairs in an already-normalised
+// fragment ("40 minutes", "1 hour 5 minutes"). Shared by every place CodeRabbit
+// states a window in prose, so a new phrasing is taught to one scanner.
+//
+// A non-positive total is not a window. Atoi accepts a leading minus, so a
+// mangled body really can scan negative — and every caller adds the result to
+// now, which would put a block in the past and read as "not blocked".
+func scanDurationPhrase(frag string) time.Duration {
 	fields := strings.Fields(frag)
 	var d time.Duration
 	for i := 0; i+1 < len(fields); i++ {
@@ -248,7 +264,19 @@ func ParseAvailableIn(text string, base time.Time) *time.Time {
 			d += time.Duration(n) * time.Second
 		}
 	}
-	if d == 0 {
+	return d
+}
+
+// ParseCLIWaitTime reads the local CLI's bare wait-time value ("32 minutes",
+// from the rate_limit error's metadata) and returns base+duration.
+//
+// The CLI states the window without the "available in" preamble its PR comments
+// use, so it needs its own entry point — but the same scanner, so both formats
+// stay in step. An unparseable value returns nil and the caller falls back to its
+// conservative window rather than inventing a short one.
+func ParseCLIWaitTime(waitTime string, base time.Time) *time.Time {
+	d := scanDurationPhrase(strings.ToLower(strings.TrimSpace(waitTime)))
+	if d <= 0 {
 		return nil
 	}
 	t := base.Add(d)
@@ -414,4 +442,48 @@ const CLIRateLimitErrorType = "rate_limit"
 // IsCLIRateLimit reports whether a CLI error type means the account is blocked.
 func IsCLIRateLimit(errorType string) bool {
 	return strings.EqualFold(strings.TrimSpace(errorType), CLIRateLimitErrorType)
+}
+
+// CLIError is the local CodeRabbit CLI's structured failure, normalized. The
+// --agent stream's key names and their meanings are CodeRabbit's format contract,
+// so they are read here rather than in orchestration: a renamed key is then one
+// change in this package plus a corpus row, not a silent loss of meaning in a
+// caller that never knew the shape.
+type CLIError struct {
+	// Type is the CLI's own classification, e.g. rate_limit.
+	Type string
+	// Recoverable is whether waiting can clear it.
+	Recoverable bool
+	// WaitTime is the CLI's stated window, in its own prose ("32 minutes").
+	WaitTime string
+	// OrgAttributed distinguishes an organisation-wide limit from this user's
+	// own. Only the former says anything about the shared account.
+	OrgAttributed bool
+}
+
+// ParseCLIError reads an error event from the CLI's --agent JSON stream.
+func ParseCLIError(event map[string]any) CLIError {
+	out := CLIError{Type: cliStringField(event, "errorType")}
+	if v, ok := event["recoverable"].(bool); ok {
+		out.Recoverable = v
+	}
+	meta, _ := event["metadata"].(map[string]any)
+	if meta != nil {
+		out.WaitTime = cliStringField(meta, "waitTime")
+		if v, ok := meta["orgAttributed"].(bool); ok {
+			out.OrgAttributed = v
+		}
+	}
+	return out
+}
+
+// IsAccountBlock reports whether this failure means the shared account quota is
+// exhausted, rather than something local being wrong.
+func (e CLIError) IsAccountBlock() bool { return IsCLIRateLimit(e.Type) }
+
+func cliStringField(m map[string]any, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
 }

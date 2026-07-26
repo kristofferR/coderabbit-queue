@@ -594,6 +594,35 @@ func TestGoldenCLIRateLimit(t *testing.T) {
 	if !IsCLIRateLimit(event.ErrorType) {
 		t.Errorf("IsCLIRateLimit(%q) = false, want true", event.ErrorType)
 	}
+	// The whole event shape is dialect's contract, so parse the captured fixture
+	// through the real parser rather than re-reading its keys by hand here.
+	var asMap map[string]any
+	if err := json.Unmarshal(raw, &asMap); err != nil {
+		t.Fatal(err)
+	}
+	parsed := ParseCLIError(asMap)
+	if !parsed.IsAccountBlock() {
+		t.Errorf("ParseCLIError(%v).IsAccountBlock() = false, want true", parsed)
+	}
+	if !parsed.Recoverable || !parsed.OrgAttributed || parsed.WaitTime == "" {
+		t.Errorf("ParseCLIError lost fields: %+v", parsed)
+	}
+	// The window matters as much as the classification: crq records this block
+	// for the whole fleet, so parse the fixture's real waitTime rather than a
+	// hand-written string.
+	base := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	if got := ParseCLIWaitTime(event.Metadata.WaitTime, base); got == nil {
+		t.Errorf("ParseCLIWaitTime(%q) = nil, want a window", event.Metadata.WaitTime)
+	} else if want := base.Add(32 * time.Minute); !got.Equal(want) {
+		t.Errorf("ParseCLIWaitTime(%q) = %s, want %s", event.Metadata.WaitTime, got, want)
+	}
+	// An unreadable or nonsensical value must not become a window in the past:
+	// the caller falls back to a conservative block instead.
+	for _, bad := range []string{"", "soon", "-5 minutes", "shortly"} {
+		if got := ParseCLIWaitTime(bad, base); got != nil {
+			t.Errorf("ParseCLIWaitTime(%q) = %s, want nil", bad, got)
+		}
+	}
 	if !event.Recoverable || event.Metadata.WaitTime == "" {
 		t.Errorf("the fixture must carry the recoverable flag and a wait time: %+v", event)
 	}

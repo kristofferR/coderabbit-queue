@@ -258,3 +258,20 @@ func allReviewed(reviewedBy map[string]bool) bool {
 	}
 	return true
 }
+
+// AcceptAccountBlock decides whether an observed account block should replace the
+// one already recorded.
+//
+// A block only ever extends. Evidence arrives from more than one place — a
+// reviewer's rate-limit comment, and the local CLI refusing — and they can
+// describe different limits: a narrower local one must not shorten a standing
+// account-wide window and let the queue fire into it.
+//
+// It lives here rather than inside the state mutation that applies it so the rule
+// is one table-tested decision, whatever new evidence source is added next.
+func AcceptAccountBlock(standing *time.Time, observed time.Time) bool {
+	if observed.IsZero() {
+		return false
+	}
+	return standing == nil || observed.After(*standing)
+}
