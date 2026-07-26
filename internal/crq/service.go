@@ -380,6 +380,10 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 // dismissal is legitimate; this performs it, so the write surface stays in one
 // file with every other one.
 //
+// readAt is when the caller read the findings, which is what separates a round
+// left on the PREVIOUS head — the ordinary state after a push — from one another
+// worker moved forward while this call was deciding.
+//
 // allowCreate says whether a round may be created for this head. It is false
 // when other blocking findings remain, because a fresh round is fire-eligible
 // and DecideFire — which never sees findings — could not hold it back.
@@ -388,7 +392,7 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 // moved after Dismiss read the findings, so this decision is about a commit
 // nobody is looking at any more; superseding would archive the newer round and
 // point the queue back at the stale head.
-func (s *Service) recordDismissal(ctx context.Context, repo string, pr int, head string, ids []string, reason string, allowCreate bool) (dismissed, already []string, err error) {
+func (s *Service) recordDismissal(ctx context.Context, repo string, pr int, head string, ids []string, reason string, allowCreate bool, readAt time.Time) (dismissed, already []string, err error) {
 	if s.cfg.DryRun {
 		return []string{}, nil, nil
 	}
@@ -406,8 +410,20 @@ func (s *Service) recordDismissal(ctx context.Context, repo string, pr int, head
 			if round, err = st.NewRound(repo, pr, head, s.clock()); err != nil {
 				return err
 			}
-		case round.Head != head:
+		case round.Head != head && round.EnqueuedAt.After(readAt):
+			// Enqueued after the findings were read: something moved the PR
+			// forward underneath this call, so the decision is about a commit
+			// nobody is looking at any more.
 			return fmt.Errorf("%s#%d moved to %s while dismissing; re-read the findings", repo, pr, round.Head)
+		case round.Head != head:
+			// The ordinary state after a push: the stored round is still on the
+			// PREVIOUS head, because `crq next` returns on a current-head finding
+			// before it enqueues. Refusing here would leave the new head in the
+			// exact drain-first deadlock this command exists to end.
+			var err error
+			if round, err = st.Supersede(repo, pr, head, s.clock()); err != nil {
+				return err
+			}
 		}
 		// Reset on every CAS attempt: a retry replays this closure, and appending
 		// to the outer slices would report each dismissal once per attempt.

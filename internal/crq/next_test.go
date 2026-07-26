@@ -420,8 +420,13 @@ func TestDismissEndsTheUnresolvableFindingDeadlock(t *testing.T) {
 	// And a round that has moved on is refused rather than superseded back: the
 	// head advanced after the findings were read, so this decision is about a
 	// commit nobody is looking at, and superseding would archive the live round.
-	if _, _, err := f.svc.recordDismissal(f.ctx, repo, pr, "999999999", []string{id}, "stale", true); err == nil {
-		t.Error("recording a dismissal against a stale head must be refused, not superseded")
+	// A round enqueued AFTER the findings were read means another worker moved
+	// the PR forward, so this decision is about a commit nobody is looking at.
+	// (A round left on the previous head is the ordinary post-push state and is
+	// superseded instead — that is what the deadlock fix depends on.)
+	if _, _, err := f.svc.recordDismissal(f.ctx, repo, pr, "999999999", []string{id}, "stale", true,
+		f.clk.now().Add(-time.Hour)); err == nil {
+		t.Error("a round enqueued after the read must be refused, not superseded")
 	}
 
 	// It is scoped to this head. A push supersedes the round, and the next

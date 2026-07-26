@@ -59,6 +59,7 @@ func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string
 	// Read the findings BEFORE writing anything. A dismissal is only meaningful
 	// against a finding that is actually there, and writing first would leave a
 	// round behind whenever validation then failed.
+	readAt := s.clock().UTC()
 	feedback, err := s.Feedback(ctx, repo, pr)
 	if err != nil {
 		return DismissResult{}, err
@@ -118,13 +119,15 @@ func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string
 	// expected to fix.
 	remaining := 0
 	for _, finding := range engine.BlockingFindings(feedback.Findings, feedback.Head) {
-		if !wanted[finding.ID] {
+		// alreadyDone counts as handled: a concurrent agent dismissing the same
+		// finding must not make this call think work is still open and refuse.
+		if !wanted[finding.ID] && !alreadyDone[finding.ID] {
 			remaining++
 		}
 	}
 
 	out := DismissResult{Repo: repo, PR: pr, Head: feedback.Head, Reason: reason, Dismissed: []string{}}
-	out.Dismissed, out.Already, err = s.recordDismissal(ctx, repo, pr, feedback.Head, clean, reason, remaining == 0)
+	out.Dismissed, out.Already, err = s.recordDismissal(ctx, repo, pr, feedback.Head, clean, reason, remaining == 0, readAt)
 	if err != nil {
 		return DismissResult{}, err
 	}

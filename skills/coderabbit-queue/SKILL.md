@@ -187,7 +187,11 @@ silently dropped, and `crq loop` converges on the same filtered list.
 Only a finding with no thread can be dismissed. One that has a `thread_id` is refused — resolve or
 decline it, so the decision lands on the PR where the bot can answer it.
 
-Judge the finding first. Dismiss is for one you have decided about, not for clearing the list. When
+Judge the finding first. Dismiss is for one you have decided about, not for clearing the list.
+
+If `crq dismiss` refuses a finding whose source is `review_comment`, crq could not read GitHub's
+review threads (a GraphQL failure) and fell back to REST, which returns no thread IDs. The finding
+does have a thread; retry once crq can read threads again rather than working around it. When
 the notice is a SKIPPED review, narrowing the PR addresses the cause; dismissing only records that
 you chose to proceed at this head.
 
