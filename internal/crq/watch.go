@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,6 +33,9 @@ type WatchOptions struct {
 	Command []string
 	// MaxAttempts bounds dispatches per head. 0 means the configured default.
 	MaxAttempts int
+	// Concurrency is how many fix sessions may run at once. 0 means the
+	// configured default.
+	Concurrency int
 }
 
 // WatchEvent is one PR's state at a pass, and what the watcher did about it.
@@ -61,11 +65,23 @@ type WatchEvent struct {
 // session for one PR, and bounded per head, so a fix that keeps not working
 // stops instead of spending a review round each time.
 func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchEvent) error) error {
+	// Fix sessions run OUTSIDE the pass. Running one inline blocked every other
+	// PR for as long as it took — one twenty-minute session meant twenty minutes
+	// in which nothing else was even looked at.
+	//
+	// The decisions stay serial on purpose. `Next` is what enqueues and fires,
+	// so deciding one PR at a time is what keeps the account-metered review in
+	// one queue; only the sessions, which spend no CodeRabbit quota, overlap.
+	pool := newDispatchPool(opts.Concurrency)
+	defer pool.wait()
 	if opts.Interval <= 0 {
 		opts.Interval = s.cfg.WatchInterval
 	}
 	if opts.MaxAttempts <= 0 {
 		opts.MaxAttempts = s.cfg.DispatchMaxAttempts
+	}
+	if opts.Concurrency <= 0 {
+		opts.Concurrency = s.cfg.DispatchConcurrency
 	}
 	if opts.Dispatch && len(opts.Command) == 0 {
 		opts.Command = s.cfg.DispatchCommand
@@ -75,7 +91,7 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 	}
 	for {
 		wait := opts.Interval
-		if err := s.watchPass(ctx, opts, emit); err != nil {
+		if err := s.watchPass(ctx, opts, pool, emit); err != nil {
 			reset, throttled := ghapi.ThrottleWait(err)
 			if !throttled {
 				return err
@@ -99,12 +115,8 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 	}
 }
 
-func (s *Service) watchPass(ctx context.Context, opts WatchOptions, emit func(WatchEvent) error) error {
+func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispatchPool, emit func(WatchEvent) error) error {
 	var failures []string
-	// Whether any fix session actually STARTED this pass. A dispatcher that
-	// cannot start one — a wedged mirror, a missing command — otherwise fails
-	// silently while the queue looks busy.
-	attempted, started, lastFailure := false, false, ""
 	repos := opts.Repos
 	if len(repos) == 0 {
 		for repo := range s.cfg.AllowRepos {
@@ -153,14 +165,11 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, emit func(Wa
 				Findings: len(report.Findings), At: s.clock().UTC(),
 			}
 			if opts.Dispatch && report.Action == string(engine.ActionFix) {
-				event.Dispatched, event.Skipped = s.dispatch(ctx, opts, report)
-				// A claim somebody else holds is not a failure of this pass.
-				if event.Dispatched {
-					attempted, started = true, true
-				} else if event.Skipped != "" && !strings.Contains(event.Skipped, "already fixing") {
-					attempted = true
-					lastFailure = event.Skipped
-				}
+				// Started, not finished: the pass moves on to the next PR while
+				// this session runs.
+				event.Dispatched, event.Skipped = pool.start(func() {
+					s.runDispatch(ctx, opts, report)
+				})
 			}
 			if emit != nil {
 				// A consumer that has gone away (a closed pipe, a full
@@ -171,9 +180,6 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, emit func(Wa
 				}
 			}
 		}
-	}
-	if opts.Dispatch && attempted {
-		s.noteDispatchHealth(ctx, started, lastFailure)
 	}
 	if len(failures) > 0 {
 		return fmt.Errorf("%d pull request(s) could not be checked: %s", len(failures), strings.Join(failures, "; "))
@@ -199,6 +205,20 @@ func (s *Service) noteDispatchHealth(ctx context.Context, started bool, reason s
 	}
 	if unhealthy && s.log != nil {
 		s.log.Printf("ALERT: no fix session has started in %d passes — %s", DrainUnhealthyAfter, reason)
+	}
+}
+
+// runDispatch performs one dispatch and records whether a session started. It
+// runs in the pool, off the pass, so a long session delays nothing else.
+func (s *Service) runDispatch(ctx context.Context, opts WatchOptions, report NextReport) {
+	ok, why := s.dispatch(ctx, opts, report)
+	// A round another watcher already holds is not this dispatcher failing.
+	if !ok && strings.Contains(why, "already fixing") {
+		return
+	}
+	s.noteDispatchHealth(ctx, ok, why)
+	if !ok && s.log != nil {
+		s.log.Printf("watch: %s#%d not fixed: %s", report.Repo, report.PR, why)
 	}
 }
 
@@ -379,3 +399,43 @@ func openPullQuery() url.Values {
 	q.Set("state", "open")
 	return q
 }
+
+// dispatchPool bounds how many fix sessions run at once.
+//
+// Non-blocking on purpose: when every slot is busy the PR is left for the next
+// pass rather than stalling the decision loop behind a session. Queuing here
+// would recreate the problem it exists to solve.
+type dispatchPool struct {
+	slots chan struct{}
+	wg    sync.WaitGroup
+}
+
+func newDispatchPool(size int) *dispatchPool {
+	if size <= 0 {
+		size = 1
+	}
+	return &dispatchPool{slots: make(chan struct{}, size)}
+}
+
+// start runs fn in the pool. It reports whether a session was started, and why
+// not when it was not.
+func (p *dispatchPool) start(fn func()) (bool, string) {
+	select {
+	case p.slots <- struct{}{}:
+	default:
+		return false, "at dispatch capacity; will retry next pass"
+	}
+	p.wg.Add(1)
+	go func() {
+		defer func() {
+			<-p.slots
+			p.wg.Done()
+		}()
+		fn()
+	}()
+	return true, ""
+}
+
+// wait blocks until every running session has finished, so a --once run does not
+// return while its sessions are still writing.
+func (p *dispatchPool) wait() { p.wg.Wait() }
