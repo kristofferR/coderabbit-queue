@@ -238,8 +238,13 @@ func (c Config) ForRepo(ov RepoReviewers) Config {
 		if have[dialect.NormalizeBotName(login)] {
 			continue
 		}
-		if co, ok := dialect.CoReviewerByName(login); ok {
-			keep = append(keep, defaultCoBot(co, containsBot(required, login)))
+		// From the operator's resolved settings, not registry defaults: a bot the
+		// fleet disabled still has CRQ_COBOT_<NAME>_CMD/TRIGGER/GRACE, and
+		// ignoring them silently gives this repository a different bot than the
+		// one that was configured.
+		if cb, ok := c.knownCoBot(login); ok {
+			cb.Required = containsBot(required, login)
+			keep = append(keep, promoteTrigger(cb))
 			have[dialect.NormalizeBotName(login)] = true
 		}
 	}
@@ -297,5 +302,39 @@ func (s *Service) cfgFor(st State, repo string) Config {
 	if !ok {
 		return s.cfg
 	}
-	return s.cfg.ForRepo(ov)
+	out := s.cfg.ForRepo(ov)
+	out.OverrideAt = ov.UpdatedAt
+	return out
+}
+
+// overrideChanged reports whether repo's reviewer override differs from the one
+// cfg was built from.
+//
+// Deciding and writing are two steps. An operator removing a co-reviewer between
+// them would otherwise have crq claim and post that bot's trigger anyway, on the
+// authority of a configuration that no longer exists.
+func overrideChanged(st *State, repo string, cfg Config) bool {
+	ov, _ := st.RepoOverride(repo)
+	switch {
+	case ov.UpdatedAt == nil && cfg.OverrideAt == nil:
+		return false
+	case ov.UpdatedAt == nil || cfg.OverrideAt == nil:
+		return true
+	default:
+		return !ov.UpdatedAt.Equal(*cfg.OverrideAt)
+	}
+}
+
+// knownCoBot is a registry co-reviewer with the operator's environment applied,
+// enabled fleet-wide or not.
+func (c Config) knownCoBot(login string) (CoBotConfig, bool) {
+	for _, cb := range c.KnownCoBots {
+		if sameBot(cb.Login, login) || strings.EqualFold(cb.Name, strings.TrimSpace(login)) {
+			return cb, true
+		}
+	}
+	if co, ok := dialect.CoReviewerByName(login); ok {
+		return defaultCoBot(co, false), true
+	}
+	return CoBotConfig{}, false
 }

@@ -668,6 +668,13 @@ func firedOrEnqueuedAt(r Round) time.Time {
 
 // applyFire executes a DecideFire verdict.
 func (s *Service) applyFire(ctx context.Context, cfg Config, round Round, obs engine.Observation, d engine.FireDecision, now time.Time) (PumpResult, error) {
+	// The decision was made from a configuration that may have been replaced
+	// since. Acting on it would post a trigger for a co-reviewer an operator has
+	// just removed, or skip one they have just required.
+	if st, _, err := s.store.Load(ctx); err == nil && overrideChanged(&st, round.Repo, cfg) {
+		return PumpResult{Action: "deduped", Repo: round.Repo, PR: round.PR, Head: round.Head,
+			Reason: "reviewer configuration changed while deciding"}, nil
+	}
 	switch d.Verdict {
 	case engine.FireDrop:
 		return s.abandonRound(ctx, round, "pr closed", "skipped")
