@@ -662,76 +662,79 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 		}
 	}
 
-	var out []QueueEntry
+	// Split by whether the round is waiting for anything the queue serializes.
+	//
+	// A co-only round is not. It spends no account quota, takes no fire slot, and
+	// DecideFire resolves it before either gate — so the account window, the slot,
+	// and its position behind other rounds are all irrelevant to it. Exempting it
+	// gate-by-gate was tried and missed a different spot three times running; the
+	// partition makes the exemption structural, so a gate added later cannot
+	// silently apply to work it does not govern.
+	var queued, freeRunning []QueueEntry
 	for _, r := range s.Rounds {
 		if r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry {
 			continue
 		}
-		// Every gate is a lower bound on when firing will accept this round, so
-		// the ready time is the LATEST of them and the reason is whichever one
-		// binds. Picking the first that matched let a later boundary hide behind
-		// an earlier one — a round cooling down for a minute inside a two-hour
-		// account block was advertised at the wrong time entirely.
 		e := QueueEntry{Round: r}
-		gate := func(at time.Time, why string) {
-			if at.After(now) && at.After(e.ReadyAt) {
-				e.ReadyAt, e.Why = at, why
+		// Its own cooldown binds either way: that is the round's, not the queue's.
+		if own := roundReadyAt(r); own.After(now) {
+			e.ReadyAt, e.Why = own, WaitCoolingDown
+		}
+		if r.CoOnly {
+			freeRunning = append(freeRunning, e)
+			continue
+		}
+		// Every remaining gate is a lower bound on when firing will accept this
+		// round, so the ready time is the LATEST of them and the reason is
+		// whichever binds. Taking the first that matched let a one-minute cooldown
+		// hide a two-hour account block.
+		for _, g := range []struct {
+			at  time.Time
+			why string
+		}{{blocked, WaitAccountBlocked}, {paced, WaitPacing}} {
+			if g.at.After(now) && g.at.After(e.ReadyAt) {
+				e.ReadyAt, e.Why = g.at, g.why
 			}
 		}
-		gate(roundReadyAt(r), WaitCoolingDown)
-		// The account window gates the metered review and nothing else. A round
-		// already degraded to its co-reviewers spends no quota, so DecideFire
-		// resolves it before that gate — labelling it "account blocked until T"
-		// promises a wait the next observation can end immediately.
-		if !r.CoOnly {
-			gate(blocked, WaitAccountBlocked)
-			gate(paced, WaitPacing)
-		}
-		out = append(out, e)
+		queued = append(queued, e)
 	}
-	// Order by what is KNOWN — the binding gate, then Seq — and claim a position
-	// for the front alone.
-	//
-	// Four review rounds were spent refining a prediction that cannot be made.
-	// Simulating the queue assumed the next slot frees one pacing interval after a
-	// fire, but release comes from the bot acknowledging the command or from
-	// CRQ_INFLIGHT_TIMEOUT, neither of which pacing knows: with seq 1 ready, seq 2
-	// cooling five minutes and seq 3 ready, an unacknowledged seq 1 makes both
-	// followers eligible together and NextEligible then takes seq 2 — the opposite
-	// of what any simulation rendered. Ordering past the front is not knowable, so
-	// this stops asserting it: the rows are listed by what gates them, and only the
-	// front carries a number (see the renderer, which prints "—" for the rest).
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].ReadyAt.Equal(out[j].ReadyAt) {
-			// Ready now (zero) sorts ahead of anything with a future gate.
-			if out[i].ReadyAt.IsZero() != out[j].ReadyAt.IsZero() {
-				return out[i].ReadyAt.IsZero()
+
+	byGateThenSeq := func(list []QueueEntry) {
+		sort.Slice(list, func(i, j int) bool {
+			if !list[i].ReadyAt.Equal(list[j].ReadyAt) {
+				// Ready now (zero) sorts ahead of anything with a future gate.
+				if list[i].ReadyAt.IsZero() != list[j].ReadyAt.IsZero() {
+					return list[i].ReadyAt.IsZero()
+				}
+				return list[i].ReadyAt.Before(list[j].ReadyAt)
 			}
-			return out[i].ReadyAt.Before(out[j].ReadyAt)
-		}
-		return out[i].Seq < out[j].Seq
-	})
+			return list[i].Seq < list[j].Seq
+		})
+	}
+	byGateThenSeq(queued)
+	byGateThenSeq(freeRunning)
 
-	// Only the front carries a time. A follower cannot start before its own gate,
-	// but neither can it start then — that depends on when the round ahead of it
-	// finishes, which is the unknown above. Showing its gate as a "ready" time
-	// states a lower bound as though it were the answer, so followers say what is
-	// actually true: they are behind an earlier round. The header and the front row
-	// already carry the account block or cooldown that explains the wait.
-	for i := 1; i < len(out); i++ {
-		out[i].ReadyAt, out[i].Why = time.Time{}, WaitBehind
+	// Order past the front is not knowable and this stops asserting it. Simulating
+	// the queue assumed a slot frees one pacing interval after a fire, but release
+	// comes from the bot acknowledging or from CRQ_INFLIGHT_TIMEOUT — neither of
+	// which pacing knows. So only the front carries a time: a follower cannot start
+	// before its own gate, but neither can it start then, and printing that gate in
+	// a "ready" column states a lower bound as though it were the answer.
+	for i := 1; i < len(queued); i++ {
+		queued[i].ReadyAt, queued[i].Why = time.Time{}, WaitBehind
 	}
 
-	// A slot held by another PR gates every entry, including the front: nothing
-	// fires until it releases, and that moment is unknowable.
+	// A held slot gates every queued round, the front included: nothing fires
+	// until it releases, and that moment is unknowable.
 	if slotBusy {
-		for i := range out {
-			if !out[i].Round.CoOnly {
-				out[i].ReadyAt, out[i].Why = time.Time{}, WaitSlotBusy
-			}
+		for i := range queued {
+			queued[i].ReadyAt, queued[i].Why = time.Time{}, WaitSlotBusy
 		}
 	}
-	return out
+
+	// Free-running work first: it is actionable now, and burying it under rounds
+	// waiting for a slot it never needs is what the exemption exists to prevent.
+	return append(freeRunning, queued...)
 }
 
 // Normalize repairs invariants after load: map init, expired retry windows

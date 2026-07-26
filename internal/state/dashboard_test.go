@@ -733,3 +733,47 @@ func TestQueueDoesNotBlockACoOnlyRoundOnTheAccountWindow(t *testing.T) {
 		t.Errorf("a co-only round must not wait on the account window: ready=%v why=%q", q[0].ReadyAt, q[0].Why)
 	}
 }
+
+// A co-only round waits for nothing the queue serializes: no account quota, no
+// fire slot, and DecideFire resolves it before either gate. Exempting it
+// gate-by-gate missed a different spot three rounds running — the account window,
+// then the ordering, then the follower pass — so this asserts the whole exemption
+// at once, with every queue-wide gate active simultaneously.
+func TestCoOnlyRoundIsExemptFromEveryQueueGate(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(
+		queuedRound("kristofferr/metered", 1, 1, now), // lower Seq, ordinary round
+		queuedRound("kristofferr/free", 2, 2, now),    // higher Seq, co-only
+	)
+	st.Rounds["kristofferr/free#2"] = func() Round {
+		r := st.Rounds["kristofferr/free#2"]
+		r.CoOnly = true
+		return r
+	}()
+	// Every gate the queue can impose, at once.
+	blocked := now.Add(2 * time.Hour)
+	st.Account.BlockedUntil = &blocked
+	fired := now
+	st.LastFired = &fired
+	st.FireSlot = &FireSlot{Key: "kristofferr/other#9", Token: "tok", Since: now.Add(-time.Minute)}
+	st.Rounds["kristofferr/other#9"] = Round{
+		Repo: "kristofferr/other", PR: 9, Head: "999999999", Seq: 9,
+		Phase: PhaseFired, Token: "tok", EnqueuedAt: now.Add(-2 * time.Minute), FiredAt: &fired,
+	}
+
+	q := st.Queue(now, 90*time.Second)
+	if len(q) != 2 {
+		t.Fatalf("Queue = %d entries, want 2", len(q))
+	}
+	free := q[0]
+	if free.PR != 2 {
+		t.Fatalf("the co-only round must lead: got #%d — actionable work cannot sit behind a slot it never needs", free.PR)
+	}
+	if !free.ReadyAt.IsZero() || free.Why != "" {
+		t.Errorf("the co-only round is ready now, got ready=%v why=%q", free.ReadyAt, free.Why)
+	}
+	// The ordinary round is still governed by all of it.
+	if q[1].Why != WaitSlotBusy {
+		t.Errorf("the metered round must report the held slot, got %q", q[1].Why)
+	}
+}
