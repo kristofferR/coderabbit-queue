@@ -31,7 +31,11 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
   methods, the CAS store, and dashboard rendering. `Round.CoBots` holds per-
   co-reviewer trigger bookkeeping; Codex's entry is **dual-written** to the
   legacy `Codex*` round fields because the fleet shares one state ref across
-  binary versions (`Normalize` folds them back on load).
+  binary versions (`Normalize` folds them back on load). `Round` and `State` also
+  **round-trip unknown JSON members** (`tolerant.go`), so a field a newer binary
+  added survives being read and rewritten by an older one — which is what makes
+  adding one safe without another dual-write, and without a schema bump (an
+  unknown version auto-reinitialises and would erase the fleet's rounds).
 - `internal/engine/` — PURE decision logic, `now` passed in, no ctx/gh:
   `DecideFire` (the single fire owner), `Progress` (fired/reviewing round
   transitions), `Completion` (the one "is the round done?"), `BlockingFindings`
