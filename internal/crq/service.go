@@ -375,6 +375,50 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 	return res, true, nil
 }
 
+// applyAccountBlock records an observed account-quota block, whatever observed
+// it. It is the single writer for that transition: the decision of whether the
+// block counts is engine.AcceptAccountBlock's, and executing it belongs here with
+// the rest of the CAS writes rather than beside each evidence source.
+//
+// It returns whether anything was written, and the block that stands either way.
+func (s *Service) applyAccountBlock(ctx context.Context, until time.Time, source string) (bool, *time.Time, error) {
+	now := s.clock()
+	// Update swallows ErrNoChange, so whether anything was written has to be
+	// recorded by the mutation itself. It is assigned on every attempt because a
+	// CAS conflict runs the closure again.
+	applied := false
+	state, err := s.store.Update(ctx, func(st *State) error {
+		if !engine.AcceptAccountBlock(st.Account.BlockedUntil, until) {
+			applied = false
+			return ErrNoChange
+		}
+		applied = true
+		at := until
+		st.Account.BlockedUntil = &at
+		st.Account.CheckedAt = &now
+		st.Account.Source = source
+		st.Account.Scope = strings.Join(s.cfg.Scope, ",")
+		// A reading from outside the PR says nothing about how many reviews are
+		// left, and a stale count beside a fresh block would read as authoritative.
+		st.Account.Remaining = nil
+		// The standing block is no longer the one a PR comment produced, so its
+		// provenance must not survive it: a later edit of that comment would be
+		// matched as a repeat and its window reused, and a pending calibration
+		// would make the next pump resume the older probe and overwrite this.
+		st.Account.RLCommentID = 0
+		st.Account.RLCommentUpdated = nil
+		st.Account.CalibAskedAt = nil
+		return nil
+	})
+	if err != nil {
+		return false, nil, err
+	}
+	if applied {
+		s.sync(ctx, state)
+	}
+	return applied, state.Account.BlockedUntil, nil
+}
+
 // quotaFreeVerdict reports whether a fire verdict can be applied while another
 // PR holds the slot or the account is blocked: none of these post
 // `@coderabbitai review`, reserve the FireSlot, or spend account quota.

@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
-	"github.com/kristofferR/coderabbit-queue/internal/engine"
 )
 
 // CLIQuotaResult reports what RecordCLIQuota did, so the caller can say so
@@ -86,48 +85,15 @@ func (s *Service) RecordCLIQuota(ctx context.Context, report PreflightReport, cl
 		return result, nil
 	}
 
-	// Update swallows ErrNoChange, so whether anything was written has to be
-	// recorded by the mutation itself. It is assigned on every attempt because a
-	// CAS conflict runs the closure again.
-	applied := false
-	state, err := s.store.Update(ctx, func(st *State) error {
-		if !engine.AcceptAccountBlock(st.Account.BlockedUntil, *until) {
-			applied = false
-			return ErrNoChange
-		}
-		applied = true
-		st.Account.BlockedUntil = until
-		st.Account.CheckedAt = &now
-		st.Account.Source = "coderabbit-cli"
-		st.Account.Scope = strings.Join(s.cfg.Scope, ",")
-		// A local reading says nothing about how many PR reviews are left, and
-		// leaving a stale count beside a fresh block would read as authoritative.
-		st.Account.Remaining = nil
-		// The standing block is no longer the one a PR comment produced, so its
-		// provenance must not survive it.
-		//
-		// The comment identity: left in place, a later edit of that same comment is
-		// matched as a repeat of the block crq already holds, and its window is
-		// reused instead of read afresh.
-		st.Account.RLCommentID = 0
-		st.Account.RLCommentUpdated = nil
-		// The pending calibration: RefreshQuota only trusts CheckedAt while no
-		// probe is outstanding, so leaving this set makes the next pump resume the
-		// older calibration — and a late reply then overwrites the block just
-		// recorded with a window measured before it.
-		st.Account.CalibAskedAt = nil
-		return nil
-	})
+	applied, standing, err := s.applyAccountBlock(ctx, *until, "coderabbit-cli")
 	if err != nil {
 		return result, err
 	}
 	result.Applied = applied
 	if !applied {
 		result.Reason = "a longer account block is already recorded"
-		result.Until = state.Account.BlockedUntil
-		return result, nil
+		result.Until = standing
 	}
-	s.sync(ctx, state)
 	return result, nil
 }
 

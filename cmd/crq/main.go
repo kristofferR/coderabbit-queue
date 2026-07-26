@@ -621,8 +621,11 @@ func shareCLIQuota(ctx context.Context, report crq.PreflightReport) *crq.CLIQuot
 		return nil
 	}
 	cfg, err := crq.LoadConfig()
-	if err != nil || cfg.RequireState() != nil {
-		return &crq.CLIQuotaResult{Reason: "no crq state configured, so there is no shared quota to update"}
+	if err != nil {
+		return &crq.CLIQuotaResult{Reason: "could not read crq config: " + err.Error()}
+	}
+	if err := cfg.RequireState(); err != nil {
+		return &crq.CLIQuotaResult{Reason: "no crq state configured: " + err.Error()}
 	}
 	// Bound BEFORE resolving credentials. With no GITHUB_TOKEN/GH_TOKEN,
 	// NewGitHub shells out to `gh auth token`, and a wedged credential store
@@ -633,7 +636,7 @@ func shareCLIQuota(ctx context.Context, report crq.PreflightReport) *crq.CLIQuot
 	defer cancel()
 	gh, err := ghapi.NewGitHub(shareCtx)
 	if err != nil {
-		return &crq.CLIQuotaResult{Reason: "no github credentials available to record the block"}
+		return &crq.CLIQuotaResult{Reason: "could not reach github to record the block: " + err.Error()}
 	}
 	store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
 	service := crq.NewService(cfg, gh, store, stderrLogger{})
