@@ -19,11 +19,21 @@ const (
 // firstStranded finds an in-flight round that reserved the slot but no longer
 // holds it: it cannot receive feedback (no command was posted) and Pump cannot
 // advance it (no slot), so it needs naming wherever it sits in the list.
-func firstStranded(inFlight []Round) *Round {
+//
+// Holding the slot is the whole distinction. Every normal fire passes through
+// PhaseReserved WITH a valid slot while the command is being posted, so testing
+// the phase alone reported the happy path as stuck — and loudly, since a stranded
+// round now outranks every other state.
+func firstStranded(st State, inFlight []Round) *Round {
+	slot := st.SlotRound()
 	for i := range inFlight {
-		if inFlight[i].Phase == PhaseReserved {
-			return &inFlight[i]
+		if inFlight[i].Phase != PhaseReserved {
+			continue
 		}
+		if slot != nil && slot.Repo == inFlight[i].Repo && slot.PR == inFlight[i].PR {
+			continue // mid-fire, not stranded
+		}
+		return &inFlight[i]
 	}
 	return nil
 }
@@ -163,7 +173,7 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# 🐰 crq — CodeRabbit review queue\n\n")
 
-	stranded := firstStranded(inFlight)
+	stranded := firstStranded(st, inFlight)
 	switch {
 	case stranded != nil:
 		// Reported before the transient states: a quota window or another PR's
@@ -280,10 +290,10 @@ func RenderTitle(st State, cfg StoreConfig) string {
 	now := time.Now().UTC()
 	queue := len(st.Queue(now, cfg.MinInterval))
 	switch {
-	case firstStranded(inFlightRounds(st)) != nil:
+	case firstStranded(st, inFlightRounds(st)) != nil:
 		// Same precedence as the body: permanently stuck work outranks states that
 		// clear by themselves.
-		return fmt.Sprintf("🐰 crq — stranded #%d · queue %d", firstStranded(inFlightRounds(st)).PR, queue)
+		return fmt.Sprintf("🐰 crq — stranded #%d · queue %d", firstStranded(st, inFlightRounds(st)).PR, queue)
 	case st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now):
 		return fmt.Sprintf("🐰 crq — blocked · queue %d", queue)
 	case st.SlotRound() != nil:

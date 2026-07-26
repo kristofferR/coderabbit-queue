@@ -628,3 +628,31 @@ func TestStrandedReservationOutranksTransientStates(t *testing.T) {
 		t.Errorf("title = %q, want the stranded reservation named", got)
 	}
 }
+
+// Every normal fire passes through PhaseReserved while its slot is held and the
+// command is posted. Reporting that as stranded turns the happy path into a loud
+// false alarm, now that stranded outranks every other state.
+func TestReservedRoundHoldingTheSlotIsNotStranded(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(queuedRound("kristofferr/a", 1, 1, now))
+	reserved := now.Add(-time.Second)
+	st.Rounds["kristofferr/a#1"] = func() Round {
+		r := st.Rounds["kristofferr/a#1"]
+		r.Phase, r.ReservedAt, r.Token = PhaseReserved, &reserved, "tok"
+		return r
+	}()
+	st.FireSlot = &FireSlot{Key: "kristofferr/a#1", Token: "tok", Since: reserved}
+
+	if got := RenderDashboard(st, StoreConfig{}); strings.Contains(got, "Stranded") {
+		t.Errorf("a mid-fire reservation must not read as stranded:\n%s", got)
+	}
+	if got := RenderTitle(st, StoreConfig{}); strings.Contains(got, "stranded") {
+		t.Errorf("title = %q, want no stranded claim mid-fire", got)
+	}
+
+	// Once the slot is gone it really is stranded.
+	st.FireSlot = nil
+	if got := RenderDashboard(st, StoreConfig{}); !strings.Contains(got, "Stranded reservation") {
+		t.Errorf("a reservation with no slot must still be named:\n%s", got)
+	}
+}
