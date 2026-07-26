@@ -394,8 +394,12 @@ func (s *Service) recordDismissal(ctx context.Context, repo string, pr int, head
 	}
 	state, err := s.store.Update(ctx, func(st *State) error {
 		round := st.Round(repo, pr)
+		// The guard is about whether a FIRE-ELIGIBLE round would exist with other
+		// findings still open, not about whether a round object exists. A queued
+		// round is just as dangerous as a new one: Pump can hand it to DecideFire,
+		// which sees no findings and cannot enforce drain-first.
 		switch {
-		case round == nil && !allowCreate:
+		case !allowCreate && (round == nil || round.FireEligible(s.clock())):
 			return fmt.Errorf("%s#%d has other unaddressed findings at %s: dismiss or resolve them in the same pass, so no round is queued while work is open", repo, pr, head)
 		case round == nil:
 			var err error

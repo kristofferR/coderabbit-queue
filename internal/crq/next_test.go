@@ -373,6 +373,15 @@ func TestDismissEndsTheUnresolvableFindingDeadlock(t *testing.T) {
 			t.Error("a dismissed finding must be withheld from findings")
 		}
 	}
+	// Repeating a successful dismissal must succeed: Feedback has already
+	// filtered that ID out, so validating against the current findings alone
+	// would fail an interrupted agent on its own earlier success.
+	if res, err := f.svc.Dismiss(f.ctx, repo, pr, []string{id}, "already handled in an earlier commit"); err != nil {
+		t.Errorf("repeating a dismissal must be idempotent, got %v", err)
+	} else if len(res.Already) != 1 {
+		t.Errorf("result = %+v, want the id reported as already dismissed", res)
+	}
+
 	// A threaded finding is refused: resolve and decline both put the decision on
 	// the PR where the bot can answer it, and dismissing one would converge the
 	// round with its thread still open.

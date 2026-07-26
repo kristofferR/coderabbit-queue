@@ -71,8 +71,28 @@ func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string
 		current[finding.ID] = finding
 	}
 
+	// Already-dismissed IDs are no longer in Findings — Feedback filters them —
+	// so a retried call would fail validation on its own earlier success. The
+	// command is documented as idempotent, and an interrupted agent repeating
+	// itself is the ordinary case.
+	alreadyDone := map[string]bool{}
+	if st, _, err := s.store.Load(ctx); err == nil {
+		if round := st.Round(repo, pr); round != nil && round.Head == feedback.Head {
+			for _, id := range clean {
+				if round.IsDismissed(id) {
+					alreadyDone[id] = true
+				}
+			}
+		}
+	} else {
+		return DismissResult{}, err
+	}
+
 	wanted := map[string]bool{}
 	for _, id := range clean {
+		if alreadyDone[id] {
+			continue
+		}
 		finding, ok := current[id]
 		if !ok {
 			return DismissResult{}, fmt.Errorf("%s is not a finding on %s#%d at %s; re-read them with crq next", id, repo, pr, feedback.Head)

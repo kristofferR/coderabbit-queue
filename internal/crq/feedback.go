@@ -438,7 +438,11 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	if round != nil && round.Head == head && len(round.Dismissed) > 0 {
 		kept := make([]dialect.Finding, 0, len(report.Findings))
 		for _, finding := range report.Findings {
-			if round.IsDismissed(finding.ID) {
+			// Only where the source itself cannot carry a thread. IDs hash the
+			// text, not the source, so a body finding later delivered as an inline
+			// comment through the REST fallback hashes the same — and filtering on
+			// the ID alone would hide a review thread that is open.
+			if dismissibleSources[finding.Source] && finding.ThreadID == "" && round.IsDismissed(finding.ID) {
 				report.Dismissed++
 				continue
 			}
