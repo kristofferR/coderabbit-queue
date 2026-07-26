@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,6 +38,9 @@ type GitHubAPI interface {
 	SearchOpenPRs(context.Context, string, bool, int) ([]ghapi.SearchPR, error)
 	EachOpenPR(context.Context, string, bool, func(ghapi.SearchPR) (bool, error)) error
 	GraphQL(context.Context, string, map[string]any, any) error
+	// ListPulls finds pull requests, filtered by the query. crq uses it to map a
+	// checkout's branch to the PR it belongs to.
+	ListPulls(context.Context, string, url.Values) ([]ghapi.Pull, error)
 	// GetRef reads a ref's SHA. It is the cheapest "did anything change?" probe
 	// crq has — a conditional GET that costs no quota while the ref is
 	// unchanged — which is what `crq wait` idles on.

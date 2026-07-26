@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -244,6 +246,33 @@ func (f *fakeGitHub) EachOpenPR(_ context.Context, _ string, _ bool, fn func(gha
 		}
 	}
 	return nil
+}
+
+// ListPulls answers the branch->PR lookup target inference uses.
+//
+// It honours the head filter, because a fake that ignores it would let a caller
+// asking for the wrong branch pass: every PR in the repository would come back
+// and a single-result assertion would still hold.
+func (f *fakeGitHub) ListPulls(_ context.Context, repo string, query url.Values) ([]ghapi.Pull, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	wantRef := ""
+	if head := query.Get("head"); head != "" {
+		_, wantRef, _ = strings.Cut(head, ":") // "owner:branch"
+	}
+	var out []ghapi.Pull
+	for key, p := range f.pulls {
+		if !strings.HasPrefix(key, strings.ToLower(repo)+"#") {
+			continue
+		}
+		if wantRef != "" && p.Head.Ref != wantRef {
+			continue
+		}
+		out = append(out, p)
+	}
+	// Deterministic: map iteration order must not decide what a test sees.
+	sort.Slice(out, func(i, j int) bool { return out[i].Number < out[j].Number })
+	return out, nil
 }
 
 // GetRef reports the fake state ref. It is what `crq wait` idles on, so tests
