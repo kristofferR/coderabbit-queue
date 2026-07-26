@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -89,9 +90,17 @@ func inFlightRounds(st State) []Round {
 	return out
 }
 
+// firedAtOf is when a round entered its in-flight life, for ordering the in-flight
+// table. A reserved round has no FiredAt — the command is not posted yet — so
+// falling straight through to EnqueuedAt sorted a long-queued PR that was reserved
+// seconds ago ahead of reviews fired much earlier, contradicting the table's own
+// ordering.
 func firedAtOf(r Round) time.Time {
 	if r.FiredAt != nil {
 		return *r.FiredAt
+	}
+	if r.ReservedAt != nil {
+		return *r.ReservedAt
 	}
 	return r.EnqueuedAt
 }
@@ -259,8 +268,16 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 			case e.Why != "":
 				ready = "unknown"
 			}
-			fmt.Fprintf(&b, "| %d | [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %d | %s | `%s` |\n",
-				i+1, e.Repo, e.PR, e.Repo, e.PR, e.Head, ready, dash(e.Why),
+			// Only claim a position when one is knowable. While another PR holds the
+			// slot, which round fires next depends on whose cooldown has elapsed by
+			// the moment it releases — and that moment is unknown, so every possible
+			// order (including Seq) is a guess. Say so instead of numbering it.
+			position := strconv.Itoa(i + 1)
+			if e.Why == WaitSlotBusy {
+				position = "—"
+			}
+			fmt.Fprintf(&b, "| %s | [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %d | %s | `%s` |\n",
+				position, e.Repo, e.PR, e.Repo, e.PR, e.Head, ready, dash(e.Why),
 				e.Attempts, fmtStamp(&e.EnqueuedAt, loc), e.ByHost)
 		}
 	}

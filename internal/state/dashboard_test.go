@@ -656,3 +656,69 @@ func TestReservedRoundHoldingTheSlotIsNotStranded(t *testing.T) {
 		t.Errorf("a reservation with no slot must still be named:\n%s", got)
 	}
 }
+
+// A reserved round has no FiredAt yet, so ordering the in-flight table by
+// enqueue time put a PR reserved seconds ago ahead of reviews fired much earlier.
+func TestInFlightOrdersAReservationByWhenItReserved(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(queuedRound("kristofferr/old", 1, 1, now), queuedRound("kristofferr/new", 2, 2, now))
+	firedLongAgo := now.Add(-time.Hour)
+	st.Rounds["kristofferr/old#1"] = func() Round {
+		r := st.Rounds["kristofferr/old#1"]
+		r.Phase, r.FiredAt = PhaseReviewing, &firedLongAgo
+		return r
+	}()
+	enqueuedEvenEarlier := now.Add(-2 * time.Hour)
+	justReserved := now.Add(-time.Second)
+	st.Rounds["kristofferr/new#2"] = func() Round {
+		r := st.Rounds["kristofferr/new#2"]
+		r.Phase, r.EnqueuedAt, r.ReservedAt = PhaseReserved, enqueuedEvenEarlier, &justReserved
+		return r
+	}()
+
+	got := inFlightRounds(st)
+	if len(got) != 2 || got[0].PR != 1 {
+		t.Errorf("in flight = %v, want the earlier-fired review first", []int{got[0].PR, got[1].PR})
+	}
+}
+
+// While another PR holds the slot, which round fires next depends on whose
+// cooldown has elapsed when it releases — and that moment is unknown, so every
+// order including Seq is a guess. The table must not number them.
+func TestQueueTableDropsPositionsWhileTheSlotIsHeld(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(coolingRound("kristofferr/a", 1, 1, now, time.Hour), queuedRound("kristofferr/b", 2, 2, now))
+	st.FireSlot = &FireSlot{Key: "kristofferr/c#3", Token: "tok", Since: now.Add(-time.Minute)}
+	st.Rounds["kristofferr/c#3"] = Round{
+		Repo: "kristofferr/c", PR: 3, Head: "ccccccccc", Seq: 3,
+		Phase: PhaseFired, Token: "tok", EnqueuedAt: now.Add(-2 * time.Minute), FiredAt: &now,
+	}
+
+	got := RenderDashboard(st, StoreConfig{})
+	if strings.Contains(got, "| 1 | [kristofferr/a") || strings.Contains(got, "| 2 | [kristofferr/b") {
+		t.Errorf("positions must not be claimed while the slot is held:\n%s", got)
+	}
+}
+
+// A round degraded to its co-reviewers spends no account quota, so DecideFire
+// resolves it before the quota gate. Promising it cannot proceed until the window
+// closes describes a wait the next observation can end immediately.
+func TestQueueDoesNotBlockACoOnlyRoundOnTheAccountWindow(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(queuedRound("kristofferr/a", 1, 1, now))
+	st.Rounds["kristofferr/a#1"] = func() Round {
+		r := st.Rounds["kristofferr/a#1"]
+		r.CoOnly = true
+		return r
+	}()
+	blocked := now.Add(2 * time.Hour)
+	st.Account.BlockedUntil = &blocked
+
+	q := st.Queue(now, 0)
+	if len(q) != 1 {
+		t.Fatalf("Queue = %d entries, want 1", len(q))
+	}
+	if q[0].Why == WaitAccountBlocked || !q[0].ReadyAt.IsZero() {
+		t.Errorf("a co-only round must not wait on the account window: ready=%v why=%q", q[0].ReadyAt, q[0].Why)
+	}
+}

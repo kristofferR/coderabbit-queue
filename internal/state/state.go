@@ -679,8 +679,14 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 			}
 		}
 		gate(roundReadyAt(r), WaitCoolingDown)
-		gate(blocked, WaitAccountBlocked)
-		gate(paced, WaitPacing)
+		// The account window gates the metered review and nothing else. A round
+		// already degraded to its co-reviewers spends no quota, so DecideFire
+		// resolves it before that gate — labelling it "account blocked until T"
+		// promises a wait the next observation can end immediately.
+		if !r.CoOnly {
+			gate(blocked, WaitAccountBlocked)
+			gate(paced, WaitPacing)
+		}
 		out = append(out, e)
 	}
 	// Order by SIMULATING what firing does, because pacing makes the naive sort
