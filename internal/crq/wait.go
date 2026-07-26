@@ -60,7 +60,7 @@ func (s *Service) WaitForAction(ctx context.Context, repo string, pr int) (NextR
 	repo = NormalizeRepo(repo)
 	var lastRef string
 	for {
-		report, action, err := s.nextFromState(ctx, repo, pr)
+		report, action, _, err := s.nextFromState(ctx, repo, pr)
 		if err != nil {
 			if wait, throttled := ghapi.ThrottleWait(err); throttled {
 				if wait <= 0 {

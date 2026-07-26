@@ -64,7 +64,7 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 		return report, err
 	}
 
-	report, action, err := s.nextFromState(ctx, repo, pr)
+	report, action, feedback, err := s.nextFromState(ctx, repo, pr)
 	if err != nil {
 		return report, err
 	}
@@ -85,11 +85,37 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 	// Not fatal if it fails: the instruction above stands on the observation
 	// already taken, and the next call pumps again.
 	if len(engine.FindingsOnHead(action.Findings, report.Head)) == 0 {
-		if _, perr := s.Pump(ctx); perr != nil && s.log != nil {
-			s.log.Printf("warning: pump during next for %s: %v", QueueKey(repo, pr), perr)
+		if err := s.advance(ctx, repo, pr, feedback); err != nil && s.log != nil {
+			s.log.Printf("warning: advancing %s: %v", QueueKey(repo, pr), err)
 		}
 	}
 	return report, nil
+}
+
+// advance moves the queue one step on this caller's behalf.
+//
+// The account-wide FIFO and the fire slot exist to serialize exactly one thing:
+// the primary reviewer's metered review. A round that will not spend that quota
+// is not a queue citizen, and letting one wait its turn is how PRs ended up
+// parked for hours behind blocked rounds whose quota they were never going to
+// touch — a free-plan repo whose primary only ever posts a walkthrough, or a
+// round degraded to its co-reviewers while the account is rate-limited.
+//
+// So this PR's own round gets resolved directly whenever its work is quota-free,
+// and only otherwise does the global pump run. The two conditions come from the
+// observation already taken, which is what keeps the bypass free: attempting it
+// unconditionally would re-observe this PR on every call for a case that applies
+// to a minority of rounds.
+func (s *Service) advance(ctx context.Context, repo string, pr int, feedback FeedbackReport) error {
+	if feedback.PrimaryUnavailable || feedback.CodeRabbitDeferred {
+		if _, handled, err := s.advanceQuotaFree(ctx, repo, pr); err != nil {
+			return err
+		} else if handled {
+			return nil
+		}
+	}
+	_, err := s.Pump(ctx)
+	return err
 }
 
 // nextFromState derives the instruction from what is already recorded and
@@ -104,19 +130,19 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 //
 // Both `crq next` and `crq wait` decide here, through the same pure
 // engine.NextAction, so the blocking and non-blocking forms cannot disagree.
-func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextReport, engine.Action, error) {
+func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextReport, engine.Action, FeedbackReport, error) {
 	report := NextReport{Repo: repo, PR: pr, Findings: []dialect.Finding{}, CheckedAt: s.clock()}
 
 	feedback, err := s.Feedback(ctx, repo, pr)
 	if err != nil {
-		return report, engine.Action{}, err
+		return report, engine.Action{}, feedback, err
 	}
 	report.Head = feedback.Head
 	report.ReviewedBy = feedback.ReviewedBy
 
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
-		return report, engine.Action{}, err
+		return report, engine.Action{}, feedback, err
 	}
 	now := s.clock()
 	round := st.Round(repo, pr)
@@ -149,7 +175,7 @@ func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextR
 		at := action.At.UTC()
 		report.RecheckAfter = &at
 	}
-	return report, action, nil
+	return report, action, feedback, nil
 }
 
 // NextWaiting is Next for an interactive caller: it sleeps through the states a

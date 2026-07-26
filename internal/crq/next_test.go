@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 // setLocalWork pins Next's "does the caller hold unlanded changes" probe so the
@@ -220,5 +222,72 @@ func TestRemoteMatchesRepo(t *testing.T) {
 				t.Errorf("remoteMatchesRepo(%q) = %v, want %v", tc.repo, got, tc.want)
 			}
 		})
+	}
+}
+
+// The queue exists to serialize ONE thing: CodeRabbit's account-wide review
+// limit. A round that will never spend that quota is not a queue citizen, so
+// neither an account block nor another PR holding the fire slot may delay it.
+//
+// `crq loop` learned this; `crq next` did not, and inherited the starvation the
+// dogfood exposed — summary-only rounds sitting behind blocked rounds they would
+// never spend quota on. Staged at its worst here: another PR HOLDS the slot, so
+// Pump short-circuits on the slot holder and never reaches the FIFO or its
+// bounded rescue scan at all.
+func TestNextResolvesSummaryOnlyWithoutTheQueue(t *testing.T) {
+	cfg := firingConfig()
+	cfg.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
+	cfg.FeedbackBots = cfg.RequiredBots
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+
+	frontPull := ghapi.Pull{State: "open"}
+	frontPull.Head.SHA = "1111111111111111"
+	gh.pulls[fakeKey("o/front", 10)] = frontPull
+
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = "2222222222222222"
+	gh.pulls[fakeKey("o/private", 20)] = pull
+	walkthrough := ghapi.IssueComment{
+		ID:        900,
+		Body:      corpusMessage(t, "coderabbit/summary-only-free-plan.md"),
+		CreatedAt: now.Add(-time.Minute),
+		UpdatedAt: now.Add(-time.Minute),
+	}
+	walkthrough.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/private", 20)] = []ghapi.IssueComment{walkthrough}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+	svc.localWorkFn = func(context.Context, string) (bool, string) { return false, "" }
+
+	seedRound(t, store, cfg, "o/front", 10, "111111111", PhaseFired, now.Add(-time.Minute), 500)
+	blockedUntil := now.Add(45 * time.Minute)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.Account.BlockedUntil = &blockedUntil
+		st.FireSlot = &FireSlot{Key: QueueKey("o/front", 10), Token: "seedtok", Since: now.Add(-time.Minute)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.Next(context.Background(), "o/private", 20); err != nil {
+		t.Fatalf("next: %v", err)
+	}
+
+	st, _, _ := store.Load(context.Background())
+	if r := st.Round("o/private", 20); r == nil || r.Phase == PhaseQueued {
+		t.Fatalf("the summary-only round must leave the queue, got %#v", r)
+	}
+	for _, p := range gh.posted {
+		if strings.Contains(p, cfg.ReviewCommand) {
+			t.Fatalf("summary-only must never post the CodeRabbit command, posted=%v", gh.posted)
+		}
+	}
+	if st.FireSlot == nil || st.FireSlot.Key != QueueKey("o/front", 10) {
+		t.Fatalf("the front PR must keep the fire slot, got %#v", st.FireSlot)
 	}
 }
