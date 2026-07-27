@@ -2,6 +2,8 @@ package crq
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -98,5 +100,59 @@ func TestWatchRetiresEveryClosedRoundItCanSee(t *testing.T) {
 	}
 	if r := st.Round(repo, 1); r == nil || !r.Active() {
 		t.Errorf("the open PR's round was retired too: %+v", r)
+	}
+}
+
+// The per-head attempt budget stops a fix that keeps not working from looping.
+// A session the WATCHER stopped never got to fail, so it must not spend one:
+// two redeploys spent two of one head's three attempts, and a third would have
+// left the pull request unfixable at that commit while `crq next` kept asking
+// for a fix.
+func TestAStoppedSessionKeepsItsAttempt(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", 4, sha
+	gh.pulls[fakeKey(repo, 4)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, repo, 4, sha, PhaseQueued, time.Now().UTC(), 0)
+
+	// A session that outlives the watcher, which is cancelled under it.
+	script := filepath.Join(t.TempDir(), "session.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	pool := newDispatchPool(0)
+	report := NextReport{Repo: repo, PR: 4, Head: sha, Action: "fix"}
+	ok, why, _ := svc.startDispatchResult(ctx, WatchOptions{
+		Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 3,
+	}, pool, report)
+	if !ok {
+		t.Fatalf("dispatch did not start: %s", why)
+	}
+	time.Sleep(150 * time.Millisecond)
+	stop()
+	pool.wait()
+
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(repo, 4)
+	if round == nil || round.Dispatch == nil {
+		t.Fatalf("no claim recorded: %+v", round)
+	}
+	if round.Dispatch.Attempts != 0 {
+		t.Errorf("attempts = %d, want the attempt returned when the watcher stopped the session",
+			round.Dispatch.Attempts)
 	}
 }

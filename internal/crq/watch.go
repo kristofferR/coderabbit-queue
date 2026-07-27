@@ -675,11 +675,25 @@ func (s *Service) dispatchWithStart(
 	}
 	s.noteDispatchHealth(context.WithoutCancel(ctx), true, "")
 	runErr := cmd.Wait()
-	s.releaseDispatch(context.WithoutCancel(ctx), report, token, true)
+	// A session the WATCHER stopped did not use up the head's attempt budget.
+	//
+	// That budget exists to stop a fix which keeps not working from looping for
+	// ever, and a session killed because the daemon went down never got to
+	// fail — it is the operator's restart, not the fix's quality. Counting it
+	// spent two of this head's three attempts on redeploys alone, and a third
+	// would have left the pull request unfixable at that commit while `crq next`
+	// went on asking for a fix.
+	attempted := ctx.Err() == nil
+	s.releaseDispatch(context.WithoutCancel(ctx), report, token, attempted)
 	if lost() {
 		return false, "another watcher took this round; the session was stopped"
 	}
 	if runErr != nil {
+		if !attempted {
+			// Say which kind of ending this was: "failed" reads as the fix being
+			// wrong, and the reader's next move is different when crq stopped it.
+			return false, fmt.Sprintf("fix session stopped with the watcher, and keeps its attempt (log: %s)", logPath)
+		}
 		// Keep the worktree AND name the log: a failed session is the one whose
 		// state somebody needs to look at.
 		return false, fmt.Sprintf("fix session failed: %v (log: %s)", runErr, logPath)
