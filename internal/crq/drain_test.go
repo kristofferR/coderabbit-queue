@@ -88,6 +88,51 @@ func TestInstallDrainUsesFleetRepositories(t *testing.T) {
 	if len(plan.Repos) != 1 || plan.Repos[0] != "owner/fleet-repo" {
 		t.Fatalf("drain repos = %v, want the fleet repository", plan.Repos)
 	}
+	if plan.PolicySource != "fleet" {
+		t.Fatalf("policy source = %q, want fleet", plan.PolicySource)
+	}
+}
+
+func TestDrainUnitKeepsHostFallbacksUnderFleetPolicy(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/host-repo": true}
+	cfg.ExcludeRepos = map[string]bool{"owner/host-excluded": true}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.SetFleetValue("repos", "owner/fleet-repo")
+		st.SetFleetValue("exclude", "owner/fleet-excluded")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	plan, err := svc.InstallDrain(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Repos) != 1 || plan.Repos[0] != "owner/fleet-repo" {
+		t.Fatalf("preview repos = %v, want current fleet policy", plan.Repos)
+	}
+	env := drainEnvFor(svc.drainFallbackConfig(nil), plan)
+	if got := env["CRQ_REPOS"]; got != "owner/host-repo" {
+		t.Fatalf("unit CRQ_REPOS = %q, want host fallback", got)
+	}
+	if got := env["CRQ_EXCLUDE"]; got != "owner/host-excluded" {
+		t.Fatalf("unit CRQ_EXCLUDE = %q, want host fallback", got)
+	}
+}
+
+func TestDrainUnitKeepsExplicitRepositoriesAsHostFallback(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/configured": true}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	plan := DrainInstall{Repos: []string{"owner/explicit"}}
+
+	env := drainEnvFor(svc.drainFallbackConfig(plan.Repos), plan)
+	if got := env["CRQ_REPOS"]; got != "owner/explicit" {
+		t.Fatalf("unit CRQ_REPOS = %q, want explicit install repository", got)
+	}
 }
 
 // A missing agent must fail loudly at install time. Discovering it at the first

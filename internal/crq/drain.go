@@ -25,13 +25,15 @@ var fixPrompt string
 // DrainInstall describes what an install would do, so --dry-run can print it and
 // the result can be reported.
 type DrainInstall struct {
-	Platform  string `json:"platform"`
-	Prompt    string `json:"prompt"`
-	Wrapper   string `json:"wrapper"`
-	Unit      string `json:"unit"`
-	LogDir    string `json:"log_dir"`
-	Workspace string `json:"workspace,omitempty"`
-	Agent     string `json:"agent"`
+	Platform     string `json:"platform"`
+	Prompt       string `json:"prompt"`
+	Wrapper      string `json:"wrapper"`
+	Unit         string `json:"unit"`
+	LogDir       string `json:"log_dir"`
+	Workspace    string `json:"workspace,omitempty"`
+	Agent        string `json:"agent"`
+	PolicySource string `json:"policy_source"`
+	Warning      string `json:"warning,omitempty"`
 	// Invocation is the exact command the wrapper runs, so --dry-run shows what
 	// the fix session will actually be — including the model, which is the
 	// agent's business and not crq's to hardcode.
@@ -58,10 +60,27 @@ func (s *Service) InstallDrain(ctx context.Context, agent string, agentArgs []st
 	}
 	effective := s.fleetCfg(st)
 	plan, err := DrainPlan(effective, agent, agentArgs, repos, effectiveDryRun)
+	plan.PolicySource = "fleet"
 	if err != nil || effectiveDryRun {
 		return plan, err
 	}
-	return s.applyDrain(ctx, plan, effective)
+	return s.applyDrain(ctx, plan, s.drainFallbackConfig(repos))
+}
+
+// drainFallbackConfig is what the unit should carry for settings the fleet may
+// later unset. Fleet policy is overlaid from state at runtime; baking today's
+// effective values into the service would make them survive after that policy
+// was removed. Explicit install repositories remain this host's chosen fallback.
+func (s *Service) drainFallbackConfig(repos []string) Config {
+	cfg := s.cfg
+	if len(repos) == 0 {
+		return cfg
+	}
+	cfg.AllowRepos = make(map[string]bool, len(repos))
+	for _, repo := range repos {
+		cfg.AllowRepos[repo] = true
+	}
+	return cfg
 }
 
 // DrainPlan computes what an install WOULD write and run, from configuration
@@ -349,7 +368,7 @@ func (s *Service) drainEnv(plan DrainInstall) map[string]string {
 
 func drainEnvFor(cfg Config, plan DrainInstall) map[string]string {
 	env := map[string]string{
-		"CRQ_REPOS": strings.Join(plan.Repos, ","),
+		"CRQ_REPOS": strings.Join(sortedRepoList(cfg.AllowRepos), ","),
 		// The denylist travels with the allowlist. Carrying one and not the other
 		// installs a service that watches a repository the operator excluded.
 		"CRQ_EXCLUDE":                strings.Join(sortedRepoList(cfg.ExcludeRepos), ","),

@@ -311,11 +311,40 @@ func TestFleetRevisionInvalidatesAStaleDecision(t *testing.T) {
 type dashboardConfigStore struct {
 	StateStore
 	render StoreConfig
+	syncs  int
 }
 
 func (s *dashboardConfigStore) SyncDashboard(_ context.Context, _ State, cfg StoreConfig) error {
 	s.render = cfg
+	s.syncs++
 	return nil
+}
+
+func TestFleetMutationsSyncTheDashboard(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.DashboardIssue = 1
+	store := &dashboardConfigStore{StateStore: NewMemoryStore(cfg)}
+	svc := NewService(cfg, newFakeGitHub(), store, &recordingLogger{})
+
+	if err := svc.SetFleetConfig(ctx, "min-interval", "5m"); err != nil {
+		t.Fatal(err)
+	}
+	if store.syncs != 1 {
+		t.Fatalf("dashboard syncs after set = %d, want 1", store.syncs)
+	}
+	if dropped, err := svc.UnsetFleetConfig(ctx, "min-interval"); err != nil || !dropped {
+		t.Fatalf("unset = %v, %v", dropped, err)
+	}
+	if store.syncs != 2 {
+		t.Fatalf("dashboard syncs after unset = %d, want 2", store.syncs)
+	}
+	if seeded, err := svc.SeedFleetConfig(ctx); err != nil || len(seeded) == 0 {
+		t.Fatalf("seed = %v, %v", seeded, err)
+	}
+	if store.syncs != 3 {
+		t.Fatalf("dashboard syncs after seed = %d, want 3", store.syncs)
+	}
 }
 
 func TestDashboardSyncReceivesTheEffectiveFleetReviewers(t *testing.T) {

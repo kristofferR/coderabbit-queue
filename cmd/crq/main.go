@@ -73,25 +73,28 @@ func run(ctx context.Context, args []string) int {
 	case "preflight":
 		return preflight(ctx, args[1:])
 	case "drain":
-		// A dry run is documented as a PREVIEW: it writes nothing and reads no
-		// GitHub state. Deciding it here, before the authenticated client is
-		// built, is what lets somebody inspect the setup before finishing it —
-		// otherwise the one command for looking at the plan was itself another
-		// thing to set up first. A real install still goes through the
-		// authenticated path below.
+		// An authenticated dry run follows the normal path below so its plan is
+		// built from the same fleet state as the real install. Keep a host-only
+		// fallback for somebody who has not configured or authenticated GitHub
+		// yet, but label it so it cannot be mistaken for the fleet-backed plan.
 		if opts, perr := parseDrainArgs(args[1:]); perr == nil && opts.dryRun {
 			cfg, cerr := crq.LoadConfig()
 			if cerr != nil {
 				fatal(cerr)
 				return 1
 			}
-			plan, ierr := crq.DrainPlan(cfg, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, true)
-			if ierr != nil {
-				fatal(ierr)
-				return 1
+			_, authErr := ghapi.NewGitHub(ctx)
+			if cfg.RequireState() != nil || authErr != nil {
+				plan, ierr := crq.DrainPlan(cfg, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, true)
+				if ierr != nil {
+					fatal(ierr)
+					return 1
+				}
+				plan.PolicySource = "host"
+				plan.Warning = "GitHub fleet state is unavailable; this host-only preview may differ from an authenticated install"
+				printJSON(plan)
+				return 0
 			}
-			printJSON(plan)
-			return 0
 		}
 	}
 

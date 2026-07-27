@@ -160,14 +160,26 @@ func (s *Service) SeedFleetConfig(ctx context.Context) ([]string, error) {
 // Dry-run differs only at the persistence boundary, so validation, capability
 // fences and reconciliation cannot drift from the command it previews.
 func (s *Service) updateFleet(ctx context.Context, mutate func(*State) error) (State, error) {
+	changed := false
+	apply := func(st *State) error {
+		err := mutate(st)
+		if err == nil {
+			changed = true
+		}
+		return err
+	}
 	if !s.cfg.DryRun {
-		return s.store.Update(ctx, mutate)
+		st, err := s.store.Update(ctx, apply)
+		if err == nil && changed {
+			s.sync(ctx, st)
+		}
+		return st, err
 	}
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
 		return State{}, err
 	}
-	err = mutate(&st)
+	err = apply(&st)
 	if errors.Is(err, ErrNoChange) {
 		err = nil
 	}
