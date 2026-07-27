@@ -190,6 +190,109 @@ func TestHoldStopsInflightCoReviewerSelfHeal(t *testing.T) {
 	}
 }
 
+func TestHoldRejectsTriggerClaimsAlreadyBeingPosted(t *testing.T) {
+	tests := map[string]func(*State, *Round, Config, time.Time) error{
+		"primary reservation": func(st *State, r *Round, cfg Config, now time.Time) error {
+			if err := r.Reserve("token", cfg.Host, now); err != nil {
+				return err
+			}
+			st.FireSlot = &FireSlot{Key: QueueKey(r.Repo, r.PR), Token: "token", Since: now}
+			return nil
+		},
+		"co-reviewer claim": func(_ *State, r *Round, _ Config, now time.Time) error {
+			r.ClaimCo(dialect.CodexBotLogin, now)
+			return nil
+		},
+	}
+
+	for name, claim := range tests {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC)
+			cfg := firingConfig()
+			store := NewMemoryStore(cfg)
+			svc := NewService(cfg, newFakeGitHub(), store, nil)
+			svc.now = func() time.Time { return now }
+			repo, pr, head := "o/r", 7, "dddddddd1"
+			seedRound(t, store, cfg, repo, pr, head, PhaseQueued, now.Add(-time.Minute), 0)
+			setHoldCapableLeader(t, ctx, store, now)
+			if _, err := store.Update(ctx, func(st *State) error {
+				r := st.Round(repo, pr)
+				if err := claim(st, r, cfg, now); err != nil {
+					return err
+				}
+				st.PutRound(*r)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := svc.Hold(ctx, repo, pr, "waiting on a decision"); err == nil {
+				t.Fatal("hold succeeded while a trigger post was already claimed")
+			}
+			st, _, err := store.Load(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, held := st.HeldPR(repo, pr); held {
+				t.Fatal("a rejected hold was persisted")
+			}
+		})
+	}
+}
+
+func TestHoldAndUnholdDryRunDoNotMutateState(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	cfg.DryRun = true
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("o/held", 1, "existing hold", "operator", now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, revision, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	svc.now = func() time.Time { return now }
+
+	held, err := svc.Hold(ctx, "o/new", 2, "simulated hold")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !held.Held || held.Reason != "simulated hold" {
+		t.Fatalf("unexpected simulated hold result: %+v", held)
+	}
+	released, err := svc.Unhold(ctx, "o/held", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if released.Held {
+		t.Fatalf("unexpected simulated unhold result: %+v", released)
+	}
+
+	after, afterRevision, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterRevision != revision {
+		t.Fatalf("dry-run changed state revision: before=%+v after=%+v", revision, afterRevision)
+	}
+	if len(after.Holds) != len(before.Holds) {
+		t.Fatalf("dry-run changed holds: before=%+v after=%+v", before.Holds, after.Holds)
+	}
+	if _, held := after.HeldPR("o/held", 1); !held {
+		t.Fatal("dry-run unhold removed the existing hold")
+	}
+	if _, held := after.HeldPR("o/new", 2); held {
+		t.Fatal("dry-run hold persisted the simulated hold")
+	}
+}
+
 // A rolling deployment can leave an older daemon holding the leader lease.
 // Such a daemon preserves Holds in JSON but does not enforce them, so the
 // command must not claim success until a capable leader owns the fleet.

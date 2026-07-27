@@ -118,12 +118,19 @@ func (s *Service) Hold(ctx context.Context, repo string, pr int, reason string) 
 		return HoldResult{}, errors.New("a hold needs a reason: it is a note to whoever finds the PR stopped")
 	}
 	now := s.clock().UTC()
+	result := HoldResult{Repo: repo, PR: pr, Held: true, Reason: reason, By: s.cfg.Host, At: &now}
+	if s.cfg.DryRun {
+		return result, nil
+	}
 	state, err := s.store.Update(ctx, func(st *State) error {
 		// An older daemon preserves Holds as unknown JSON but cannot enforce it.
 		// Require a capable live leader: without one, an older standby could
 		// acquire the expired/empty lease immediately after this write.
 		if st.Leader == nil || !st.Leader.ExpiresAt.After(now) || !st.LeaderHasCapability(leaderCapabilityHolds) {
 			return errors.New("administrative holds require a live hold-capable autoreview leader; start or upgrade the daemon and try again")
+		}
+		if triggerPostClaimed(st.Round(repo, pr), now) {
+			return errors.New("a review trigger is already being posted; wait for it to finish before holding the PR")
 		}
 		st.Hold(repo, pr, reason, s.cfg.Host, now)
 		return nil
@@ -135,12 +142,16 @@ func (s *Service) Hold(ctx context.Context, repo string, pr int, reason string) 
 	if s.log != nil {
 		s.log.Printf("%s#%d held: %s", repo, pr, reason)
 	}
-	return HoldResult{Repo: repo, PR: pr, Held: true, Reason: reason, By: s.cfg.Host, At: &now}, nil
+	return result, nil
 }
 
 // Unhold puts a PR back in the queue.
 func (s *Service) Unhold(ctx context.Context, repo string, pr int) (HoldResult, error) {
 	repo = NormalizeRepo(repo)
+	result := HoldResult{Repo: repo, PR: pr, Held: false}
+	if s.cfg.DryRun {
+		return result, nil
+	}
 	released := false
 	state, err := s.store.Update(ctx, func(st *State) error {
 		if !st.Unhold(repo, pr) {
@@ -158,7 +169,27 @@ func (s *Service) Unhold(ctx context.Context, repo string, pr int) (HoldResult, 
 			s.log.Printf("%s#%d released", repo, pr)
 		}
 	}
-	return HoldResult{Repo: repo, PR: pr, Held: false}, nil
+	return result, nil
+}
+
+// triggerPostClaimed reports the two claim states after which Hold cannot
+// promise that no new review command will be posted. The hold and each claim
+// are CAS writes, so checking them in the hold write makes either ordering
+// safe: an existing claim rejects the hold, and an existing hold rejects a
+// later claim.
+func triggerPostClaimed(r *Round, now time.Time) bool {
+	if r == nil {
+		return false
+	}
+	if r.Phase == PhaseReserved {
+		return true
+	}
+	for _, co := range r.CoBots {
+		if co.ClaimedAt != nil && now.Sub(co.ClaimedAt.UTC()) < triggerClaimTTL {
+			return true
+		}
+	}
+	return false
 }
 
 type EnqueueResult struct {

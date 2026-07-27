@@ -35,11 +35,14 @@ func stripFencedCode(body string) string {
 	var out strings.Builder
 	var fence byte
 	fenceLen := 0
+	fenceQuoteDepth := 0
 	for _, line := range strings.SplitAfter(body, "\n") {
-		delimiter, run, tail, ok := markdownFence(line)
+		content, quoteDepth := markdownBlockQuoteContent(line)
+		delimiter, run, tail, ok := markdownFence(content)
 		if fence == 0 {
 			if ok && (delimiter != '`' || !strings.Contains(tail, "`")) {
 				fence, fenceLen = delimiter, run
+				fenceQuoteDepth = quoteDepth
 				if strings.HasSuffix(line, "\n") {
 					out.WriteByte('\n')
 				}
@@ -48,14 +51,53 @@ func stripFencedCode(body string) string {
 			out.WriteString(line)
 			continue
 		}
-		if ok && delimiter == fence && run >= fenceLen && strings.TrimSpace(tail) == "" {
-			fence, fenceLen = 0, 0
+
+		// A fenced block inside a block quote ends with that container. Do not
+		// swallow following prose merely because its eventual fence resembles
+		// a closing delimiter.
+		if quoteDepth < fenceQuoteDepth {
+			fence, fenceLen, fenceQuoteDepth = 0, 0, 0
+			if ok && (delimiter != '`' || !strings.Contains(tail, "`")) {
+				fence, fenceLen, fenceQuoteDepth = delimiter, run, quoteDepth
+				if strings.HasSuffix(line, "\n") {
+					out.WriteByte('\n')
+				}
+				continue
+			}
+			out.WriteString(line)
+			continue
+		}
+		if quoteDepth == fenceQuoteDepth && ok && delimiter == fence && run >= fenceLen && strings.TrimSpace(tail) == "" {
+			fence, fenceLen, fenceQuoteDepth = 0, 0, 0
 		}
 		if strings.HasSuffix(line, "\n") {
 			out.WriteByte('\n')
 		}
 	}
 	return out.String()
+}
+
+// markdownBlockQuoteContent removes CommonMark block-quote container markers
+// so block constructs such as fenced code are recognized relative to their
+// container. It also returns the nesting depth so a fence cannot outlive the
+// quote that contains it.
+func markdownBlockQuoteContent(line string) (string, int) {
+	depth := 0
+	for {
+		start := 0
+		for start < len(line) && start < 3 && line[start] == ' ' {
+			start++
+		}
+		if start >= len(line) || line[start] != '>' {
+			return line, depth
+		}
+		start++
+		if start < len(line) && (line[start] == ' ' || line[start] == '\t') {
+			start++
+		}
+		line = line[start:]
+		depth++
+	}
 }
 
 func stripIndentedCode(body string) string {
