@@ -64,6 +64,10 @@ type FeedbackReport struct {
 	// permission to release the slot. Not serialized: the feedback JSON contract
 	// is frozen.
 	PrimaryAckPending bool `json:"-"`
+	// config is the reviewer configuration identity that produced this report.
+	// A completion write revalidates it under CAS so an override committed after
+	// observation cannot turn stale convergence into a permanent dedup marker.
+	config Config
 }
 
 // CoReviewerStatus is one co-reviewer's observed state for the current head.
@@ -113,6 +117,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		HeadRef:    pull.Head.Ref,
 		HeadRepo:   NormalizeRepo(pull.Head.Repo.FullName),
 		ReviewedBy: map[string]bool{},
+		config:     cfg,
 		Findings:   []dialect.Finding{},
 		CheckedAt:  now,
 	}
@@ -547,7 +552,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		// timeout so the caller retries later instead. A skipped wait result is
 		// terminal, not retryable, so preserve it as a skipped report.
 		if waitResult.Action == "skipped" {
-			s.completeWaitRound(ctx, repo, pr, "", false)
+			s.completeWaitRound(ctx, repo, pr, "", false, nil)
 		}
 		return FeedbackReport{Status: status, Repo: NormalizeRepo(repo), PR: pr, Head: waitResult.Head, Reason: waitResult.Reason, ReviewedBy: map[string]bool{}, Findings: []dialect.Finding{}}, code, nil
 	}
@@ -600,7 +605,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			report.Status = "feedback"
 			if allReviewed(report.ReviewedBy) {
 				report.Reason = "all required reviewers finished; address findings, push once, and resolve threads"
-				s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending)
+				s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending, &report.config)
 			} else if report.CodeRabbitDeferred && engine.DoneExceptWithEvidence(report.ReviewedBy, s.cfg.Bot, dialect.CodexBotLogin) {
 				// Degraded round: every required bot except the rate-limited
 				// CodeRabbit has finished. These findings are this round's work —
@@ -638,7 +643,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			}
 			if s.cfg.SettleWindow <= 0 || s.clock().Sub(settledAt) >= s.cfg.SettleWindow {
 				if report.Converged {
-					s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending)
+					s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending, &report.config)
 				}
 				return report, 0, nil
 			}
@@ -693,7 +698,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			// A degraded round must not be completed on timeout: marking the head
 			// reviewed would silently cancel the still-owed CodeRabbit review.
 			if !report.CodeRabbitDeferred {
-				s.completeWaitRound(ctx, repo, pr, head, false)
+				s.completeWaitRound(ctx, repo, pr, head, false, &report.config)
 			}
 			if len(report.Findings) > 0 {
 				report.Status = "feedback"
@@ -811,7 +816,7 @@ func (s *Service) pushWaitDeadline(ctx context.Context, repo string, pr int, hea
 // and the hold is stamped on the slot so the push this success invites cannot
 // drop it along with the superseded round. Only the convergence callers pass it;
 // a timed-out or never fired wait must still end.
-func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, head string, holdUnacked bool) {
+func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, head string, holdUnacked bool, cfg *Config) {
 	repo = NormalizeRepo(repo)
 	changed := false
 	state, err := s.store.Update(ctx, func(st *State) error {
@@ -821,6 +826,9 @@ func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, he
 			return ErrNoChange
 		}
 		if head != "" && r.Head != head {
+			return ErrNoChange
+		}
+		if cfg != nil && overrideChanged(st, repo, *cfg) {
 			return ErrNoChange
 		}
 		if holdUnacked && st.FireSlot != nil && st.FireSlot.Key == QueueKey(repo, pr) {

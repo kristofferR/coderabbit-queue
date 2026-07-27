@@ -2216,7 +2216,7 @@ func TestCompleteWaitRoundHoldsAnUnacknowledgedFireSlot(t *testing.T) {
 	repo, pr, head := "o/r", 4, "aaaaaaaa1"
 	seedRound(t, store, cfg, repo, pr, head, PhaseFired, now, 12)
 
-	svc.completeWaitRound(ctx, repo, pr, head, true)
+	svc.completeWaitRound(ctx, repo, pr, head, true, &cfg)
 	if got := roundPhase(t, store, repo, pr); got != PhaseFired {
 		t.Fatalf("phase = %s, want the round left fired while the primary is silent", got)
 	}
@@ -2228,7 +2228,7 @@ func TestCompleteWaitRoundHoldsAnUnacknowledgedFireSlot(t *testing.T) {
 		t.Fatal("the fire slot must stay held until the primary acknowledges")
 	}
 
-	svc.completeWaitRound(ctx, repo, pr, head, false)
+	svc.completeWaitRound(ctx, repo, pr, head, false, &cfg)
 	if got := roundPhase(t, store, repo, pr); got != PhaseCompleted {
 		t.Fatalf("phase = %s, want an acknowledged round completed as before", got)
 	}
@@ -2255,7 +2255,7 @@ func TestAHeldFireSlotSurvivesTheHeadAdvanceItInvites(t *testing.T) {
 	now := time.Now().UTC()
 	repo, pr, head := "o/r", 5, "aaaaaaaa1"
 	seedRound(t, store, cfg, repo, pr, head, PhaseFired, now, 12)
-	svc.completeWaitRound(ctx, repo, pr, head, true)
+	svc.completeWaitRound(ctx, repo, pr, head, true, &cfg)
 
 	// The push: the agent acted on the success the loop just reported.
 	if _, err := store.Update(ctx, func(st *State) error {

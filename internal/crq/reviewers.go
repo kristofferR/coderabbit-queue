@@ -283,11 +283,10 @@ func (c Config) ForRepo(ov RepoReviewers) Config {
 // A fleet entry carries the trigger its OWN required-ness produced: Codex
 // defaults to never and only becomes always when required. Retaining that entry
 // while making the bot required leaves the engine waiting for evidence no
-// command was ever posted for. Only a never trigger is promoted, so an operator
-// who deliberately configured selfheal keeps it — and only one that FELL OUT of
-// the registry defaults, since CRQ_COBOT_<NAME>_TRIGGER=never already wins over
-// the required trigger fleet-wide and posting the command a repository override
-// away from that would be crq overruling the operator.
+// command was ever posted for. Only a never trigger is promoted; a self-heal
+// trigger remains the bot's normal mode. Reviewer-change reopens carry their
+// one-shot force on the Round instead, so the override does not permanently
+// change how that bot runs on later heads.
 func promoteTrigger(cb CoBotConfig) CoBotConfig {
 	if !cb.Required || cb.Trigger != engine.TriggerNever || cb.Command == "" || cb.TriggerExplicit {
 		return cb

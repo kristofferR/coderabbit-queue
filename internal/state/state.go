@@ -110,6 +110,10 @@ type Round struct {
 	// the round rather than treating it as "this head was reviewed". Reopen
 	// clears it — the reopened round answers under the current requirements.
 	ReviewersChanged bool `json:"reviewers_changed,omitempty"`
+	// ForceCoReviewers names newly required self-heal reviewers that need one
+	// immediate trigger when a completed head is reopened. Once their command is
+	// recorded, normal per-bot dedupe makes the force harmless.
+	ForceCoReviewers []string `json:"force_co_reviewers,omitempty"`
 
 	Token string `json:"token,omitempty"` // reservation token (CAS race detection)
 	// ByHost identifies the PROCESS that reserved this round, in the writer form
@@ -296,11 +300,17 @@ type State struct {
 	Rev     int64 `json:"rev"`
 	NextSeq int64 `json:"next_seq"`
 
-	Rounds    map[string]Round `json:"rounds"`
-	FireSlot  *FireSlot        `json:"fire_slot,omitempty"`
-	LastFired *time.Time       `json:"last_fired,omitempty"`
-	Account   AccountQuota     `json:"account"`
-	Leader    *LeaderLease     `json:"leader,omitempty"`
+	Rounds   map[string]Round `json:"rounds"`
+	FireSlot *FireSlot        `json:"fire_slot,omitempty"`
+	// FireSlotHoldUntil is the top-level compatibility mirror of
+	// FireSlot.HoldUntil. Binaries predating nested FireSlot tolerance discard
+	// hold_until and clear an orphaned slot during Normalize, but their State
+	// tolerance carries this unknown top-level member. New binaries can therefore
+	// still recover the hold after an older writer rewrites the shared state.
+	FireSlotHoldUntil *time.Time   `json:"fire_slot_hold_until,omitempty"`
+	LastFired         *time.Time   `json:"last_fired,omitempty"`
+	Account           AccountQuota `json:"account"`
+	Leader            *LeaderLease `json:"leader,omitempty"`
 
 	// CalibrationIssue overrides the configured calibration PR/issue when the
 	// original hit GitHub's hard 2500-comment cap and crq rotated to a fresh
@@ -553,6 +563,18 @@ func (r *Round) Reopen() error {
 	return nil
 }
 
+// ForceCoReviewer reports whether a reviewer-change reopen granted login its
+// one immediate trigger. Bot names are normalized like CoBots keys.
+func (r *Round) ForceCoReviewer(login string) bool {
+	key := coBotKey(login)
+	for _, candidate := range r.ForceCoReviewers {
+		if coBotKey(candidate) == key {
+			return true
+		}
+	}
+	return false
+}
+
 // Acknowledge records that the bot has seen the fired command (reaction,
 // in-progress summary, or other non-terminal reply): fired → reviewing. The
 // fire slot may be released; the round itself stays open until Complete.
@@ -627,6 +649,7 @@ func (r *Round) Complete() error {
 		return r.illegal(PhaseCompleted)
 	}
 	r.Phase = PhaseCompleted
+	r.ForceCoReviewers = nil
 	r.Note = ""
 	return nil
 }
@@ -643,6 +666,7 @@ func (r *Round) Dedupe(now time.Time) error {
 	r.Phase = PhaseCompleted
 	r.Token = ""
 	r.ReservedAt = nil
+	r.ForceCoReviewers = nil
 	r.Note = "bot already reviewed head"
 	return nil
 }
@@ -765,13 +789,13 @@ func (s *State) SlotRound() *Round {
 // round that converged without its primary would free the slot for a second
 // concurrent metered command.
 func (s *State) SlotHeld(now time.Time) bool {
-	if s.FireSlot == nil {
-		return false
-	}
-	if s.SlotRound() != nil {
+	if s.FireSlot != nil && s.SlotRound() != nil {
 		return true
 	}
-	return s.FireSlot.HoldUntil != nil && s.FireSlot.HoldUntil.After(now)
+	if s.FireSlotHoldUntil != nil && s.FireSlotHoldUntil.After(now) {
+		return true
+	}
+	return s.FireSlot != nil && s.FireSlot.HoldUntil != nil && s.FireSlot.HoldUntil.After(now)
 }
 
 // HoldSlotUntil keeps the current fire slot held past the round that owns it.
@@ -783,6 +807,7 @@ func (s *State) HoldSlotUntil(until time.Time) {
 	}
 	u := until.UTC()
 	s.FireSlot.HoldUntil = &u
+	s.FireSlotHoldUntil = &u
 }
 
 // NextEligible returns the fire-eligible round with the lowest Seq, or nil.
@@ -1002,8 +1027,22 @@ func (s *State) Normalize(now time.Time) {
 	if s.Version == 0 {
 		s.Version = SchemaVersion
 	}
-	if s.FireSlot != nil && !s.SlotHeld(now) {
+	// Fold both hold representations before repairing the slot. The top-level
+	// mirror may be the only copy left after a pre-FireSlot-tolerance binary
+	// normalized and rewrote an orphaned hold.
+	if s.FireSlot != nil && s.FireSlot.HoldUntil != nil &&
+		(s.FireSlotHoldUntil == nil || s.FireSlotHoldUntil.Before(*s.FireSlot.HoldUntil)) {
+		u := s.FireSlot.HoldUntil.UTC()
+		s.FireSlotHoldUntil = &u
+	}
+	if s.FireSlotHoldUntil != nil && s.FireSlot != nil &&
+		(s.FireSlot.HoldUntil == nil || s.FireSlot.HoldUntil.Before(*s.FireSlotHoldUntil)) {
+		u := s.FireSlotHoldUntil.UTC()
+		s.FireSlot.HoldUntil = &u
+	}
+	if !s.SlotHeld(now) {
 		s.FireSlot = nil
+		s.FireSlotHoldUntil = nil
 	}
 	for key, r := range s.Rounds {
 		r.foldLegacyCodex()

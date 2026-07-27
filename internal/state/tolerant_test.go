@@ -110,6 +110,51 @@ func TestUnknownFireSlotFieldsSurviveARewrite(t *testing.T) {
 	}
 }
 
+// A binary from before FireSlot had its own tolerant marshal drops nested
+// hold_until and then clears the orphaned slot in Normalize. The top-level
+// mirror is unknown to that binary, so State's existing tolerance carries it
+// and a current reader must still honor the in-flight command window.
+func TestOrphanedHoldSurvivesALegacyRewrite(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	until := now.Add(15 * time.Minute)
+	st := State{
+		Version: SchemaVersion,
+		Rounds:  map[string]Round{},
+		FireSlot: &FireSlot{
+			Key: "owner/repo#1", Token: "slot-token", Since: now,
+		},
+	}
+	st.HoldSlotUntil(until)
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Model the legacy rewrite: its Normalize removes fire_slot because no live
+	// round owns it, while its top-level unknown-field carrier leaves the mirror.
+	var legacy map[string]any
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	delete(legacy, "fire_slot")
+	rewritten, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var back State
+	if err := json.Unmarshal(rewritten, &back); err != nil {
+		t.Fatal(err)
+	}
+	back.Normalize(now)
+	if !back.SlotHeld(now) {
+		t.Fatalf("legacy rewrite lost the orphaned hold: %+v", back)
+	}
+	if back.SlotHeld(until.Add(time.Second)) {
+		t.Fatal("the recovered compatibility hold must still expire")
+	}
+}
+
 // A carried member must never win over a field this binary owns: what this build
 // computes now is the current truth, and a stale copy from a foreign write would
 // silently override it.

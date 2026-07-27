@@ -174,6 +174,46 @@ func TestOverrideNeverGatesOnAReviewerItCannotTrigger(t *testing.T) {
 		}
 	})
 
+	t.Run("a newly required self-heal bot gets an immediate trigger", func(t *testing.T) {
+		// Bugbot normally self-heals only after activity proves it missed a head.
+		// On a completed head reopened by this override it has no activity yet, so
+		// preserving selfheal would complete the round without ever asking it.
+		fleet := isolatedConfig(t, map[string]string{"CRQ_COBOTS": "bugbot"})
+		got := fleet.ForRepo(RepoReviewers{
+			CoBots: []string{"bugbot"}, SetCoBots: true,
+			Required: []string{"bugbot"}, SetRequired: true,
+		})
+		for _, cb := range got.CoBots {
+			if cb.Name != "bugbot" {
+				continue
+			}
+			if cb.Trigger != engine.TriggerSelfHeal {
+				t.Errorf("bugbot = %+v: the repository's steady-state policy must stay selfheal", cb)
+			}
+			forced := forcedCoReviewers(nil, fleet, got)
+			if len(forced) != 1 || !sameBot(forced[0], cb.Login) {
+				t.Fatalf("forced reviewers = %v, want newly required bugbot", forced)
+			}
+			round := Round{
+				Repo: "o/r", PR: 3, Head: "aaaaaaaa1", Phase: PhaseQueued,
+				ForceCoReviewers: forced,
+			}
+			obs := engine.Observation{
+				Head: "aaaaaaaa1", Open: true,
+				Reviews: []engine.ReviewSeen{{
+					Bot: got.Bot, Commit: "aaaaaaaa1",
+				}},
+			}
+			decision := engine.DecideFire(engine.Global{SlotFree: true}, round, obs, time.Now().UTC(), got.policy())
+			if decision.Verdict != engine.FireCoOnly || len(decision.PostCo) != 1 ||
+				!sameBot(decision.PostCo[0], cb.Login) {
+				t.Errorf("decision = %+v, want one immediate bugbot trigger", decision)
+			}
+			return
+		}
+		t.Fatalf("CoBots = %+v, want bugbot enabled", got.CoBots)
+	})
+
 	t.Run("an explicit feedback set survives", func(t *testing.T) {
 		// CRQ_FEEDBACK_BOTS is the one list an operator may widen beyond who
 		// reviews. Deriving over it would silently stop surfacing those findings
@@ -624,6 +664,38 @@ func TestCompletionIsRevalidatedInsideItsWrite(t *testing.T) {
 	}
 	if got := roundPhase(t, store, repo, pr); got != PhaseFired {
 		t.Fatalf("phase = %s, want the stale completion dropped so the new reviewer is still asked", got)
+	}
+}
+
+// Feedback and its completion write have the same decision/write window as
+// Progress. A reviewer override landing in that window must leave the in-flight
+// round open so the next observation can ask the newly required reviewer.
+func TestFeedbackCompletionIsRevalidatedInsideItsWrite(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = codexCoBots(nil)
+	store := NewMemoryStore(cfg)
+	hooked := &hookedStore{StateStore: store}
+	gh := newFakeGitHub()
+	repo, pr, head := "o/r", 13, "aaaaaaaa1"
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	svc := NewService(cfg, gh, hooked, nil)
+	now := time.Now().UTC()
+	seedRound(t, store, cfg, repo, pr, head, PhaseFired, now, 21)
+
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := svc.cfgFor(st, repo)
+	hooked.hook = func() {
+		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+			t.Error(err)
+		}
+	}
+	svc.completeWaitRound(ctx, repo, pr, head, false, &stale)
+	if got := roundPhase(t, store, repo, pr); got != PhaseFired {
+		t.Fatalf("phase = %s, want stale feedback completion dropped", got)
 	}
 }
 

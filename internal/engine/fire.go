@@ -315,6 +315,9 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, prim
 		if !gates || coReviewedHead(obs, cp.Login) {
 			continue
 		}
+		if cp.Trigger == TriggerSelfHeal && r.ForceCoReviewer(cp.Login) {
+			cp.Trigger = TriggerAlways
+		}
 		if DecideCoPost(r, obs, cp, len(co.Commands) > 0, anchor, now) {
 			post = append(post, cp.Login)
 			continue

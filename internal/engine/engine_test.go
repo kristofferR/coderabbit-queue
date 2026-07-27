@@ -1023,6 +1023,17 @@ func TestReopenedRoundDedupesOnlyOnCompletionEvidence(t *testing.T) {
 			want: FireDedupe,
 		},
 		{
+			// A clean-summary verdict is Completion's other no-Review evidence.
+			// Reopening the marker for a reviewer change must not buy the same
+			// primary review again.
+			name: "clean summary for this round",
+			obs: Observation{Head: head, Open: true, Events: []dialect.BotEvent{{
+				Kind: dialect.EvNoAction, Bot: "coderabbitai[bot]", CommentID: 1003,
+				CreatedAt: t0.Add(time.Minute), UpdatedAt: t0.Add(time.Minute),
+			}}},
+			want: FireDedupe,
+		},
+		{
 			// Nothing to stand in for: the bot has never submitted a review, so
 			// the head has not been reviewed and the round must still fire.
 			name: "completion reply with no review anywhere",

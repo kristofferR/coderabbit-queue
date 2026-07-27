@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
@@ -288,10 +289,12 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 		if NormalizeRepo(round.Repo) != NormalizeRepo(repo) || round.Phase != PhaseCompleted {
 			continue
 		}
+		forced := forcedCoReviewers(round.ForceCoReviewers, before, after)
 		if !open[round.PR] {
-			if !round.ReviewersChanged {
+			if !round.ReviewersChanged || !sameLogins(round.ForceCoReviewers, forced) {
 				marked := round
 				marked.ReviewersChanged = true
+				marked.ForceCoReviewers = forced
 				st.PutRound(marked)
 			}
 			continue
@@ -300,11 +303,29 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 		if err := reopened.Reopen(); err != nil {
 			continue
 		}
+		reopened.ForceCoReviewers = forced
 		st.PutRound(reopened)
 		if s.log != nil {
 			s.log.Printf("reviewers: requeued %s#%d@%s — the reviewer set changed", round.Repo, round.PR, round.Head)
 		}
 	}
+}
+
+// forcedCoReviewers carries the one exceptional trigger a completed-head reopen
+// needs. A newly required self-heal bot has no activity on that old head, so its
+// normal mode cannot decide it missed anything; force it once without changing
+// the repository's steady-state trigger policy.
+func forcedCoReviewers(existing []string, before, after Config) []string {
+	var out []string
+	for _, cb := range after.CoBots {
+		if !cb.Required || cb.Trigger != engine.TriggerSelfHeal || cb.Command == "" {
+			continue
+		}
+		if containsBot(existing, cb.Login) || !containsBot(before.RequiredBots, cb.Login) {
+			out = append(out, cb.Login)
+		}
+	}
+	return out
 }
 
 // requeueIfReviewersChanged reopens a completed round that a reviewer change
