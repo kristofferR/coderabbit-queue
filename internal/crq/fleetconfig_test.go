@@ -131,6 +131,25 @@ func TestSeedingDoesNotOverwriteWhatTheFleetAlreadySays(t *testing.T) {
 	}
 }
 
+func TestSeedingValidatesEveryMissingValueBeforeWriting(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"not-a-repository": true}
+	store := NewMemoryStore(cfg)
+
+	seeded, err := NewService(cfg, newFakeGitHub(), store, nil).SeedFleetConfig(ctx)
+	if err == nil || !strings.Contains(err.Error(), "cannot seed repos") {
+		t.Fatalf("seed = %v, %v; want the malformed host repository rejected", seeded, err)
+	}
+	st, _, loadErr := store.Load(ctx)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if len(st.FleetConfig) != 0 {
+		t.Fatalf("failed seed partially wrote fleet policy: %v", st.FleetConfig)
+	}
+}
+
 func TestFleetRequiredBotsRebuildsDerivedReviewers(t *testing.T) {
 	cfg := isolatedConfig(t, map[string]string{
 		"CRQ_COBOTS":        "codex",
@@ -183,7 +202,7 @@ func TestFleetDryRunStillChecksDriverCompatibility(t *testing.T) {
 	store := NewMemoryStore(cfg)
 	if _, err := store.Update(ctx, func(st *State) error {
 		st.Leader = &LeaderLease{Owner: "old-daemon", ExpiresAt: now.Add(time.Minute)}
-		st.NoteWriter("old-daemon", CapsRepoOverrides, now)
+		st.NoteWriter("old-daemon", CapsFleetPolicy-1, now)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -226,6 +245,44 @@ func TestFleetScopeChangeInvalidatesAccountQuota(t *testing.T) {
 	if st.Account.BlockedUntil != nil || st.Account.Remaining != nil || st.Account.CheckedAt != nil ||
 		st.Account.CalibAskedAt != nil || st.Account.RLCommentID != 0 || st.Account.RLCommentUpdated != nil {
 		t.Fatalf("old account quota survived the scope change: %+v", st.Account)
+	}
+}
+
+func TestEquivalentFleetScopeKeepsAccountQuota(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.Scope = []string{"Acme", "Foo"}
+	store := NewMemoryStore(cfg)
+	blocked := time.Date(2026, 7, 27, 13, 0, 0, 0, time.UTC)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Account.BlockedUntil = &blocked
+		st.Account.Scope = "Acme,Foo"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := NewService(cfg, newFakeGitHub(), store, nil).SetFleetConfig(ctx, "scope", "foo,acme"); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.Equal(blocked) {
+		t.Fatalf("equivalent scope cleared the account block: %+v", st.Account)
+	}
+}
+
+func TestFleetInflightTimeoutOverridesTheHost(t *testing.T) {
+	cfg := firingConfig()
+	cfg.InflightTimeout = 15 * time.Minute
+	st := DefaultState(cfg)
+	st.SetFleetValue("inflight-timeout", "45m")
+
+	got := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil).fleetCfg(st)
+	if got.InflightTimeout != 45*time.Minute {
+		t.Fatalf("inflight timeout = %s, want fleet 45m", got.InflightTimeout)
 	}
 }
 
@@ -394,7 +451,7 @@ func TestFleetPolicyRefusesALaggingQueueDriver(t *testing.T) {
 	store := NewMemoryStore(cfg)
 	if _, err := store.Update(ctx, func(st *State) error {
 		st.Leader = &LeaderLease{Owner: "old-daemon", ExpiresAt: now.Add(time.Minute)}
-		st.NoteWriter("old-daemon", CapsRepoOverrides, now)
+		st.NoteWriter("old-daemon", CapsFleetPolicy-1, now)
 		return nil
 	}); err != nil {
 		t.Fatal(err)

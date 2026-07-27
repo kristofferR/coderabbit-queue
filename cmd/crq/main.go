@@ -83,8 +83,15 @@ func run(ctx context.Context, args []string) int {
 				fatal(cerr)
 				return 1
 			}
-			_, authErr := ghapi.NewGitHub(ctx)
-			if cfg.RequireState() != nil || authErr != nil {
+			gh, fleetErr := ghapi.NewGitHub(ctx)
+			if fleetErr == nil {
+				fleetErr = cfg.RequireState()
+			}
+			if fleetErr == nil {
+				store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
+				_, _, fleetErr = store.Load(ctx)
+			}
+			if fleetErr != nil {
 				plan, ierr := crq.DrainPlan(cfg, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, true)
 				if ierr != nil {
 					fatal(ierr)
@@ -1116,8 +1123,8 @@ window one host respects and another does not — and nothing says so, because
 each host is behaving correctly according to what it can see. These settings
 have one answer for the fleet:
 
-  scope, repos, exclude, required-bots, min-interval, rate-limit-fallback,
-  calibrate-ttl, settle, skip-marker
+  scope, repos, exclude, required-bots, min-interval, inflight-timeout,
+  rate-limit-fallback, calibrate-ttl, settle, skip-marker
 
 Three kinds of setting deliberately stay local: where the state lives
 (CRQ_REPO, CRQ_ISSUE, CRQ_STATE_REF — a host cannot read fleet policy until it

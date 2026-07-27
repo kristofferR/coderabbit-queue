@@ -945,3 +945,35 @@ func TestSelfHealTriggerIsRevalidatedInsideItsClaim(t *testing.T) {
 		t.Errorf("codex bookkeeping = %+v, want no claim for a removed reviewer", c)
 	}
 }
+
+func TestSelfHealDoesNotTriggerForFleetExcludedRepository(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RequiredBots = []string{cfg.Bot, dialect.CodexBotLogin}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
+	cfg.ExcludeRepos = map[string]bool{"o/r": true}
+	store := NewMemoryStore(cfg)
+	gh := newFakeGitHub()
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	seedRound(t, store, cfg, "o/r", 13, "aaaaaaaa1", PhaseFired, now, 22)
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	svc.selfHealCoReviewers(ctx, cfg, *st.Round("o/r", 13), engine.Observation{
+		Head: "aaaaaaaa1", Open: true,
+	}, now)
+
+	if len(gh.posted) != 0 {
+		t.Fatalf("excluded repository received a co-review trigger: %v", gh.posted)
+	}
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := st.Round("o/r", 13).Co(dialect.CodexBotLogin); c.ClaimedAt != nil || c.CommandID != 0 {
+		t.Fatalf("excluded repository retained a co-review claim: %+v", c)
+	}
+}

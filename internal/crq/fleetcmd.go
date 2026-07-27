@@ -122,6 +122,10 @@ func (s *Service) UnsetFleetConfig(ctx context.Context, key string) (bool, error
 // whole mechanism exists to end.
 func (s *Service) SeedFleetConfig(ctx context.Context) ([]string, error) {
 	settings := fleetSettings()
+	rendered := make(map[string]string, len(settings))
+	for _, key := range FleetKeys() {
+		rendered[key] = settings[key].Show(s.cfg)
+	}
 	var seeded []string
 	initial, _, err := s.store.Load(ctx)
 	if err != nil {
@@ -144,8 +148,13 @@ func (s *Service) SeedFleetConfig(ctx context.Context) ([]string, error) {
 			if _, ok := st.FleetValue(key); ok {
 				continue
 			}
-			st.SetFleetValue(key, settings[key].Show(s.cfg))
+			if err := ValidateFleetSetting(key, rendered[key]); err != nil {
+				return fmt.Errorf("cannot seed %s from this host: %w", key, err)
+			}
 			seeded = append(seeded, key)
+		}
+		for _, key := range seeded {
+			st.SetFleetValue(key, rendered[key])
 		}
 		if len(seeded) == 0 {
 			return ErrNoChange
@@ -268,7 +277,7 @@ func inaccessibleRepoLookup(err error) bool {
 }
 
 func (s *Service) reconcileFleetChange(st *State, before, after Config, open map[string]map[int]bool) {
-	if strings.Join(before.Scope, ",") != strings.Join(after.Scope, ",") {
+	if !sameFoldedSet(before.Scope, after.Scope) {
 		st.Account = AccountQuota{
 			Scope:  strings.Join(after.Scope, ","),
 			Source: "fleet scope changed",
@@ -285,6 +294,24 @@ func (s *Service) reconcileFleetChange(st *State, before, after Config, open map
 		releaseSlot(st, QueueKey(round.Repo, round.PR))
 	}
 	s.reopenForFleetReviewerChange(st, before, after, open)
+}
+
+func sameFoldedSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]int, len(a))
+	for _, value := range a {
+		seen[strings.ToLower(strings.TrimSpace(value))]++
+	}
+	for _, value := range b {
+		key := strings.ToLower(strings.TrimSpace(value))
+		seen[key]--
+		if seen[key] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Service) reopenForFleetReviewerChange(st *State, before, after Config, open map[string]map[int]bool) {

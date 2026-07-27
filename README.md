@@ -491,8 +491,8 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 ### One configuration for the fleet, not one per machine
 
 These settings belong to the whole fleet and live in the state ref, not in the table below:
-`scope`, `repos`, `exclude`, `required-bots`, `min-interval`, `rate-limit-fallback`,
-`calibrate-ttl`, `settle`, `skip-marker`.
+`scope`, `repos`, `exclude`, `required-bots`, `min-interval`, `inflight-timeout`,
+`rate-limit-fallback`, `calibrate-ttl`, `settle`, `skip-marker`.
 
 ```bash
 crq config                      # what is in force, and where it came from

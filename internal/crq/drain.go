@@ -64,7 +64,7 @@ func (s *Service) InstallDrain(ctx context.Context, agent string, agentArgs []st
 	if err != nil || effectiveDryRun {
 		return plan, err
 	}
-	return s.applyDrain(ctx, plan, s.drainFallbackConfig(repos))
+	return s.applyDrain(ctx, plan, s.drainFallbackConfig(repos), repos)
 }
 
 // drainFallbackConfig is what the unit should carry for settings the fleet may
@@ -173,7 +173,7 @@ func DrainPlan(cfg Config, agent string, agentArgs []string, repos []string, dry
 }
 
 // applyDrain writes the plan to disk and starts the service.
-func (s *Service) applyDrain(ctx context.Context, plan DrainInstall, cfg Config) (DrainInstall, error) {
+func (s *Service) applyDrain(ctx context.Context, plan DrainInstall, cfg Config, repos []string) (DrainInstall, error) {
 	invocation, logDir := plan.Invocation, plan.LogDir
 	self, err := os.Executable()
 	if err != nil {
@@ -188,12 +188,7 @@ func (s *Service) applyDrain(ctx context.Context, plan DrainInstall, cfg Config)
 
 	// Known agents receive their non-interactive flags. Any other executable is
 	// treated as a self-contained prompt-taking wrapper.
-	wrapper := fmt.Sprintf(`#!/usr/bin/env bash
-# Installed by "crq drain install". Runs the review drain: crq decides, and a
-# fix session is started for each PR that needs one.
-set -uo pipefail
-exec %s watch -- %s
-`, shellQuote(self), invocation)
+	wrapper := drainWrapper(self, invocation, repos)
 
 	for _, f := range []struct {
 		path string
@@ -249,6 +244,23 @@ exec %s watch -- %s
 	}
 	plan.Started = true
 	return plan, nil
+}
+
+func drainWrapper(self, invocation string, repos []string) string {
+	watchArgs := make([]string, 0, len(repos))
+	for _, repo := range repos {
+		watchArgs = append(watchArgs, shellQuote(repo))
+	}
+	watch := strings.Join(watchArgs, " ")
+	if watch != "" {
+		watch += " "
+	}
+	return fmt.Sprintf(`#!/usr/bin/env bash
+# Installed by "crq drain install". Runs the review drain: crq decides, and a
+# fix session is started for each PR that needs one.
+set -uo pipefail
+exec %s watch %s-- %s
+`, shellQuote(self), watch, invocation)
 }
 
 func writeDrainFile(path, body string, mode os.FileMode) error {

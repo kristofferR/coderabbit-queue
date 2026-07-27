@@ -38,6 +38,7 @@ func Init(ctx context.Context, cfg Config, gh *ghapi.GitHub, store StateStore) (
 	if err != nil {
 		return InitResult{}, err
 	}
+	cfg = applyFleet(cfg, state.FleetConfig, nil)
 	if cfg.DashboardIssue <= 0 {
 		body, err := issueBody(state, cfg)
 		if err != nil {

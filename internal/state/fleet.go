@@ -18,8 +18,8 @@ import (
 //
 // A flat map rather than a struct, on purpose. One JSON member means an older
 // binary round-trips the whole thing rather than dropping settings it does not
-// know, and adding a setting later needs no schema change. The keys are
-// validated where they are set and where they are applied, not here.
+// know. Newly interpreted decision-changing keys still require a writer
+// capability bump so an active older driver cannot ignore them.
 type Fleet map[string]string
 
 // FleetValue returns a fleet setting and whether it is recorded. Absent means

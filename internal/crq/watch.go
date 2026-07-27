@@ -764,6 +764,10 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 			reason, byDesign = "fix sessions are disabled for this repository", true
 			return ErrNoChange
 		}
+		if s.fleetCfg(*st).ExcludeRepos[NormalizeRepo(report.Repo)] {
+			reason, byDesign = "repository is excluded by fleet policy", true
+			return ErrNoChange
+		}
 		round := st.Round(report.Repo, report.PR)
 		// What this attempt actually read, recorded before anything acts on it.
 		// Three sessions once ran on one PR at one head while the round showed no

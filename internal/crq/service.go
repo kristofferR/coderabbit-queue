@@ -1825,7 +1825,7 @@ func (s *Service) fireCoDeferred(ctx context.Context, cfg Config, round Round, d
 // command, or an account that reviews on its own all suppress it (see
 // DecideCoPost) — not a retry counter.
 func (s *Service) selfHealCoReviewers(ctx context.Context, cfg Config, round Round, obs engine.Observation, now time.Time) {
-	if s.cfg.DryRun || round.FiredAt == nil || obs.Head != round.Head {
+	if s.cfg.DryRun || cfg.ExcludeRepos[NormalizeRepo(round.Repo)] || round.FiredAt == nil || obs.Head != round.Head {
 		return
 	}
 	firedAt := round.FiredAt.UTC()

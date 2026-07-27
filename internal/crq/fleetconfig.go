@@ -90,6 +90,16 @@ func fleetSettings() map[string]fleetSetting {
 			},
 			Show: func(cfg Config) string { return cfg.MinInterval.String() },
 		},
+		"inflight-timeout": {
+			Doc: "how long a metered review command may remain unanswered",
+			Env: "CRQ_INFLIGHT_TIMEOUT",
+			Apply: func(cfg *Config, v string) error {
+				d, err := parseFleetDuration(v)
+				cfg.InflightTimeout = d
+				return err
+			},
+			Show: func(cfg Config) string { return cfg.InflightTimeout.String() },
+		},
 		"rate-limit-fallback": {
 			Doc: "how long to wait when a rate-limit notice states no window",
 			Env: "CRQ_RL_FALLBACK",

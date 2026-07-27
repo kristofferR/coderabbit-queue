@@ -135,6 +135,16 @@ func TestDrainUnitKeepsExplicitRepositoriesAsHostFallback(t *testing.T) {
 	}
 }
 
+func TestDrainWrapperKeepsExplicitRepositoriesAuthoritative(t *testing.T) {
+	got := drainWrapper("/usr/bin/crq", "'agent' 'prompt'", []string{"owner/explicit", "owner/with space"})
+	if !strings.Contains(got, "watch 'owner/explicit' 'owner/with space' --") {
+		t.Fatalf("wrapper lost explicit repositories:\n%s", got)
+	}
+	if fallback := drainWrapper("/usr/bin/crq", "'agent' 'prompt'", nil); !strings.Contains(fallback, "watch --") {
+		t.Fatalf("wrapper without explicit repositories does not use runtime fleet policy:\n%s", fallback)
+	}
+}
+
 // A missing agent must fail loudly at install time. Discovering it at the first
 // dispatch means a drain that looks installed and fixes nothing.
 func TestInstallDrainRefusesWithoutAnAgent(t *testing.T) {

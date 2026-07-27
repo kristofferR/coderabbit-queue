@@ -5,6 +5,12 @@ import (
 	"time"
 )
 
+func TestFleetPolicyCapabilityAdvancesWithNewDecisionKeys(t *testing.T) {
+	if WriterCaps != 3 || CapsFleetPolicy != WriterCaps {
+		t.Fatalf("writer caps = %d, fleet caps = %d; want fleet policy fenced at writer capability 3", WriterCaps, CapsFleetPolicy)
+	}
+}
+
 // Sharing a state ref stops an older binary ERASING a new field. It does not
 // make that binary act on it: it loads the field as unknown JSON, writes it back
 // untouched, and keeps deciding from its own fleet-wide configuration. So the

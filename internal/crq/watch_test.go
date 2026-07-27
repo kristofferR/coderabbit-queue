@@ -808,6 +808,35 @@ func TestClaimDispatchRechecksRepositoryDrainSwitch(t *testing.T) {
 	}
 }
 
+func TestClaimDispatchRechecksFleetExclusion(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	report := NextReport{
+		Repo: "owner/thing", PR: 12, Head: "aaaaaaaa1", Action: "fix",
+		Findings: []dialect.Finding{{ID: "f1", Commit: "aaaaaaaa1"}},
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("exclude", report.Repo)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, why, byDesign := svc.claimDispatch(ctx, report, "tok", 3)
+	if ok || !byDesign || !strings.Contains(why, "excluded") {
+		t.Fatalf("claim = %v, %q, %v; want a fleet-exclusion refusal", ok, why, byDesign)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(report.Repo, report.PR); round != nil && round.Dispatch != nil {
+		t.Errorf("refused claim mutated the round: %+v", round)
+	}
+}
+
 // A head that moved on while its previous round still stood: `Next` reports fix
 // without enqueueing, so nothing else supersedes the stale round. Refusing the
 // claim over the mismatch left the new head's findings undispatchable on every
