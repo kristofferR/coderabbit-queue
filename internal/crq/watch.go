@@ -62,8 +62,9 @@ type WatchEvent struct {
 	Action   string `json:"action"`
 	Reason   string `json:"reason,omitempty"`
 	Findings int    `json:"findings"`
-	// Dispatched says a fix session was started for this event; Skipped says why
-	// one was not, when dispatch was enabled and the action asked for it.
+	// Dispatched says a fix session was claimed and handed to the dispatch pool;
+	// Skipped says why one was not, when dispatch was enabled and the action
+	// asked for it. A one-shot watch waits and reports the session's final result.
 	Dispatched bool      `json:"dispatched,omitempty"`
 	Skipped    string    `json:"skipped,omitempty"`
 	At         time.Time `json:"at"`
@@ -321,9 +322,10 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			} else if opts.dispatching() && report.Action == string(engine.ActionFix) && !s.mayDispatch(repo, pull) {
 				event.Skipped = "the head branch is a fork; set CRQ_DISPATCH_FORKS=1 to fix contributor pull requests"
 			} else if opts.dispatching() && report.Action == string(engine.ActionFix) {
-				// Claimed here, run in the pool: the pass moves on to the next PR
-				// while this session runs.
-				event.Dispatched, event.Skipped, result = s.startDispatchResult(ctx, opts, pool, report)
+				// Claim here and hand preparation to the pool. Checkout and
+				// cmd.Start may block on a remote; neither belongs in the serial
+				// decision pass that still has other PRs to inspect.
+				event.Dispatched, event.Skipped, result = s.queueDispatchResult(ctx, opts, pool, report)
 			}
 			if opts.dispatching() && report.Action == string(engine.ActionFix) && !event.Dispatched {
 				// The peek above deliberately avoided firing before a session
@@ -451,21 +453,46 @@ func (s *Service) startDispatch(ctx context.Context, opts WatchOptions, pool *di
 	return ok, why
 }
 
-// startDispatchResult waits through checkout and cmd.Start so its boolean means
-// a process actually started, then returns the eventual session result. The
-// buffered result lets an ordinary continuous watch forget the exit while a
-// one-shot watch waits for an honest final event.
+// startDispatchResult is the synchronous test/helper form: it waits through
+// checkout and cmd.Start so its boolean means a process actually started.
 func (s *Service) startDispatchResult(
 	ctx context.Context,
 	opts WatchOptions,
 	pool *dispatchPool,
 	report NextReport,
 ) (bool, string, <-chan dispatchResult) {
+	queued, why, result, started := s.queueDispatch(ctx, opts, pool, report)
+	if !queued {
+		return false, why, nil
+	}
+	start := <-started
+	return start.ok, start.reason, result
+}
+
+// queueDispatchResult returns once the session is claimed and queued. Its
+// buffered result lets a continuous watch forget the exit while a one-shot
+// watch waits for an honest final event.
+func (s *Service) queueDispatchResult(
+	ctx context.Context,
+	opts WatchOptions,
+	pool *dispatchPool,
+	report NextReport,
+) (bool, string, <-chan dispatchResult) {
+	queued, why, result, _ := s.queueDispatch(ctx, opts, pool, report)
+	return queued, why, result
+}
+
+func (s *Service) queueDispatch(
+	ctx context.Context,
+	opts WatchOptions,
+	pool *dispatchPool,
+	report NextReport,
+) (bool, string, <-chan dispatchResult, <-chan dispatchResult) {
 	// DryRun means crq writes nothing and posts nothing. Claiming shared state,
 	// running a code-writing command, and recording dispatch health are all
 	// writes, so this is checked before any of them.
 	if s.cfg.DryRun {
-		return false, "dry run: would dispatch a fix session", nil
+		return false, "dry run: would dispatch a fix session", nil, nil
 	}
 	var ok bool
 	var why string
@@ -475,7 +502,7 @@ func (s *Service) startDispatchResult(
 		ok, why = pool.acquire()
 	}
 	if !ok {
-		return false, why, nil
+		return false, why, nil, nil
 	}
 	token := randomToken()
 	claimed, why, byDesign := s.claimDispatch(ctx, report, token, opts.MaxAttempts)
@@ -492,7 +519,7 @@ func (s *Service) startDispatchResult(
 				s.log.Printf("watch: %s#%d not fixed: %s", report.Repo, report.PR, why)
 			}
 		}
-		return false, why, nil
+		return false, why, nil, nil
 	}
 	result := make(chan dispatchResult, 1)
 	started := make(chan dispatchResult, 1)
@@ -500,8 +527,7 @@ func (s *Service) startDispatchResult(
 		result <- s.runDispatch(ctx, opts, report, token, started)
 		close(result)
 	})
-	start := <-started
-	return start.ok, start.reason, result
+	return true, "", result, started
 }
 
 type dispatchResult struct {

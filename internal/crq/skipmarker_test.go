@@ -14,6 +14,9 @@ func TestSkipMarkerHasToBeUsedNotMentioned(t *testing.T) {
 		skip bool
 	}{
 		{"used", "Low risk.\n\n<!-- crq:skip-autoreview -->\n", true},
+		{"escaped mention", `\<!-- crq:skip-autoreview -->`, false},
+		{"even backslashes leave the comment unescaped", `\\<!-- crq:skip-autoreview -->`, true},
+		{"escaped mention before a used marker", "\\<!-- crq:skip-autoreview -->\n\n<!-- crq:skip-autoreview -->", true},
 		{"mentioned in a code span", "- `<!-- crq:skip-autoreview -->` stops fleet auto-review.", false},
 		{"mentioned in a fence", "```md\n<!-- crq:skip-autoreview -->\n```\n", false},
 		{"mentioned in a tilde fence", "~~~md\n<!-- crq:skip-autoreview -->\n~~~\n", false},
@@ -61,6 +64,15 @@ func TestSkipMarkerMatchesConfiguredWhitespaceExactly(t *testing.T) {
 	}
 	if !cfg.SkipsReview("no review ") {
 		t.Error("the marker with its configured trailing space did not match")
+	}
+	if !cfg.SkipsReview(`\no review `) {
+		t.Error("a backslash changed a prose marker that does not begin with punctuation")
+	}
+}
+
+func TestUnescapedMarkerCanOverlapAnEscapedOne(t *testing.T) {
+	if !containsUnescapedMarker(`\<<<`, "<<") {
+		t.Error("an escaped overlapping prefix hid the later unescaped marker")
 	}
 }
 

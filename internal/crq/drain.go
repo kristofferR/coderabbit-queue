@@ -341,6 +341,7 @@ func drainPath(plan DrainInstall) string {
 func (s *Service) drainEnv(plan DrainInstall) map[string]string {
 	env := map[string]string{
 		"CRQ_REPOS":                  strings.Join(plan.Repos, ","),
+		"CRQ_SCOPE":                  strings.Join(s.cfg.Scope, ","),
 		"CRQ_WATCH_INTERVAL":         s.cfg.WatchInterval.String(),
 		"CRQ_DISPATCH_MAX_ATTEMPTS":  fmt.Sprint(s.cfg.DispatchMaxAttempts),
 		"CRQ_DISPATCH_CONCURRENCY":   fmt.Sprint(s.cfg.DispatchConcurrency),

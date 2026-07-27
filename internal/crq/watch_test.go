@@ -613,6 +613,42 @@ func TestDispatchRefundsTheAttemptWhenTheCommandCannotStart(t *testing.T) {
 	}
 }
 
+func TestWatchQueuesCheckoutWithoutBlockingThePass(t *testing.T) {
+	bin := t.TempDir()
+	git := filepath.Join(bin, "git")
+	if err := os.WriteFile(git, []byte("#!/bin/sh\nexec /bin/sleep 5\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("CRQ_REMOTE_BASE", t.TempDir())
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	report := NextReport{Repo: "owner/thing", PR: 16, Head: "aaaaaaaa1", Action: "fix"}
+	seedRound(t, store, cfg, report.Repo, report.PR, report.Head, PhaseQueued, time.Now().UTC(), 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	pool := newDispatchPool(0)
+	before := time.Now()
+	queued, why, result := svc.queueDispatchResult(ctx, WatchOptions{
+		Dispatch: dispatchOn(), Command: []string{"/bin/true"}, MaxAttempts: 3,
+	}, pool, report)
+	if elapsed := time.Since(before); elapsed > time.Second {
+		t.Fatalf("queueing waited %s for checkout; the serial pass would be blocked", elapsed)
+	}
+	if !queued {
+		t.Fatalf("dispatch was not queued: %s", why)
+	}
+
+	cancel()
+	pool.wait()
+	if outcome := <-result; outcome.ok || !strings.Contains(outcome.reason, "checkout failed") {
+		t.Fatalf("canceled queued dispatch = %+v, want checkout cancellation", outcome)
+	}
+}
+
 func TestDispatchHealthRecordsProcessStartBeforeItsExit(t *testing.T) {
 	base := t.TempDir()
 	repo := "owner/thing"

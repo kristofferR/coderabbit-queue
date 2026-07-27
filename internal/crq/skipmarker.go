@@ -20,7 +20,37 @@ func (c Config) SkipsReview(body string) bool {
 	if marker == "" {
 		return false
 	}
-	return strings.Contains(stripCode(body), marker)
+	return containsUnescapedMarker(stripCode(body), marker)
+}
+
+// containsUnescapedMarker distinguishes an HTML comment from a Markdown
+// example written as \<!-- ... -->. Backslashes only escape ASCII punctuation,
+// so configured prose markers keep their literal substring semantics.
+func containsUnescapedMarker(body, marker string) bool {
+	for from := 0; ; {
+		offset := strings.Index(body[from:], marker)
+		if offset < 0 {
+			return false
+		}
+		at := from + offset
+		if !markdownPunctuation(marker[0]) {
+			return true
+		}
+		slashes := 0
+		for i := at - 1; i >= 0 && body[i] == '\\'; i-- {
+			slashes++
+		}
+		if slashes%2 == 0 {
+			return true
+		}
+		// The next occurrence may overlap this one. Advance one byte, not one
+		// marker, or an escaped prefix can hide a later unescaped match.
+		from = at + 1
+	}
+}
+
+func markdownPunctuation(b byte) bool {
+	return strings.ContainsRune(`!"#$%&'()*+,-./:;<=>?@[\]^_`+"`"+`{|}~`, rune(b))
 }
 
 // stripCode removes fenced blocks, indented blocks and inline code spans from

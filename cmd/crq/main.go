@@ -11,9 +11,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/crq"
@@ -27,7 +29,9 @@ func (stderrLogger) Printf(format string, args ...any) {
 }
 
 func main() {
-	code := run(context.Background(), os.Args[1:])
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := run(ctx, os.Args[1:])
+	stop()
 	os.Exit(code)
 }
 
@@ -327,10 +331,9 @@ func run(ctx context.Context, args []string) int {
 				break
 			}
 		}
-		// Dispatch is the default. --dispatch stays as an accepted no-op so an
-		// installed unit or a habit does not break; --no-dispatch is how you get
-		// an observer.
-		_ = fs.Bool("dispatch", true, "start a fix session for a PR that needs one (default)")
+		// Dispatch is the default. Keep both the standard boolean form
+		// --dispatch=false and the more explicit --no-dispatch observer alias.
+		dispatch := fs.Bool("dispatch", true, "start a fix session for a PR that needs one (default)")
 		noDispatch := fs.Bool("no-dispatch", false, "observe only: report what each PR needs and fix nothing")
 		once := fs.Bool("once", false, "run one pass and exit")
 		interval := fs.Duration("interval", 0, "time between passes")
@@ -346,11 +349,8 @@ func run(ctx context.Context, args []string) int {
 		opts := crq.WatchOptions{
 			Once:     *once,
 			Interval: *interval, MaxAttempts: *attempts,
-			Command: command,
-		}
-		if *noDispatch {
-			off := false
-			opts.Dispatch = &off
+			Command:  command,
+			Dispatch: watchDispatchOption(*dispatch, *noDispatch),
 		}
 		// Only when it was actually passed: `--concurrency 0` means "no cap" and
 		// has to override a configured one, which an unset flag must not do.
@@ -436,6 +436,14 @@ func run(ctx context.Context, args []string) int {
 		fatal(fmt.Errorf("unknown command: %s (try 'crq help')", args[0]))
 		return 1
 	}
+}
+
+func watchDispatchOption(dispatch, noDispatch bool) *bool {
+	if dispatch && !noDispatch {
+		return nil
+	}
+	off := false
+	return &off
 }
 
 func debug(ctx context.Context, service *crq.Service, store crq.StateStore, cfg crq.Config, args []string) int {

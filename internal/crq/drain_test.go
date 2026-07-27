@@ -138,6 +138,7 @@ func TestDrainUnitCarriesTheConfigurationTheInstallRead(t *testing.T) {
 
 	cfg := firingConfig()
 	cfg.AllowRepos = map[string]bool{"owner/name": true}
+	cfg.Scope = []string{"reviewed-org", "second-org"}
 	cfg.DashboardIssue = 7
 	cfg.CalibrationPR = 1
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
@@ -150,7 +151,14 @@ func TestDrainUnitCarriesTheConfigurationTheInstallRead(t *testing.T) {
 	// The state ref included: without it the service falls back to the default
 	// and reads a queue nobody else is using, which looks exactly like an idle
 	// fleet.
-	for _, want := range []string{config, cfg.GateRepo, "CRQ_ISSUE", "CRQ_CAL_PR", "CRQ_STATE_REF=" + cfg.StateRef} {
+	for _, want := range []string{
+		config,
+		cfg.GateRepo,
+		"CRQ_SCOPE=reviewed-org,second-org",
+		"CRQ_ISSUE",
+		"CRQ_CAL_PR",
+		"CRQ_STATE_REF=" + cfg.StateRef,
+	} {
 		if !strings.Contains(unit, want) {
 			t.Errorf("the unit does not carry %q; the drain would not find it:\n%s", want, unit)
 		}
