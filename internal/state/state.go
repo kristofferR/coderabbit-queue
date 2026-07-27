@@ -1,4 +1,4 @@
-// Package state defines crq's persisted schema v3: one Round per tracked PR,
+// Package state defines crq's persisted schema v4: one Round per tracked PR,
 // a single global fire slot, and the CodeRabbit account quota. A Round is
 // never deleted, only transitioned (or archived when superseded by a new
 // head) — the invariant that makes "forgot we already requested a review at
@@ -79,6 +79,43 @@ type Round struct {
 	// CodeRabbit requests must skip these.
 	CoOnly bool `json:"co_only,omitempty"`
 
+	// Dispatch is the claim held by a watcher running a fix for this round. It
+	// exists so two watchers cannot both spawn a session for the same PR, and so
+	// a session that dies does not hold the round forever — the claim is
+	// heartbeated, and one older than DispatchTTL is free to take over.
+	Dispatch *DispatchClaim `json:"dispatch,omitempty"`
+	// DispatchHoldPhase/DispatchHoldRetryAt preserve the queue state hidden by a
+	// live dispatch. While held, a queued round is mirrored into
+	// awaiting_retry with a heartbeat-extended RetryAt. Older binaries already
+	// honor that phase/window even though they do not understand Dispatch, so a
+	// rolling deployment cannot fire a review for code a new watcher is fixing.
+	// These are top-level round members so tolerant old binaries preserve them.
+	DispatchHoldPhase   Phase      `json:"dispatch_hold_phase,omitempty"`
+	DispatchHoldRetryAt *time.Time `json:"dispatch_hold_retry_at,omitempty"`
+	// PostedCommands are the trigger comments crq itself WROTE for this round,
+	// including the ones a retry replaced. Two things need it. A retry posts a
+	// new command — the bot answered the previous one, usually with a rate-limit
+	// notice, so it can never be adopted again — and without this record nothing
+	// knows the old comment exists, which is why a throttled PR collects a
+	// column of identical review requests. And CommandID alone cannot say who
+	// wrote a comment: a round records an ADOPTED command there just the same,
+	// so treating it as crq's own is how tidying would erase a person's request
+	// to review.
+	PostedCommands []PostedCommand `json:"posted_commands,omitempty"`
+	// Dismissed maps the ID of a finding an agent explicitly accounted for to the
+	// reason given. GitHub offers no way to close these: a review-body finding, a
+	// review-skipped notice and an outside-diff remark all lack a review thread,
+	// so `crq resolve` and `crq decline` have nothing to act on and drain-first
+	// can never be satisfied — the round repeats `fix` forever and no new review is ever
+	// requested for the head.
+	//
+	// Scoped to this round on purpose. Finding IDs are content-derived, so a
+	// dismissal that outlived the head would silently swallow the same finding
+	// when the next reviewer reports it again. Superseding the round drops these
+	// with it, which is the same rule body findings already follow: the current
+	// reviewer must report it again.
+	Dismissed map[string]string `json:"dismissed,omitempty"`
+
 	// RetryAt is the earliest time this head may fire again (awaiting_retry).
 	RetryAt *time.Time `json:"retry_at,omitempty"`
 
@@ -127,6 +164,15 @@ type Round struct {
 	// binary's additions survive being read and rewritten here. Unexported, so
 	// it is never a member itself. See tolerant.go.
 	unknown unknownFields
+}
+
+// PostedCommand is one trigger comment crq posted, with the reviewer it was
+// addressed to and when it landed — the two facts a later cleanup needs to
+// decide whether that reviewer has read it yet.
+type PostedCommand struct {
+	ID  int64     `json:"id"`
+	Bot string    `json:"bot,omitempty"`
+	At  time.Time `json:"at,omitempty"`
 }
 
 // CoBotRound is one co-reviewer's bookkeeping inside a Round: the trigger
@@ -286,17 +332,45 @@ type AccountQuota struct {
 }
 
 type LeaderLease struct {
-	Owner     string    `json:"owner"`
-	Token     string    `json:"token"`
-	ExpiresAt time.Time `json:"expires_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Owner        string    `json:"owner"`
+	Token        string    `json:"token"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Capabilities []string  `json:"capabilities,omitempty"`
 }
 
-// State is schema v3. It persists as state.json in the git state ref exactly
-// like v2; only the payload shape changed (no migration — v2 payloads
-// auto-reinit, crq is pre-release).
+// HasCapability reports whether the active daemon understands a state feature.
+func (l LeaderLease) HasCapability(want string) bool {
+	for _, capability := range l.Capabilities {
+		if capability == want {
+			return true
+		}
+	}
+	return false
+}
+
+// LeaderCapabilityLease dual-writes the active leader's capabilities at the
+// top level. Older schema-v3 binaries preserve unknown top-level members, while
+// they drop unknown members nested inside LeaderLease. The token prevents a
+// preserved capability list from being attributed to a different leader.
+type LeaderCapabilityLease struct {
+	Token        string   `json:"token"`
+	Capabilities []string `json:"capabilities,omitempty"`
+}
+
+func (l LeaderCapabilityLease) HasCapability(want string) bool {
+	for _, capability := range l.Capabilities {
+		if capability == want {
+			return true
+		}
+	}
+	return false
+}
+
+// State is schema v4. It persists as state.json in the existing git state ref;
+// v3 is migrated in place so its live rounds survive the compatibility fence.
 type State struct {
-	Version int   `json:"v"` // 3
+	Version int   `json:"v"` // 4
 	Rev     int64 `json:"rev"`
 	NextSeq int64 `json:"next_seq"`
 
@@ -315,6 +389,10 @@ type State struct {
 	LastFired             *time.Time   `json:"last_fired,omitempty"`
 	Account               AccountQuota `json:"account"`
 	Leader                *LeaderLease `json:"leader,omitempty"`
+
+	// LeaderCapabilities is outside Leader so old binaries' tolerant state
+	// writer carries it across lease renewals and unrelated state mutations.
+	LeaderCapabilities *LeaderCapabilityLease `json:"leader_capabilities,omitempty"`
 
 	// CalibrationIssue overrides the configured calibration PR/issue when the
 	// original hit GitHub's hard 2500-comment cap and crq rotated to a fresh
@@ -343,10 +421,41 @@ type State struct {
 	// argument as Repos above, one level up: hosts that each carry their own
 	// answer diverge silently. See fleet.go.
 	FleetConfig Fleet `json:"fleet,omitempty"`
-
+	// Holds are the PRs crq must not fire a review for, keyed by "owner/name#pr".
+	//
+	// Holding used to take two commands that could not be one: the skip marker
+	// stops fleet auto-review from enqueueing, `crq cancel` stops the pump, and
+	// between the two a daemon fired anyway. A hold is one fact, in the state
+	// every firing path already reads.
+	Holds map[string]Hold `json:"holds,omitempty"`
 	// Archive keeps recently finished rounds (superseded, closed, cancelled)
 	// for the dashboard and debugging. Bounded by ArchiveMax.
 	Archive []Round `json:"archive,omitempty"`
+
+	// Drain records the watcher's dispatch health. It is separate from Warn
+	// because Warn is cleared by the next successful fire — a dispatcher that
+	// has been failing for hours would be wiped by unrelated progress, which is
+	// exactly how the failure stayed invisible.
+	Drain *DrainHealth `json:"drain,omitempty"`
+	// Drains keeps each host's failure streak independent. Drain above is the
+	// fleet summary dual-written for older binaries during rolling upgrades.
+	Drains map[string]DrainHealth `json:"drains,omitempty"`
+	// Dispatches holds live PR-level claims outside the bounded round archive.
+	// A session may still be resolving threads after its push superseded the
+	// claimed round, and archive eviction must not admit a second session.
+	Dispatches map[string]DispatchClaim `json:"dispatches,omitempty"`
+	// RepoDrain answers "may crq fix pull requests here?" per repository. Absent
+	// means the default, which is yes — see DrainEnabled.
+	RepoDrain map[string]RepoDrainSwitch `json:"repo_drain,omitempty"`
+	// TidiedCommands are durable tombstones for trigger comments Tidy removed.
+	// Unlike Archive, they are not bounded: GitHub can deliver a delayed reply
+	// for as long as the PR conversation exists, and command/reply FIFO pairing
+	// still needs the deleted command's chronological position.
+	TidiedCommands map[string][]PostedCommand `json:"tidied_commands,omitempty"`
+	// TidyReactionCursors rotate the bounded scan of unanswered Codex commands
+	// so old candidates are not reread on every housekeeping pass and newer
+	// candidates are not starved.
+	TidyReactionCursors map[string]int64 `json:"tidy_reaction_cursors,omitempty"`
 
 	Warn         string     `json:"warn,omitempty"`
 	UpdatedAt    *time.Time `json:"wrote_at,omitempty"`
@@ -356,6 +465,23 @@ type State struct {
 	// tolerant.go.
 	unknown unknownFields
 }
+
+// LeaderHasCapability reports whether the current lease holder advertises a
+// capability, accepting either the nested representation or its rolling-
+// deployment-safe top-level copy.
+func (s State) LeaderHasCapability(want string) bool {
+	if s.Leader == nil {
+		return false
+	}
+	if s.Leader.HasCapability(want) {
+		return true
+	}
+	return s.LeaderCapabilities != nil &&
+		s.LeaderCapabilities.Token == s.Leader.Token &&
+		s.LeaderCapabilities.HasCapability(want)
+}
+
+const SchemaVersion = 4
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
@@ -468,8 +594,6 @@ func (s *State) ClearRepoOverride(repo string) bool {
 func normalizeRepoKey(repo string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(repo), ".git"))
 }
-
-const SchemaVersion = 3
 
 // ArchiveMax bounds the finished-rounds ring. Active rounds are never
 // evicted — only Archive is trimmed — so a live "already fired at this head"
@@ -690,11 +814,29 @@ func (r *Round) Abandon(reason string) {
 }
 
 func (r *Round) retryEligible(now time.Time) bool {
-	return r.Phase == PhaseAwaitingRetry && r.RetryAt != nil && !now.Before(*r.RetryAt)
+	if r.Phase != PhaseAwaitingRetry || r.RetryAt == nil || now.Before(*r.RetryAt) {
+		return false
+	}
+	// A dead dispatch loses its live claim after DispatchTTL, but it must not
+	// erase a longer cooldown the round was already serving. ReleaseDispatch
+	// restores this value for an orderly exit; this check preserves it when the
+	// watcher dies before releasing.
+	return r.DispatchHoldRetryAt == nil || !now.Before(*r.DispatchHoldRetryAt)
 }
 
 // FireEligible reports whether Pump may consider this round for firing now.
+//
+// A round a fix session holds is not: that session is replacing the very code a
+// review would be about, and its push moves the head minutes later. Firing there
+// spends the account's metered review on a head nobody will look at again — and
+// the claim is the only record of it, since the round stays queued throughout.
+// Leaving the round OUT of the queue rather than refusing it at the fire gate is
+// what keeps every other PR moving while one is being fixed; a claim nobody
+// heartbeats expires (DispatchTTL), so this can never park a round for good.
 func (r *Round) FireEligible(now time.Time) bool {
+	if r.DispatchHeld(now) {
+		return false
+	}
 	return r.Phase == PhaseQueued || r.retryEligible(now)
 }
 
@@ -850,7 +992,10 @@ func (s *State) NextEligible(now time.Time) *Round {
 	var best *Round
 	for key := range s.Rounds {
 		r := s.Rounds[key]
-		if !r.FireEligible(now) {
+		// Held PRs are skipped HERE, in the one place a round is chosen to fire,
+		// rather than at each caller. An exemption that has to be remembered at
+		// every site is one that will be missed at one of them.
+		if !r.FireEligible(now) || s.isHeld(r) {
 			continue
 		}
 		if best == nil || r.Seq < best.Seq {
@@ -865,12 +1010,433 @@ func (s *State) NextEligible(now time.Time) *Round {
 func (s *State) QueuedRounds(now time.Time) []Round {
 	var out []Round
 	for _, r := range s.Rounds {
-		if r.FireEligible(now) {
+		if r.FireEligible(now) && !s.isHeld(r) {
 			out = append(out, r)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
 	return out
+}
+
+// DispatchTTL is how long a dispatch claim survives without a heartbeat. A fix
+// session outlives any single poll, so the claim is refreshed while one runs;
+// this bounds how long a crashed watcher blocks the next attempt.
+const DispatchTTL = 10 * time.Minute
+
+// DispatchClaim records who is running a fix for a round, and how many attempts
+// this head has had.
+type DispatchClaim struct {
+	Host string `json:"host"`
+	// Token distinguishes two claims from the same host, so a restarted watcher
+	// cannot heartbeat or release the claim of the process it replaced.
+	Token     string    `json:"token"`
+	At        time.Time `json:"at"`
+	Heartbeat time.Time `json:"heartbeat"`
+	// Attempts counts dispatches for THIS head, so a fix that keeps failing
+	// stops instead of looping. It survives release; only a new head clears it,
+	// because a new head means the previous attempt achieved something.
+	Attempts int `json:"attempts,omitempty"`
+}
+
+// DispatchHeld reports whether a live claim exists.
+func (r *Round) DispatchHeld(now time.Time) bool {
+	return r.Dispatch != nil && !r.Dispatch.Heartbeat.IsZero() && now.UTC().Sub(r.Dispatch.Heartbeat) < DispatchTTL
+}
+
+// ArchivedDispatchHeld reports whether a round of repo#pr that has already been
+// archived still holds a live dispatch claim.
+//
+// A session's own push is what supersedes the round it was fixing, and the claim
+// is archived with it while the session is still running — resolving threads,
+// declining others. The current round is then a fresh one carrying no claim at
+// all, so asking it alone answers "nobody is fixing this" about a pull request
+// somebody is very much still fixing, and a second session is launched into the
+// same worktree generation's work.
+func (s *State) ArchivedDispatchHeld(repo string, pr int, now time.Time) bool {
+	key := Key(repo, pr)
+	if claim, ok := s.Dispatches[key]; ok && claimHeld(claim, now) {
+		return true
+	}
+	for i := range s.Archive {
+		r := &s.Archive[i]
+		if Key(r.Repo, r.PR) == key && r.DispatchHeld(now) {
+			return true
+		}
+	}
+	return false
+}
+
+// HeartbeatArchivedDispatch refreshes the archived claim owned by token. A
+// successful session archives its own round when its push moves the head, but
+// it still owns the PR until thread resolution and the process both finish.
+func (s *State) HeartbeatArchivedDispatch(repo string, pr int, token string, now time.Time) (ok, taken bool) {
+	key := Key(repo, pr)
+	if claim, exists := s.Dispatches[key]; exists {
+		if claim.Token == token {
+			// The CAS update containing this heartbeat also serializes a safe
+			// reacquisition after an extended state outage. If a replacement
+			// watcher won first, its different live token is observed below.
+			claim.Heartbeat = now.UTC()
+			s.Dispatches[key] = claim
+			return true, false
+		}
+		if claimHeld(claim, now) {
+			return false, true
+		}
+	}
+	for i := range s.Archive {
+		r := &s.Archive[i]
+		if Key(r.Repo, r.PR) != key {
+			continue
+		}
+		if refreshed, byOther := r.HeartbeatDispatch(token, now); refreshed {
+			if s.Dispatches == nil {
+				s.Dispatches = map[string]DispatchClaim{}
+			}
+			s.Dispatches[key] = *r.Dispatch
+			return true, false
+		} else if byOther {
+			taken = true
+		}
+	}
+	return false, taken
+}
+
+// ReleaseArchivedDispatch drops a claim this token owns on an archived round, so
+// a session that has finished stops holding the next one out for the rest of the
+// TTL. It reports whether anything was released.
+func (s *State) ReleaseArchivedDispatch(repo string, pr int, token string) bool {
+	key := Key(repo, pr)
+	released := false
+	if claim, ok := s.Dispatches[key]; ok && claim.Token == token {
+		delete(s.Dispatches, key)
+		released = true
+	}
+	for i := range s.Archive {
+		r := &s.Archive[i]
+		if Key(r.Repo, r.PR) == key && r.ReleaseDispatch(token) {
+			released = true
+		}
+	}
+	return released
+}
+
+// RememberDispatch stores a newly granted claim independently of its round.
+func (s *State) RememberDispatch(repo string, pr int, claim DispatchClaim) {
+	if s.Dispatches == nil {
+		s.Dispatches = map[string]DispatchClaim{}
+	}
+	s.Dispatches[Key(repo, pr)] = claim
+}
+
+func claimHeld(claim DispatchClaim, now time.Time) bool {
+	return !claim.Heartbeat.IsZero() && now.UTC().Sub(claim.Heartbeat) < DispatchTTL
+}
+
+// ClaimDispatch takes this round's dispatch claim, or reports why it cannot. A
+// claim past its TTL is taken over, keeping the attempt count: that session died,
+// but its attempt still happened.
+func (r *Round) ClaimDispatch(host, token string, now time.Time, maxAttempts int) (bool, string) {
+	now = now.UTC()
+	attempts := 0
+	if r.Dispatch != nil {
+		if r.DispatchHeld(now) {
+			return false, "another watcher is already fixing this round"
+		}
+		attempts = r.Dispatch.Attempts
+	}
+	if maxAttempts > 0 && attempts >= maxAttempts {
+		return false, fmt.Sprintf("%d dispatch attempts already made for this head", attempts)
+	}
+	r.beginDispatchHold(now)
+	r.Dispatch = &DispatchClaim{Host: host, Token: token, At: now, Heartbeat: now, Attempts: attempts + 1}
+	return true, ""
+}
+
+// beginDispatchHold mirrors the new dispatch exclusion into queue state every
+// older binary already knows. The original cooldown is restored on release.
+func (r *Round) beginDispatchHold(now time.Time) {
+	if r.DispatchHoldPhase == "" && (r.Phase == PhaseQueued || r.Phase == PhaseAwaitingRetry) {
+		r.DispatchHoldPhase = r.Phase
+		if r.RetryAt != nil {
+			at := r.RetryAt.UTC()
+			r.DispatchHoldRetryAt = &at
+		}
+	}
+	if r.DispatchHoldPhase == "" || (r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry) {
+		return
+	}
+	until := now.UTC().Add(DispatchTTL)
+	r.Phase = PhaseAwaitingRetry
+	r.RetryAt = &until
+}
+
+// HeartbeatDispatch refreshes a claim this token owns.
+//
+// The two ways it can fail are NOT the same thing, and treating them alike is
+// what made a session destroy its own work. taken is true only when somebody
+// else holds a live claim — the case where continuing would put two sessions in
+// one worktree. A claim that is merely GONE means the round was superseded,
+// which is what a session's own push does: it moves the head, the round is
+// archived, and the fresh round carries no claim. Killing the session there ends
+// it between pushing and resolving, every time it succeeds.
+func (r *Round) HeartbeatDispatch(token string, now time.Time) (ok, taken bool) {
+	if r.Dispatch == nil {
+		return false, false
+	}
+	if r.Dispatch.Token != token {
+		return false, r.DispatchHeld(now)
+	}
+	r.Dispatch.Heartbeat = now.UTC()
+	r.beginDispatchHold(now)
+	return true, false
+}
+
+// ReleaseDispatch drops a claim this token owns, keeping the attempt count.
+func (r *Round) ReleaseDispatch(token string) bool {
+	if r.Dispatch == nil || r.Dispatch.Token != token {
+		return false
+	}
+	r.Dispatch.Heartbeat = time.Time{}
+	r.Dispatch.Token = ""
+	if r.DispatchHoldPhase != "" {
+		// An archived round was abandoned when it was superseded. Never revive it
+		// into the queue just because its session finished.
+		if r.Phase == PhaseAwaitingRetry {
+			r.Phase = r.DispatchHoldPhase
+			r.RetryAt = r.DispatchHoldRetryAt
+		}
+		r.DispatchHoldPhase = ""
+		r.DispatchHoldRetryAt = nil
+	}
+	return true
+}
+
+// DrainUnhealthyAfter is how many consecutive dispatch attempts may fail to
+// start a session before crq says so out loud. One failure is a transient; three
+// in a row is a dispatcher that is not working.
+//
+// Attempts, not passes: sessions outlive the pass that started them, so their
+// outcomes arrive one at a time and any success resets the count.
+const DrainUnhealthyAfter = 3
+
+// DrainHealthTTL is how long a host that reports no dispatch outcome remains
+// part of the fleet health summary. A retired or renamed host cannot report its
+// own recovery, so retaining it forever would make one historical failure the
+// permanent fleet verdict.
+const DrainHealthTTL = 24 * time.Hour
+
+// DrainHealth is the watcher's dispatch record: whether fix sessions are
+// actually starting.
+//
+// A dispatch failure used to be a line in a log nobody read, so a wedged git
+// mirror stopped every session for hours while the queue looked busy. Counting
+// it here puts it on the dashboard and in the status line instead.
+type DrainHealth struct {
+	Host                string     `json:"host,omitempty"`
+	ConsecutiveFailures int        `json:"consecutive_failures,omitempty"`
+	LastError           string     `json:"last_error,omitempty"`
+	LastFailureAt       *time.Time `json:"last_failure_at,omitempty"`
+	LastSuccessAt       *time.Time `json:"last_success_at,omitempty"`
+}
+
+// Unhealthy reports whether dispatch has failed enough times in a row to be
+// worth someone's attention.
+func (d *DrainHealth) Unhealthy() bool {
+	return d != nil && d.ConsecutiveFailures >= DrainUnhealthyAfter
+}
+
+// NoteDispatch records one dispatch attempt's outcome: whether a session
+// started, and the reason if it did not.
+func (s *State) NoteDispatch(host string, started bool, reason string, now time.Time) {
+	if s.Drains == nil {
+		s.Drains = map[string]DrainHealth{}
+		if s.Drain != nil && s.Drain.Host != "" {
+			s.Drains[s.Drain.Host] = *s.Drain
+		}
+	}
+	at := now.UTC()
+	drain := s.Drains[host]
+	drain.Host = host
+	if started {
+		drain.ConsecutiveFailures = 0
+		drain.LastError = ""
+		drain.LastSuccessAt = &at
+	} else {
+		drain.ConsecutiveFailures++
+		drain.LastError = reason
+		drain.LastFailureAt = &at
+	}
+	s.Drains[host] = drain
+	s.summarizeDrains(now)
+}
+
+func (s *State) summarizeDrains(now time.Time) {
+	var summary *DrainHealth
+	for host, drain := range s.Drains {
+		latest := drain.LastFailureAt
+		if timeAfter(drain.LastSuccessAt, latest) {
+			latest = drain.LastSuccessAt
+		}
+		if latest != nil && !latest.Add(DrainHealthTTL).After(now.UTC()) {
+			delete(s.Drains, host)
+			continue
+		}
+		candidate := drain
+		if summary == nil ||
+			candidate.ConsecutiveFailures > summary.ConsecutiveFailures ||
+			(candidate.ConsecutiveFailures == summary.ConsecutiveFailures &&
+				(timeAfter(candidate.LastFailureAt, summary.LastFailureAt) ||
+					(timeEqual(candidate.LastFailureAt, summary.LastFailureAt) &&
+						candidate.Host < summary.Host))) {
+			summary = &candidate
+		}
+	}
+	s.Drain = summary
+}
+
+func timeAfter(a, b *time.Time) bool {
+	return a != nil && (b == nil || a.After(*b))
+}
+
+func timeEqual(a, b *time.Time) bool {
+	return (a == nil && b == nil) || (a != nil && b != nil && a.Equal(*b))
+}
+
+// Hold records why a PR is held out of the review queue.
+type Hold struct {
+	Reason string    `json:"reason,omitempty"`
+	By     string    `json:"by,omitempty"`
+	At     time.Time `json:"at"`
+}
+
+// Hold marks repo#pr as not to be reviewed, replacing any earlier hold.
+func (s *State) Hold(repo string, pr int, reason, by string, now time.Time) {
+	if s.Holds == nil {
+		s.Holds = map[string]Hold{}
+	}
+	s.Holds[holdKey(repo, pr)] = Hold{Reason: reason, By: by, At: now.UTC()}
+}
+
+// Unhold releases a hold, reporting whether one was there.
+func (s *State) Unhold(repo string, pr int) bool {
+	key := holdKey(repo, pr)
+	if _, ok := s.Holds[key]; !ok {
+		return false
+	}
+	delete(s.Holds, key)
+	return true
+}
+
+// HeldPR reports whether repo#pr is held, and why.
+func (s *State) HeldPR(repo string, pr int) (Hold, bool) {
+	h, ok := s.Holds[holdKey(repo, pr)]
+	return h, ok
+}
+
+func (s *State) isHeld(r Round) bool {
+	_, held := s.HeldPR(r.Repo, r.PR)
+	return held
+}
+
+func holdKey(repo string, pr int) string {
+	return fmt.Sprintf("%s#%d", normalizeRepoKey(repo), pr)
+}
+
+// RecordPosted remembers a trigger comment crq WROTE for this round, addressed
+// to bot. Call it only where crq actually posted: an adopted command is not
+// crq's to record, and later cleanup trusts this list as proof of authorship.
+//
+// Bounded, so a PR that retries all day cannot grow its round without limit.
+func (r *Round) RecordPosted(bot string, id int64, at time.Time) {
+	const maxPosted = 50
+	if id == 0 {
+		return
+	}
+	for _, have := range r.PostedCommands {
+		if have.ID == id {
+			return
+		}
+	}
+	// Copy-on-write, like setCo: Rounds are passed around by value, so appending
+	// in place could write this entry into a sibling copy's backing array.
+	posted := make([]PostedCommand, len(r.PostedCommands), len(r.PostedCommands)+1)
+	copy(posted, r.PostedCommands)
+	posted = append(posted, PostedCommand{ID: id, Bot: bot, At: at.UTC()})
+	if len(posted) > maxPosted {
+		posted = posted[len(posted)-maxPosted:]
+	}
+	r.PostedCommands = posted
+}
+
+// RecordTidied remembers a trigger before Tidy removes it from GitHub. It is
+// idempotent because a CAS retry may apply the same mutation more than once.
+func (s *State) RecordTidied(repo string, pr int, commands ...PostedCommand) {
+	if len(commands) == 0 {
+		return
+	}
+	if s.TidiedCommands == nil {
+		s.TidiedCommands = map[string][]PostedCommand{}
+	}
+	key := Key(repo, pr)
+	have := make(map[int64]bool, len(s.TidiedCommands[key])+len(commands))
+	for _, command := range s.TidiedCommands[key] {
+		have[command.ID] = true
+	}
+	for _, command := range commands {
+		if command.ID == 0 || have[command.ID] {
+			continue
+		}
+		command.At = command.At.UTC()
+		s.TidiedCommands[key] = append(s.TidiedCommands[key], command)
+		have[command.ID] = true
+	}
+}
+
+// ForgetTidied removes tombstones for comments Tidy ultimately kept or failed
+// to delete. A present GitHub comment remains the source of truth for those.
+func (s *State) ForgetTidied(repo string, pr int, ids ...int64) {
+	key := Key(repo, pr)
+	if len(ids) == 0 || len(s.TidiedCommands[key]) == 0 {
+		return
+	}
+	remove := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		remove[id] = true
+	}
+	kept := s.TidiedCommands[key][:0]
+	for _, command := range s.TidiedCommands[key] {
+		if !remove[command.ID] {
+			kept = append(kept, command)
+		}
+	}
+	if len(kept) == 0 {
+		delete(s.TidiedCommands, key)
+		if len(s.TidiedCommands) == 0 {
+			s.TidiedCommands = nil
+		}
+		return
+	}
+	s.TidiedCommands[key] = kept
+}
+
+// Dismiss records a finding ID as accounted for. Returns false when it was
+// already dismissed, so a caller can tell a repeat from a new decision.
+func (r *Round) Dismiss(id, reason string) bool {
+	if id == "" || r.IsDismissed(id) {
+		return false
+	}
+	if r.Dismissed == nil {
+		r.Dismissed = map[string]string{}
+	}
+	r.Dismissed[id] = reason
+	return true
+}
+
+// IsDismissed reports whether this round already accounted for the finding.
+func (r *Round) IsDismissed(id string) bool {
+	_, ok := r.Dismissed[id]
+	return ok
 }
 
 // Queue-entry wait reasons. A waiting round is held by exactly one of these
@@ -951,6 +1517,18 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 	var queued, freeRunning []QueueEntry
 	for _, r := range s.Rounds {
 		if r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry {
+			continue
+		}
+		// A round a fix session holds is not waiting its turn either: the claim
+		// is what keeps it out of the queue, and showing it invites somebody to
+		// wonder why nothing is taking it.
+		if r.DispatchHeld(now) {
+			continue
+		}
+
+		// A held round is not waiting its turn — nothing will take it — so
+		// showing it in the queue tells the reader the opposite of the truth.
+		if s.isHeld(r) {
 			continue
 		}
 		e := QueueEntry{Round: r}
@@ -1069,6 +1647,17 @@ func (s *State) Normalize(now time.Time) {
 	}
 	if s.Version == 0 {
 		s.Version = SchemaVersion
+	}
+	if s.Drain != nil && s.Drain.Host != "" {
+		if s.Drains == nil {
+			s.Drains = map[string]DrainHealth{}
+		}
+		if _, ok := s.Drains[s.Drain.Host]; !ok {
+			s.Drains[s.Drain.Host] = *s.Drain
+		}
+	}
+	if s.Drains != nil {
+		s.summarizeDrains(now)
 	}
 	// Fold both hold representations before repairing the slot. The top-level
 	// mirror may be the only copy left after a pre-FireSlot-tolerance binary

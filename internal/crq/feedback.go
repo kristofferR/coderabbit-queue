@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,7 +26,11 @@ type FeedbackReport struct {
 	Converged  bool              `json:"converged"`
 	ReviewedBy map[string]bool   `json:"reviewed_by"`
 	Findings   []dialect.Finding `json:"findings"`
-	CheckedAt  time.Time         `json:"checked_at"`
+	// Dismissed counts the findings this head's round accounted for through
+	// `crq dismiss`. They are withheld from Findings, so the count is how a
+	// reader sees something was set aside rather than never reported.
+	Dismissed int       `json:"dismissed,omitempty"`
+	CheckedAt time.Time `json:"checked_at"`
 	// Open is whether the PR was open in the same observation Head and
 	// ReviewedBy came from. It is deliberately not serialized — the feedback
 	// JSON contract is frozen — and exists so a caller deciding an action reads
@@ -99,9 +104,21 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// engine.Completion over the same snapshot — no second fetch path, and the
 	// "is head reviewed?" rules live only in the engine.
 	cfg := s.cfgFor(st, repo)
-	obs, err := s.observe(ctx, cfg, repo, pr, round, now)
+	obs, err := s.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, now)
 	if err != nil {
 		return FeedbackReport{}, err
+	}
+	// A rate-limit notice is evidence about the ACCOUNT, and this is the only
+	// place that looks at a PR the queue is not about to fire. Pump records the
+	// notice on the round it selects; a notice sitting on a PR that was
+	// superseded — or is simply not next in the queue — was seen here and thrown
+	// away, and the next fire went out inside a window the bot had already
+	// stated. It is the one write on this path, it happens once per notice rather
+	// than once per poll, and all it can do is stop a review.
+	if updated, err := s.recordObservedBlock(ctx, obs, st, now); err != nil {
+		return FeedbackReport{}, fmt.Errorf("recording the account block observed on %s: %w", QueueKey(repo, pr), err)
+	} else if updated != nil {
+		st = *updated
 	}
 	pull := obs.pull
 	head := ""
@@ -441,6 +458,29 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	}
 
 	report.Findings = dedupeFindings(report.Findings, suppressPromptAt, settledStableIDs)
+	// Dismissals apply HERE, not in the caller: convergence and `crq loop`'s exit
+	// code are computed from this list, so filtering further out would leave a
+	// dismissed finding permanently actionable everywhere except `crq next`.
+	if round != nil && round.Head == head && len(round.Dismissed) > 0 {
+		kept := make([]dialect.Finding, 0, len(report.Findings))
+		for _, finding := range report.Findings {
+			// Only where the source itself cannot carry a thread. IDs hash the
+			// text, not the source, so a body finding later delivered as an inline
+			// comment through the REST fallback hashes the same — and filtering on
+			// the ID alone would hide a review thread that is open.
+			if dismissibleSources[finding.Source] && finding.ThreadID == "" && round.IsDismissed(finding.ID) {
+				continue
+			}
+			kept = append(kept, finding)
+		}
+		report.Findings = kept
+		// The count is of the DECISIONS this round recorded, not of the findings
+		// that happened to still match one. A bot that edits or deletes the
+		// comment a dismissal was made against leaves nothing to match, and
+		// reporting zero there would make a set-aside finding indistinguishable
+		// from one that was never reported at all.
+		report.Dismissed = len(round.Dismissed)
+	}
 	sort.Slice(report.Findings, func(i, j int) bool {
 		if dialect.RankSeverity(report.Findings[i].Severity) != dialect.RankSeverity(report.Findings[j].Severity) {
 			return dialect.RankSeverity(report.Findings[i].Severity) > dialect.RankSeverity(report.Findings[j].Severity)
@@ -539,12 +579,29 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 	if err != nil {
 		return FeedbackReport{}, 1, err
 	}
+	// A hold ends the loop wherever it is reported. It is administrative and
+	// indefinite: entering the feedback poll would wait out a whole second
+	// timeout for a review that will not be requested until a person lifts it.
+	//
+	// Code 0, not 2. The exit codes are frozen with 2 meaning an ELAPSED wait,
+	// so returning it for a hold tells a caller scripted against that contract
+	// to retry something only a person ends. Terminal like "skipped"; the status
+	// is what tells them which.
+	if waitResult.Action == "held" {
+		return FeedbackReport{
+			Status: "held", Repo: NormalizeRepo(repo), PR: pr,
+			Head: waitResult.Head, Reason: waitResult.Reason,
+			ReviewedBy: map[string]bool{}, Findings: []dialect.Finding{},
+		}, 0, nil
+	}
 	if waitCode == 2 {
 		status := "timeout"
 		code := 2
-		if waitResult.Action == "skipped" {
+		switch waitResult.Action {
+		case "skipped":
 			status = "skipped"
 			code = 0
+			s.completeWaitRound(ctx, repo, pr, "", false, nil)
 		}
 		// The slot wait timed out (CRQ_WAIT_TIMEOUT) without firing a review. Don't
 		// enter the feedback poll — that would burn another feedback timeout and could
@@ -554,6 +611,10 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		if waitResult.Action == "skipped" {
 			s.completeWaitRound(ctx, repo, pr, "", false, nil)
 		}
+
+		// return stale pre-existing findings despite no new review round. A held
+		// result is administrative, not completion: an already-fired round must
+		// stay open so its acknowledgement still owns the FireSlot.
 		return FeedbackReport{Status: status, Repo: NormalizeRepo(repo), PR: pr, Head: waitResult.Head, Reason: waitResult.Reason, ReviewedBy: map[string]bool{}, Findings: []dialect.Finding{}}, code, nil
 	}
 	head = waitResult.Head

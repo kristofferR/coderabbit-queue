@@ -27,9 +27,14 @@ type fakeGitHub struct {
 	reviewComments  map[string][]ghapi.ReviewComment
 	issueReactions  map[string][]ghapi.Reaction
 	reactions       map[int64][]ghapi.Reaction
+	reactionErrs    map[int64]error
+	reactionReads   []int64
 	checkRuns       map[string][]ghapi.CheckRun // key: ref (short or full sha)
 	checkRunErrs    map[string]error
 	postBodyErrs    map[string]error // body → error (selective trigger-post failures)
+	listPullErrs    map[string]error // repo → error (a repository the token cannot read)
+	deleteErrs      map[int64]error  // comment id → error (GitHub refuses the delete)
+	deleteAfterErrs map[int64]error  // comment id → error after GitHub applies the delete
 	posted          []string
 	deleted         []int64
 	commentID       int64
@@ -43,6 +48,7 @@ type fakeGitHub struct {
 	refReads    int
 	reviewReads int
 	searchPRs   []ghapi.SearchPR
+	getComment  func(repo string, id int64) (ghapi.IssueComment, error)
 	// now, when set, timestamps posted comments off the same injected clock the
 	// service uses, so a fire's recorded FiredAt tracks the fake wall clock the
 	// replay suite advances. nil falls back to real time (all existing tests).
@@ -58,14 +64,17 @@ func (f *fakeGitHub) clock() time.Time {
 
 func newFakeGitHub() *fakeGitHub {
 	return &fakeGitHub{
-		pulls:          map[string]ghapi.Pull{},
-		commits:        map[string]ghapi.Commit{},
-		commitErrs:     map[string]error{},
-		reviews:        map[string][]ghapi.Review{},
-		comments:       map[string][]ghapi.IssueComment{},
-		reviewComments: map[string][]ghapi.ReviewComment{},
-		issueReactions: map[string][]ghapi.Reaction{},
-		reactions:      map[int64][]ghapi.Reaction{},
+		pulls:           map[string]ghapi.Pull{},
+		commits:         map[string]ghapi.Commit{},
+		commitErrs:      map[string]error{},
+		reviews:         map[string][]ghapi.Review{},
+		comments:        map[string][]ghapi.IssueComment{},
+		reviewComments:  map[string][]ghapi.ReviewComment{},
+		issueReactions:  map[string][]ghapi.Reaction{},
+		reactions:       map[int64][]ghapi.Reaction{},
+		reactionErrs:    map[int64]error{},
+		deleteErrs:      map[int64]error{},
+		deleteAfterErrs: map[int64]error{},
 	}
 }
 
@@ -152,6 +161,22 @@ func (f *fakeGitHub) ListIssueComments(_ context.Context, repo string, pr int) (
 	return append([]ghapi.IssueComment(nil), f.comments[fakeKey(repo, pr)]...), nil
 }
 
+func (f *fakeGitHub) GetIssueComment(_ context.Context, repo string, id int64) (ghapi.IssueComment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.getComment != nil {
+		return f.getComment(repo, id)
+	}
+	for _, comments := range f.comments {
+		for _, comment := range comments {
+			if comment.ID == id {
+				return comment, nil
+			}
+		}
+	}
+	return ghapi.IssueComment{}, ghapi.ErrNotFound
+}
+
 func (f *fakeGitHub) ListReviewComments(_ context.Context, repo string, pr int) ([]ghapi.ReviewComment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -167,6 +192,10 @@ func (f *fakeGitHub) ListIssueReactions(_ context.Context, repo string, pr int) 
 func (f *fakeGitHub) ListCommentReactions(_ context.Context, _ string, id int64) ([]ghapi.Reaction, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.reactionReads = append(f.reactionReads, id)
+	if err := f.reactionErrs[id]; err != nil {
+		return nil, err
+	}
 	return append([]ghapi.Reaction(nil), f.reactions[id]...), nil
 }
 
@@ -216,12 +245,15 @@ func (f *fakeGitHub) ListIssueCommentsPage(_ context.Context, repo string, pr, p
 func (f *fakeGitHub) DeleteIssueComment(_ context.Context, repo string, id int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.deleteErrs[id]; err != nil {
+		return err
+	}
 	for key, list := range f.comments {
 		for i, c := range list {
 			if c.ID == id {
 				f.comments[key] = append(list[:i], list[i+1:]...)
 				f.deleted = append(f.deleted, id)
-				return nil
+				return f.deleteAfterErrs[id]
 			}
 		}
 	}
@@ -256,6 +288,9 @@ func (f *fakeGitHub) EachOpenPR(_ context.Context, _ string, _ bool, fn func(gha
 func (f *fakeGitHub) ListPulls(_ context.Context, repo string, query url.Values) ([]ghapi.Pull, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.listPullErrs[strings.ToLower(repo)]; err != nil {
+		return nil, err
+	}
 	wantRef := ""
 	if head := query.Get("head"); head != "" {
 		_, wantRef, _ = strings.Cut(head, ":") // "owner:branch"
@@ -267,6 +302,12 @@ func (f *fakeGitHub) ListPulls(_ context.Context, repo string, query url.Values)
 		}
 		if wantRef != "" && p.Head.Ref != wantRef {
 			continue
+		}
+		// GitHub always names the head's repository, and dispatch reads it to
+		// tell a fork from a branch of this repository. A fake that left it
+		// empty would make every test PR look like an unreadable fork.
+		if p.Head.Repo.FullName == "" {
+			p.Head.Repo.FullName = repo
 		}
 		out = append(out, p)
 	}
@@ -326,6 +367,26 @@ func (s *failNthUpdateStore) Update(ctx context.Context, mutate func(*State) err
 		return State{}, s.err
 	}
 	return s.StateStore.Update(ctx, mutate)
+}
+
+type holdAfterEnqueueStore struct {
+	StateStore
+	held bool
+}
+
+func (s *holdAfterEnqueueStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {
+	state, err := s.StateStore.Update(ctx, mutate)
+	if err != nil || s.held {
+		return state, err
+	}
+	s.held = true
+	if _, err := s.StateStore.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting on a decision", "operator", time.Now())
+		return nil
+	}); err != nil {
+		return State{}, err
+	}
+	return state, nil
 }
 
 // retryNoChangeStore invokes the mutate closure twice within one Update: first
@@ -628,6 +689,38 @@ func TestEnqueueBatchAppendsOncePerPR(t *testing.T) {
 	st2, _, _ := svc.store.Load(ctx)
 	if len(st2.QueuedRounds(time.Now().UTC())) != 2 {
 		t.Fatalf("expected still 2 after re-batch, got %d", len(st2.QueuedRounds(time.Now().UTC())))
+	}
+}
+
+func TestEnqueueBatchSkipsHeldPRsUnderCAS(t *testing.T) {
+	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, Host: "h"}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("o/held", 1, "waiting on a decision", "operator", now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	items := []queueCandidate{
+		{Repo: "o/held", PR: 1, Head: "aaaaaaaa1"},
+		{Repo: "o/ready", PR: 2, Head: "bbbbbbbb2"},
+	}
+	if err := svc.enqueueBatch(ctx, items); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Round("o/held", 1); got != nil {
+		t.Fatalf("held PR acquired a hidden queue position: %+v", got)
+	}
+	if got := st.Round("o/ready", 2); got == nil || got.Seq != 1 {
+		t.Fatalf("ready PR should receive the first queue position, got %+v", got)
 	}
 }
 
@@ -1283,6 +1376,9 @@ func TestPumpKeepsRoundReviewingWhenBotOnlyReacted(t *testing.T) {
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	command := ghapi.IssueComment{ID: 5, Body: cfg.ReviewCommand, CreatedAt: firedAt, UpdatedAt: firedAt}
+	command.User.Login = "kristofferR"
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{command}
 	reaction := ghapi.Reaction{}
 	reaction.User.Login = cfg.Bot
 	gh.reactions[5] = []ghapi.Reaction{reaction}
@@ -1516,6 +1612,110 @@ func TestWaitReenqueuesAfterClearingStaleRound(t *testing.T) {
 	}
 	if len(gh.posted) != 1 {
 		t.Fatalf("expected one review command for the new head, posted=%d", len(gh.posted))
+	}
+}
+
+func TestWaitReturnsWhenPRIsHeld(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.WaitTimeout = 0
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls["owner/repo#12"] = pull
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting on a decision", "operator", time.Now())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(cfg, gh, store, nil)
+
+	result, code, err := service.Wait(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Code 0, not 2: the loop's codes are frozen with 2 meaning an elapsed wait,
+	// and a hold is indefinite. Terminal like "skipped", named by the status.
+	if code != 0 || result.Action != "held" || result.Reason != "held: waiting on a decision" {
+		t.Fatalf("held PR should terminate the legacy wait without claiming a timeout, code=%d result=%#v", code, result)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Round("owner/repo", 12); got != nil {
+		t.Fatalf("held PR enqueued a round: %+v", got)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("held PR posted %d review commands", len(gh.posted))
+	}
+}
+
+func TestWaitReturnsWhenPRIsHeldAfterEnqueue(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.WaitTimeout = 100 * time.Millisecond
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls["owner/repo#12"] = pull
+	store := &holdAfterEnqueueStore{StateStore: NewMemoryStore(cfg)}
+	service := NewService(cfg, gh, store, nil)
+
+	result, code, err := service.Wait(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 || result.Action != "held" || result.Reason != "held: waiting on a decision" {
+		t.Fatalf("hold created after enqueue should terminate the wait, code=%d result=%#v", code, result)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("held PR posted %d review commands", len(gh.posted))
+	}
+}
+
+func TestLoopLeavesHeldInflightRoundOpen(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls["owner/repo#12"] = pull
+	store := NewMemoryStore(cfg)
+	firedAt := time.Now().Add(-time.Minute)
+	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseFired, firedAt, 7)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting on a decision", "operator", time.Now())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(cfg, gh, store, nil)
+
+	report, code, err := service.Loop(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Code 0, not 2: 2 is frozen as the elapsed-wait result, and a hold ends
+	// only when a person lifts it. The status is what names the outcome.
+	if code != 0 || report.Status != "held" || report.Reason != "held: waiting on a decision" {
+		t.Fatalf("held in-flight loop result: code=%d report=%#v", code, report)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round("owner/repo", 12)
+	if round == nil || round.Phase != PhaseFired {
+		t.Fatalf("held in-flight round was completed: %+v", round)
+	}
+	if st.FireSlot == nil || st.FireSlot.Key != QueueKey("owner/repo", 12) {
+		t.Fatalf("held in-flight round lost its fire slot: %+v", st.FireSlot)
 	}
 }
 
@@ -1865,6 +2065,82 @@ func TestPumpDropsClosedPRWhileReviewQuotaIsBlocked(t *testing.T) {
 	}
 }
 
+func TestPumpDropsClosedPRWhileHeld(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	pull := ghapi.Pull{State: "closed", Merged: true}
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+
+	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseQueued, time.Now().UTC(), 0)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting on a decision", "operator", time.Now().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "skipped" || pumped.Reason != "pr closed" {
+		t.Fatalf("expected held closed PR cleanup, got %#v", pumped)
+	}
+	if containsActiveRound(store, t, "owner/repo", 12) {
+		t.Fatal("closed PR should not remain active merely because it is held")
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, archived := range st.Archive {
+		if archived.Repo == "owner/repo" && archived.PR == 12 && archived.Phase == PhaseAbandoned {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("closed PR cleanup did not preserve the abandoned round in the archive")
+	}
+}
+
+func TestDryRunReportsClosedHeldPRWithoutMutatingState(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.DryRun = true
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey("owner/repo", 12)] = ghapi.Pull{State: "closed", Merged: true}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+
+	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseQueued, time.Now().UTC(), 0)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting on a decision", "operator", time.Now().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "skipped" || pumped.Reason != "pr closed" {
+		t.Fatalf("dry-run should report held closed PR cleanup, got %#v", pumped)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("owner/repo", 12); round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("dry-run mutated held round: %#v", round)
+	}
+}
+
 func containsActiveRound(store StateStore, t *testing.T, repo string, pr int) bool {
 	t.Helper()
 	st, _, err := store.Load(context.Background())
@@ -2134,10 +2410,11 @@ func TestLoopDegradesToCodexOnlyOnRateLimit(t *testing.T) {
 	}
 }
 
-// TestFeedbackDefersCleanAutoCodexWithDefaultRequiredBots covers the default
-// feedback-only Codex setup: its SHA-bound clean verdict is sufficient evidence
-// even though Completion.ReviewedBy contains only the pending CodeRabbit key.
-func TestFeedbackDefersCleanAutoCodexWithDefaultRequiredBots(t *testing.T) {
+// A rate-limit notice observed by this Feedback call must affect the same
+// report. The default feedback-only Codex setup supplies a SHA-bound clean
+// verdict even though Completion.ReviewedBy contains only the pending
+// CodeRabbit key.
+func TestFeedbackUsesNewAccountBlockToDeferCleanAutoCodex(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	cfg.RateLimitCoDegrade = true
@@ -2152,16 +2429,14 @@ func TestFeedbackDefersCleanAutoCodexWithDefaultRequiredBots(t *testing.T) {
 		Body:      "Codex Review: Didn't find any major issues. :tada:\n\n**Reviewed commit:** `abcdef1234`",
 		CreatedAt: cleanAt, UpdatedAt: cleanAt}
 	clean.User.Login = "chatgpt-codex-connector[bot]"
-	gh.comments[fakeKey("o/carrier", 93)] = []ghapi.IssueComment{clean}
+	rateLimitedAt := cleanAt.Add(time.Second)
+	rateLimited := ghapi.IssueComment{ID: 702,
+		Body:      "<!-- rate limited by coderabbit.ai -->\n> ## Review limit reached\n> **Next review available in:** **30 minutes**",
+		CreatedAt: rateLimitedAt, UpdatedAt: rateLimitedAt}
+	rateLimited.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/carrier", 93)] = []ghapi.IssueComment{clean, rateLimited}
 	store := NewMemoryStore(cfg)
 	seedRound(t, store, cfg, "o/carrier", 93, "abcdef123", PhaseQueued, cleanAt.Add(-time.Minute), 0)
-	blockedUntil := time.Now().UTC().Add(30 * time.Minute)
-	if _, err := store.Update(ctx, func(st *State) error {
-		st.Account.BlockedUntil = &blockedUntil
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
 
 	svc := NewService(cfg, gh, store, nil)
 	report, err := svc.Feedback(ctx, "o/carrier", 93)
@@ -2776,5 +3051,113 @@ func TestWaitResolvesSummaryOnlyWithoutTheQueue(t *testing.T) {
 	// The other PR keeps the slot — resolving ours never touched it.
 	if st.FireSlot == nil || st.FireSlot.Key != QueueKey("o/front", 10) {
 		t.Fatalf("the front PR must keep the fire slot, got %#v", st.FireSlot)
+	}
+}
+
+// A rate-limit notice is evidence about the ACCOUNT, and the pump only ever
+// looks at the PR it is about to fire. A notice sitting on a superseded round —
+// or simply on a PR that is not next in the queue — was read here and thrown
+// away, and the next fire went out inside a window the bot had already stated.
+func TestFeedbackRecordsARateLimitNoticeItObserves(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = "a0646f010abcdef0"
+	gh.pulls[fakeKey("o/carrier", 82)] = pull
+	other := ghapi.Pull{State: "open"}
+	other.Head.SHA = "bbbbbbbb2abcdef0"
+	gh.pulls[fakeKey("o/other", 90)] = other
+
+	notice := time.Now().UTC().Add(-time.Minute)
+	rl := ghapi.IssueComment{ID: 501,
+		Body:      "<!-- rate limited by coderabbit.ai -->\n> ## Review limit reached\n> **Next review available in:** **40 minutes**",
+		CreatedAt: notice, UpdatedAt: notice}
+	rl.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/carrier", 82)] = []ghapi.IssueComment{rl}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	// Nobody asked about this PR's round; the notice is simply there to be seen.
+	if _, err := svc.Feedback(ctx, "o/carrier", 82); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Account.BlockedUntil == nil {
+		t.Fatal("the observed notice was thrown away; the next fire would go out inside the window")
+	}
+
+	// And the block is what the queue then decides with.
+	if _, err := svc.Enqueue(ctx, "o/other", 90); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range gh.posted {
+		if strings.HasSuffix(p, ":"+cfg.ReviewCommand) {
+			t.Errorf("a review was requested while the account was blocked: %s", p)
+		}
+	}
+}
+
+func TestObservedAccountBlockPersistsANewerNoticeAtTheStandingWindow(t *testing.T) {
+	now := time.Date(2026, 7, 27, 8, 0, 0, 0, time.UTC)
+	standing := now.Add(time.Hour)
+	oldNotice := now.Add(-2 * time.Minute)
+	newNotice := now.Add(-time.Minute)
+	q := AccountQuota{
+		BlockedUntil:     &standing,
+		RLCommentID:      100,
+		RLCommentUpdated: &oldNotice,
+	}
+	blk := &engine.AccountBlock{
+		Until: standing, CommentID: 101, CommentUpdated: newNotice,
+	}
+	if !observedAccountBlockChanges(q, blk) {
+		t.Fatal("a distinct shorter notice was not accepted for watermarking")
+	}
+	st := State{Account: q}
+	applyAccountBlock(&st, blk, now)
+	if st.Account.RLCommentID != 101 || !st.Account.RLCommentUpdated.Equal(newNotice) {
+		t.Fatalf("notice watermark = id %d updated %v, want id 101 at %s",
+			st.Account.RLCommentID, st.Account.RLCommentUpdated, newNotice)
+	}
+}
+
+func TestObservedAccountBlockDoesNotRollTheNoticeWatermarkBackward(t *testing.T) {
+	now := time.Date(2026, 7, 27, 8, 0, 0, 0, time.UTC)
+	standing := now.Add(time.Hour)
+	watermark := now.Add(-time.Minute)
+	older := now.Add(-2 * time.Minute)
+	q := AccountQuota{
+		BlockedUntil:     &standing,
+		RLCommentID:      100,
+		RLCommentUpdated: &watermark,
+	}
+	blk := &engine.AccountBlock{
+		Until: standing, CommentID: 101, CommentUpdated: older,
+	}
+	if observedAccountBlockChanges(q, blk) {
+		t.Fatal("an older notice from a different comment rolled the watermark backward")
+	}
+
+	later := standing.Add(time.Hour)
+	blk.Until = later
+	if !observedAccountBlockChanges(q, blk) {
+		t.Fatal("an older notice's longer block window was discarded")
+	}
+	st := State{Account: q}
+	applyAccountBlock(&st, blk, now)
+	if !st.Account.BlockedUntil.Equal(later) {
+		t.Fatalf("blocked until %s, want extension to %s", st.Account.BlockedUntil, later)
+	}
+	if st.Account.RLCommentID != q.RLCommentID || !st.Account.RLCommentUpdated.Equal(watermark) {
+		t.Fatalf("older notice replaced watermark with id %d at %v",
+			st.Account.RLCommentID, st.Account.RLCommentUpdated)
 	}
 }

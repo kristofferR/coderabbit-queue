@@ -71,11 +71,12 @@ func minutesUntil(t time.Time, now time.Time) int {
 // carrying: reserved (slot held, command not yet posted), fired, or reviewing —
 // ordered by fire time.
 //
-// Together with State.Queue (queued + awaiting_retry) this PARTITIONS Active()
-// by phase, which is what makes "every active round is on the dashboard" true
-// by construction. The previous single "Feedback wait" row showed reviewing[0]
-// and silently dropped every round behind it, along with any reserved round
-// whose fire slot Normalize had cleared.
+// Together with State.Queue (queued + awaiting_retry) and heldRounds this
+// PARTITIONS Active() by phase and administrative state, which is what makes
+// "every active round is on the dashboard" true by construction. The previous
+// single "Feedback wait" row showed reviewing[0] and silently dropped every
+// round behind it, along with any reserved round whose fire slot Normalize had
+// cleared.
 func inFlightRounds(st State) []Round {
 	var out []Round
 	for _, r := range st.Rounds {
@@ -88,6 +89,55 @@ func inFlightRounds(st State) []Round {
 		return firedAtOf(out[i]).Before(firedAtOf(out[j]))
 	})
 	return out
+}
+
+type heldRound struct {
+	Round
+	Hold Hold
+}
+
+// heldRounds returns work intentionally excluded from firing. Held work is not
+// part of Queue because it is not waiting its turn, but it remains a decision
+// somebody made and must stay visible.
+//
+// Built from the HOLDS, not from the rounds. Holding an untracked PR is the
+// ordinary case — Enqueue deliberately refuses to create a round for one — so
+// walking rounds showed nothing, and the dashboard said "Idle" immediately
+// after a hold succeeded. A round's details are attached when there is one.
+func heldRounds(st State) []heldRound {
+	out := make([]heldRound, 0, len(st.Holds))
+	for key, hold := range st.Holds {
+		repo, pr, ok := splitHoldKey(key)
+		if !ok {
+			continue
+		}
+		entry := heldRound{Hold: hold, Round: Round{Repo: repo, PR: pr}}
+		if r := st.Round(repo, pr); r != nil {
+			entry.Round = *r
+		}
+		out = append(out, entry)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Repo != out[j].Repo {
+			return out[i].Repo < out[j].Repo
+		}
+		return out[i].PR < out[j].PR
+	})
+	return out
+}
+
+// splitHoldKey reverses holdKey. A key it cannot read is skipped rather than
+// rendered as a row pointing at a pull request that does not exist.
+func splitHoldKey(key string) (repo string, pr int, ok bool) {
+	repo, num, found := strings.Cut(key, "#")
+	if !found || repo == "" {
+		return "", 0, false
+	}
+	pr, err := strconv.Atoi(num)
+	if err != nil || pr <= 0 {
+		return "", 0, false
+	}
+	return repo, pr, true
 }
 
 // firedAtOf is when a round entered its in-flight life, for ordering the in-flight
@@ -204,13 +254,14 @@ func hostName(writer string) string {
 	return name
 }
 
-// RenderDashboard renders the human-facing dashboard for v3 state: rounds by
-// phase instead of v2's queue/fired/awaiting maps.
+// RenderDashboard renders the human-facing dashboard for the current state:
+// rounds by phase instead of v2's queue/fired/awaiting maps.
 func RenderDashboard(st State, cfg StoreConfig) string {
 	loc := dashboardLoc(cfg)
 	now := time.Now().UTC()
 	queue := st.Queue(now, cfg.MinInterval)
 	inFlight := inFlightRounds(st)
+	held := heldRounds(st)
 	slot := st.SlotRound()
 	blocked := st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now)
 
@@ -239,6 +290,8 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 		} else {
 			fmt.Fprintf(&b, "### 🟠 %d queued\n\n", len(queue))
 		}
+	case len(held) > 0:
+		fmt.Fprintf(&b, "### ⏸ %d held\n\n", len(held))
 	default:
 		fmt.Fprintf(&b, "### 🟢 Idle\n\n")
 	}
@@ -267,6 +320,10 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 		fmt.Fprintf(&b, "| **Co-reviewers** | %s |\n", cfg.CoReviewers)
 	}
 	fmt.Fprintf(&b, "| **Last review fired** | %s |\n", fmtStamp(st.LastFired, loc))
+	if st.Drain.Unhealthy() {
+		fmt.Fprintf(&b, "\n> 🚨 fix sessions are not starting on %s — %d attempts in a row: %s\n",
+			dash(st.Drain.Host), st.Drain.ConsecutiveFailures, st.Drain.LastError)
+	}
 	if st.Warn != "" {
 		fmt.Fprintf(&b, "\n> ⚠️ %s\n", st.Warn)
 	}
@@ -320,6 +377,18 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 		}
 	}
 
+	fmt.Fprintf(&b, "\n## ⏸ Held — %d\n\n", len(held))
+	if len(held) == 0 {
+		fmt.Fprintf(&b, "_None._\n")
+	} else {
+		fmt.Fprintf(&b, "| PR | commit | phase | reason | held by | since |\n|---|---|---|---|---|---|\n")
+		for _, e := range held {
+			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | `%s` | %s |\n",
+				e.Repo, e.PR, e.Repo, e.PR, dash(e.Head), dash(string(e.Phase)), cell(dash(e.Hold.Reason)),
+				cell(e.Hold.By), fmtStamp(&e.Hold.At, loc))
+		}
+	}
+
 	requested := requestedRounds(st)
 	fmt.Fprintf(&b, "\n## 📨 Recently requested — last %d\n\n", len(requested))
 	if len(requested) == 0 {
@@ -344,6 +413,7 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 func RenderTitle(st State, cfg StoreConfig) string {
 	now := time.Now().UTC()
 	queue := len(st.Queue(now, cfg.MinInterval))
+	held := len(heldRounds(st))
 	switch {
 	case firstStranded(st, inFlightRounds(st)) != nil:
 		// Same precedence as the body: permanently stuck work outranks states that
@@ -357,6 +427,8 @@ func RenderTitle(st State, cfg StoreConfig) string {
 		return fmt.Sprintf("🐰 crq — awaiting feedback · queue %d", queue)
 	case queue > 0:
 		return fmt.Sprintf("🐰 crq — %d queued", queue)
+	case held > 0:
+		return fmt.Sprintf("🐰 crq — %d held", held)
 	default:
 		return "🐰 crq — idle"
 	}
@@ -373,4 +445,15 @@ func IssueBody(st State, cfg StoreConfig) (string, error) {
 func hashString(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
+}
+
+// cell makes a free-form value safe to put in a Markdown table. A hold reason is
+// whatever an operator typed: a pipe ends the column early and a newline ends
+// the row, so a reason like "waiting on API | security decision" rewrites the
+// table around it.
+func cell(v string) string {
+	v = strings.ReplaceAll(v, "\r\n", " ")
+	v = strings.ReplaceAll(v, "\n", " ")
+	v = strings.ReplaceAll(v, "\r", " ")
+	return strings.ReplaceAll(v, "|", "\\|")
 }

@@ -15,14 +15,11 @@ import (
 // legacy fields, and why adding anything to a Round was a rollout problem rather
 // than a change.
 //
-// Bumping the schema version is not the answer and was rejected: an unknown
-// version is auto-reinitialised, so an old binary meeting a new one would erase
-// every round in the fleet — a bounded loss traded for an unbounded one, during
-// exactly the rolling deploy at issue.
-//
-// So unknown members are carried instead. A load keeps whatever it did not
-// recognise, a save puts it back, and a field this binary has never heard of
-// survives a foreign write untouched.
+// Unknown members are therefore carried by default. A load keeps whatever it
+// did not recognise, a save puts it back, and a field this binary has never
+// heard of survives a foreign write untouched. A schema bump is reserved for a
+// compatibility fence: newer state is refused by older binaries, as v4 requires
+// so v3 pumping clients cannot ignore administrative holds.
 
 // unknownFields holds JSON members this binary has no field for, verbatim.
 type unknownFields map[string]json.RawMessage

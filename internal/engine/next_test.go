@@ -30,6 +30,34 @@ func finding(commit string) dialect.Finding {
 	return dialect.Finding{Bot: "coderabbitai[bot]", Title: "nil deref", Commit: commit, ThreadID: "T1"}
 }
 
+func TestRoundPhaseRules(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		phase           state.Phase
+		reviewRequested bool
+		canStillFire    bool
+	}{
+		{"missing", "", false, false},
+		{"queued", state.PhaseQueued, false, true},
+		{"reserved", state.PhaseReserved, true, true},
+		{"fired", state.PhaseFired, true, false},
+		{"reviewing", state.PhaseReviewing, true, false},
+		{"awaiting retry", state.PhaseAwaitingRetry, true, true},
+		{"completed", state.PhaseCompleted, true, false},
+		{"abandoned", state.PhaseAbandoned, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			round := state.Round{Phase: tc.phase}
+			if got := reviewRequested(round); got != tc.reviewRequested {
+				t.Errorf("reviewRequested(%q) = %t, want %t", tc.phase, got, tc.reviewRequested)
+			}
+			if got := CanStillFire(round); got != tc.canStillFire {
+				t.Errorf("CanStillFire(%q) = %t, want %t", tc.phase, got, tc.canStillFire)
+			}
+		})
+	}
+}
+
 // The action table. Each row is a claim about what a caller must do next, and
 // together they are the whole contract `crq next` exposes.
 func TestNextAction(t *testing.T) {
@@ -37,6 +65,11 @@ func TestNextAction(t *testing.T) {
 		return completionOf(map[string]bool{nextPrimary: cr, "chatgpt-codex-connector[bot]": codex})
 	}
 	deferredUntil := t0.Add(30 * time.Minute)
+	coPendingRound := state.Round{
+		Phase:    state.PhaseCompleted,
+		Dispatch: &state.DispatchClaim{Heartbeat: t0},
+	}
+	coPendingRound.SetCoCommand(nextCoBot, 42, t0.Add(-time.Minute))
 
 	cases := []struct {
 		name    string
@@ -60,6 +93,49 @@ func TestNextAction(t *testing.T) {
 			in: NextInput{
 				Obs: openObs(), Completion: both(true, true),
 				Findings: []dialect.Finding{finding(nextHead)}, LocalWork: true,
+			},
+			want: ActionFix,
+		},
+		{
+			name: "live fix session holds findings while a reviewer is reading",
+			in: NextInput{
+				Round: state.Round{
+					Phase:    state.PhaseReviewing,
+					Dispatch: &state.DispatchClaim{Heartbeat: t0},
+				},
+				Obs: openObs(), Completion: both(false, true), LocalWork: true,
+				Findings: []dialect.Finding{finding(nextHead)}, MinDelay: time.Minute,
+				Primary: nextPrimary,
+			},
+			want: ActionHold, wantAt: t0.Add(time.Minute),
+			pending: []string{nextPrimary},
+		},
+		{
+			name: "live fix session holds findings while a co-reviewer is reading",
+			in: NextInput{
+				Round: coPendingRound,
+				Obs:   openObs(),
+				Completion: completionOf(map[string]bool{
+					nextPrimary: true, "chatgpt-codex-connector[bot]": true, nextCoBot: false,
+				}),
+				LocalWork: true, Findings: []dialect.Finding{finding(nextHead)},
+				Deferred: true, DeferredUntil: &deferredUntil,
+				MinDelay: time.Minute, Primary: nextPrimary,
+			},
+			want: ActionHold, wantAt: t0.Add(time.Minute),
+			pending: []string{nextCoBot},
+		},
+		{
+			name: "live fix session may replace a queued review that nobody is reading",
+			in: NextInput{
+				Round: state.Round{
+					Phase:             state.PhaseAwaitingRetry,
+					DispatchHoldPhase: state.PhaseQueued,
+					Dispatch:          &state.DispatchClaim{Heartbeat: t0},
+				},
+				Obs: openObs(), Completion: both(false, true), LocalWork: true,
+				Findings: []dialect.Finding{finding(nextHead)}, MinDelay: time.Minute,
+				Primary: nextPrimary,
 			},
 			want: ActionFix,
 		},
@@ -157,6 +233,28 @@ func TestNextAction(t *testing.T) {
 				Obs: openObs(), Completion: both(false, false), LocalWork: true,
 			},
 			want: ActionPush,
+		},
+		{
+			// A queued round has asked for nothing either — and `crq dismiss`
+			// creates one to record its decision, so the documented fix flow
+			// reaches here holding the very fixes the review would be spent on.
+			name: "a queued round is not a review to hold for",
+			in: NextInput{
+				Round: state.Round{Phase: state.PhaseQueued},
+				Obs:   openObs(), Completion: both(false, false), LocalWork: true,
+			},
+			want: ActionPush,
+		},
+		{
+			// The other side of that boundary: reserving the slot IS the request,
+			// so the command is imminent and the head must stop moving.
+			name: "a reserved round is a review to hold for",
+			in: NextInput{
+				Round: state.Round{Phase: state.PhaseReserved},
+				Obs:   openObs(), Completion: both(false, false), LocalWork: true,
+				MinDelay: time.Minute,
+			},
+			want: ActionHold, wantAt: t0.Add(time.Minute),
 		},
 		{
 			name: "all answered with staged work means push",
@@ -394,5 +492,38 @@ func TestNextActionHoldsConvergenceThroughTheSettleWindow(t *testing.T) {
 		SettleUntil: &passed,
 	}, t0); got.Kind != ActionDone {
 		t.Fatalf("NextAction = %q (%s), want %q once settled", got.Kind, got.Reason, ActionDone)
+	}
+}
+
+// A session that is holding a round must not be told to hold for a reviewer.
+//
+// ClaimDispatch mirrors a queued round into awaiting_retry so older binaries
+// honour the exclusion, and reviewRequested read that as "a review was
+// requested for this head". The session was then told `hold`, waited for a
+// review nobody could ask for — the claim makes the round ineligible to fire —
+// and its own heartbeat extended the window it was waiting on. It ended by
+// exiting with a commit it never pushed.
+func TestADispatchHoldIsNotAReviewRequest(t *testing.T) {
+	now := time.Date(2026, 7, 27, 11, 0, 0, 0, time.UTC)
+	retry := now.Add(10 * time.Minute)
+	for _, heldPhase := range []state.Phase{state.PhaseQueued, state.PhaseAwaitingRetry} {
+		round := state.Round{
+			Repo: "o/r", PR: 1, Head: "aaaaaaaa1",
+			Phase:             state.PhaseAwaitingRetry,
+			DispatchHoldPhase: heldPhase,
+			RetryAt:           &retry,
+			EnqueuedAt:        now.Add(-time.Minute),
+		}
+
+		got := NextAction(NextInput{
+			Round:      round,
+			Obs:        Observation{Head: "aaaaaaaa1", Open: true},
+			Completion: CompletionStatus{ReviewedBy: map[string]bool{"coderabbitai[bot]": false}},
+			Primary:    "coderabbitai[bot]",
+			LocalWork:  true,
+		}, now)
+		if got.Kind != ActionPush {
+			t.Errorf("held phase %s: action = %s (%s), want push: no review is active for this head", heldPhase, got.Kind, got.Reason)
+		}
 	}
 }

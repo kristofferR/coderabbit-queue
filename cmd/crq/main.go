@@ -2,14 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/crq"
@@ -23,7 +29,9 @@ func (stderrLogger) Printf(format string, args ...any) {
 }
 
 func main() {
-	code := run(context.Background(), os.Args[1:])
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := run(ctx, os.Args[1:])
+	stop()
 	os.Exit(code)
 }
 
@@ -64,6 +72,27 @@ func run(ctx context.Context, args []string) int {
 		return 1
 	case "preflight":
 		return preflight(ctx, args[1:])
+	case "drain":
+		// A dry run is documented as a PREVIEW: it writes nothing and reads no
+		// GitHub state. Deciding it here, before the authenticated client is
+		// built, is what lets somebody inspect the setup before finishing it —
+		// otherwise the one command for looking at the plan was itself another
+		// thing to set up first. A real install still goes through the
+		// authenticated path below.
+		if opts, perr := parseDrainArgs(args[1:]); perr == nil && opts.dryRun {
+			cfg, cerr := crq.LoadConfig()
+			if cerr != nil {
+				fatal(cerr)
+				return 1
+			}
+			plan, ierr := crq.DrainPlan(cfg, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, true)
+			if ierr != nil {
+				fatal(ierr)
+				return 1
+			}
+			printJSON(plan)
+			return 0
+		}
 	}
 
 	cfg, err := crq.LoadConfig()
@@ -225,6 +254,23 @@ func run(ctx context.Context, args []string) int {
 			return 1
 		}
 		return runReviewers(ctx, service, args[1:])
+	case "threads":
+		repo, pr, ok := repoPR(args[1:])
+		if !ok {
+			fatal(errors.New("usage: crq threads <repo> <pr>"))
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		threads, terr := service.OpenThreads(ctx, repo, pr)
+		if terr != nil {
+			fatal(terr)
+			return 1
+		}
+		printJSON(threads)
+		return 0
 	case "decline":
 		threads, reason, resolve, ok := parseDeclineArgs(args[1:])
 		if !ok || len(threads) == 0 || strings.TrimSpace(reason) == "" {
@@ -234,6 +280,215 @@ func run(ctx context.Context, args []string) int {
 		result, err := service.DeclineThreads(ctx, threads, reason, resolve)
 		if err != nil {
 			fatal(err)
+			return 1
+		}
+		printJSON(result)
+		return 0
+	case "drain":
+		switch sub := drainSubcommand(args[1:]); sub {
+		case "?":
+			fatal(fmt.Errorf("unknown drain subcommand %q (try: crq drain, crq drain on|off|default <repo>, crq drain install)", args[1]))
+			return 1
+		case "", "list":
+			if err := cfg.RequireState(); err != nil {
+				fatal(err)
+				return 1
+			}
+			settings, derr := service.DrainSettings(ctx)
+			if derr != nil {
+				fatal(derr)
+				return 1
+			}
+			printJSON(settings)
+			return 0
+		case "on", "off", "default":
+			rest, reason, ok := parseDrainReason(args[2:])
+			if !ok || len(rest) != 1 {
+				fatal(errors.New(`usage: crq drain on|off|default <repo> [--reason "<why>"]`))
+				return 1
+			}
+			if err := cfg.RequireState(); err != nil {
+				fatal(err)
+				return 1
+			}
+			if sub == "default" {
+				cleared, cerr := service.ClearDrainEnabled(ctx, rest[0])
+				if cerr != nil {
+					fatal(cerr)
+					return 1
+				}
+				printJSON(map[string]any{"repo": crq.NormalizeRepo(rest[0]), "cleared": cleared, "enabled": true, "default": true})
+				return 0
+			}
+			setting, serr := service.SetDrainEnabled(ctx, rest[0], sub == "on", reason)
+			if serr != nil {
+				fatal(serr)
+				return 1
+			}
+			printJSON(setting)
+			return 0
+		}
+		opts, perr := parseDrainArgs(args[1:])
+		if perr != nil {
+			fatal(perr)
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		plan, ierr := service.InstallDrain(ctx, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, opts.dryRun)
+		if ierr != nil {
+			fatal(ierr)
+			return 1
+		}
+		printJSON(plan)
+		return 0
+	case "watch":
+		fs := flag.NewFlagSet("watch", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		// Split on "--" BEFORE parsing: FlagSet.Parse consumes the terminator, so
+		// looking for it in fs.Args() afterwards never finds it and the fix
+		// command is silently read as a list of repositories.
+		flagArgs, command := args[1:], []string(nil)
+		for i, arg := range flagArgs {
+			if arg == "--" {
+				command = flagArgs[i+1:]
+				// Three-index slice: without capping capacity, the flag half
+				// still reaches into the command half, and anything that appends
+				// to a slice derived from it — fs.Args(), which is exactly what
+				// the repository list becomes — writes over the command.
+				flagArgs = flagArgs[:i:i]
+				break
+			}
+		}
+		// Dispatch is the default. Keep both the standard boolean form
+		// --dispatch=false and the more explicit --no-dispatch observer alias.
+		dispatch := fs.Bool("dispatch", true, "start a fix session for a PR that needs one (default)")
+		noDispatch := fs.Bool("no-dispatch", false, "observe only: report what each PR needs and fix nothing")
+		once := fs.Bool("once", false, "run one pass and exit")
+		interval := fs.Duration("interval", 0, "time between passes")
+		attempts := fs.Int("max-attempts", 0, "dispatches allowed per head")
+		concurrency := fs.Int("concurrency", 0, "cap on concurrent fix sessions (0 = no cap)")
+		if err := fs.Parse(flagArgs); err != nil {
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		opts := crq.WatchOptions{
+			Once:     *once,
+			Interval: *interval, MaxAttempts: *attempts,
+			Command:  command,
+			Dispatch: watchDispatchOption(*dispatch, *noDispatch),
+		}
+		// Only when it was actually passed: `--concurrency 0` means "no cap" and
+		// has to override a configured one, which an unset flag must not do.
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "concurrency" {
+				opts.Concurrency = concurrency
+			}
+		})
+		opts.Repos = fs.Args()
+		enc := json.NewEncoder(os.Stdout)
+		werr := service.Watch(ctx, opts, func(e crq.WatchEvent) error {
+			return enc.Encode(e)
+		})
+		if werr != nil && !errors.Is(werr, context.Canceled) {
+			fatal(werr)
+			return 1
+		}
+		return 0
+	case "hold", "unhold":
+		if args[0] == "hold" && len(args[1:]) == 0 {
+			if err := cfg.RequireState(); err != nil {
+				fatal(err)
+				return 1
+			}
+			holds, herr := service.Holds(ctx)
+			if herr != nil {
+				fatal(herr)
+				return 1
+			}
+			printJSON(holds)
+			return 0
+		}
+		rest, reason, ok := parseReasonArgs(args[1:])
+		// Exactly two: `crq hold owner/repo 12 13` is a malformed administrative
+		// command, and silently holding 12 is the wrong answer to it.
+		if !ok || len(rest) != 2 || (args[0] == "unhold" && hasReasonArg(args[1:])) {
+			fatal(errors.New(`usage: crq hold <repo> <pr> --reason "<why>" | crq unhold <repo> <pr>`))
+			return 1
+		}
+		repo, pr, valid := repoPR(rest[:2])
+		if !valid {
+			fatal(fmt.Errorf("bad target %q %q", rest[0], rest[1]))
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		var result crq.HoldResult
+		var herr error
+		if args[0] == "hold" {
+			result, herr = service.Hold(ctx, repo, pr, reason)
+		} else {
+			result, herr = service.Unhold(ctx, repo, pr)
+		}
+		if herr != nil {
+			fatal(herr)
+			return 1
+		}
+		printJSON(result)
+		return 0
+	case "tidy":
+		dryRun := hasFlag(args[1:], "--dry-run")
+		repo, pr, ok := repoPR(positional(args[1:]))
+		if !ok {
+			fatal(errors.New("usage: crq tidy <repo> <pr> [--dry-run]"))
+			return 1
+		}
+		if bad, found := unknownFlag(args[1:], "--dry-run"); found {
+			fatal(fmt.Errorf("unknown flag %s (usage: crq tidy <repo> <pr> [--dry-run])", bad))
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		result, terr := service.Tidy(ctx, repo, pr, dryRun)
+		if terr != nil {
+			fatal(terr)
+			return 1
+		}
+		printJSON(result)
+		return 0
+	case "dismiss":
+		rest, reason, ok := parseDismissArgs(args[1:])
+		if !ok || strings.TrimSpace(reason) == "" {
+			fatal(errors.New(`usage: crq dismiss <repo> <pr> <finding-id> [<finding-id>...] --reason "<why>"`))
+			return 1
+		}
+		if len(rest) < 3 {
+			fatal(errors.New(`usage: crq dismiss <repo> <pr> <finding-id> [<finding-id>...] --reason "<why>"`))
+			return 1
+		}
+		// Same target validation as every other command, so a non-numeric or
+		// non-positive PR fails the same way here as there.
+		repo, pr, ok := repoPR(rest[:2])
+		if !ok {
+			fatal(fmt.Errorf("bad target %q %q (usage: crq dismiss <repo> <pr> <finding-id>... --reason \"<why>\")", rest[0], rest[1]))
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		result, derr := service.Dismiss(ctx, repo, pr, rest[2:], reason)
+		if derr != nil {
+			fatal(derr)
 			return 1
 		}
 		printJSON(result)
@@ -328,6 +583,14 @@ func run(ctx context.Context, args []string) int {
 	}
 }
 
+func watchDispatchOption(dispatch, noDispatch bool) *bool {
+	if dispatch && !noDispatch {
+		return nil
+	}
+	off := false
+	return &off
+}
+
 func debug(ctx context.Context, service *crq.Service, store crq.StateStore, cfg crq.Config, args []string) int {
 	if len(args) == 0 {
 		fatal(errors.New("usage: crq debug <enqueue|pump|refresh|state>"))
@@ -395,6 +658,7 @@ DRIVING A PR REVIEW
   Call crq next, do exactly what .action says, call it again. That is the whole loop.
 
     fix      fix .findings[], validate, then crq resolve (or crq decline) each thread
+             (no .thread_id? crq dismiss it once judged — at this head nothing else can)
     hold     do NOT push: a required reviewer is pending; call again at .recheck_after
     push     the head is released — commit and push your fixes once
     wait     nothing to do; call again at .recheck_after
@@ -423,6 +687,23 @@ USAGE
   crq reviewers set <repo> [--bots <a,b>] [--required <a,b>]
                                    choose this project's reviewers (either flag alone)
   crq reviewers clear <repo>       go back to the fleet default
+  crq drain install [--agent <path>] [--dry-run] [<repo>...]
+  crq drain [on|off|default <repo>]  which repositories crq may fix (on by default)
+                                   install and start the unattended review drain
+  crq watch [--no-dispatch] [--once] [<repo>...] [-- <fix command>]
+                                   drive open PRs through crq next; --dispatch starts a
+                                   session to fix the ones that need it
+  crq hold <repo> <pr> --reason "<why>"
+                                   stop crq reviewing a PR (crq hold lists them)
+  crq unhold <repo> <pr>           put it back in the queue
+  crq tidy <repo> <pr> [--dry-run] remove crq's own spent review-trigger comments
+  crq reviewers <repo>             which bots review this project (and what each costs)
+  crq reviewers set <repo> [--bots <a,b>] [--required <a,b>]
+                                   choose this project's reviewers (either flag alone)
+  crq reviewers clear <repo>       go back to the fleet default
+  crq threads <repo> <pr>          list every unresolved review thread, outdated ones included
+  crq dismiss <repo> <pr> <finding-id> [...] --reason "<why>"
+                                   account for a finding GitHub gives you no thread to close
   crq autoreview [--once] [--no-incremental]
                                    keep open PRs reviewed, rate-coordinated
   crq preflight [--type all|committed|uncommitted] [--base <branch>]
@@ -607,6 +888,160 @@ bug worth not having.
 The primary reviewer is fleet-wide. Its markers and command are compiled into the
 classifiers when crq starts, so a per-repo primary would mean per-repo
 classifiers — a much larger change than choosing who else runs.
+`)
+	case "drain":
+		fmt.Print(`crq drain install [--agent <path>] [--dry-run] [<repo>...]
+crq drain                            (which repositories crq may fix)
+crq drain off <repo> [--reason "<why>"]
+crq drain on <repo>
+crq drain default <repo>             (back to the fleet default, which is on)
+
+Install and start the unattended review drain: crq watches every open PR and
+starts a fix session for the ones that need one.
+
+Draining is ON for every repository in scope. That is the point of watching: a
+pull request nobody fixes is a queue that reports work and does none. Turn it off
+where you do not want crq writing code — a release branch, a repository you are
+hand-tuning — and watching continues there regardless, so reviews still arrive
+for a person to act on. The setting lives in the state ref, next to the reviewer
+overrides, because the daemon has no checkout of what it watches.
+
+It writes the fix prompt, a wrapper, and a service definition for this platform
+(a systemd user unit, or a launchd agent on macOS), turns on whatever that
+platform needs to survive a logout, and starts it. --dry-run prints the paths and
+commands without touching anything.
+
+The agent defaults to "claude" on PATH; --agent takes another path to it, or a
+wrapper around it. The installed service runs the agent with Claude Code's own
+flags (-p, --permission-mode, --output-format), so an agent with a different CLI
+needs its own wrapper script and "crq watch -- <cmd>...", which runs
+whatever argv you give it. --agent must name something runnable; a name that
+cannot be resolved is refused here rather than at the first dispatch.
+
+It is run with permissions bypassed because it is unattended — an interactive
+prompt for "go test" or "git push" would hang forever with nobody to answer it.
+What keeps that bounded is the isolated worktree, one claimed session per PR,
+CRQ_DISPATCH_MAX_ATTEMPTS per head, and the prompt's stated scope.
+
+Repositories default to CRQ_REPOS.
+`)
+	case "watch":
+		fmt.Print(`crq watch [--no-dispatch] [--once] [--interval <d>] [--max-attempts <n>] [<repo>...] [-- <cmd>...]
+
+Drive every open PR through the same crq next oracle an agent uses, emit one JSON
+line per PR per pass, and start a fix session for each PR whose action is "fix".
+
+Fixing is the default — watching a pull request nobody fixes is a queue that
+reports work and does none. Three things turn it off: --no-dispatch for one run,
+"crq drain off <repo>" for one repository, and having no fix command configured
+at all, which observes and says so rather than refusing to start.
+
+A dispatched session runs in a worktree crq checked out at that head, with:
+
+  CRQ_DISPATCH_REPO      owner/name
+  CRQ_DISPATCH_PR        the number
+  CRQ_DISPATCH_HEAD      the commit the findings are about
+  CRQ_DISPATCH_FINDINGS  path to the findings as JSON
+
+The command comes from CRQ_DISPATCH_CMD or from everything after --. It is run
+directly, not through a shell, so nothing expands that you did not write.
+
+Sessions run concurrently and OFF the decision loop, with no cap by default. The
+queue exists for the account-metered review and nothing else; fixing findings
+spends none of that allowance, so a PR whose findings are ready gets a session
+now rather than a place in a line. CRQ_DISPATCH_CONCURRENCY (or --concurrency)
+sets a cap if a machine cannot take the load — a resource valve, not a queue.
+--concurrency 0 turns a configured cap off for one run.
+
+The decisions themselves stay serial, because that is what keeps the metered
+review in one queue.
+
+crq still does not decide which findings are real — it starts the session and
+says which PR to look at; the session judges. Every dispatch is claimed under
+compare-and-swap, so two watchers cannot both work one PR, and bounded per head
+(CRQ_DISPATCH_MAX_ATTEMPTS, default 3) so a fix that keeps not working stops
+instead of spending a review round each time.
+
+Repositories default to CRQ_REPOS.
+`)
+	case "hold", "unhold":
+		fmt.Print(`crq hold <repo> <pr> --reason "<why>"
+crq unhold <repo> <pr>
+crq hold                             (lists what is held)
+
+Stop crq requesting reviews for a PR, in one write.
+
+Holding used to take two commands that could not be one: the skip marker stops
+fleet auto-review from enqueueing, crq cancel stops the pump, and between the two
+a daemon fired anyway. A hold is a single fact recorded where every firing path
+already looks, so there is no window between the halves.
+
+A hold does not cancel a review already in flight — that one is bought, and its
+findings are still worth having. It stops the next one. The reason is required:
+it is the note to whoever finds the PR stopped. A live autoreview daemon that
+advertises hold support is required, so its lease keeps an older standby out.
+`)
+	case "tidy":
+		fmt.Print(`crq tidy <repo> <pr> [--dry-run]
+
+Delete the review-trigger comments crq posted that nothing needs any more. A PR
+driven through a dozen rounds collects a dozen "@coderabbitai review" comments,
+which buries the conversation a human came to read.
+
+A comment is removed only when all three hold:
+
+  * crq WROTE it, and it still READS as that one-line command. The candidates
+    are the comments each round recorded posting, not anything matching the text
+    and not one the round adopted: a person's "@coderabbitai review" is their
+    decision to ask and not crq's to erase. crq posts under your own account, so
+    a recorded comment someone has since edited is their words, and it stays.
+  * the round that asked has PROGRESSED. A live round keeps its command, because
+    that is the comment crq adopts instead of posting another one.
+  * the bot answered it, and it predates the current head. Adoption only ever
+    considers commands newer than the head commit, so deleting one of those
+    would make the next pump post a duplicate and buy a second review; a head
+    crq cannot read leaves the check unevaluable, and everything stays. Only a
+    request crq's own retry replaced is spent whatever its timestamp says.
+
+It never deletes the bots' own comments. An auto-generated reply can be a
+rate-limit or skipped-review notice, which crq reads as evidence and surfaces as
+a finding — deleting those would destroy feedback nobody had read yet.
+
+Set CRQ_TIDY=1 to run it automatically as rounds progress under crq autoreview.
+--dry-run reports what it would remove.
+`)
+	case "threads":
+		fmt.Print(`crq threads <repo> <pr>
+
+List the PR's unresolved review threads as JSON, including the ones GitHub has
+marked OUTDATED, with .thread_id ready for crq resolve.
+
+Findings leave outdated threads out on purpose: the code they point at is gone,
+and anything carrying a thread ID blocks the round until it is resolved. But an
+outdated thread is still open on the PR — and after a push that is every thread
+from the previous head, so fixing and pushing used to leave no way to close them
+through crq at all.
+
+Read this, decide, then crq resolve (or crq decline) the ones you have answered.
+`)
+	case "dismiss":
+		fmt.Print(`crq dismiss <repo> <pr> <finding-id> [<finding-id>...] --reason "<why>"
+
+Record that you have accounted for a finding that has no review thread, so it
+stops blocking the round.
+
+crq resolve and crq decline both act on a thread. A review-body finding, a
+review-skipped notice or an outside-diff remark has none, so neither command can
+touch it — and a finding that can never drain blocks every future round, leaving
+a PR whose current head no review was ever requested for.
+
+Finding IDs come from .findings[].id. They are content-derived, not GitHub node
+IDs, so the repo and PR are required. A dismissal covers the current head only:
+push, and the next reviewer has to report it again.
+
+Use it for a finding you have judged and set aside. Fix what is real instead — and
+for a review crq was told was SKIPPED, narrowing the PR fixes the cause, while
+dismissing only records that you decided to live with it at this head.
 `)
 	case "autoreview", "auto":
 		fmt.Print(`crq autoreview [--once] [--no-incremental]
@@ -828,6 +1263,38 @@ func codeRabbitOrg(ctx context.Context, binary string) string {
 	return checkCodeRabbitAuth(ctx, tools).CurrentOrg
 }
 
+// parseReasonArgs splits positional arguments from a --reason value. An
+// unrecognized flag is an error rather than a positional: a typo like --resaon
+// must fail loudly, not silently become part of the target.
+func parseReasonArgs(args []string) (rest []string, reason string, ok bool) {
+	for i := 0; i < len(args); i++ {
+		switch arg := args[i]; {
+		case arg == "--reason":
+			if i+1 >= len(args) {
+				return nil, "", false
+			}
+			reason = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--reason="):
+			reason = strings.TrimPrefix(arg, "--reason=")
+		case strings.HasPrefix(arg, "-"):
+			return nil, "", false
+		default:
+			rest = append(rest, arg)
+		}
+	}
+	return rest, reason, true
+}
+
+func hasReasonArg(args []string) bool {
+	for _, arg := range args {
+		if arg == "--reason" || strings.HasPrefix(arg, "--reason=") {
+			return true
+		}
+	}
+	return false
+}
+
 // runReviewers handles `crq reviewers [set|clear] <repo> [flags]`.
 func runReviewers(ctx context.Context, service *crq.Service, args []string) int {
 	action, rest := "show", args
@@ -1002,6 +1469,30 @@ func parseResolveArgs(args []string) ([]string, bool) {
 	return threads, ok
 }
 
+// parseDismissArgs splits `crq dismiss <repo> <pr> <id>...` from its --reason.
+// Unlike a thread ID, a finding ID is not globally unique — it is a hash of the
+// finding's own text — so the repo and PR genuinely identify something here and
+// are required.
+func parseDismissArgs(args []string) (rest []string, reason string, ok bool) {
+	for i := 0; i < len(args); i++ {
+		switch arg := args[i]; {
+		case arg == "--reason":
+			if i+1 >= len(args) {
+				return nil, "", false
+			}
+			reason = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--reason="):
+			reason = strings.TrimPrefix(arg, "--reason=")
+		case strings.HasPrefix(arg, "-"):
+			return nil, "", false // a typo must fail, not become a finding ID
+		default:
+			rest = append(rest, arg)
+		}
+	}
+	return rest, reason, true
+}
+
 func parseDeclineArgs(args []string) (threads []string, reason string, resolve, ok bool) {
 	return parseThreadCommand(args, true)
 }
@@ -1093,8 +1584,17 @@ type doctorReport struct {
 	CodeRabbitCLI   doctorCodeRabbitCLI `json:"coderabbit_cli"`
 	Tools           map[string]toolInfo `json:"tools"`
 	Environment     doctorEnvironment   `json:"environment"`
+	OtherInstalls   []otherInstall      `json:"other_installs"`
 	AgentCommands   []string            `json:"agent_commands"`
 	Recommendations []string            `json:"recommendations"`
+}
+
+// otherInstall is another crq executable this host can run. Every one of them
+// writes the same state ref, and an older one erases what a newer one recorded.
+type otherInstall struct {
+	Path      string `json:"path"`
+	SameBuild bool   `json:"same_build"`
+	ModTime   string `json:"mod_time,omitempty"`
 }
 
 type doctorConfig struct {
@@ -1192,7 +1692,85 @@ func doctor(ctx context.Context) doctorReport {
 	if (report.Tools["cr"].Found || report.Tools["coderabbit"].Found) && !report.Environment.CodeRabbitAPIKey && !report.CodeRabbitCLI.Authenticated {
 		report.Recommendations = append(report.Recommendations, "optional: set CODERABBIT_API_KEY or run coderabbit auth login for headless local reviews")
 	}
+	report.OtherInstalls = otherInstalls()
+	for _, other := range report.OtherInstalls {
+		if !other.SameBuild {
+			report.Recommendations = append(report.Recommendations,
+				"replace or remove "+other.Path+": a different crq build writes the same state ref, and an older one erases fields this one records")
+		}
+	}
 	return report
+}
+
+// otherInstalls finds every other crq this host can run.
+//
+// They all write one state ref, and a build old enough to predate a field
+// simply drops it: one stale binary quietly erased every dispatch claim in the
+// fleet, so three fix sessions ran on one pull request at once. Version
+// tolerance carries unknown members, but only for a binary that HAS it — the one
+// that does the damage is by definition older than the mechanism meant to stop
+// it. Nothing in this build can prevent that, which is why it is worth naming.
+//
+// Compared by content, not by version: the version string only changes at a
+// release, so two builds from either side of one report the same thing and it
+// cannot tell them apart. GOPATH/bin is included whether or not it is on PATH —
+// the binary that caused this was not on the daemon's PATH and ran anyway.
+func otherInstalls() []otherInstall {
+	self, err := os.Executable()
+	if err != nil {
+		return nil
+	}
+	if resolved, rerr := filepath.EvalSymlinks(self); rerr == nil {
+		self = resolved
+	}
+	mine, err := fileDigest(self)
+	if err != nil {
+		return nil
+	}
+	dirs := filepath.SplitList(os.Getenv("PATH"))
+	if gopath := strings.TrimSpace(os.Getenv("GOPATH")); gopath != "" {
+		dirs = append(dirs, filepath.Join(gopath, "bin"))
+	} else if home, herr := os.UserHomeDir(); herr == nil {
+		dirs = append(dirs, filepath.Join(home, "go", "bin"))
+	}
+	var found []otherInstall
+	seen := map[string]bool{self: true}
+	for _, dir := range dirs {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		path := filepath.Join(dir, "crq")
+		if resolved, rerr := filepath.EvalSymlinks(path); rerr == nil {
+			path = resolved
+		}
+		if seen[path] {
+			continue
+		}
+		info, serr := os.Stat(path)
+		if serr != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+			continue
+		}
+		seen[path] = true
+		entry := otherInstall{Path: path, ModTime: info.ModTime().UTC().Format(time.RFC3339)}
+		if digest, derr := fileDigest(path); derr == nil {
+			entry.SameBuild = digest == mine
+		}
+		found = append(found, entry)
+	}
+	return found
+}
+
+func fileDigest(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	sum := sha256.New()
+	if _, err := io.Copy(sum, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(sum.Sum(nil)), nil
 }
 
 func checkCodeRabbitAuth(ctx context.Context, tools map[string]toolInfo) doctorCodeRabbitCLI {
@@ -1314,4 +1892,74 @@ func fleetDivergence(ctx context.Context) []string {
 		return nil
 	}
 	return diverged
+}
+
+// drainArgs is `crq drain install`'s parsed command line.
+type drainArgs struct {
+	agent     string
+	agentArgs string
+	dryRun    bool
+	repos     []string
+}
+
+// parseDrainArgs is shared by the pre-authentication dry-run path and the
+// install itself, so the two cannot disagree about what was asked for.
+func parseDrainArgs(args []string) (drainArgs, error) {
+	fs := flag.NewFlagSet("drain", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	agent := fs.String("agent", "", "fix agent to run: claude or codex (default: claude on PATH)")
+	agentArgs := fs.String("agent-args", "", "extra flags for the agent, e.g. model and reasoning effort")
+	dryRun := fs.Bool("dry-run", false, "print what would be written and run")
+	sub, rest := "", args
+	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+		sub, rest = rest[0], rest[1:]
+	}
+	if err := fs.Parse(rest); err != nil {
+		return drainArgs{}, err
+	}
+	if sub != "install" {
+		return drainArgs{}, errors.New("usage: crq drain install [--agent <path>] [--dry-run] [<repo>...]")
+	}
+	return drainArgs{agent: *agent, agentArgs: *agentArgs, dryRun: *dryRun, repos: fs.Args()}, nil
+}
+
+// drainSubcommand names what `crq drain ...` was asked to do. An empty string
+// means the bare command, which lists; "?" means something this command does not
+// have.
+//
+// A typo must not list. `crq drain of owner/name` reading as the bare listing
+// would report the repository as drained and leave it drained — an answer to a
+// question nobody asked, in place of the instruction that was meant.
+func drainSubcommand(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	switch args[0] {
+	case "on", "off", "default", "list", "install":
+		return args[0]
+	}
+	return "?"
+}
+
+// parseDrainReason splits `<repo>` from an optional --reason value. An
+// unrecognized flag is an error rather than a positional: a typo like --resaon
+// must fail loudly, not silently become the repository name.
+func parseDrainReason(args []string) (rest []string, reason string, ok bool) {
+	for i := 0; i < len(args); i++ {
+		switch arg := args[i]; {
+		case arg == "--reason":
+			if i+1 >= len(args) {
+				return nil, "", false
+			}
+			reason = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--reason="):
+			reason = strings.TrimPrefix(arg, "--reason=")
+		case strings.HasPrefix(arg, "-"):
+			return nil, "", false
+		default:
+			rest = append(rest, arg)
+		}
+	}
+	return rest, reason, true
 }

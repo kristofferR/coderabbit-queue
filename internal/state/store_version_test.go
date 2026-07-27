@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -61,14 +62,54 @@ func TestLoadRefusesStateFromANewerBinary(t *testing.T) {
 	}
 }
 
-// A v3 payload this binary cannot decode is a shape change inside the current
-// version, not an obsolete one — the rounds it describes are live.
+// A current or migratable payload this binary cannot decode describes live
+// rounds and must not be discarded.
 func TestLoadRefusesUndecodableCurrentState(t *testing.T) {
-	if _, _, err := versionStore(t, `{"v":3,"rounds":"not-a-map"}`).Load(context.Background()); err == nil {
-		t.Fatal("an undecodable v3 payload must be refused, not reinitialized over")
+	for _, version := range []int{SchemaVersion - 1, SchemaVersion} {
+		payload := fmt.Sprintf(`{"v":%d,"rounds":"not-a-map"}`, version)
+		if _, _, err := versionStore(t, payload).Load(context.Background()); err == nil {
+			t.Fatalf("an undecodable v%d payload must be refused, not reinitialized over", version)
+		}
 	}
 	if _, _, err := versionStore(t, `not json at all`).Load(context.Background()); err == nil {
 		t.Fatal("an unparseable payload must be refused")
+	}
+}
+
+func TestLoadMigratesV3WithoutLosingLiveRounds(t *testing.T) {
+	payload := `{
+		"v":3,
+		"rev":7,
+		"next_seq":2,
+		"rounds":{
+			"owner/repo#7":{
+				"repo":"owner/repo",
+				"pr":7,
+				"head":"abcdef123",
+				"seq":1,
+				"phase":"queued",
+				"enqueued_at":"2026-07-26T12:00:00Z"
+			}
+		},
+		"account":{"scope":"owner"},
+		"future_top_level":{"keep":true}
+	}`
+	st, _, err := versionStore(t, payload).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Version != SchemaVersion {
+		t.Errorf("version = %d, want migrated v%d", st.Version, SchemaVersion)
+	}
+	if round := st.Round("owner/repo", 7); round == nil || round.Head != "abcdef123" {
+		t.Fatalf("live v3 round was lost during migration: %+v", round)
+	}
+	encoded, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), "future_top_level") {
+		t.Fatalf("unknown v3 state was lost during migration: %s", encoded)
 	}
 }
 

@@ -8,7 +8,7 @@ CLI contract read `README.md` and `llms.txt`; for usage read `crq help`.
 ## Package layout
 
 Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state ← crq`,
-`gh ← {state, crq}`. The engine does no I/O by construction.
+`gh ← {state, crq}`, `workspace ← crq`. The engine does no I/O by construction.
 
 - `internal/dialect/` — ALL bot-text knowledge, zero deps. CodeRabbit/Codex
   completion, rate-limit, paused, in-progress, failed, summary-only-plan,
@@ -26,20 +26,22 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
   The only package (besides dialect) allowed to say "rate limit".
   `ListCheckRuns` fetches a ref's check runs (envelope-paged, ETag'd); matching
   them to a bot is dialect's `ClassifyCheckRun`, never gh's.
-- `internal/state/` — persisted schema v3: one `Round` per PR, one global
+- `internal/workspace/` — reusable repository mirrors, detached PR worktrees,
+  credential-safe Git execution, stale-worktree pruning, and mirror migration.
+  Owns persistent filesystem and process I/O for checkouts; `crq` supplies only
+  configured roots and a current-token resolver.
+- `internal/state/` — persisted schema v4: one `Round` per PR, one global
   `FireSlot`, the CodeRabbit `AccountQuota`, an `Archive` ring. Round transition
-  methods, the CAS store, and dashboard rendering. `Round.CoBots` holds per-
+  methods, durable tombstones for tidied trigger comments, the CAS store, and
+  dashboard rendering. `Round.CoBots` holds per-
   co-reviewer trigger bookkeeping; Codex's entry is **dual-written** to the
   legacy `Codex*` round fields because the fleet shares one state ref across
   binary versions (`Normalize` folds them back on load). `Round` and `State` also
   **round-trip unknown JSON members** (`tolerant.go`), so a field a newer binary
   added survives being read and rewritten by an older one — which is what makes
-  adding one safe without another dual-write, and without a schema bump (an
-  unknown version auto-reinitialises and would erase the fleet's rounds).
-  `FireSlot.HoldUntil` is the compatibility exception for the binary immediately
-  before nested slot tolerance: its deadline is mirrored at the tolerant top
-  level and in the legacy pacing anchor so that writer both preserves and
-  honours it during a rolling deployment.
+  ordinary additions safe without another dual-write or schema bump. Schema v4
+  is the deliberate exception: older v3 clients refuse it, fencing pumping
+  clients that cannot enforce administrative holds.
 - `internal/engine/` — PURE decision logic, `now` passed in, no ctx/gh:
   `DecideFire` (the single fire owner), `Progress` (fired/reviewing round
   transitions), `Completion` (the one "is the round done?"), `BlockingFindings`
@@ -121,7 +123,9 @@ Daemon `Pump` = Progress on the slot round + DecideFire on the next eligible.
 `crq loop` (Wait + Feedback) = the same DecideFire to fire, then `Completion` +
 findings filters to converge. The wait IS the round: a fired/reviewing round with
 a `WaitDeadline` is the in-flight wait. Loop exit codes are frozen: 0 converged/
-skipped, 10 findings, 2 timeout.
+skipped/held, 10 findings, 2 timeout. A hold is terminal for the run and ends
+only when a person lifts it, so it is never 2 — that code means the wait
+elapsed, and a caller scripted against it would retry for ever.
 
 ## Adding a new bot-message format
 

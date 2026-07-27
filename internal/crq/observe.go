@@ -30,8 +30,9 @@ type observation struct {
 //
 // round anchors the round-relative facts: reactions target its fired command,
 // the adoption cutoff is its LastAttemptAt, and reactions/thumbs-up are fetched
-// only for a round that has fired.
-func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, round *Round, now time.Time) (observation, error) {
+// only for a round that has fired. posted restores the chronological position
+// of crq-authored trigger comments that Tidy has removed from GitHub.
+func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, round *Round, posted []engine.CommandComment, now time.Time) (observation, error) {
 	pull, err := s.gh.GetPull(ctx, repo, pr)
 	if err != nil {
 		return observation{}, err
@@ -90,8 +91,30 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 		ReviewCommand: cfg.ReviewCommand,
 		CoReviewers:   cfg.classifierCoReviewers(),
 	}
+	presentComments := make(map[int64]bool, len(comments))
 	for _, c := range comments {
+		presentComments[c.ID] = true
 		o.eng.Events = append(o.eng.Events, classifier.Classify(c.User.Login, c.Body, c.ID, c.CreatedAt, c.UpdatedAt))
+	}
+	// Tidy removes spent trigger comments, but command/reply pairing still needs
+	// their place in the chronological FIFO. PostedCommands is the persisted
+	// proof of the comments crq wrote, so restore only commands no longer on the
+	// PR; a live comment remains classified from its actual body above.
+	for _, cmd := range posted {
+		if presentComments[cmd.ID] {
+			continue
+		}
+		ev := dialect.BotEvent{
+			Kind:      dialect.EvCoCommand,
+			CommentID: cmd.ID,
+			CreatedAt: cmd.CreatedAt,
+			For:       dialect.NormalizeBotName(cmd.Bot),
+		}
+		if dialect.NormalizeBotName(cmd.Bot) == dialect.NormalizeBotName(cfg.Bot) {
+			ev.Kind = dialect.EvCommand
+			ev.For = ""
+		}
+		o.eng.Events = append(o.eng.Events, ev)
 	}
 
 	// Check runs are the only place a silent-clean Bugbot round exists, and they
@@ -125,7 +148,11 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 	// Reactions and Codex thumbs-up only matter for a round that has fired.
 	if round != nil && round.FiredAt != nil {
 		cutoff := round.FiredAt.UTC()
-		if round.CommandID != 0 {
+		// A completed round remains as the reviewed-head marker after Tidy
+		// deletes its trigger, and an adopted command can be removed by its
+		// author too. Reactions on a missing issue comment return 404, and no
+		// reaction can appear after the comment has gone, so skip that read.
+		if round.CommandID != 0 && presentComments[round.CommandID] {
 			reactions, err := s.gh.ListCommentReactions(ctx, repo, round.CommandID)
 			if err != nil {
 				return observation{}, err

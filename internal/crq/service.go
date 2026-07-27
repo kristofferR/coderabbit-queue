@@ -27,6 +27,7 @@ type GitHubAPI interface {
 	GetCommit(context.Context, string, string) (ghapi.Commit, error)
 	ListReviews(context.Context, string, int) ([]ghapi.Review, error)
 	ListIssueComments(context.Context, string, int) ([]ghapi.IssueComment, error)
+	GetIssueComment(context.Context, string, int64) (ghapi.IssueComment, error)
 	ListIssueCommentsPage(context.Context, string, int, int, int) ([]ghapi.IssueComment, error)
 	ListReviewComments(context.Context, string, int) ([]ghapi.ReviewComment, error)
 	ListIssueReactions(context.Context, string, int) ([]ghapi.Reaction, error)
@@ -56,6 +57,10 @@ type Service struct {
 	// lastParkedSweep rotates sweepParkedClosed's candidate across pumps (see
 	// there); in-memory only, single-writer (the pump caller).
 	lastParkedSweep string
+	// watchOffset rotates where a watch pass starts, so a PR at the tail is not
+	// starved of dispatch slots forever by the ones ahead of it; in-memory only,
+	// single-writer (the watch caller).
+	watchOffset int
 	// scanOffset rotates the bounded quota-free rescue scan's window so a round
 	// past the first few is not starved forever; in-memory only, same writer.
 	scanOffset int
@@ -105,6 +110,102 @@ func (s *Service) clock() time.Time {
 // dialect constant) and is surfaced via AccountQuota, not the sticky Warn field.
 const warnRateLimited = dialect.ReasonRateLimited
 
+const leaderCapabilityHolds = "administrative-holds"
+
+// Hold takes a PR out of the review queue in one write.
+//
+// Holding used to need two commands that could not be one: the skip marker
+// stops fleet auto-review from enqueueing, `crq cancel` stops the pump, and
+// between the two a daemon fired anyway. A hold is one fact, recorded where
+// every firing path already looks, so there is no window between the halves.
+//
+// It does not cancel a round already in flight: that review is bought and its
+// findings are still worth having. It stops the next one.
+func (s *Service) Hold(ctx context.Context, repo string, pr int, reason string) (HoldResult, error) {
+	repo = NormalizeRepo(repo)
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return HoldResult{}, errors.New("a hold needs a reason: it is a note to whoever finds the PR stopped")
+	}
+	now := s.clock().UTC()
+	result := HoldResult{Repo: repo, PR: pr, Held: true, Reason: reason, By: s.cfg.Host, At: &now}
+	if s.cfg.DryRun {
+		return result, nil
+	}
+	state, err := s.store.Update(ctx, func(st *State) error {
+		// An older daemon preserves Holds as unknown JSON but cannot enforce it.
+		// Require a capable live leader: without one, an older standby could
+		// acquire the expired/empty lease immediately after this write.
+		if st.Leader == nil || !st.Leader.ExpiresAt.After(now) || !st.LeaderHasCapability(leaderCapabilityHolds) {
+			return errors.New("administrative holds require a live hold-capable autoreview leader; start or upgrade the daemon and try again")
+		}
+		if triggerPostClaimed(st.Round(repo, pr)) {
+			return errors.New("a review trigger is already being posted; wait for it to finish before holding the PR")
+		}
+		st.Hold(repo, pr, reason, s.cfg.Host, now)
+		return nil
+	})
+	if err != nil {
+		return HoldResult{}, err
+	}
+	s.sync(ctx, state)
+	if s.log != nil {
+		s.log.Printf("%s#%d held: %s", repo, pr, reason)
+	}
+	return result, nil
+}
+
+// Unhold puts a PR back in the queue.
+func (s *Service) Unhold(ctx context.Context, repo string, pr int) (HoldResult, error) {
+	repo = NormalizeRepo(repo)
+	result := HoldResult{Repo: repo, PR: pr, Held: false}
+	if s.cfg.DryRun {
+		return result, nil
+	}
+	released := false
+	state, err := s.store.Update(ctx, func(st *State) error {
+		if !st.Unhold(repo, pr) {
+			return ErrNoChange
+		}
+		released = true
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrNoChange) {
+		return HoldResult{}, err
+	}
+	if released {
+		s.sync(ctx, state)
+		if s.log != nil {
+			s.log.Printf("%s#%d released", repo, pr)
+		}
+	}
+	return result, nil
+}
+
+// triggerPostClaimed reports the two claim states after which Hold cannot
+// promise that no new review command will be posted. The hold and each claim
+// are CAS writes, so checking them in the hold write makes either ordering
+// safe: an existing claim rejects the hold, and an existing hold rejects a
+// later claim.
+func triggerPostClaimed(r *Round) bool {
+	if r == nil {
+		return false
+	}
+	if r.Phase == PhaseReserved {
+		return true
+	}
+	for _, co := range r.CoBots {
+		// A claim's retry lease may expire while its original poster is still
+		// inside the transport's unbounded network retry. Until a command id is
+		// recorded, that worker can still resume and post, so Hold cannot promise
+		// that the PR is trigger-free.
+		if co.ClaimedAt != nil {
+			return true
+		}
+	}
+	return false
+}
+
 type EnqueueResult struct {
 	Repo          string `json:"repo"`
 	PR            int    `json:"pr"`
@@ -113,6 +214,12 @@ type EnqueueResult struct {
 	Deduped       bool   `json:"deduped"`
 	Head          string `json:"head,omitempty"`
 	Seq           int64  `json:"seq,omitempty"`
+	// Held says the PR is out of the queue on purpose. A caller that treats a
+	// no-op as "try again" would otherwise spin: nothing about a held PR changes
+	// by asking again.
+	Held bool `json:"held,omitempty"`
+	// Reason explains a no-op, which today means the PR is held.
+	Reason string `json:"reason,omitempty"`
 }
 
 // Enqueue records a review round for repo#pr's current head. A round already
@@ -131,6 +238,13 @@ func (s *Service) Enqueue(ctx context.Context, repo string, pr int) (EnqueueResu
 	result.Head = head
 	state, err := s.store.Update(ctx, func(st *State) error {
 		now := s.clock()
+		if h, held := st.HeldPR(repo, pr); held {
+			// Enqueueing a held PR would queue a round nothing may fire, which
+			// reads on the dashboard as work waiting its turn.
+			result.Held = true
+			result.Reason = "held: " + h.Reason
+			return ErrNoChange
+		}
 		r := st.Round(repo, pr)
 		if r != nil && r.Head == head {
 			// A PR reopened after its reviewers changed: the completed round is a
@@ -192,6 +306,9 @@ func (s *Service) enqueueBatch(ctx context.Context, items []queueCandidate) erro
 		added := 0
 		for _, it := range items {
 			repo := NormalizeRepo(it.Repo)
+			if _, held := st.HeldPR(repo, it.PR); held {
+				continue
+			}
 			if r := st.Round(repo, it.PR); r != nil {
 				if r.Head == it.Head {
 					if requeueIfReviewersChanged(st, r) {
@@ -260,6 +377,11 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		if free, handled, err := s.sweepQuotaFree(ctx, st, s.clock(), slot.Repo, slot.PR); err != nil {
 			return PumpResult{}, err
 		} else if handled {
+			// The quota-free result is the one Pump exposes to its caller, so
+			// preserve the cleanup hook for the slot result it replaces.
+			if err := s.tidyAfterPump(ctx, res); err != nil {
+				return res, err
+			}
 			return free, nil
 		}
 		return res, nil
@@ -273,9 +395,9 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		st = updated
 	}
 
-	// 2b. A PR closed during a cooldown parks invisibly (NextEligible skips
-	//    awaiting_retry until RetryAt): sweep the oldest parked round's PR state
-	//    so closure abandons it now instead of after the window.
+	// 2b. A PR closed during a cooldown or hold parks invisibly (NextEligible
+	//    skips it): sweep one such round's PR state so closure abandons it now
+	//    instead of waiting for the cooldown or an operator to release the hold.
 	if res, handled, err := s.sweepParkedClosed(ctx, st); err != nil {
 		return PumpResult{}, err
 	} else if handled {
@@ -315,9 +437,18 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		return PumpResult{Action: "idle"}, nil
 	}
 	cfg := s.cfgFor(st, next.Repo)
-	obs, err := s.observe(ctx, cfg, next.Repo, next.PR, next, now)
+	obs, err := s.observe(ctx, cfg, next.Repo, next.PR, next, collectPosted(st, next.Repo, next.PR).commands, now)
 	if err != nil {
 		return PumpResult{}, err
+	}
+	// Record a rate-limit notice before deciding, whichever round it answered.
+	// A session's push supersedes the round that asked, and the reply used to be
+	// archived unread — so crq believed the account was free and posted the
+	// command again minutes after being told to wait.
+	if updated, err := s.recordObservedBlock(ctx, obs, st, now); err != nil {
+		return PumpResult{}, err
+	} else if updated != nil {
+		st = *updated
 	}
 	global := s.global(st, now)
 	decision := engine.DecideFire(global, *next, obs.eng, now, cfg.policy())
@@ -380,7 +511,7 @@ func (s *Service) sweepQuotaFree(ctx context.Context, st State, now time.Time, s
 		// the cost instead.
 		scanned++
 		cfg := s.cfgFor(st, round.Repo)
-		obs, err := s.observe(ctx, cfg, round.Repo, round.PR, &round, now)
+		obs, err := s.observe(ctx, cfg, round.Repo, round.PR, &round, collectPosted(st, round.Repo, round.PR).commands, now)
 		if err != nil {
 			continue
 		}
@@ -416,8 +547,11 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 	if round == nil || !round.FireEligible(now) {
 		return PumpResult{}, false, nil
 	}
+	if _, held := st.HeldPR(repo, pr); held {
+		return PumpResult{}, false, nil
+	}
 	cfg := s.cfgFor(st, repo)
-	obs, err := s.observe(ctx, cfg, repo, pr, round, now)
+	obs, err := s.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, now)
 	if err != nil {
 		return PumpResult{}, false, err
 	}
@@ -433,6 +567,155 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 		s.log.Printf("%s#%d resolved without the review queue: %s", repo, pr, d.Reason)
 	}
 	return res, true, nil
+}
+
+// recordObservedBlock folds any rate-limit notice in this observation into the
+// shared account quota, independent of which round it answered.
+//
+// Progress only derives the window for a round that still exists and fired
+// before the notice. Neither survives a fix session's push: the head moves, the
+// round is superseded, and the reply it was waiting for is archived unread. The
+// allowance is not a property of a round, so any current notice from the primary
+// counts here. AcceptAccountBlock still decides whether it replaces the standing
+// window, and never shortens it.
+func (s *Service) recordObservedBlock(ctx context.Context, obs observation, st State, now time.Time) (*State, error) {
+	blk := engine.ObservedAccountBlock(obs.eng, s.cfg.policy(), st.Account, now)
+	if blk == nil || s.cfg.DryRun || !observedAccountBlockChanges(st.Account, blk) {
+		return nil, nil
+	}
+	updated, err := s.store.Update(ctx, func(w *State) error {
+		if !observedAccountBlockChanges(w.Account, blk) {
+			return ErrNoChange
+		}
+		applyAccountBlock(w, blk, now)
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrNoChange) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	// Like every other writer of this window: the dashboard is where an operator
+	// reads whether the account is available, and the decision that follows this
+	// is usually FireNo — which writes nothing further, leaving the issue claiming
+	// a free account for the whole block while state and `crq status` say
+	// otherwise.
+	s.sync(ctx, updated)
+	if s.log != nil {
+		s.log.Printf("account blocked until %s (observed, not tied to a round)", blk.Until.UTC().Format(time.RFC3339))
+	}
+	return &updated, nil
+}
+
+// observedAccountBlockChanges accepts a longer window, or a distinct notice
+// whose shorter window the engine has already clamped to the standing block.
+// The latter still has to advance the notice watermark so it cannot become a
+// fresh fallback block when the standing window expires.
+func observedAccountBlockChanges(q AccountQuota, blk *engine.AccountBlock) bool {
+	if engine.AcceptAccountBlock(q.BlockedUntil, blk.Until) {
+		return true
+	}
+	if q.BlockedUntil == nil || !blk.Until.Equal(*q.BlockedUntil) || blk.CommentID == 0 {
+		return false
+	}
+	if q.RLCommentUpdated != nil && !blk.CommentUpdated.After(*q.RLCommentUpdated) {
+		return false
+	}
+	if blk.CommentID != q.RLCommentID || q.RLCommentUpdated == nil {
+		return true
+	}
+	return true
+}
+
+// recordDismissal is the effects executor for `crq dismiss`: the CAS write that
+// records which findings a round has accounted for. Dismiss decides WHETHER a
+// dismissal is legitimate; this performs it, so the write surface stays in one
+// file with every other one.
+//
+// seenSeq is the Seq of the round Dismiss read the findings against (0 for
+// none), which is what separates a round left on the PREVIOUS head — the
+// ordinary state after a push — from one another worker moved forward while
+// this call was deciding. Seq is the state's own counter rather than a
+// timestamp, so the two cannot be confused by a fleet whose hosts disagree
+// about the time.
+//
+// allowCreate says whether a round may be created for this head. It is false
+// when other blocking findings remain, because a fresh round is fire-eligible
+// and DecideFire — which never sees findings — could not hold it back.
+//
+// A round tracking a DIFFERENT head is refused when it is not the one Dismiss
+// read: the head moved after the findings were read, so this decision is about
+// a commit nobody is looking at any more, and superseding would archive the
+// newer round and point the queue back at the stale head.
+func (s *Service) recordDismissal(ctx context.Context, repo string, pr int, head string, ids []string, reason string, allowCreate bool, seenSeq int64) (dismissed, already []string, err error) {
+	mutate := func(st *State) error {
+		round := st.Round(repo, pr)
+		switch {
+		case round != nil && round.Head != head && round.Seq != seenSeq:
+			// Not the round Dismiss read: something moved the PR forward
+			// underneath this call, so the decision is about a commit nobody is
+			// looking at any more.
+			return fmt.Errorf("%s#%d moved to %s while dismissing; re-read the findings", repo, pr, round.Head)
+		case !allowCreate && (round == nil || round.Head != head ||
+			(engine.CanStillFire(*round) && !round.DispatchHeld(s.clock()))):
+			// The guard is about whether a FIRE-ELIGIBLE round would exist with
+			// other findings still open, not about whether a round object
+			// exists. A queued round is just as dangerous as a new one: Pump can
+			// hand it to DecideFire, which sees no findings and cannot enforce
+			// drain-first. A live dispatch claim is the exception: it excludes
+			// this exact round from Pump until the session pushes or releases
+			// it, so a session may dismiss one finding at a time. So is a round
+			// on the previous head, because the supersede below would replace it
+			// with a fresh queued one.
+			return fmt.Errorf("%s#%d has other unaddressed findings at %s: dismiss or resolve them in the same pass, so no round is queued while work is open", repo, pr, head)
+		case round == nil:
+			var err error
+			if round, err = st.NewRound(repo, pr, head, s.clock()); err != nil {
+				return err
+			}
+		case round.Head != head:
+			// The ordinary state after a push: the stored round is still on the
+			// PREVIOUS head, because `crq next` returns on a current-head finding
+			// before it enqueues. Refusing here would leave the new head in the
+			// exact drain-first deadlock this command exists to end.
+			var err error
+			if round, err = st.Supersede(repo, pr, head, s.clock()); err != nil {
+				return err
+			}
+		}
+		// Reset on every CAS attempt: a retry replays this closure, and appending
+		// to the outer slices would report each dismissal once per attempt.
+		dismissed, already = []string{}, nil
+		for _, id := range ids {
+			if round.Dismiss(id, reason) {
+				dismissed = append(dismissed, id)
+			} else {
+				already = append(already, id)
+			}
+		}
+		st.PutRound(*round)
+		return nil
+	}
+	// A dry run must report what a real one would do, refusals included. The one
+	// way it cannot drift from the write is to BE the write, run against a
+	// throwaway copy of the state that nothing stores.
+	if s.cfg.DryRun {
+		st, _, err := s.store.Load(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := mutate(&st); err != nil {
+			return nil, nil, err
+		}
+		return dismissed, already, nil
+	}
+	state, err := s.store.Update(ctx, mutate)
+	if err != nil {
+		return nil, nil, err
+	}
+	s.sync(ctx, state)
+	return dismissed, already, nil
 }
 
 // applyAccountBlock records an observed account-quota block, whatever observed
@@ -506,7 +789,7 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 		return PumpResult{}, err
 	}
 	cfg := s.cfgFor(st, slot.Repo)
-	obs, err := s.observe(ctx, cfg, slot.Repo, slot.PR, &slot, now)
+	obs, err := s.observe(ctx, cfg, slot.Repo, slot.PR, &slot, collectPosted(st, slot.Repo, slot.PR).commands, now)
 	if err != nil {
 		return PumpResult{}, err
 	}
@@ -605,6 +888,20 @@ func sameRound(r *Round, want Round) bool {
 	return r != nil && r.Seq == want.Seq && r.Head == want.Head
 }
 
+// firable is the fire guard every reserving CAS uses: eligible, and not held.
+//
+// Selecting the round and writing the reservation are two steps, and a hold that
+// commits between them would otherwise be too late — the daemon has already
+// decided. Re-reading it here is what makes `crq hold` mean something the moment
+// it returns, rather than from the next pass onward.
+func firable(st *State, r *Round, now time.Time) bool {
+	if r == nil || !r.FireEligible(now) {
+		return false
+	}
+	_, held := st.HeldPR(r.Repo, r.PR)
+	return !held
+}
+
 // applyAccountBlock ports requeueInflight's account-quota bookkeeping. The window
 // (including same-comment reuse) was resolved by the engine, so only the store
 // write happens here.
@@ -615,7 +912,8 @@ func applyAccountBlock(st *State, blk *engine.AccountBlock, now time.Time) {
 	st.Account.Remaining = &zero
 	st.Account.Source = "warning"
 	st.Account.CheckedAt = &now
-	if blk.CommentID != 0 {
+	if blk.CommentID != 0 &&
+		(st.Account.RLCommentUpdated == nil || blk.CommentUpdated.After(*st.Account.RLCommentUpdated)) {
 		st.Account.RLCommentID = blk.CommentID
 		u := blk.CommentUpdated.UTC()
 		st.Account.RLCommentUpdated = &u
@@ -660,7 +958,7 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 		return st, nil
 	}
 	cfg := s.cfgFor(st, target.Repo)
-	obs, err := s.observe(ctx, cfg, target.Repo, target.PR, target, now)
+	obs, err := s.observe(ctx, cfg, target.Repo, target.PR, target, collectPosted(st, target.Repo, target.PR).commands, now)
 	if err != nil {
 		if s.log != nil {
 			s.log.Printf("warning: reviewing-round sweep for %s#%d failed: %v", target.Repo, target.PR, err)
@@ -686,6 +984,12 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 		return st, err
 	}
 	s.sync(ctx, updated)
+	// A round completed here is invisible to the caller — Pump goes on to report
+	// whatever it fires next, or idle — so this is the only moment that knows the
+	// PR's trigger comments are spent.
+	if err := s.tidyProgressed(ctx, target.Repo, target.PR); err != nil {
+		return updated, err
+	}
 	return updated, nil
 }
 
@@ -790,7 +1094,7 @@ func (s *Service) dedupeRound(ctx context.Context, cfg Config, round Round, now 
 		// SetReviewers cannot see it coming, the round is still queued when the
 		// override lands (requeuing a queued round is a no-op), yet the marker is
 		// exactly what stops the newly required reviewer from ever being asked.
-		if !sameRound(r, round) || !r.FireEligible(now) || overrideChanged(st, round.Repo, cfg) {
+		if !sameRound(r, round) || !firable(st, r, now) || overrideChanged(st, round.Repo, cfg) {
 			return ErrNoChange
 		}
 		if err := r.Dedupe(now); err != nil {
@@ -859,7 +1163,7 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 			r := st.Round(round.Repo, round.PR)
 			// postCo below was chosen by cfg's reviewers; a change since means the
 			// claims written here are for a set the operator has replaced.
-			if !sameRound(r, round) || !r.FireEligible(now) || overrideChanged(st, round.Repo, cfg) {
+			if !sameRound(r, round) || !firable(st, r, now) || overrideChanged(st, round.Repo, cfg) {
 				return ErrNoChange
 			}
 			if err := r.Reserve(token, s.cfg.WriterID(), now); err != nil {
@@ -923,7 +1227,7 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 			return ErrNoChange
 		}
 		r := st.Round(round.Repo, round.PR)
-		if !sameRound(r, round) || !r.FireEligible(now) || overrideChanged(st, round.Repo, cfg) {
+		if !sameRound(r, round) || !firable(st, r, now) || overrideChanged(st, round.Repo, cfg) {
 			return ErrNoChange
 		}
 		if err := r.Reserve(token, s.cfg.WriterID(), now); err != nil {
@@ -1036,7 +1340,7 @@ func (s *Service) fireCoOnly(ctx context.Context, cfg Config, round Round, login
 		r := st.Round(round.Repo, round.PR)
 		// The claim is what authorizes the posts below, so the reviewer set that
 		// chose them must still be the configured one when it commits.
-		if !sameRound(r, round) || !r.FireEligible(now) || overrideChanged(st, round.Repo, cfg) {
+		if !sameRound(r, round) || !firable(st, r, now) || overrideChanged(st, round.Repo, cfg) {
 			return ErrNoChange
 		}
 		for _, login := range logins {
@@ -1127,6 +1431,11 @@ func (s *Service) fireCoOnly(ctx context.Context, cfg Config, round Round, login
 			st.Warn = ""
 		}
 		for _, p := range posts {
+			// Recorded against the co-reviewer it was addressed to, including the
+			// one anchoring the round: a co-only round's CommandID is that same
+			// comment, and calling it the primary's would let unrelated CodeRabbit
+			// activity pass for the answer this trigger is still waiting on.
+			r.RecordPosted(p.login, p.id, p.at)
 			if r.Co(p.login).CommandID == 0 {
 				r.SetCoCommand(p.login, p.id, p.at)
 			}
@@ -1229,7 +1538,7 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		changed = false
 		r := st.Round(round.Repo, round.PR)
-		if !sameRound(r, round) || !r.FireEligible(now) {
+		if !sameRound(r, round) || !firable(st, r, now) {
 			return ErrNoChange
 		}
 		deadline := now.Add(s.cfg.FeedbackWaitTimeout)
@@ -1275,7 +1584,12 @@ func (s *Service) recordFire(ctx context.Context, round Round, token string, com
 			if err := r.Fire(commandID, firedAt); err != nil {
 				return err
 			}
+			// Recorded as crq's own whatever the round then does with it: the
+			// comment is on the PR either way, and the record is the only proof
+			// crq (rather than a person) wrote it.
+			r.RecordPosted(s.cfg.Bot, commandID, firedAt)
 			for _, p := range coPosts {
+				r.RecordPosted(p.login, p.id, p.at)
 				if r.Co(p.login).CommandID == 0 {
 					r.SetCoCommand(p.login, p.id, p.at)
 				}
@@ -1354,6 +1668,7 @@ func (s *Service) fireCoTrigger(ctx context.Context, cfg Config, round Round, lo
 		if !sameRound(r, round) {
 			return ErrNoChange
 		}
+		r.RecordPosted(login, id, at)
 		if r.Co(login).CommandID == 0 {
 			r.SetCoCommand(login, id, at)
 		} else {
@@ -1408,6 +1723,9 @@ func (s *Service) fireCoDeferred(ctx context.Context, cfg Config, round Round, d
 		// co-reviewers cfg chose, so a reviewer change since voids them.
 		if !sameRound(r, round) || (r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry) ||
 			overrideChanged(st, round.Repo, cfg) {
+			return ErrNoChange
+		}
+		if _, held := st.HeldPR(round.Repo, round.PR); held {
 			return ErrNoChange
 		}
 		changed := false
@@ -1505,6 +1823,9 @@ func (s *Service) selfHealCoReviewers(ctx context.Context, cfg Config, round Rou
 			if !sameRound(r, round) || r.Co(login).CommandID != 0 || overrideChanged(st, round.Repo, cfg) {
 				return ErrNoChange
 			}
+			if _, held := st.HeldPR(round.Repo, round.PR); held {
+				return ErrNoChange
+			}
 			if c := r.Co(login); c.ClaimedAt != nil && now.Sub(c.ClaimedAt.UTC()) < triggerClaimTTL {
 				return ErrNoChange
 			}
@@ -1583,15 +1904,39 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 			st.Account.RLCommentID = rlID
 			st.Account.RLCommentUpdated = rlUpdated
 		}
-		// An inconclusive probe (still awaiting a calibration reply) carries no
-		// BlockedUntil, but it is not evidence the account is clear. Preserve a
-		// still-active block until a conclusive reply lands — otherwise the block
-		// vanishes after CalibrationTTL and Pump fires queued reviews inside the
-		// original window, recreating the duplicate attempts this whole system
-		// exists to prevent.
-		if quota.CalibAskedAt != nil && prevBlock != nil && prevBlock.After(now) {
+		// A calibration reading must not SHORTEN a standing block, which is the
+		// rule every other writer follows (engine.AcceptAccountBlock) and the one
+		// place that bypassed it.
+		//
+		// Two ways a probe reports no block: it is still awaiting a reply, or its
+		// reply carried no parseable reset. Neither is evidence the account is
+		// clear, and both used to erase a window a PR's own rate-limit notice had
+		// stated — after which Pump fires inside that window, which is the
+		// duplicate-review behaviour this whole system exists to prevent.
+		//
+		// A LONGER window from the probe still wins: that is new information.
+		//
+		// So does a reply that states reviews are left. That is not "no block
+		// observed", it is the account reporting itself available — restoring the
+		// old window over it would leave state saying both at once and hold every
+		// metered round until a window the bot has just contradicted expires.
+		reviewsLeft := st.Account.Remaining != nil && *st.Account.Remaining > 0 &&
+			st.Account.BlockedUntil == nil && st.Account.CalibAskedAt == nil
+		if reviewsLeft {
+			// The reading ends the old window, but the notice watermark must
+			// survive. Otherwise an unchanged, windowless historical notice looks
+			// new on the next observation and recreates a fallback block forever.
+			// Reuse is still visible because CodeRabbit advances UpdatedAt when it
+			// edits the comment for a later fire.
+			st.Account.RLCommentID = rlID
+			st.Account.RLCommentUpdated = rlUpdated
+		}
+		if !reviewsLeft && prevBlock != nil && prevBlock.After(now) &&
+			(st.Account.BlockedUntil == nil || prevBlock.After(*st.Account.BlockedUntil)) {
 			st.Account.BlockedUntil = prevBlock
-			st.Account.Remaining = prevRemaining
+			if st.Account.Remaining == nil {
+				st.Account.Remaining = prevRemaining
+			}
 		}
 		if st.Warn == warnRateLimited && (st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.After(now)) {
 			st.Warn = ""
@@ -1876,7 +2221,7 @@ func isCommentCapError(err error) bool {
 
 // Wait enqueues repo#pr and pumps until a review fires for its head (code 0),
 // current-head feedback is already available (code 3), the wait times out (code
-// 2), or the PR is closed (code 2). The wait IS the round: a fired/reviewing
+// 2), or the PR is closed or held (code 2). The wait IS the round: a fired/reviewing
 // round for the head is the in-flight wait, a completed round is the "already
 // reviewed" dedup marker, and firedMarker/waitingHead read those states off the
 // round rather than a separate wait record.
@@ -1906,6 +2251,21 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 			result, err := s.Enqueue(ctx, repo, pr)
 			if err != nil {
 				return PumpResult{}, 1, err
+			}
+			if result.Held {
+				// Code 0, not 2. The loop's exit codes are frozen — 0 converged
+				// or skipped, 10 findings, 2 TIMEOUT — and a hold is none of the
+				// last: it is indefinite and ends when a person says so, while 2
+				// tells every caller scripted against that contract to retry. It
+				// is the same shape as "skipped": terminal for this run, and the
+				// status field is what says which.
+				return PumpResult{
+					Action: "held",
+					Repo:   repo,
+					PR:     pr,
+					Head:   result.Head,
+					Reason: result.Reason,
+				}, 0, nil
 			}
 			enqueued = result.Queued || result.AlreadyQueued
 			if result.Deduped {
@@ -2015,6 +2375,20 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 		if err != nil {
 			return PumpResult{}, 1, err
 		}
+		if hold, held := state.HeldPR(repo, pr); held {
+			// Terminal with code 0, as above: a hold is not an elapsed wait.
+			head := ""
+			if round := state.Round(repo, pr); round != nil {
+				head = round.Head
+			}
+			return PumpResult{
+				Action: "held",
+				Repo:   repo,
+				PR:     pr,
+				Head:   head,
+				Reason: "held: " + hold.Reason,
+			}, 0, nil
+		}
 		if r := state.Round(repo, pr); r != nil && (r.Phase == PhaseFired || r.Phase == PhaseReviewing) {
 			// A reviewing round is in flight (a fired ack, or a bounded co-review
 			// wait): advance from the slot wait into feedback polling, which the
@@ -2062,18 +2436,16 @@ func queuedFeedbackCheckEvery(poll time.Duration) time.Duration {
 	return 30 * time.Second
 }
 
-// sweepParkedClosed abandons the oldest awaiting_retry round whose PR has been
-// closed or merged. Parked rounds are invisible to NextEligible until RetryAt,
-// so without this a PR closed during an account-block cooldown stays active and
-// a waiting loop times out instead of returning skipped. One pull read per
+// sweepParkedClosed abandons one non-firable queued round whose PR has been
+// closed or merged. Cooldowns and administrative holds make rounds invisible
+// to NextEligible, so they need this bounded cleanup path. One pull read per
 // pump, ETag-cached.
 func (s *Service) sweepParkedClosed(ctx context.Context, st State) (PumpResult, bool, error) {
-	if s.cfg.DryRun {
-		return PumpResult{}, false, nil
-	}
 	var keys []string
 	for key := range st.Rounds {
-		if st.Rounds[key].Phase == PhaseAwaitingRetry {
+		r := st.Rounds[key]
+		_, held := st.HeldPR(r.Repo, r.PR)
+		if r.Phase == PhaseAwaitingRetry || (r.Phase == PhaseQueued && held) {
 			keys = append(keys, key)
 		}
 	}
@@ -2101,6 +2473,15 @@ func (s *Service) sweepParkedClosed(ctx context.Context, st State) (PumpResult, 
 	}
 	if open {
 		return PumpResult{}, false, nil
+	}
+	if s.cfg.DryRun {
+		return PumpResult{
+			Action: "skipped",
+			Repo:   target.Repo,
+			PR:     target.PR,
+			Head:   target.Head,
+			Reason: "pr closed",
+		}, true, nil
 	}
 	res, err := s.abandonRound(ctx, *target, "pr closed", "skipped")
 	return res, true, err

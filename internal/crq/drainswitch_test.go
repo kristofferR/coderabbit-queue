@@ -1,0 +1,140 @@
+package crq
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
+)
+
+// Draining is on by default and off only where somebody said so. A repository
+// nobody has ruled on gets fixed, because that is what the watcher is for.
+func TestDrainIsOnUnlessARepositorySaysOtherwise(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/one": true, "owner/two": true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	settings, err := svc.DrainSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settings) != 2 {
+		t.Fatalf("settings = %+v, want one per watched repository", settings)
+	}
+	for _, s := range settings {
+		if !s.Enabled || !s.Default {
+			t.Errorf("%s = %+v, want enabled by default", s.Repo, s)
+		}
+	}
+
+	if _, err := svc.SetDrainEnabled(ctx, "Owner/One", false, "hand-tuned branch"); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Case-insensitive, like every other repository key.
+	if st.DrainEnabled("owner/one") {
+		t.Error("an explicit off did not take")
+	}
+	if !st.DrainEnabled("owner/two") {
+		t.Error("turning one repository off turned another off too")
+	}
+
+	// Back to the default is distinguishable from an explicit on.
+	if cleared, err := svc.ClearDrainEnabled(ctx, "owner/one"); err != nil || !cleared {
+		t.Fatalf("clear = %v %v, want it to report the setting it removed", cleared, err)
+	}
+	st, _, _ = store.Load(ctx)
+	if !st.DrainEnabled("owner/one") {
+		t.Error("clearing the setting did not return the repository to the default")
+	}
+}
+
+func TestDrainSwitchRejectsMalformedRepositoryNames(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	for _, repo := range []string{"owner", "owner/repo/", "/repo", "owner/repo/extra", "../repo"} {
+		if _, err := svc.SetDrainEnabled(ctx, repo, false, "operator stop"); err == nil {
+			t.Errorf("SetDrainEnabled(%q) succeeded", repo)
+		}
+		if _, err := svc.ClearDrainEnabled(ctx, repo); err == nil {
+			t.Errorf("ClearDrainEnabled(%q) succeeded", repo)
+		}
+	}
+}
+
+// Off stops FIXING, not watching: the pull request is still observed and still
+// reviewed, so its feedback arrives for a person to act on.
+func TestDrainOffStillWatchesAndSaysWhy(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/quiet": true}
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", 5, "aaaaaaaa1"
+	gh.pulls[fakeKey("owner/quiet", 5)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, "owner/quiet", 5, "aaaaaaaa1", PhaseQueued, time.Now().UTC(), 0)
+	if _, err := svc.SetDrainEnabled(ctx, "owner/quiet", false, "release branch"); err != nil {
+		t.Fatal(err)
+	}
+
+	var events []WatchEvent
+	err := svc.Watch(ctx, WatchOptions{Once: true, Command: []string{"/bin/true"}},
+		func(e WatchEvent) error { events = append(events, e); return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) == 0 {
+		t.Fatal("a repository with draining off stopped being watched")
+	}
+	for _, e := range events {
+		if e.Dispatched {
+			t.Errorf("a session ran for a repository with draining off: %+v", e)
+		}
+	}
+}
+
+func TestSkippedDispatchStillAdvancesHeadWithCarriedFinding(t *testing.T) {
+	base := time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr := "owner/repo", 16
+	old, head := "aaaaaaaa1", "bbbbbbbb2"
+	f.openPull(repo, pr, head)
+	f.gh.mu.Lock()
+	pull := f.gh.pulls[fakeKey(repo, pr)]
+	pull.Number = pr
+	f.gh.pulls[fakeKey(repo, pr)] = pull
+	f.gh.mu.Unlock()
+	f.setCommitDate(old, base.Add(-2*time.Minute))
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.botReview(repo, pr, 900, old, base.Add(-time.Minute))
+	f.botReviewComment(repo, pr, 901, old, "internal/state/state.go", 42,
+		"_⚠️ Potential issue_\n\nThis dereferences a nil round.")
+	if _, err := f.svc.SetDrainEnabled(f.ctx, repo, false, "operator stop"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := f.svc.Watch(f.ctx, WatchOptions{
+		Repos: []string{repo}, Once: true, Dispatch: dispatchOn(), Command: []string{"/bin/true"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.reviewsPosted(repo, pr); got != 1 {
+		t.Fatalf("current head review posts = %d, want 1 after skipped carried fix", got)
+	}
+	if round := f.round(repo, pr); round == nil || round.Head != head {
+		t.Fatalf("current head was not advanced after the skipped dispatch: %+v", round)
+	}
+}

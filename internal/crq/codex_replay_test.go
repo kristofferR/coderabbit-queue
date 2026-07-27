@@ -382,7 +382,7 @@ func TestObserveScopesShellFilterToCodeRabbit(t *testing.T) {
 	f.gh.reviews[key] = []ghapi.Review{crShell, codexReview}
 	f.gh.mu.Unlock()
 
-	obs, err := f.svc.observe(f.ctx, f.svc.cfg, repo, pr, nil, f.clk.now())
+	obs, err := f.svc.observe(f.ctx, f.svc.cfg, repo, pr, nil, nil, f.clk.now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,6 +446,41 @@ func TestFireCoOnlyPostFailureParks(t *testing.T) {
 	}
 }
 
+// A co-only round's CommandID is the co-reviewer's trigger comment — one
+// comment under two names. Recording it as the primary's own would let
+// unrelated CodeRabbit activity pass for the answer that trigger is still
+// waiting on, and would put the same id on the cleanup list twice.
+func TestFireCoOnlyRecordsItsAnchorAsTheCoReviewersCommand(t *testing.T) {
+	base := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = []string{cfg.Bot, codexLogin}
+	})
+	repo, pr, head := "o/r", 13, "aaaabbbbccccdddd"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Hour))
+	// CodeRabbit already reviewed the head → DecideFire returns FireCoOnly.
+	f.botReview(repo, pr, 500, head, base.Add(-time.Minute))
+
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected a co-only fire, got %+v", res)
+	}
+	r := f.round(repo, pr)
+	if r == nil || !r.CoOnly {
+		t.Fatalf("expected a co-only round, got %+v", r)
+	}
+	if len(r.PostedCommands) != 1 {
+		t.Fatalf("posted = %v, want the one comment crq wrote", r.PostedCommands)
+	}
+	posted := r.PostedCommands[0]
+	if posted.ID != r.CommandID {
+		t.Errorf("posted id = %d, want the round's anchor %d", posted.ID, r.CommandID)
+	}
+	if dialect.NormalizeBotName(posted.Bot) != dialect.NormalizeBotName(codexLogin) {
+		t.Errorf("posted bot = %q, want the co-reviewer it was addressed to", posted.Bot)
+	}
+}
+
 // TestSelfHealCodexClaimPreventsDoublePost pins claim-before-post: two sweepers
 // observing the same round with CodexCommandID==0 must produce exactly one
 // `@codex review` — the second claim fails under CAS.
@@ -495,7 +530,7 @@ func TestSelfHealCodexClaimPreventsDoublePost(t *testing.T) {
 	}
 	st, _, _ := f.store.Load(f.ctx)
 	round := st.Round(repo, pr)
-	obs, err := f.svc.observe(f.ctx, f.svc.cfg, repo, pr, round, f.clk.now())
+	obs, err := f.svc.observe(f.ctx, f.svc.cfg, repo, pr, round, nil, f.clk.now())
 	if err != nil {
 		t.Fatal(err)
 	}

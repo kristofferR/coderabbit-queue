@@ -213,6 +213,17 @@ reviewed. The two flags mirror CodeRabbit's own toggles: default = *Automatic + 
 commit it requested a review for, so the same commit is never reviewed twice. One process is the
 leader at a time (a lease in the shared state), so running the daemon on several machines is safe.
 
+With `CRQ_TIDY=1`, the daemon also **deletes crq's own spent trigger comments** as each round
+progresses — the
+`@coderabbitai review` / `@codex review` one-liners it posted, which otherwise bury the conversation a
+human came to read. It removes a comment only when crq wrote it (never one it adopted from a person,
+never a bot's own comment, and never one edited into something else), only from a round that has moved
+on, only after the bot answered it, and only once it is too old to adopt again (older than the head
+commit, or than a later force-push); a command superseded by crq's own retry is spent regardless of
+its timestamp. Automatic tidying is opt-in so older binaries sharing the state ref never mis-pair a
+delayed reply after a newer daemon deletes its command. You can also run a pass by hand with
+`crq tidy <repo> <pr>` (`--dry-run` reports what it would remove).
+
 <details>
 <summary>Run it persistently (macOS launchd / Linux systemd)</summary>
 
@@ -284,7 +295,7 @@ Read `.action`, do exactly that, call it again.
 
 | `.action` | what to do |
 |---|---|
-| `fix` | fix `.findings[]`, validate, then `crq resolve` (or `crq decline`) each thread |
+| `fix` | fix `.findings[]`, validate, then `crq resolve` (or `crq decline`) each thread; `crq dismiss` one with no thread |
 | `hold` | **do not commit or push** — a required reviewer hasn't answered for this head; call again at `.recheck_after` |
 | `push` | the head is released — commit and push your fixes once |
 | `wait` | nothing to do until `.recheck_after` |
@@ -383,17 +394,35 @@ least 10 minutes of silence.
 crq next <repo> <pr>      # ⭐ the agent loop: emit the single next action as JSON (--wait blocks)
 crq loop <repo> <pr>      # blocking one-shot round: fire + wait + emit JSON findings
 crq feedback <repo> <pr>  # current normalized findings as JSON, WITHOUT triggering a review
+crq threads <repo> <pr>                                     # every unresolved thread, outdated included
 crq resolve <thread-id> [<thread-id>...]                    # resolve addressed review threads
 crq decline <thread-id> [...] --reason "<why>" [--resolve]  # record why a finding is declined
 crq reviewers <repo>      # which bots review this project, and what each costs
 crq reviewers set <repo> [--bots <a,b>] [--required <a,b>] # choose them (either flag alone)
 crq reviewers clear <repo>                                 # back to the fleet default
+crq drain install         # ⭐ unattended: watch every PR and fix what needs fixing
+crq watch                 #    what the drain runs: drive open PRs through crq next, one JSON
+                          #    line each. Fixing is ON by default (--no-dispatch observes only)
+crq drain                 # which repositories crq may fix
+crq drain off <repo> --reason "<why>"   # stop fixing there; watching and reviewing continue
+crq drain on <repo> | crq drain default <repo>
+crq hold <repo> <pr> --reason "<why>"                       # persistently stop reviews for a PR
+crq unhold <repo> <pr>                                      # resume reviews for a held PR
+crq hold                                                    # list held PRs
+
+crq tidy <repo> <pr>      # delete crq's own spent review-trigger comments (--dry-run previews)
+
+crq reviewers <repo>      # which bots review this project, and what each costs
+crq reviewers set <repo> [--bots <a,b>] [--required <a,b>] # choose them (either flag alone)
+crq reviewers clear <repo>                                 # back to the fleet default
+
+crq dismiss <repo> <pr> <finding-id> [...] --reason "<why>"  # account for a finding with no thread
 crq autoreview            # ⭐ review ALL open PRs automatically, rate-coordinated
                           #    (--no-incremental = first review only; --once = single pass for cron)
 crq status                # show the dashboard: queue, in-flight, quota, next slot
 crq doctor                # JSON readiness report (gh/auth/config/CLI) — never writes to GitHub
 crq preflight [...]       # run the local CodeRabbit CLI pre-push and normalize its JSON
-crq cancel <repo> <pr>    # take a PR out of the line
+crq cancel <repo> <pr>    # abandon the current round; autoreview may enqueue it again
 crq init                  # first-time setup of the gate repo
 crq debug <enqueue|pump|refresh|state>   # diagnosis only — review loops should use crq next
 crq version               # print the version
@@ -401,10 +430,17 @@ crq help [command]        # help, optionally for one command
 ```
 
 `<repo>` is `owner/name`; `<pr>` is the number. **`crq next` always exits 0** — read `.action`, not
-the exit code. **`crq loop` exit codes:** `0` converged or no
-actionable findings, `10` actionable findings returned in `.findings[]`, `2` timed out waiting for
-feedback. crq keys resolution off GitHub's own thread state, so a finding keeps reappearing in
+the exit code. **`crq loop` exit codes:** `0` converged, no
+actionable findings, or the PR is held (`.status` says which), `10` actionable findings returned in
+`.findings[]`, `2` timed out waiting for feedback. A hold is never `2`: that code means the wait
+elapsed and is worth retrying, and a hold ends only when somebody lifts it. crq keys resolution off GitHub's own thread state, so a finding keeps reappearing in
 `feedback`/`loop` until its thread is resolved (or declined-and-resolved) on GitHub.
+
+Use `crq hold` for an administrative pause: the hold survives autoreview passes and prevents both
+primary and co-reviewer triggers until `crq unhold`. `crq cancel` only abandons the current round,
+so fleet autoreview may discover the still-open PR and enqueue it again. Creating a hold requires a
+live autoreview daemon that advertises hold support; this keeps an older standby from acquiring the
+fleet lease while the active daemon maintains it.
 
 <details>
 <summary>Feedback JSON shape</summary>
@@ -482,11 +518,12 @@ and what the machine can physically do (`CRQ_DISPATCH_CMD`, `CRQ_WORKSPACE`,
 | `CRQ_ISSUE` | from `init` | dashboard issue number |
 | `CRQ_CAL_PR` | from `init` | calibration PR number |
 | `CRQ_SCOPE` | owner of `CRQ_REPO` | which owners/orgs share this quota (comma-separated) |
-| `CRQ_STATE_REF` | `crq-state-v3` | git ref that stores the typed CAS state |
+| `CRQ_STATE_REF` | `crq-state-v3` | git ref that stores the typed CAS state. The name is fixed; the schema inside it is v4, and a binary that predates a schema **refuses** the payload rather than erasing it — so upgrade every host together |
 | `CRQ_REPOS` | _(all in scope)_ | `autoreview` allowlist — only these `owner/name` repos (comma-separated) |
-| `CRQ_EXCLUDE` | _(none)_ | `autoreview` denylist — never these `owner/name` repos (comma-separated) |
+| `CRQ_EXCLUDE` | _(none)_ | denylist — crq never reviews, watches or fixes these `owner/name` repos (comma-separated) |
 | `CRQ_AUTOREVIEW_SKIP_AUTHORS` | `dependabot[bot]` | PR authors `autoreview` never enqueues (comma-separated; case and `[bot]` suffix don't matter) — set to empty to auto-review bot PRs too; manual `crq review` is unaffected |
 | `CRQ_AUTOREVIEW_SKIP_MARKER` | `<!-- crq:skip-autoreview -->` | exact PR-body marker that suppresses fleet auto-review; set empty to disable; manual `crq loop` is unaffected |
+| `CRQ_TIDY` | `0` | set to `1` to delete crq's own spent review-trigger comments as rounds progress (`crq tidy` by hand is unaffected) |
 | `CRQ_REQUIRED_BOTS` | `coderabbitai[bot]` | bots that must review the head for convergence (crq waits for all of them) |
 | `CRQ_COBOTS` | `codex,bugbot,macroscope` | co-reviewers crq surfaces and (optionally) triggers; set empty to disable all |
 | `CRQ_COBOT_<NAME>_REQUIRED` | `0` | make that co-reviewer gate convergence (folds it into `CRQ_REQUIRED_BOTS`); `<NAME>` ∈ `CODEX`, `BUGBOT`, `MACROSCOPE` |
@@ -627,6 +664,12 @@ If you're an autonomous agent running a PR-review loop, here's everything you ne
 - **Resolve / decline:** after fixing a finding, `crq resolve <thread-id>...` (pass them all at
   once). If you're declining one, `crq decline <thread-id> --reason "…"` — that resolves it too,
   because a thread left open keeps its finding actionable; `--keep-open` overrides.
+- **Dismiss what has no thread:** a finding with no `thread_id` cannot be resolved or declined, and
+  blocks every future round until it is accounted for: `crq dismiss <repo> <pr> <finding-id>
+  --reason "…"`. It covers the current head only. A `source: "review_comment"`
+  finding is refused: it lost its thread ID to crq's REST fallback and still has
+  an open thread, so it needs `resolve`/`decline` once crq can read threads again. For a skipped review, narrowing the PR fixes the
+  cause; dismissing only records that you chose to proceed.
 - **Don't narrate the wait.** Report real state changes — findings, a push, convergence, a block —
   not elapsed time.
 - **Setup check:** run `crq doctor`; if config is missing, do the Quick Start (install + `crq init`).

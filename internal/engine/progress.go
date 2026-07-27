@@ -218,7 +218,9 @@ func PrimaryAckPending(r state.Round, obs Observation, p Policy) bool {
 // standing block when the SAME edited account-quota comment is re-observed
 // (CodeRabbit edits one comment in place — a re-observation must not extend
 // the window on every bounce), and fall back to a conservative fixed window
-// when no "available in" duration parsed.
+// when no "available in" duration parsed. A fallback is anchored to the notice,
+// not observation time: otherwise alternating historical notices from different
+// PRs continually renew the single account-wide block.
 func resolveBlockWindow(ev dialect.BotEvent, q state.AccountQuota, now time.Time, p Policy) time.Time {
 	until := ev.Window
 	sameComment := ev.CommentID != 0 && ev.CommentID == q.RLCommentID
@@ -226,7 +228,11 @@ func resolveBlockWindow(ev dialect.BotEvent, q state.AccountQuota, now time.Time
 		until = q.BlockedUntil
 	}
 	if until == nil || !until.After(now) {
-		t := now.Add(p.rateLimitFallback())
+		anchor := ev.ObservedTime()
+		if anchor.IsZero() || anchor.After(now) {
+			anchor = now
+		}
+		t := anchor.Add(p.rateLimitFallback())
 		return t
 	}
 	return until.UTC()
@@ -252,4 +258,90 @@ func reviewMatchesRound(review ReviewSeen, head string, firedAt time.Time) bool 
 		return strings.HasPrefix(review.Commit, head)
 	}
 	return notBefore(review.SubmittedAt, firedAt)
+}
+
+// ObservedAccountBlock reports the account-quota block visible in an
+// observation, whatever round it belongs to.
+//
+// The window used to be derived only inside Progress, which needs the round that
+// fired the command to still exist and to have fired before the notice. Neither
+// holds once a fix session pushes: the head moves, the round is superseded, and
+// the rate-limit reply it was waiting for is archived unread. crq then believed
+// the account was free and posted the command again — minutes after being told
+// to wait, over and over.
+//
+// The account allowance is not a property of a round. Any current notice from
+// the primary is evidence about the whole account, so it counts here regardless
+// of which round asked. AcceptAccountBlock still decides whether it replaces the
+// standing window, and never shortens it.
+func ObservedAccountBlock(obs Observation, p Policy, q state.AccountQuota, now time.Time) *AccountBlock {
+	var newest *dialect.BotEvent
+	for i, ev := range obs.Events {
+		if ev.Kind != dialect.EvRateLimited || !sameBot(ev.Bot, p.Bot) {
+			continue
+		}
+		if newest == nil || ev.UpdatedAt.After(newest.UpdatedAt) {
+			newest = &obs.Events[i]
+		}
+	}
+	if newest == nil {
+		return nil
+	}
+	// While the recorded block stands, edits to its comment are only countdown
+	// updates and must not renew it. Once that block has ended (by time or a
+	// conclusive calibration), CodeRabbit may reuse the same comment for a later
+	// fire. A newer UpdatedAt is then fresh evidence; permanently spending the
+	// ID would miss the new account-wide block.
+	if newest.CommentID != 0 && newest.CommentID == q.RLCommentID {
+		if q.BlockedUntil != nil && q.BlockedUntil.After(now) {
+			return nil
+		}
+		// An edit made during the old window is still that window's countdown,
+		// even when we only observe it after the window expires.
+		if q.BlockedUntil != nil && !newest.UpdatedAt.After(*q.BlockedUntil) {
+			return nil
+		}
+		if q.RLCommentUpdated != nil && !newest.UpdatedAt.After(*q.RLCommentUpdated) {
+			return nil
+		}
+	}
+	// An explicit expired window proves the notice is spent. The conservative
+	// fallback is only for a notice whose window could not be parsed; applying it
+	// to an expired timestamp would revive an hour-old message after calibration
+	// clears the notice watermark.
+	//
+	// For an unparseable notice, the watermark is the last NOTICE crq accounted
+	// for, not the last quota check: Account.CheckedAt is also advanced by a
+	// calibration probe that is
+	// still awaiting its reply or whose reply had nothing parseable in it, and
+	// neither is evidence the account is clear. A notice crq had never seen was
+	// discarded for being older than such a probe, and the round then fired
+	// inside the block the bot had just reported.
+	if newest.Window != nil && !newest.Window.After(now) {
+		return nil
+	}
+	if newest.Window == nil {
+		if q.RLCommentUpdated != nil && !newest.UpdatedAt.After(*q.RLCommentUpdated) {
+			return nil
+		}
+	}
+	until := resolveBlockWindow(*newest, q, now, p)
+	if !until.After(now) {
+		return nil
+	}
+	// A standing block is never SHORTENED by a notice that ends sooner. Each PR
+	// gets its own message, and CodeRabbit tells each one when that PR may go
+	// again — so a notice arriving from another PR routinely names an earlier
+	// moment than the window already recorded. Applying it would move the whole
+	// fleet's block backwards and let the next fire land inside a window the bot
+	// has not lifted.
+	//
+	// The notice is still recorded as accounted for. That is the half worth
+	// keeping: without it the same now-expired message reads as unseen evidence
+	// on the next pass, and turns into a fresh fallback block from a message that
+	// was answered long ago.
+	if q.BlockedUntil != nil && q.BlockedUntil.After(until) {
+		until = q.BlockedUntil.UTC()
+	}
+	return &AccountBlock{Until: until, CommentID: newest.CommentID, CommentUpdated: newest.UpdatedAt}
 }

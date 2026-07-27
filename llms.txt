@@ -50,7 +50,7 @@ crq next                      # inside the checkout, the target is inferred
 
 | `.action` | what to do |
 |---|---|
-| `fix` | Fix `.findings[]`, validate locally, then `crq resolve` each addressed `.thread_id` (or `crq decline` with a reason). Call again. |
+| `fix` | Fix `.findings[]`, validate locally, then `crq resolve` each addressed `.thread_id` (or `crq decline` with a reason). A finding with no `.thread_id` clears with `crq dismiss` once judged — except `source: "review_comment"`, which lost its thread ID to a GraphQL fallback and has to wait for crq to read threads again. Call again. |
 | `hold` | Do NOT commit or push: a required reviewer has not answered for this head, and moving the head restarts its review (resolving threads does not). Call again at `.recheck_after`. |
 | `push` | The head is released. Commit and push the accumulated fixes once. Call again. |
 | `wait` | Nothing to do until `.recheck_after`. |
@@ -152,7 +152,9 @@ Exit codes (`crq loop` only — `crq next` always exits 0 and answers in `.actio
   and all non-CodeRabbit required reviewers are true: those are Codex-only findings during a
   CodeRabbit rate-limit window, so fix, push, and loop again (each Codex round takes minutes;
   several fit inside one CodeRabbit window).
-- `2`: timed out waiting for feedback; do not push a stale-feedback round.
+- `2`: timed out waiting for feedback; do not push a stale-feedback round. A HELD pull request is
+  not this — it exits `0` with `.status: "held"`, because a hold ends only when somebody lifts it
+  and retrying on `2` would spin for ever.
 
 Rate-limit degrade: when CodeRabbit is rate-limited ("Review limit reached … Next review available
 in: NN minutes") and Codex demonstrably reviews the PR, the loop degrades to Codex-only rounds
@@ -188,6 +190,13 @@ reappearing until its thread is resolved there):
 crq resolve THREAD_ID [THREAD_ID...]
 ```
 
+After a push, threads from the previous head become outdated and drop out of `findings`, so their
+IDs are no longer available there. List every unresolved thread, outdated included:
+
+```bash
+crq threads REPO PR
+```
+
 Decline a finding you are not addressing. This posts the reason AND resolves the thread — crq reads
 GitHub resolution state, so one left open keeps returning `fix`. A contested bot reply is
 re-surfaced as its own finding, so nothing is buried. Use `--keep-open` to leave it open on purpose:
@@ -217,6 +226,108 @@ round does not WAIT for it, not that it is never asked.
 `budget: account` means the reviewer is serialized against the shared CodeRabbit allowance;
 `budget: none` means it runs immediately. Stored in the shared state ref, so the daemon and agents
 cannot disagree. The primary reviewer is fleet-wide.
+Run the whole thing unattended — crq watches every open PR and starts a fix session for the ones
+that need one:
+
+```bash
+crq drain install            # prompt + wrapper + service, started; --dry-run to preview
+```
+
+Session output goes to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log`. Three dispatch attempts in a
+row that start nothing put `dispatch failing` on the dashboard and the status line.
+
+The service does not inherit your shell. The unit names the config file the install read
+(`CRQ_CONFIG`, or `~/.config/crq/env`) and the queue's identity, and the credential has to be one
+the service can resolve itself — `gh auth login`, or `GITHUB_TOKEN`/`GH_TOKEN` in that file. A token
+exported only in a shell profile makes the install refuse rather than start a watcher that cannot
+authenticate.
+
+`crq drain install` runs `crq watch`, which you can also run yourself:
+
+```bash
+crq watch [--no-dispatch] [--once] [--interval 2m] [--concurrency 0] [<repo>...] [-- <cmd>...]
+crq drain                                  # which repositories crq may fix
+crq drain off REPO --reason "why"          # stop fixing there; watching continues
+crq drain on REPO | crq drain default REPO
+```
+
+It drives every open PR in `CRQ_REPOS` through the same `crq next` oracle and emits one JSON line
+per PR per pass (`repo`, `pr`, `action`, `findings`, `dispatched`, `skipped`). Fixing is ON by
+default — watching a PR nobody fixes is a queue that reports work and does none. `--no-dispatch`
+makes one run an observer, `crq drain off REPO` stops it for one repository (watching and reviewing
+continue there), and having no fix command configured observes with a log line rather than refusing
+to start. A PR whose action is `fix` is claimed under compare-and-swap and the
+command from `CRQ_DISPATCH_CMD` (or after `--`) runs in a crq-made worktree checked out at that
+head, with `CRQ_DISPATCH_REPO`, `CRQ_DISPATCH_PR`, `CRQ_DISPATCH_HEAD` and `CRQ_DISPATCH_FINDINGS`
+(a JSON file) in its environment. The command is run directly, not through a shell; quoted
+arguments in `CRQ_DISPATCH_CMD` are kept whole. Dispatch is bounded per head by
+`CRQ_DISPATCH_MAX_ATTEMPTS` (default 3) and uncapped in parallel unless
+`CRQ_DISPATCH_CONCURRENCY` sets a valve — fixing findings spends no account quota, so it does not
+queue. While a session holds a PR its round leaves the fire queue (and no second session is started
+for that PR, even after its own push supersedes the round): the review would be of a head about to
+move. `--once` exits non-zero if any PR or repository could not be checked, so cron cannot mistake a
+partial scan for a clean one; a daemon pass logs the failure and carries on to the rest of the fleet.
+
+A PR whose head branch lives in a FORK is reviewed like any other but not dispatched: the session
+would run an agent over a stranger's code with approvals bypassed and a write token in reach. Set
+`CRQ_DISPATCH_FORKS=1` to fix contributor pull requests anyway. That is a trust decision, not a
+sandbox — crq has none to offer.
+Stop crq reviewing a PR (one write, no window for a daemon to fire in):
+
+```bash
+crq hold REPO PR --reason "why"
+crq unhold REPO PR
+crq hold                      # list
+```
+
+A live autoreview daemon that advertises hold support is required when creating a hold.
+
+With `CRQ_TIDY=1`, crq removes its own spent `@coderabbitai review` / `@codex review` comments as
+rounds progress. Automatic tidying is opt-in while older binaries may share the state ref. On demand:
+
+```bash
+crq tidy REPO PR [--dry-run]
+```
+
+Only comments crq posted (never one it adopted — that comment is someone else's), only while the
+comment still reads as that one-line command (an edited one is someone's words), only from rounds
+that have progressed, only after the bot answered, only once the comment is too old for crq to adopt
+again — older than the head commit, or than a later force-push (a command crq's own retry replaced is
+spent regardless, and an unreadable head keeps everything),
+and never the bots' own comments. Deletions GitHub refuses are reported in `.failed[]`.
+
+Choose which bots review one project:
+
+```bash
+crq reviewers REPO                                    # effective reviewers + budgets
+crq reviewers set REPO --bots codex --required codex  # Codex is the only required co-reviewer
+crq reviewers clear REPO                              # fleet default again
+```
+
+The primary is fleet-wide: an override chooses the CO-reviewers, so CodeRabbit is still triggered
+and still spends account quota even when it is left out of `--required`. Leaving it out means the
+round does not WAIT for it, not that it is never asked.
+
+`budget: account` means the reviewer is serialized against the shared CodeRabbit allowance;
+`budget: none` means it runs immediately. Stored in the shared state ref, so the daemon and agents
+cannot disagree. The primary reviewer is fleet-wide.
+
+A finding with no `thread_id` — a review body finding, a review-skipped notice, an outside-diff
+remark, an issue-comment finding — has nothing for `resolve` or `decline` to act on, and would otherwise block every future
+round on that PR. Judge it, then record the decision:
+
+```bash
+crq dismiss REPO PR FINDING_ID [FINDING_ID...] --reason "why this is set aside"
+```
+
+`FINDING_ID` is `.findings[].id` — content-derived, not a GitHub node ID, which is why the repo and
+PR are required. The dismissal covers the current head only; after a push the next reviewer must
+report it again. `crq next` and `crq feedback` report `dismissed: N` so a set-aside finding never
+looks lost, and `crq loop` converges on the same filtered list. A finding that HAS a thread is
+refused: resolve or decline it instead, so the decision lands where the bot can answer it.
+
+For a SKIPPED review specifically, the two remedies differ: narrowing the PR addresses why the
+review was skipped, while `crq dismiss` only records that you chose to proceed at this head.
 
 Current feedback without triggering a review:
 

@@ -2,7 +2,7 @@ package crq
 
 import (
 	"context"
-	"os/exec"
+	"os"
 	"strings"
 	"time"
 
@@ -31,6 +31,10 @@ type NextReport struct {
 	// Pending lists the required reviewers with no evidence for this head.
 	Pending  []string          `json:"pending,omitempty"`
 	Findings []dialect.Finding `json:"findings"`
+	// Dismissed counts the findings this head's round has accounted for through
+	// `crq dismiss`. They are withheld from Findings, so the count is how a
+	// caller sees that something was set aside rather than never reported.
+	Dismissed int `json:"dismissed,omitempty"`
 
 	ReviewedBy map[string]bool `json:"reviewed_by,omitempty"`
 	// LocalWork records whether crq saw changes the PR head does not have. It
@@ -113,6 +117,16 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 	if err != nil {
 		return report, err
 	}
+	if enqueued.Held {
+		// Findings were drained above before Enqueue was allowed to write.
+		// Once that work is clear, a hold is actionable administrative state,
+		// not an ordinary reviewer wait: there is no recheck time that can make
+		// progress without somebody releasing it.
+		report.Action = string(engine.ActionBlocked)
+		report.Reason = enqueued.Reason
+		report.RecheckAfter = nil
+		return report, nil
+	}
 	// Enqueue re-reads the head. If it moved in between, every conclusion above
 	// describes a head that is no longer current — and returning `done` for it
 	// would stop a caller just as an unreviewed head was queued. Say so and let
@@ -122,6 +136,10 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 		report.Action = string(engine.ActionWait)
 		report.Reason = "the head moved while deciding; re-reading it"
 		report.Findings = []dialect.Finding{}
+		// Dismissals are head-scoped, so the count read for the old head says
+		// nothing about this one — reporting it beside the new head would credit
+		// the new head with decisions never made about it.
+		report.Dismissed = 0
 		at := s.clock().Add(s.waitTick()).UTC()
 		report.RecheckAfter = &at
 		return report, nil
@@ -194,9 +212,12 @@ func (s *Service) advance(ctx context.Context, repo string, pr int, feedback Fee
 }
 
 // nextFromState derives the instruction from what is already recorded and
-// observable. It writes NOTHING — no enqueue, no pump, no dashboard sync — which
-// is what lets `crq wait` re-evaluate as often as it likes without spending the
-// account's write budget or firing reviews behind the caller's back.
+// observable. It enqueues nothing, pumps nothing and fires nothing, which is what
+// lets `crq wait` re-evaluate as often as it likes without spending the account's
+// write budget or firing reviews behind the caller's back.
+//
+// Its one write is Feedback recording a rate-limit notice it observed: that costs
+// a write per NOTICE, not per poll, and it can only prevent a review.
 //
 // ONE observation drives the whole decision. Feedback already reads the pull, so
 // head, open, per-bot evidence and findings all describe the same instant.
@@ -224,6 +245,10 @@ func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextR
 
 	report.LocalWork, report.LocalWorkReason = s.checkLocalWork(ctx,
 		[]string{repo, feedback.HeadRepo}, report.Head, feedback.HeadRef)
+
+	// Feedback has already withheld what this round dismissed — including from
+	// its own convergence verdict — so there is one filter, not one per caller.
+	report.Dismissed = feedback.Dismissed
 
 	in := engine.NextInput{
 		Obs:           engine.Observation{Head: feedback.Head, Open: feedback.Open},
@@ -303,7 +328,27 @@ func (s *Service) checkLocalWork(ctx context.Context, repos []string, head, head
 	if s.localWorkFn != nil {
 		return s.localWorkFn(ctx, head)
 	}
-	return localWork(ctx, repos, head, headRef)
+	return localWork(ctx, s.cfg.WorkDir, repos, head, headRef, isCurrentDispatch(repos, head))
+}
+
+// isCurrentDispatch recognizes the detached checkout made by `crq watch
+// --dispatch`. Its prompt pushes HEAD to an explicit ref, so unlike an ordinary
+// detached checkout it does not need a local branch. Both values must still
+// describe this observation: stale dispatch variables must not make another
+// checkout look safe to push.
+func isCurrentDispatch(repos []string, head string) bool {
+	dispatchRepo := NormalizeRepo(os.Getenv("CRQ_DISPATCH_REPO"))
+	dispatchHead := strings.TrimSpace(os.Getenv("CRQ_DISPATCH_HEAD"))
+	if dispatchRepo == "" || dispatchHead == "" || head == "" ||
+		!strings.HasPrefix(head, dispatchHead) {
+		return false
+	}
+	for _, repo := range repos {
+		if NormalizeRepo(repo) == dispatchRepo {
+			return true
+		}
+	}
+	return false
 }
 
 // localWork reports whether the working copy holds changes the PR head does not
@@ -323,13 +368,15 @@ func (s *Service) checkLocalWork(ctx context.Context, repos []string, head, head
 // `done` rather than `push`. That is the safe direction: `push` is only ever
 // emitted once the head is already released, so a missed one costs one extra
 // call, while a spurious `hold` would stall the loop.
-func localWork(ctx context.Context, repos []string, head, headRef string) (bool, string) {
+// dir is the checkout to inspect; "" means the process's own directory,
+// which is what an agent running crq from its working copy means.
+func localWork(ctx context.Context, dir string, repos []string, head, headRef string, detachedDispatch bool) (bool, string) {
 	git := func(args ...string) (string, bool) {
-		out, err := exec.CommandContext(ctx, "git", args...).Output()
+		out, err := gitDir(ctx, dir, args...)
 		if err != nil {
 			return "", false
 		}
-		return strings.TrimSpace(string(out)), true
+		return out, true
 	}
 	if _, ok := git("rev-parse", "--is-inside-work-tree"); !ok {
 		return false, "not run inside a git checkout"
@@ -355,10 +402,10 @@ func localWork(ctx context.Context, repos []string, head, headRef string) (bool,
 
 	// Sitting exactly on the PR head: only an uncommitted change is new work —
 	// but the caller still has to be able to push it. A detached checkout at the
-	// PR SHA has no branch, so the prescribed push fails and the next call, now
-	// ahead of the head, reports no local work and can converge over the fix.
+	// PR SHA is accepted only for a matching dispatch, whose prompt pushes HEAD
+	// to the PR's explicit ref.
 	if head == "" || strings.HasPrefix(local, head) {
-		if why := branchMismatch(git, headRef); why != "" {
+		if why := branchMismatch(git, headRef, detachedDispatch); why != "" {
 			return false, why
 		}
 		if status, ok := git("status", "--porcelain"); ok && status != "" {
@@ -379,19 +426,23 @@ func localWork(ctx context.Context, repos []string, head, headRef string) (bool,
 	// Descending from the PR head is not the same as being the PR branch: a
 	// feature branch forked off it also descends, and reporting its commits as
 	// this PR's work invites a push that updates something else entirely.
-	if why := branchMismatch(git, headRef); why != "" {
+	if why := branchMismatch(git, headRef, detachedDispatch); why != "" {
 		return false, why
 	}
 	return true, "local HEAD " + shortSHA(local) + " is ahead of the pr head " + head
 }
 
 // branchMismatch explains why this checkout is not the PR's branch, or "" when
-// it is. A detached checkout counts as a mismatch: there is nothing to push to.
-func branchMismatch(git func(...string) (string, bool), headRef string) string {
+// it is. A detached dispatch checkout is the one exception: its prompt pushes
+// HEAD to an explicit ref instead of relying on a local branch.
+func branchMismatch(git func(...string) (string, bool), headRef string, detachedDispatch bool) string {
 	if headRef == "" {
 		return ""
 	}
 	branch, ok := git("rev-parse", "--abbrev-ref", "HEAD")
+	if ok && branch == "HEAD" && detachedDispatch {
+		return ""
+	}
 	if !ok || branch == "HEAD" {
 		return "this checkout is detached, so there is no branch to push to " + headRef
 	}
