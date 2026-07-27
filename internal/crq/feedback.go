@@ -88,7 +88,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// findings from the raw reviews/comments and derives convergence from
 	// engine.Completion over the same snapshot — no second fetch path, and the
 	// "is head reviewed?" rules live only in the engine.
-	obs, err := s.observe(ctx, repo, pr, round, now)
+	obs, err := s.observe(ctx, s.cfg, repo, pr, round, now)
 	if err != nil {
 		return FeedbackReport{}, err
 	}
@@ -123,13 +123,13 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	if anchorOK {
 		anchorCutoff = completionRound.FiredAt.UTC()
 	}
-	completion := engine.Completion(completionRound, obs.eng, s.policy())
+	completion := engine.Completion(completionRound, obs.eng, s.cfg.policy())
 	report.ReviewedBy = completion.ReviewedBy
 	// Completion does not always arrive as a review: a clean-summary comment, a
 	// paired completion reply and a co-reviewer check run all satisfy it. Anchor
 	// the settle window on the newest of ANY of them, or a round completed by a
 	// comment would settle against a stale timestamp and converge instantly.
-	evidenceBots := dialect.BotSet(unionBots(s.cfg.FeedbackBots, s.cfg.RequiredBots))
+	evidenceBots := s.cfg.evidenceBots()
 	noteEvidence := func(at time.Time) {
 		if at.After(report.LastEvidenceAt) {
 			report.LastEvidenceAt = at
@@ -156,7 +156,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		verdictCutoff = obs.eng.HeadAt
 	}
 	report.CoReviewers = coReviewerStatuses(s.cfg, obs.eng, verdictCutoff)
-	if why := engine.PrimaryUnavailableReason(obs.eng, s.policy(), head); why != "" {
+	if why := engine.PrimaryUnavailableReason(obs.eng, s.cfg.policy(), head); why != "" {
 		report.PrimaryUnavailable = true
 		report.PrimaryUnavailableReason = s.cfg.Bot + " " + why
 	}
@@ -166,7 +166,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// hang convergence if it were) still has its findings reported instead of
 	// dropped. It always includes the required bots: a bot crq waits for whose
 	// findings it didn't surface would hang the loop forever.
-	extractBots := dialect.BotSet(unionBots(s.cfg.FeedbackBots, s.cfg.RequiredBots))
+	extractBots := s.cfg.evidenceBots()
 
 	// Review-body findings — CodeRabbit's detailed and "Prompt for AI agents"
 	// blocks — carry no per-finding resolution state, only the review's commit.
@@ -188,7 +188,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		// before that round belongs to the previous head. Unresolved threads are
 		// still surfaced below across commits, while thread-less body findings
 		// must be re-reported by the current round instead of trapping the loop.
-		if anchorOK && s.isConfiguredBot(login) &&
+		if anchorOK && s.cfg.isConfiguredBot(login) &&
 			(head == "" || !strings.HasPrefix(review.CommitID, head)) &&
 			!notBefore(review.SubmittedAt, anchorCutoff) {
 			continue
@@ -362,7 +362,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		if !dialect.InBots(extractBots, comment.User.Login) {
 			continue
 		}
-		if s.cr.IsReviewSkipped(comment.Body) && s.isConfiguredBot(comment.User.Login) &&
+		if s.cr.IsReviewSkipped(comment.Body) && s.cfg.isConfiguredBot(comment.User.Login) &&
 			skipAppliesToHead(comment.Body, head) &&
 			!skipPredatesHead(comment, headCutoffOf) {
 			// Checked BEFORE the rate-limit guard below: the skip notice embeds
@@ -406,7 +406,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		if _, ok := coEventKinds[comment.ID]; ok {
 			continue
 		}
-		if s.isConfiguredBot(comment.User.Login) {
+		if s.cfg.isConfiguredBot(comment.User.Login) {
 			continue
 		}
 		if dialect.IsNonActionableText(comment.Body) {
