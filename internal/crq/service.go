@@ -1567,15 +1567,23 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 			st.Account.RLCommentID = rlID
 			st.Account.RLCommentUpdated = rlUpdated
 		}
-		// An inconclusive probe (still awaiting a calibration reply) carries no
-		// BlockedUntil, but it is not evidence the account is clear. Preserve a
-		// still-active block until a conclusive reply lands — otherwise the block
-		// vanishes after CalibrationTTL and Pump fires queued reviews inside the
-		// original window, recreating the duplicate attempts this whole system
-		// exists to prevent.
-		if quota.CalibAskedAt != nil && prevBlock != nil && prevBlock.After(now) {
+		// A calibration reading must not SHORTEN a standing block, which is the
+		// rule every other writer follows (engine.AcceptAccountBlock) and the one
+		// place that bypassed it.
+		//
+		// Two ways a probe reports no block: it is still awaiting a reply, or its
+		// reply carried no parseable reset. Neither is evidence the account is
+		// clear, and both used to erase a window a PR's own rate-limit notice had
+		// stated — after which Pump fires inside that window, which is the
+		// duplicate-review behaviour this whole system exists to prevent.
+		//
+		// A LONGER window from the probe still wins: that is new information.
+		if prevBlock != nil && prevBlock.After(now) &&
+			(st.Account.BlockedUntil == nil || prevBlock.After(*st.Account.BlockedUntil)) {
 			st.Account.BlockedUntil = prevBlock
-			st.Account.Remaining = prevRemaining
+			if st.Account.Remaining == nil {
+				st.Account.Remaining = prevRemaining
+			}
 		}
 		if st.Warn == warnRateLimited && (st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.After(now)) {
 			st.Warn = ""
