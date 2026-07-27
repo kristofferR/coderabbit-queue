@@ -16,186 +16,340 @@ import "strings"
 // mention lives and an instruction does not: an instruction is an HTML comment
 // in the prose, which is exactly what survives this.
 func (c Config) SkipsReview(body string) bool {
-	marker := strings.TrimSpace(c.SkipMarker)
+	marker := c.SkipMarker
 	if marker == "" {
 		return false
 	}
 	return strings.Contains(stripCode(body), marker)
 }
 
-// stripCode removes indented and fenced blocks and inline code spans from
-// Markdown.
-//
-// Block constructs first: a block may contain unbalanced backticks that would
-// otherwise make the span pass read the rest of the document as code. Neither
-// pass tries to be a Markdown parser — anything it gets wrong only means a
-// marker is read where GitHub renders one, which is the reading that was already
-// happening.
+// stripCode removes fenced blocks, indented blocks and inline code spans from
+// Markdown. Delimiter runs are significant in fenced blocks and spans: a
+// four-backtick fence may contain triple backticks, and a double-backtick span
+// may contain a single literal backtick.
 func stripCode(body string) string {
-	var out strings.Builder
-	rest := stripIndentedCode(body)
-	for {
-		start, fence, width := nextFence(rest)
-		if start < 0 {
-			break
-		}
-		out.WriteString(rest[:start])
-		after := rest[start+width:]
-		end, closingWidth := matchingFence(after, fence, width)
-		if end < 0 {
-			// An unclosed fence runs to the end of the body, the way GitHub
-			// renders it.
-			return out.String()
-		}
-		rest = after[end+closingWidth:]
-	}
-	out.WriteString(rest)
-
-	text := out.String()
-	var spanned strings.Builder
-	for len(text) > 0 {
-		start := strings.IndexByte(text, '`')
-		if start < 0 {
-			break
-		}
-		spanned.WriteString(text[:start])
-		run := backtickRun(text[start:])
-		after := text[start+run:]
-		end := matchingBacktickRun(after, run)
-		if end < 0 {
-			// An unmatched delimiter is literal, not the start of a span.
-			spanned.WriteString(text[start:])
-			return spanned.String()
-		}
-		text = after[end+run:]
-	}
-	spanned.WriteString(text)
-	return spanned.String()
+	return stripCodeSpans(stripIndentedCode(stripFencedCode(body)))
 }
 
-func stripIndentedCode(body string) string {
-	lines := strings.SplitAfter(body, "\n")
+func stripFencedCode(body string) string {
 	var out strings.Builder
-	blankBefore := true
-	inCode := false
-	for _, line := range lines {
-		content := strings.TrimSuffix(line, "\n")
-		content = strings.TrimSuffix(content, "\r")
-		blank := strings.TrimSpace(content) == ""
-		indented := strings.HasPrefix(content, "    ") || strings.HasPrefix(content, "\t")
-
-		if inCode {
-			if blank || indented {
-				out.WriteByte('\n')
+	var fence byte
+	fenceLen := 0
+	fenceQuoteDepth := 0
+	for _, line := range strings.SplitAfter(body, "\n") {
+		content, quoteDepth := markdownBlockQuoteContent(line)
+		delimiter, run, tail, ok := markdownFence(content)
+		if fence == 0 {
+			if ok && (delimiter != '`' || !strings.Contains(tail, "`")) {
+				fence, fenceLen = delimiter, run
+				fenceQuoteDepth = quoteDepth
+				if strings.HasSuffix(line, "\n") {
+					out.WriteByte('\n')
+				}
 				continue
 			}
-			inCode = false
-		}
-		if blankBefore && indented {
-			inCode = true
-			out.WriteByte('\n')
+			out.WriteString(line)
 			continue
 		}
-		out.WriteString(line)
-		blankBefore = blank
+
+		// A fenced block inside a block quote ends with that container. Do not
+		// swallow following prose merely because its eventual fence resembles
+		// a closing delimiter.
+		if quoteDepth < fenceQuoteDepth {
+			fence, fenceLen, fenceQuoteDepth = 0, 0, 0
+			if ok && (delimiter != '`' || !strings.Contains(tail, "`")) {
+				fence, fenceLen, fenceQuoteDepth = delimiter, run, quoteDepth
+				if strings.HasSuffix(line, "\n") {
+					out.WriteByte('\n')
+				}
+				continue
+			}
+			out.WriteString(line)
+			continue
+		}
+		if quoteDepth == fenceQuoteDepth && ok && delimiter == fence && run >= fenceLen && strings.TrimSpace(tail) == "" {
+			fence, fenceLen, fenceQuoteDepth = 0, 0, 0
+		}
+		if strings.HasSuffix(line, "\n") {
+			out.WriteByte('\n')
+		}
 	}
 	return out.String()
 }
 
-// nextFence finds the next fenced-block OPENER, which only exists at the start
-// of a line after at most three spaces — the same position matchingFence
-// already requires of a closer.
-//
-// Searching the whole text instead read a mid-line run as an opener: a body
-// mentioning ```` ```bash ```` inline opened a block whose inline closer no
-// closer position could match, so the fence read as unclosed, everything after
-// it was discarded, and a marker further down went unseen. crq then fired a
-// review the author had opted out of. Mid-line runs belong to the inline-span
-// pass, which runs next.
-func nextFence(text string) (int, byte, int) {
-	for lineStart := 0; lineStart < len(text); {
-		lineEnd := strings.IndexByte(text[lineStart:], '\n')
-		if lineEnd < 0 {
-			lineEnd = len(text)
-		} else {
-			lineEnd += lineStart
+// markdownBlockQuoteContent removes CommonMark block-quote container markers
+// so block constructs such as fenced code are recognized relative to their
+// container. It also returns the nesting depth so a fence cannot outlive the
+// quote that contains it.
+func markdownBlockQuoteContent(line string) (string, int) {
+	depth := 0
+	for {
+		start := 0
+		for start < len(line) && start < 3 && line[start] == ' ' {
+			start++
 		}
-		line := text[lineStart:lineEnd]
-		if indent := fenceIndent(line); indent < len(line) {
-			if marker := line[indent]; marker == '`' || marker == '~' {
-				if width := fenceRun(line[indent:], marker); width >= 3 {
-					return lineStart + indent, marker, width
-				}
+		if start >= len(line) || line[start] != '>' {
+			return line, depth
+		}
+		start++
+		if start < len(line) && (line[start] == ' ' || line[start] == '\t') {
+			start++
+		}
+		line = line[start:]
+		depth++
+	}
+}
+
+func stripIndentedCode(body string) string {
+	type containerState struct {
+		inParagraph bool
+		listIndents []int
+	}
+	var out strings.Builder
+	states := []containerState{{}}
+	currentDepth := 0
+	for _, line := range strings.SplitAfter(body, "\n") {
+		content, depth := markdownBlockQuoteContent(line)
+		effectiveDepth := depth
+		if depth < currentDepth && strings.TrimSpace(content) != "" && states[currentDepth].inParagraph {
+			// CommonMark permits a block-quote paragraph to continue lazily
+			// without another `>` marker. Keep processing that line in the
+			// active child container rather than mistaking its indentation for
+			// an outer code block.
+			effectiveDepth = currentDepth
+		}
+		if effectiveDepth > currentDepth {
+			for len(states) <= effectiveDepth {
+				states = append(states, containerState{})
+			}
+			for d := currentDepth + 1; d <= effectiveDepth; d++ {
+				states[d] = containerState{}
 			}
 		}
-		if lineEnd == len(text) {
-			break
+		currentDepth = effectiveDepth
+		state := &states[effectiveDepth]
+		if strings.TrimSpace(content) == "" {
+			out.WriteString(line)
+			state.inParagraph = false
+			continue
 		}
-		lineStart = lineEnd + 1
-	}
-	return -1, 0, 0
-}
-
-func matchingFence(text string, marker byte, width int) (int, int) {
-	for lineStart := 0; lineStart < len(text); {
-		lineEnd := strings.IndexByte(text[lineStart:], '\n')
-		if lineEnd < 0 {
-			lineEnd = len(text)
-		} else {
-			lineEnd += lineStart
+		indent := markdownIndent(content)
+		for len(state.listIndents) > 0 && indent < state.listIndents[len(state.listIndents)-1] {
+			state.listIndents = state.listIndents[:len(state.listIndents)-1]
 		}
-		line := text[lineStart:lineEnd]
-		indent := fenceIndent(line)
-		if indent < len(line) && line[indent] == marker {
-			closingWidth := fenceRun(line[indent:], marker)
-			if closingWidth >= width && strings.TrimSpace(line[indent+closingWidth:]) == "" {
-				return lineStart + indent, closingWidth
+		containerIndent := 0
+		if len(state.listIndents) > 0 {
+			containerIndent = state.listIndents[len(state.listIndents)-1]
+		}
+		if contentIndent, ok := markdownListContentIndent(content, containerIndent); ok {
+			state.listIndents = append(state.listIndents, contentIndent)
+			out.WriteString(line)
+			state.inParagraph = continuesMarkdownParagraph(content)
+			continue
+		}
+		relativeIndent := indent - containerIndent
+		if relativeIndent >= 4 {
+			// Indentation cannot interrupt a CommonMark paragraph. Without a
+			// preceding blank line this is paragraph continuation, not an
+			// indented code block. Indentation is relative to the active list
+			// container: four absolute spaces can be ordinary list-item content.
+			if state.inParagraph {
+				out.WriteString(line)
+				continue
 			}
+			if strings.HasSuffix(line, "\n") {
+				out.WriteByte('\n')
+			}
+			continue
 		}
-		if lineEnd == len(text) {
+		out.WriteString(line)
+		state.inParagraph = continuesMarkdownParagraph(content)
+	}
+	return out.String()
+}
+
+// markdownListContentIndent returns the column where a list item's content
+// starts. CommonMark measures an indented code block from that column, not from
+// the left edge of the document.
+func markdownListContentIndent(line string, containerIndent int) (int, bool) {
+	line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+	column, at := leadingIndent(line)
+	if column < containerIndent || column-containerIndent > 3 || at >= len(line) {
+		return 0, false
+	}
+	start := at
+	switch line[at] {
+	case '-', '+', '*':
+		at++
+	default:
+		digits := 0
+		for at < len(line) && line[at] >= '0' && line[at] <= '9' && digits < 9 {
+			at++
+			digits++
+		}
+		if digits == 0 || at >= len(line) || (line[at] != '.' && line[at] != ')') {
+			return 0, false
+		}
+		at++
+	}
+	markerWidth := at - start
+	if at == len(line) {
+		return column + markerWidth + 1, true
+	}
+	if line[at] != ' ' && line[at] != '\t' {
+		return 0, false
+	}
+	padding := 0
+	for at < len(line) && (line[at] == ' ' || line[at] == '\t') {
+		next := padding + 1
+		if line[at] == '\t' {
+			currentColumn := column + markerWidth + padding
+			next = padding + 4 - currentColumn%4
+		}
+		if next > 4 {
 			break
 		}
-		lineStart = lineEnd + 1
+		padding = next
+		at++
 	}
-	return -1, 0
+	if padding == 0 || (at < len(line) && (line[at] == ' ' || line[at] == '\t')) {
+		padding = 1
+	}
+	return column + markerWidth + padding, true
 }
 
-func fenceRun(text string, marker byte) int {
-	width := 0
-	for width < len(text) && text[width] == marker {
-		width++
-	}
-	return width
-}
-
-func fenceIndent(line string) int {
-	indent := 0
-	for indent < len(line) && indent < 3 && line[indent] == ' ' {
-		indent++
-	}
-	return indent
-}
-
-func backtickRun(text string) int {
-	n := 0
-	for n < len(text) && text[n] == '`' {
-		n++
-	}
-	return n
-}
-
-func matchingBacktickRun(text string, want int) int {
-	for at := 0; at < len(text); {
-		next := strings.IndexByte(text[at:], '`')
-		if next < 0 {
-			return -1
+func leadingIndent(line string) (columns, bytes int) {
+	for bytes < len(line) {
+		switch line[bytes] {
+		case ' ':
+			columns++
+		case '\t':
+			columns += 4 - columns%4
+		default:
+			return columns, bytes
 		}
-		at += next
-		if run := backtickRun(text[at:]); run == want {
-			return at
-		} else {
-			at += run
+		bytes++
+	}
+	return columns, bytes
+}
+
+func continuesMarkdownParagraph(line string) bool {
+	line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+	indent := markdownIndent(line)
+	if indent > 3 || indent >= len(line) {
+		return false
+	}
+	text := line[indent:]
+	if text[0] == '#' {
+		end := 0
+		for end < len(text) && text[end] == '#' {
+			end++
 		}
+		if end <= 6 && (end == len(text) || text[end] == ' ' || text[end] == '\t') {
+			return false
+		}
+	}
+	return !markdownThematicBreak(text)
+}
+
+func markdownThematicBreak(text string) bool {
+	var delimiter byte
+	count := 0
+	for i := 0; i < len(text); i++ {
+		switch text[i] {
+		case ' ', '\t':
+			continue
+		case '*', '-', '_':
+			if delimiter == 0 {
+				delimiter = text[i]
+			}
+			if text[i] != delimiter {
+				return false
+			}
+			count++
+		default:
+			return false
+		}
+	}
+	return count >= 3
+}
+
+func markdownIndent(line string) int {
+	columns, _ := leadingIndent(line)
+	return columns
+}
+
+// markdownFence recognizes a CommonMark fence delimiter: at most three leading
+// spaces followed by a run of at least three backticks or tildes.
+func markdownFence(line string) (delimiter byte, run int, tail string, ok bool) {
+	line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+	start := 0
+	for start < len(line) && start < 3 && line[start] == ' ' {
+		start++
+	}
+	if start >= len(line) || (line[start] != '`' && line[start] != '~') {
+		return 0, 0, "", false
+	}
+	delimiter = line[start]
+	end := start
+	for end < len(line) && line[end] == delimiter {
+		end++
+	}
+	if end-start < 3 {
+		return 0, 0, "", false
+	}
+	return delimiter, end - start, line[end:], true
+}
+
+func stripCodeSpans(text string) string {
+	var out strings.Builder
+	for i := 0; i < len(text); {
+		if text[i] != '`' || backtickEscaped(text, i) {
+			out.WriteByte(text[i])
+			i++
+			continue
+		}
+		runEnd := i
+		for runEnd < len(text) && text[runEnd] == '`' {
+			runEnd++
+		}
+		run := runEnd - i
+		closeEnd := matchingBacktickRun(text, runEnd, run)
+		if closeEnd < 0 {
+			out.WriteString(text[i:runEnd])
+			i = runEnd
+			continue
+		}
+		// Keep prose on either side from being joined into a false marker.
+		out.WriteByte(' ')
+		i = closeEnd
+	}
+	return out.String()
+}
+
+func matchingBacktickRun(text string, start, want int) int {
+	for i := start; i < len(text); {
+		if text[i] != '`' || backtickEscaped(text, i) {
+			i++
+			continue
+		}
+		end := i
+		for end < len(text) && text[end] == '`' {
+			end++
+		}
+		if end-i == want {
+			return end
+		}
+		i = end
 	}
 	return -1
+}
+
+func backtickEscaped(text string, at int) bool {
+	backslashes := 0
+	for at > 0 && text[at-1] == '\\' {
+		backslashes++
+		at--
+	}
+	return backslashes%2 == 1
 }

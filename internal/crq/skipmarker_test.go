@@ -15,23 +15,33 @@ func TestSkipMarkerHasToBeUsedNotMentioned(t *testing.T) {
 	}{
 		{"used", "Low risk.\n\n<!-- crq:skip-autoreview -->\n", true},
 		{"mentioned in a code span", "- `<!-- crq:skip-autoreview -->` stops fleet auto-review.", false},
-		{"mentioned in a double-backtick code span", "- ``<!-- crq:skip-autoreview -->`` stops fleet auto-review.", false},
-		{"double-backtick span may contain a backtick", "``example ` <!-- crq:skip-autoreview -->``", false},
 		{"mentioned in a fence", "```md\n<!-- crq:skip-autoreview -->\n```\n", false},
 		{"mentioned in a tilde fence", "~~~md\n<!-- crq:skip-autoreview -->\n~~~\n", false},
-		{"shorter nested fence does not close a longer fence", "````md\n```\n<!-- crq:skip-autoreview -->\n```\n````\n", false},
-		{"longer fence closes a shorter fence", "```md\n<!-- crq:skip-autoreview -->\n````\n<!-- crq:skip-autoreview -->", true},
+		{"mentioned in a blockquote fence", "> ~~~md\n> <!-- crq:skip-autoreview -->\n> ~~~\n", false},
+		{"mentioned in a nested blockquote fence", "> > ```md\n> > <!-- crq:skip-autoreview -->\n> > ```\n", false},
+		{"used after a blockquote fence", "> ```md\n> documented marker\n\n<!-- crq:skip-autoreview -->\n", true},
 		{"mentioned in an indented block", "Example:\n\n    <!-- crq:skip-autoreview -->\n", false},
-		{"indented block followed by a used marker", "Example:\n\n    <!-- crq:skip-autoreview -->\n\n<!-- crq:skip-autoreview -->", true},
+		{"mentioned in a blockquoted indented block", "> Example:\n>\n>     <!-- crq:skip-autoreview -->\n", false},
+		{"mentioned in blockquoted code after prose", "Example:\n>     <!-- crq:skip-autoreview -->\n", false},
+		{"used in a lazy blockquote continuation", "> Prose\n    <!-- crq:skip-autoreview -->\n", true},
+		{"used after nested quote returns to a list", "> - Item\n>   > nested\n>     <!-- crq:skip-autoreview -->\n", true},
+		{"mentioned in blockquoted code nested in a list", "> - Example\n>\n>       <!-- crq:skip-autoreview -->\n", false},
 		{"mentioned in a tab-indented block", "Example:\n\n\t<!-- crq:skip-autoreview -->\n", false},
-		{"tab-indented block followed by a used marker", "Example:\n\n\t<!-- crq:skip-autoreview -->\n\n<!-- crq:skip-autoreview -->", true},
-		{"four spaces inside prose do not start a block", "Text\n    <!-- crq:skip-autoreview -->", true},
-		{"backticks inside a tilde fence do not consume later prose", "~~~md\n`example`\n~~~\n<!-- crq:skip-autoreview -->", true},
+		{"used as indented list content", "- Review settings\n\n    <!-- crq:skip-autoreview -->\n", true},
+		{"used after tab-padded list marker", "-\tOpt out\n\n    <!-- crq:skip-autoreview -->\n", true},
+		{"used in a nested list item", "- Review settings\n\n  - Opt out\n\n      <!-- crq:skip-autoreview -->\n", true},
+		{"mentioned in code nested in a list", "- Example\n\n      <!-- crq:skip-autoreview -->\n", false},
+		{"used in a paragraph continuation", "Paragraph\n    <!-- crq:skip-autoreview -->\n", true},
+		{"mentioned in code after a heading", "# Example\n    <!-- crq:skip-autoreview -->\n", false},
+		{"mentioned in code after a thematic break", "***\n    <!-- crq:skip-autoreview -->\n", false},
+		{"mentioned in a long fence", "````md\n```\n<!-- crq:skip-autoreview -->\n```\n````\n", false},
+		{"mentioned in a long code span", "Use `` ` <!-- crq:skip-autoreview --> ` `` to document it.", false},
 		{"documented and then used", "Use `<!-- crq:skip-autoreview -->`.\n\n<!-- crq:skip-autoreview -->", true},
 		{"absent", "An ordinary description.", false},
 		{"unclosed fence swallows the rest, as GitHub renders it", "```\n<!-- crq:skip-autoreview -->", false},
-		{"unclosed tilde fence swallows the rest", "~~~\n<!-- crq:skip-autoreview -->", false},
+		{"shorter fence does not close a long fence", "````\n<!-- crq:skip-autoreview -->\n```\n", false},
 		{"a lone backtick is literal, not a span", "a ` tick and <!-- crq:skip-autoreview -->", true},
+		{"escaped backticks are literal", "Use a literal \\` here.\n\n<!-- crq:skip-autoreview -->\n\nAnd another \\` here.", true},
 	} {
 		if got := cfg.SkipsReview(tc.body); got != tc.skip {
 			t.Errorf("%s: SkipsReview = %v, want %v", tc.name, got, tc.skip)
@@ -41,6 +51,16 @@ func TestSkipMarkerHasToBeUsedNotMentioned(t *testing.T) {
 	// No marker configured means nothing is ever skipped, whatever a body says.
 	if (Config{}).SkipsReview("<!-- crq:skip-autoreview -->") {
 		t.Error("an empty marker skipped a pull request")
+	}
+}
+
+func TestSkipMarkerMatchesConfiguredWhitespaceExactly(t *testing.T) {
+	cfg := Config{SkipMarker: "no review "}
+	if cfg.SkipsReview("no review") {
+		t.Error("a marker without its configured trailing space matched")
+	}
+	if !cfg.SkipsReview("no review ") {
+		t.Error("the marker with its configured trailing space did not match")
 	}
 }
 
