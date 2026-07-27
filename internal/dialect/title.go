@@ -109,7 +109,8 @@ func pathLike(text string) bool {
 func firstProse(body string) string {
 	for _, line := range strings.Split(body, "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "<") || strings.HasPrefix(line, "#") {
+		_, heading := headingText(line)
+		if line == "" || strings.HasPrefix(line, "<") || heading {
 			continue
 		}
 		if usableTitle(line) != "" {
@@ -122,11 +123,32 @@ func firstProse(body string) string {
 // headingOf returns the first Markdown heading's text.
 func headingOf(body string) string {
 	for _, line := range strings.Split(body, "\n") {
-		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "#") {
-			return strings.TrimSpace(strings.TrimLeft(trimmed, "# "))
+		if heading, ok := headingText(line); ok {
+			return heading
 		}
 	}
 	return ""
+}
+
+// headingText recognizes an ATX heading marker only when its hashes are
+// followed by whitespace or the end of the line. An issue reference such as
+// "#123 breaks parsing" is prose and must keep its hash.
+func headingText(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	hashes := 0
+	for hashes < len(line) && hashes < 6 && line[hashes] == '#' {
+		hashes++
+	}
+	if hashes == 0 || (hashes < len(line) && line[hashes] == '#') {
+		return "", false
+	}
+	if hashes == len(line) {
+		return "", true
+	}
+	if line[hashes] != ' ' && line[hashes] != '\t' {
+		return "", false
+	}
+	return strings.TrimSpace(line[hashes:]), true
 }
 
 func cleanTitle(title string) string {

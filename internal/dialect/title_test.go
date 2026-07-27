@@ -121,17 +121,16 @@ func TestThreadTitleAgainstTheCorpus(t *testing.T) {
 	for _, tc := range []struct{ file, want string }{
 		{"bugbot/inline-finding-high.md", "Queue cap desyncs stores"},
 		{"bugbot/inline-finding-medium.md", "Composer acks unrelated queue changes"},
-		{"macroscope/inline-finding-high.md", "`writeScreenshotFile` writes directly to `absolutePath`"},
+		{"macroscope/inline-finding-high.md", "writeScreenshotFile writes directly to absolutePath after WorkspacePaths.resolveRelativePathWithinRoot validates it, ..."},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
 			body, err := os.ReadFile(filepath.Join("testdata", tc.file))
 			if err != nil {
-				t.Skipf("corpus file missing: %v", err)
+				t.Fatalf("read corpus fixture: %v", err)
 			}
 			got := ThreadTitle(true, string(body))
-			if !strings.HasPrefix(got, strings.TrimPrefix(tc.want, "`")) &&
-				!strings.Contains(got, strings.Trim(strings.SplitN(tc.want, " ", 2)[0], "`")) {
-				t.Errorf("ThreadTitle = %q, want it to start from %q", got, tc.want)
+			if got != tc.want {
+				t.Errorf("ThreadTitle = %q, want %q", got, tc.want)
 			}
 			if severityOnly.MatchString(got) {
 				t.Errorf("ThreadTitle = %q — a severity label is not a summary", got)
@@ -146,6 +145,7 @@ func TestThreadTitleKeepsCodeAndReferences(t *testing.T) {
 	for _, tc := range []struct{ body, want string }{
 		{"**Handle Map<string, User> correctly**\n\ndetail", "Handle Map<string, User> correctly"},
 		{"**Fix the leak from #123**\n\ndetail", "Fix the leak from #123"},
+		{"#123 breaks parsing\n\ndetail", "#123 breaks parsing"},
 	} {
 		if got := ThreadTitle(true, tc.body); got != tc.want {
 			t.Errorf("ThreadTitle = %q, want %q", got, tc.want)
