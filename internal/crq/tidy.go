@@ -65,12 +65,17 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 	if err != nil {
 		return result, err
 	}
+	// Which comments count as a trigger depends on who reviews, so the whole
+	// path takes a configuration value rather than reading the Service's. That
+	// is what lets per-repo reviewers substitute one here later without
+	// threading anything new through.
+	cfg := s.cfg
 	if len(collectPosted(st, repo, pr).commands) == 0 {
 		result.Kept = append(result.Kept, "no round on this pr posted a trigger comment")
 		return result, nil
 	}
 
-	obs, err := s.observe(ctx, repo, pr, nil, s.clock())
+	obs, err := s.observe(ctx, cfg, repo, pr, nil, s.clock())
 	if err != nil {
 		return result, err
 	}
@@ -97,7 +102,7 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 	for _, comment := range obs.comments {
 		present[comment.ID] = comment.Body
 	}
-	triggers := s.triggerBodies()
+	triggers := cfg.triggerBodies()
 	var commands []engine.CommandComment
 	edited := 0
 	for _, cmd := range posted.commands {
@@ -225,10 +230,10 @@ func collectPosted(st State, repo string, pr int) postedCommands {
 // triggerBodies maps each reviewer (normalized login) to the comment bodies
 // that count as its trigger: the configured review command for the primary, the
 // command plus registry aliases for each enabled co-reviewer.
-func (s *Service) triggerBodies() map[string][]string {
-	out := s.coCommandBodies()
-	if command := strings.TrimSpace(s.cfg.ReviewCommand); command != "" {
-		key := dialect.NormalizeBotName(s.cfg.Bot)
+func (c Config) triggerBodies() map[string][]string {
+	out := c.coCommandBodies()
+	if command := strings.TrimSpace(c.ReviewCommand); command != "" {
+		key := dialect.NormalizeBotName(c.Bot)
 		out[key] = append(out[key], command)
 	}
 	return out
