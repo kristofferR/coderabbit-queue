@@ -53,7 +53,7 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 
 	pool := newDispatchPool(0)
 	ok, why := svc.startDispatch(context.Background(), WatchOptions{
-		Dispatch: true, Command: []string{script}, MaxAttempts: 3,
+		Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 3,
 	}, pool, report)
 	if !ok {
 		t.Fatalf("dispatch did not run: %s", why)
@@ -109,16 +109,57 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	})
 }
 
-// Watching is an observation; dispatching writes code. Asking for the second
-// without saying what to run must fail loudly rather than silently watch.
-func TestWatchRefusesDispatchWithNoCommand(t *testing.T) {
+// Dispatching is the default, so a machine with no fix agent configured must
+// still be able to watch: refusing to start would make the default setting
+// break the plain command. It observes instead — and says so, because a drain
+// that quietly does nothing is the failure this whole area is about.
+func TestWatchObservesWhenNoFixCommandIsConfigured(t *testing.T) {
 	cfg := firingConfig()
 	cfg.DispatchCommand = nil
-	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
-	err := svc.Watch(context.Background(), WatchOptions{Dispatch: true, Once: true}, nil)
-	if err == nil || !strings.Contains(err.Error(), "command") {
-		t.Errorf("err = %v, want a refusal naming the missing command", err)
+	cfg.AllowRepos = map[string]bool{"owner/thing": true}
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", 3, "aaaaaaaa1"
+	gh.pulls[fakeKey("owner/thing", 3)] = pull
+	said := &recordingLogger{}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), said)
+
+	var events []WatchEvent
+	err := svc.Watch(context.Background(), WatchOptions{Once: true}, func(e WatchEvent) error {
+		events = append(events, e)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("watch refused to observe without a fix command: %v", err)
 	}
+	if len(events) == 0 {
+		t.Fatal("nothing was observed")
+	}
+	for _, e := range events {
+		if e.Dispatched {
+			t.Errorf("a session was dispatched with no command configured: %+v", e)
+		}
+	}
+	if !said.contains("observing only") {
+		t.Errorf("the watcher did not say it was observing only: %q", said.lines)
+	}
+}
+
+// recordingLogger keeps what the service said, so a test can assert on the one
+// line that explains a silent-looking mode.
+type recordingLogger struct{ lines []string }
+
+func (r *recordingLogger) Printf(format string, args ...any) {
+	r.lines = append(r.lines, fmt.Sprintf(format, args...))
+}
+
+func (r *recordingLogger) contains(want string) bool {
+	for _, line := range r.lines {
+		if strings.Contains(line, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestWatchEmitsAnEventForASkipMarkedPullRequest(t *testing.T) {
@@ -201,7 +242,7 @@ func TestDispatchHonoursDryRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	pool := newDispatchPool(0)
-	ok, why := svc.startDispatch(context.Background(), WatchOptions{Dispatch: true, Command: []string{script}},
+	ok, why := svc.startDispatch(context.Background(), WatchOptions{Dispatch: dispatchOn(), Command: []string{script}},
 		pool, NextReport{Repo: "o/r", PR: 1, Head: "aaaaaaaa1", Action: "fix"})
 	pool.wait()
 	if ok {
@@ -256,7 +297,7 @@ func TestWatchClaimsCarriedFeedbackBeforeAdvancingTheQueue(t *testing.T) {
 	}
 
 	if err := svc.Watch(context.Background(), WatchOptions{
-		Repos: []string{repo}, Once: true, Dispatch: true,
+		Repos: []string{repo}, Once: true, Dispatch: dispatchOn(),
 		Command: []string{script}, MaxAttempts: 3,
 	}, nil); err != nil {
 		t.Fatal(err)
@@ -298,7 +339,7 @@ func TestOneShotWatchReportsDispatchFailure(t *testing.T) {
 
 	var events []WatchEvent
 	err := svc.Watch(context.Background(), WatchOptions{
-		Repos: []string{repo}, Once: true, Dispatch: true,
+		Repos: []string{repo}, Once: true, Dispatch: dispatchOn(),
 		Command: []string{script}, MaxAttempts: 3,
 	}, func(event WatchEvent) error {
 		events = append(events, event)
@@ -404,7 +445,7 @@ func TestDispatchKeepsAWorktreeWithUnpushedWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	pool := newDispatchPool(0)
-	ok, why := svc.startDispatch(context.Background(), WatchOptions{Dispatch: true, Command: []string{script}, MaxAttempts: 3},
+	ok, why := svc.startDispatch(context.Background(), WatchOptions{Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 3},
 		pool, NextReport{Repo: repo, PR: 8, Head: sha, Action: "fix"})
 	if !ok {
 		t.Fatalf("dispatch failed: %s", why)
@@ -506,7 +547,7 @@ func TestDispatchKeepsACommittedButUnpushedFix(t *testing.T) {
 	}
 
 	pool := newDispatchPool(0)
-	ok, why := svc.startDispatch(context.Background(), WatchOptions{Dispatch: true, Command: []string{script}, MaxAttempts: 3},
+	ok, why := svc.startDispatch(context.Background(), WatchOptions{Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 3},
 		pool, NextReport{Repo: repo, PR: 11, Head: sha, Action: "fix"})
 	if !ok {
 		t.Fatalf("dispatch failed: %s", why)
@@ -551,7 +592,7 @@ func TestDispatchRefundsTheAttemptWhenTheCommandCannotStart(t *testing.T) {
 	pool := newDispatchPool(0)
 	missing := filepath.Join(t.TempDir(), "no-such-agent")
 	if ok, why := svc.startDispatch(context.Background(),
-		WatchOptions{Dispatch: true, Command: []string{missing}, MaxAttempts: 3},
+		WatchOptions{Dispatch: dispatchOn(), Command: []string{missing}, MaxAttempts: 3},
 		pool, NextReport{Repo: repo, PR: 6, Head: sha, Action: "fix"}); ok {
 		t.Fatal("a command that never started was reported as dispatched")
 	} else if !strings.Contains(why, "could not start") {
@@ -591,7 +632,7 @@ func TestDispatchHealthRecordsProcessStartBeforeItsExit(t *testing.T) {
 	pool := newDispatchPool(0)
 	report := NextReport{Repo: repo, PR: 15, Head: sha, Action: "fix"}
 	if ok, why := svc.startDispatch(context.Background(), WatchOptions{
-		Dispatch: true, Command: []string{script}, MaxAttempts: 3,
+		Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 3,
 	}, pool, report); !ok {
 		t.Fatalf("dispatch was not claimed: %s", why)
 	}
@@ -869,4 +910,42 @@ func TestDispatchSkipsAForkUnlessAllowed(t *testing.T) {
 	if !NewService(allowed, newFakeGitHub(), NewMemoryStore(allowed), nil).mayDispatch("owner/thing", fork) {
 		t.Error("CRQ_DISPATCH_FORKS did not allow a fork")
 	}
+}
+
+// The watcher must not write into the caller's slices.
+//
+// `crq watch -- <cmd>` splits argv at "--": the flag half is args[:i] and the
+// command half is args[i+1:], so the flag half keeps CAPACITY reaching into the
+// command. fs.Args() is a sub-slice of it, and filling an empty repo list with
+// append then overwrote the fix command in place — every dispatch tried to exec
+// a repository slug ("fork/exec kristofferr/coderabbit-queue: no such file or
+// directory") and no pull request in the fleet was fixed.
+func TestWatchDoesNotOverwriteTheCommandItWasGiven(t *testing.T) {
+	argv := []string{"--dispatch", "--", "/bin/true", "exec"}
+	flagArgs, command := argv[:1], argv[2:]
+	repos := flagArgs[1:] // what fs.Args() hands back: empty, but aliasing command
+
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/one": true, "owner/two": true, "owner/three": true}
+	gh := newFakeGitHub()
+	gh.listPullErrs = map[string]error{
+		"owner/one": errors.New("unreadable"), "owner/two": errors.New("unreadable"),
+		"owner/three": errors.New("unreadable"),
+	}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	_ = svc.watchPass(context.Background(), WatchOptions{
+		Repos: repos, Command: command, Dispatch: dispatchOn(),
+	}, newDispatchPool(0), nil)
+
+	if command[0] != "/bin/true" || command[1] != "exec" {
+		t.Fatalf("the fix command was overwritten: %q", command)
+	}
+}
+
+// dispatchOn is the explicit "yes" a test needs now that WatchOptions.Dispatch
+// distinguishes unset (default on) from an answer.
+func dispatchOn() *bool {
+	on := true
+	return &on
 }

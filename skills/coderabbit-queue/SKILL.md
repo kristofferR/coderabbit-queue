@@ -173,7 +173,7 @@ finding. Pass `--keep-open` to leave it unresolved deliberately.
 
 ## Unattended Drain
 
-`crq watch --dispatch` starts a fix session for every PR whose action is `fix`, in a worktree crq
+`crq watch` starts a fix session for every PR whose action is `fix` — that is the default — in a worktree crq
 checked out at that head. Sessions run concurrently and off the decision loop, with **no cap by default** — fixing findings
 spends no account quota, so it does not belong in a queue. `CRQ_DISPATCH_CONCURRENCY` sets one if the
 machine cannot take the load. The decisions stay serial, which is what keeps the metered review in

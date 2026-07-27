@@ -23,6 +23,8 @@ type (
 	Revision     = crqstate.Revision
 	StateStore   = crqstate.StateStore
 	StoreConfig  = crqstate.StoreConfig
+	// RepoDrainSwitch is one repository's answer to whether crq may fix it.
+	RepoDrainSwitch = crqstate.RepoDrainSwitch
 )
 
 const (

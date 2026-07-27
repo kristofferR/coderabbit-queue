@@ -166,7 +166,7 @@ func (s *Service) applyDrain(ctx context.Context, plan DrainInstall) (DrainInsta
 # Installed by "crq drain install". Runs the review drain: crq decides, and a
 # fix session is started for each PR that needs one.
 set -uo pipefail
-exec %s watch --dispatch -- %s
+exec %s watch -- %s
 `, shellQuote(self), invocation)
 
 	for _, f := range []struct {

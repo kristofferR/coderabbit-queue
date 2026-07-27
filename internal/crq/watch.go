@@ -27,9 +27,12 @@ type WatchOptions struct {
 	Interval time.Duration
 	// Once runs a single pass and returns.
 	Once bool
-	// Dispatch turns "a PR needs fixing" into a session that fixes it. Off by
-	// default: watching is an observation, dispatching writes code.
-	Dispatch bool
+	// Dispatch turns "a PR needs fixing" into a session that fixes it. nil means
+	// the default, which is ON: watching a pull request nobody fixes is a queue
+	// that reports work and does none. A pointer because "unset" and "explicitly
+	// off" are different instructions, and only the first may be overridden by
+	// the configured default.
+	Dispatch *bool
 	// Command is the fix session to run, argv-style. Empty means CRQ_DISPATCH_CMD.
 	Command []string
 	// MaxAttempts bounds dispatches per head. 0 means the configured default.
@@ -43,6 +46,13 @@ type WatchOptions struct {
 	// `--concurrency 0` is how one run overrides a cap set in
 	// CRQ_DISPATCH_CONCURRENCY, and an int cannot tell that from no flag at all.
 	Concurrency *int
+}
+
+// dispatching reports whether this run starts fix sessions. Watch resolves the
+// default before a pass ever reads it, so nil here means the caller reached a
+// pass without going through Watch — observe rather than guess.
+func (o WatchOptions) dispatching() bool {
+	return o.Dispatch != nil && *o.Dispatch
 }
 
 // WatchEvent is one PR's state at a pass, and what the watcher did about it.
@@ -78,11 +88,27 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 	if opts.MaxAttempts <= 0 {
 		opts.MaxAttempts = s.cfg.DispatchMaxAttempts
 	}
-	if opts.Dispatch && len(opts.Command) == 0 {
+	// Dispatch is what watching is FOR, so it is on unless something says
+	// otherwise: an observed pull request nobody fixes is a queue that reports
+	// work and does none. Off comes from three places — --no-dispatch for one
+	// run, a per-repo switch in the state ref, and having no fix command at all.
+	if opts.Dispatch == nil {
+		on := true
+		opts.Dispatch = &on
+	}
+	if *opts.Dispatch && len(opts.Command) == 0 {
 		opts.Command = s.cfg.DispatchCommand
 	}
-	if opts.Dispatch && len(opts.Command) == 0 {
-		return errors.New("dispatch needs a command: set CRQ_DISPATCH_CMD, or pass one after --")
+	if *opts.Dispatch && len(opts.Command) == 0 {
+		// Not an error: `crq watch` on a machine with no fix agent configured is
+		// a perfectly good observer, and refusing to start would make the
+		// default setting break the plain command. Say it once, out loud, so it
+		// is not the silent nothing dispatch health exists to prevent.
+		off := false
+		opts.Dispatch = &off
+		if s.log != nil {
+			s.log.Printf("watch: observing only — no fix command configured (set CRQ_DISPATCH_CMD, or pass one after --)")
+		}
 	}
 	// Fix sessions run OUTSIDE the pass, and by default without a cap.
 	//
@@ -156,7 +182,14 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		result <-chan dispatchResult
 	}
 	var pending []pendingEvent
-	repos := opts.Repos
+	// Copied, never appended to in place. `crq watch -- <cmd>` splits argv at
+	// "--", so the flag half keeps CAPACITY reaching into the command half, and
+	// fs.Args() is a sub-slice of it: filling an empty list with append wrote the
+	// repository names straight over the fix command, and every dispatch in the
+	// fleet died with "fork/exec kristofferr/coderabbit-queue: no such file or
+	// directory". A caller's slice is the caller's.
+	repos := make([]string, 0, len(opts.Repos)+len(s.cfg.AllowRepos))
+	repos = append(repos, opts.Repos...)
 	if len(repos) == 0 {
 		for repo := range s.cfg.AllowRepos {
 			repos = append(repos, repo)
@@ -179,6 +212,17 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	}
 	var candidates []candidate
 	gate := NormalizeRepo(s.cfg.GateRepo)
+	// Which repositories may be FIXED is per repository, read once for the pass.
+	// Watching is unaffected: a repository with draining off is still observed
+	// and still reviewed, so its feedback arrives for a person to act on.
+	drainOff := map[string]bool{}
+	if st, _, err := s.store.Load(ctx); err == nil {
+		for _, repo := range repos {
+			if !st.DrainEnabled(repo) {
+				drainOff[NormalizeRepo(repo)] = true
+			}
+		}
+	}
 	for _, repo := range repos {
 		// The calibration PR is deliberately kept open to probe account quota; it
 		// is not work, and `Next` would enqueue a real review for it — or dispatch
@@ -239,7 +283,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			}
 			var report NextReport
 			var err error
-			if opts.Dispatch {
+			if opts.dispatching() {
 				// Peek through the non-firing decision path first. A carried
 				// finding can make Next enqueue and Pump the current head before
 				// returning "fix"; claiming only afterwards spends a metered
@@ -271,9 +315,11 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				Action: report.Action, Reason: report.Reason,
 				Findings: len(report.Findings), At: s.clock().UTC(),
 			}
-			if opts.Dispatch && report.Action == string(engine.ActionFix) && !s.mayDispatch(repo, pull) {
+			if opts.dispatching() && report.Action == string(engine.ActionFix) && drainOff[NormalizeRepo(repo)] {
+				event.Skipped = "draining is off for this repository (crq drain on " + NormalizeRepo(repo) + ")"
+			} else if opts.dispatching() && report.Action == string(engine.ActionFix) && !s.mayDispatch(repo, pull) {
 				event.Skipped = "the head branch is a fork; set CRQ_DISPATCH_FORKS=1 to fix contributor pull requests"
-			} else if opts.Dispatch && report.Action == string(engine.ActionFix) {
+			} else if opts.dispatching() && report.Action == string(engine.ActionFix) {
 				// Claimed here, run in the pool: the pass moves on to the next PR
 				// while this session runs.
 				var result <-chan dispatchResult

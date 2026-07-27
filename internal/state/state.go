@@ -315,6 +315,9 @@ type State struct {
 	// A session may still be resolving threads after its push superseded the
 	// claimed round, and archive eviction must not admit a second session.
 	Dispatches map[string]DispatchClaim `json:"dispatches,omitempty"`
+	// RepoDrain answers "may crq fix pull requests here?" per repository. Absent
+	// means the default, which is yes — see DrainEnabled.
+	RepoDrain map[string]RepoDrainSwitch `json:"repo_drain,omitempty"`
 
 	Warn         string     `json:"warn,omitempty"`
 	UpdatedAt    *time.Time `json:"wrote_at,omitempty"`

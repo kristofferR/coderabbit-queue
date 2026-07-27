@@ -250,6 +250,46 @@ func run(ctx context.Context, args []string) int {
 		printJSON(result)
 		return 0
 	case "drain":
+		switch sub := drainSubcommand(args[1:]); sub {
+		case "", "list":
+			if err := cfg.RequireState(); err != nil {
+				fatal(err)
+				return 1
+			}
+			settings, derr := service.DrainSettings(ctx)
+			if derr != nil {
+				fatal(derr)
+				return 1
+			}
+			printJSON(settings)
+			return 0
+		case "on", "off", "default":
+			rest, reason, ok := parseDrainReason(args[2:])
+			if !ok || len(rest) != 1 {
+				fatal(errors.New(`usage: crq drain on|off|default <repo> [--reason "<why>"]`))
+				return 1
+			}
+			if err := cfg.RequireState(); err != nil {
+				fatal(err)
+				return 1
+			}
+			if sub == "default" {
+				cleared, cerr := service.ClearDrainEnabled(ctx, rest[0])
+				if cerr != nil {
+					fatal(cerr)
+					return 1
+				}
+				printJSON(map[string]any{"repo": crq.NormalizeRepo(rest[0]), "cleared": cleared, "enabled": true, "default": true})
+				return 0
+			}
+			setting, serr := service.SetDrainEnabled(ctx, rest[0], sub == "on", reason)
+			if serr != nil {
+				fatal(serr)
+				return 1
+			}
+			printJSON(setting)
+			return 0
+		}
 		opts, perr := parseDrainArgs(args[1:])
 		if perr != nil {
 			fatal(perr)
@@ -276,11 +316,19 @@ func run(ctx context.Context, args []string) int {
 		for i, arg := range flagArgs {
 			if arg == "--" {
 				command = flagArgs[i+1:]
-				flagArgs = flagArgs[:i]
+				// Three-index slice: without capping capacity, the flag half
+				// still reaches into the command half, and anything that appends
+				// to a slice derived from it — fs.Args(), which is exactly what
+				// the repository list becomes — writes over the command.
+				flagArgs = flagArgs[:i:i]
 				break
 			}
 		}
-		dispatch := fs.Bool("dispatch", false, "start a fix session for a PR that needs one")
+		// Dispatch is the default. --dispatch stays as an accepted no-op so an
+		// installed unit or a habit does not break; --no-dispatch is how you get
+		// an observer.
+		_ = fs.Bool("dispatch", true, "start a fix session for a PR that needs one (default)")
+		noDispatch := fs.Bool("no-dispatch", false, "observe only: report what each PR needs and fix nothing")
 		once := fs.Bool("once", false, "run one pass and exit")
 		interval := fs.Duration("interval", 0, "time between passes")
 		attempts := fs.Int("max-attempts", 0, "dispatches allowed per head")
@@ -293,9 +341,13 @@ func run(ctx context.Context, args []string) int {
 			return 1
 		}
 		opts := crq.WatchOptions{
-			Dispatch: *dispatch, Once: *once,
+			Once:     *once,
 			Interval: *interval, MaxAttempts: *attempts,
 			Command: command,
+		}
+		if *noDispatch {
+			off := false
+			opts.Dispatch = &off
 		}
 		// Only when it was actually passed: `--concurrency 0` means "no cap" and
 		// has to override a configured one, which an unset flag must not do.
@@ -447,8 +499,9 @@ USAGE
                                    reply on a thread to record why a finding is declined
                                    (resolves it; --keep-open leaves it open)
   crq drain install [--agent <path>] [--dry-run] [<repo>...]
+  crq drain [on|off|default <repo>]  which repositories crq may fix (on by default)
                                    install and start the unattended review drain
-  crq watch [--dispatch] [--once] [<repo>...] [-- <fix command>]
+  crq watch [--no-dispatch] [--once] [<repo>...] [-- <fix command>]
                                    drive open PRs through crq next; --dispatch starts a
                                    session to fix the ones that need it
   crq autoreview [--once] [--no-incremental]
@@ -607,9 +660,20 @@ intend to keep working). Thread IDs come from .findings[].thread_id.
 `)
 	case "drain":
 		fmt.Print(`crq drain install [--agent <path>] [--dry-run] [<repo>...]
+crq drain                            (which repositories crq may fix)
+crq drain off <repo> [--reason "<why>"]
+crq drain on <repo>
+crq drain default <repo>             (back to the fleet default, which is on)
 
 Install and start the unattended review drain: crq watches every open PR and
 starts a fix session for the ones that need one.
+
+Draining is ON for every repository in scope. That is the point of watching: a
+pull request nobody fixes is a queue that reports work and does none. Turn it off
+where you do not want crq writing code — a release branch, a repository you are
+hand-tuning — and watching continues there regardless, so reviews still arrive
+for a person to act on. The setting lives in the state ref, next to the reviewer
+overrides, because the daemon has no checkout of what it watches.
 
 It writes the fix prompt, a wrapper, and a service definition for this platform
 (a systemd user unit, or a launchd agent on macOS), turns on whatever that
@@ -619,7 +683,7 @@ commands without touching anything.
 The agent defaults to "claude" on PATH; --agent takes another path to it, or a
 wrapper around it. The installed service runs the agent with Claude Code's own
 flags (-p, --permission-mode, --output-format), so an agent with a different CLI
-needs its own wrapper script and "crq watch --dispatch -- <cmd>...", which runs
+needs its own wrapper script and "crq watch -- <cmd>...", which runs
 whatever argv you give it. --agent must name something runnable; a name that
 cannot be resolved is refused here rather than at the first dispatch.
 
@@ -631,14 +695,17 @@ CRQ_DISPATCH_MAX_ATTEMPTS per head, and the prompt's stated scope.
 Repositories default to CRQ_REPOS.
 `)
 	case "watch":
-		fmt.Print(`crq watch [--dispatch] [--once] [--interval <d>] [--max-attempts <n>] [<repo>...] [-- <cmd>...]
+		fmt.Print(`crq watch [--no-dispatch] [--once] [--interval <d>] [--max-attempts <n>] [<repo>...] [-- <cmd>...]
 
-Drive every open PR through the same crq next oracle an agent uses, and emit one
-JSON line per PR per pass. Without --dispatch that is all it does: watching is an
-observation.
+Drive every open PR through the same crq next oracle an agent uses, emit one JSON
+line per PR per pass, and start a fix session for each PR whose action is "fix".
 
-With --dispatch, a PR whose action is "fix" gets a session started for it, in a
-worktree crq checked out at that head, with:
+Fixing is the default — watching a pull request nobody fixes is a queue that
+reports work and does none. Three things turn it off: --no-dispatch for one run,
+"crq drain off <repo>" for one repository, and having no fix command configured
+at all, which observes and says so rather than refusing to start.
+
+A dispatched session runs in a worktree crq checked out at that head, with:
 
   CRQ_DISPATCH_REPO      owner/name
   CRQ_DISPATCH_PR        the number
@@ -1339,4 +1406,40 @@ func parseDrainArgs(args []string) (drainArgs, error) {
 		return drainArgs{}, errors.New("usage: crq drain install [--agent <path>] [--dry-run] [<repo>...]")
 	}
 	return drainArgs{agent: *agent, agentArgs: *agentArgs, dryRun: *dryRun, repos: fs.Args()}, nil
+}
+
+// drainSubcommand names what `crq drain ...` was asked to do. An empty string
+// means the bare command, which lists.
+func drainSubcommand(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	switch args[0] {
+	case "on", "off", "default", "list", "install":
+		return args[0]
+	}
+	return ""
+}
+
+// parseDrainReason splits `<repo>` from an optional --reason value. An
+// unrecognized flag is an error rather than a positional: a typo like --resaon
+// must fail loudly, not silently become the repository name.
+func parseDrainReason(args []string) (rest []string, reason string, ok bool) {
+	for i := 0; i < len(args); i++ {
+		switch arg := args[i]; {
+		case arg == "--reason":
+			if i+1 >= len(args) {
+				return nil, "", false
+			}
+			reason = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--reason="):
+			reason = strings.TrimPrefix(arg, "--reason=")
+		case strings.HasPrefix(arg, "-"):
+			return nil, "", false
+		default:
+			rest = append(rest, arg)
+		}
+	}
+	return rest, reason, true
 }
