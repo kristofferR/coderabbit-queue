@@ -211,6 +211,23 @@ func run(ctx context.Context, args []string) int {
 		}
 		printJSON(result)
 		return 0
+	case "threads":
+		repo, pr, ok := repoPR(args[1:])
+		if !ok {
+			fatal(errors.New("usage: crq threads <repo> <pr>"))
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		threads, terr := service.OpenThreads(ctx, repo, pr)
+		if terr != nil {
+			fatal(terr)
+			return 1
+		}
+		printJSON(threads)
+		return 0
 	case "decline":
 		threads, reason, resolve, ok := parseDeclineArgs(args[1:])
 		if !ok || len(threads) == 0 || strings.TrimSpace(reason) == "" {
@@ -385,6 +402,7 @@ USAGE
   crq decline <thread-id> [...] --reason "<why>" [--keep-open]
                                    reply on a thread to record why a finding is declined
                                    (resolves it; --keep-open leaves it open)
+  crq threads <repo> <pr>          list every unresolved review thread, outdated ones included
   crq dismiss <repo> <pr> <finding-id> [...] --reason "<why>"
                                    account for a finding GitHub gives you no thread to close
   crq autoreview [--once] [--no-incremental]
@@ -540,6 +558,20 @@ replies contesting the decline, crq re-surfaces that reply as its own finding.
 
 Pass --keep-open to leave it unresolved anyway (an on-the-record disagreement you
 intend to keep working). Thread IDs come from .findings[].thread_id.
+`)
+	case "threads":
+		fmt.Print(`crq threads <repo> <pr>
+
+List the PR's unresolved review threads as JSON, including the ones GitHub has
+marked OUTDATED, with .thread_id ready for crq resolve.
+
+Findings leave outdated threads out on purpose: the code they point at is gone,
+and anything carrying a thread ID blocks the round until it is resolved. But an
+outdated thread is still open on the PR — and after a push that is every thread
+from the previous head, so fixing and pushing used to leave no way to close them
+through crq at all.
+
+Read this, decide, then crq resolve (or crq decline) the ones you have answered.
 `)
 	case "dismiss":
 		fmt.Print(`crq dismiss <repo> <pr> <finding-id> [<finding-id>...] --reason "<why>"

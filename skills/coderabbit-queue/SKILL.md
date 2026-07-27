@@ -160,6 +160,17 @@ call rather than looping a subprocess per thread.
 crq keys off GitHub's resolution state: an addressed finding keeps reappearing in `crq feedback`
 until its thread is resolved on GitHub. Resolve only threads you actually addressed; leave the rest open.
 
+After a push, every thread from the previous head is **outdated**. Findings leave those out on
+purpose — the code they point at is gone — so `crq feedback` no longer gives you their IDs even
+though they are still open on the PR. List them instead of reaching for the GitHub API:
+
+```bash
+crq threads "$REPO" "$PR"
+```
+
+It returns every unresolved thread, outdated ones included, current ones first, each with the
+`thread_id` that `crq resolve` and `crq decline` take.
+
 For a finding you are **not** addressing, record why instead of leaving it silently open:
 
 ```bash
