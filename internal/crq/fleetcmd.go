@@ -233,8 +233,8 @@ func (s *Service) updateFleet(ctx context.Context, mutate func(*State) error) (S
 	return st, err
 }
 
-// FleetDivergence lists the settings whose value on this host differs from what
-// the fleet records, for `crq doctor`.
+// FleetDivergence lists the settings this host still answers for itself while
+// the fleet records them, for `crq doctor`.
 //
 // A host that quietly disagrees is the failure this is about: everything looks
 // healthy on both machines, and a repository is excluded on one and reviewed by
@@ -259,9 +259,19 @@ func (s *Service) FleetDivergence(ctx context.Context) ([]string, error) {
 		case item.Error != "":
 			out = append(out, fmt.Sprintf("%s: the fleet's value is one this crq cannot read (%s); using this host's %q",
 				item.Key, item.Error, item.Value))
-		case item.HostValue != nil && len(hostEnv) > 0:
+		case item.Source == "fleet" && item.HostValue != nil && len(hostEnv) > 0:
 			out = append(out, fmt.Sprintf("%s is %q for the fleet, but %s is set to %q on this host; remove it or run crq config set %s",
 				item.Key, item.Value, strings.Join(hostEnv, ", "), *item.HostValue, item.Key))
+		case item.Source == "fleet" && len(hostEnv) > 0:
+			// A host copy that currently AGREES is still worth naming. Nothing
+			// misbehaves while the fleet records the key — but `crq config unset`
+			// hands the setting back to whatever each host says, and this host
+			// then falls back to a value nobody remembers setting, diverging from
+			// every host without it. That is the same failure, one command later,
+			// and by then there is no recorded value left to compare against and
+			// nothing here would report it.
+			out = append(out, fmt.Sprintf("%s is %q for the fleet and %s is still set to that value on this host; remove it, or unsetting %s silently returns this host to its own copy",
+				item.Key, item.Value, strings.Join(hostEnv, ", "), item.Key))
 		}
 	}
 	return out, nil
@@ -348,20 +358,27 @@ func (c fleetChange) adopts(key string) bool {
 // removed, so a policy the fleet is only now recording is reconciled as the
 // change it is for everyone else.
 //
-// A reviewer key drops the whole reviewer set: another host may have completed a
-// head without a bot the adoption makes fleet-required, and that host's
-// completed round is the dedup marker that would keep the newly required bot
-// from ever being triggered. It is conservative, not expensive — a reopened
+// A reviewer MEMBERSHIP key drops the whole reviewer set: another host may have
+// completed a head without a bot the adoption makes fleet-required, and that
+// host's completed round is the dedup marker that would keep the newly required
+// bot from ever being triggered. It is conservative, not expensive — a reopened
 // round the primary already answered dedupes at DecideFire's already-reviewed
 // gate instead of buying a second review, and a repository that pins its own
 // reviewers still decides its effective set, so its rounds compare equal and are
 // left alone. Adopting `exclude` likewise drops the baseline exclusions, so a
 // repository this host already skipped still has to pass the claimed-trigger
 // refusal that the rest of the fleet never applied to it.
+//
+// The per-bot keys are deliberately not in that set. Adopting a co-reviewer's
+// command, trigger mode or self-heal grace moves nobody in or out of the
+// reviewer set, and reconciliation compares membership — so erasing the baseline
+// for one would reopen every completed round in the fleet and force a self-heal
+// trigger post on every open PR, for a timing value. Ordinary updates to the
+// same key reopen nothing, and adoption has no more to reconcile than they do.
 func (c fleetChange) baseline() Config {
 	before := c.before
 	for _, key := range c.adopted {
-		if isReviewerFleetKey(key) {
+		if isReviewerMembershipFleetKey(key) {
 			before.RequiredBots, before.CoBots, before.Reviewers = nil, nil, nil
 		}
 		if key == "exclude" {

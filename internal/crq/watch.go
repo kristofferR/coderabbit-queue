@@ -177,6 +177,26 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 	}
 }
 
+// watchesRepo reports whether the policy in hand still covers this repository,
+// the same two questions the pass asked when it gathered its candidates:
+// `exclude` means "crq does not go here" everywhere, and the fleet's repository
+// list decides the set whenever the pass had to build one. Repositories named on
+// the command line are the operator's own request and outrank the list — but not
+// the exclusion, exactly as at the top of the pass.
+//
+// An empty list is the fleet having no list, not a list that allows nothing:
+// without one crq scans by scope, which is how autoReviewPass reads it too.
+func watchesRepo(cfg Config, explicit []string, repo string) bool {
+	key := NormalizeRepo(repo)
+	if cfg.ExcludeRepos[key] {
+		return false
+	}
+	if len(explicit) > 0 || len(cfg.AllowRepos) == 0 {
+		return true
+	}
+	return cfg.AllowRepos[key]
+}
+
 func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispatchPool, emit func(WatchEvent) error) error {
 	var failures []string
 	state, _, err := s.store.Load(ctx)
@@ -278,16 +298,19 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				return err
 			}
 			// The fleet's skip marker suppresses review deliberately, to protect
-			// the shared quota. Next is a MUTATING oracle — it enqueues and can
-			// fire — so the marker has to be honoured before calling it, not
-			// after.
+			// the shared quota, and its repository lists say where crq goes at
+			// all. Next is a MUTATING oracle — it enqueues and can fire — and it
+			// enforces neither, because it is the manual path: its target is a
+			// request a person made. So both have to be honoured before calling
+			// it, not after.
 			//
 			// The policy is re-read here rather than reused from the top of the
-			// pass. A fleet-wide scan is long, and Next does not enforce the body
-			// marker itself (it is the manual path), so a marker the fleet adopted
-			// mid-pass would otherwise spend a metered review on every candidate
-			// still to come in it. Rereading costs a conditional GET on the ETag'd
-			// state ref, against a call that already re-observes the PR.
+			// pass. A fleet-wide scan is long, so a marker the fleet adopted — or
+			// a repository it dropped — mid-pass would otherwise spend a metered
+			// review on every candidate still to come in it, gathered under the
+			// policy the pass started with. Rereading costs a conditional GET on
+			// the ETag'd state ref, against a call that already re-observes the
+			// PR.
 			live, _, lerr := s.store.Load(ctx)
 			if lerr != nil {
 				if _, throttled := ghapi.ThrottleWait(lerr); throttled {
@@ -304,7 +327,11 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				}
 				continue
 			}
-			if s.fleetCfg(live).SkipsReview(pull.Body) {
+			liveCfg := s.fleetCfg(live)
+			if !watchesRepo(liveCfg, opts.Repos, repo) {
+				continue
+			}
+			if liveCfg.SkipsReview(pull.Body) {
 				event := WatchEvent{
 					Repo: repo, PR: pull.Number,
 					Action: "skipped", Reason: "fleet auto-review skip marker present",

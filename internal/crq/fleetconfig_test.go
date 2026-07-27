@@ -594,6 +594,47 @@ func TestFirstFleetReviewerValueReopensCompletedRounds(t *testing.T) {
 	}
 }
 
+// Adoption erases the reviewer baseline because the fleet may never have agreed
+// on WHO reviews. A co-reviewer's self-heal grace is not that question: it is
+// how long an already-configured bot is given, every host was driving the same
+// set before and after, and reconciliation compares membership. Erasing the
+// baseline for it reopened every completed round in the fleet and forced a
+// self-heal trigger post on every open PR, for a timing value.
+func TestFirstFleetCoBotTimingValueLeavesCompletedRoundsAlone(t *testing.T) {
+	ctx := context.Background()
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":               "codex,bugbot",
+		"CRQ_REQUIRED_BOTS":        "coderabbitai[bot]",
+		"CRQ_COBOT_BUGBOT_CMD":     "bugbot run",
+		"CRQ_COBOT_BUGBOT_TRIGGER": "selfheal",
+	})
+	repo, pr := "owner/repo", 7
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		// Who reviews is already the fleet's answer; only the timing is not.
+		st.SetFleetValue("cobots", "codex,bugbot")
+		st.SetFleetValue("required-bots", "coderabbitai[bot]")
+		st.PutRound(Round{Repo: repo, PR: pr, Head: "abcdef123", Phase: PhaseCompleted})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := NewService(cfg, gh, store, nil).SetFleetConfig(ctx, "cobot-bugbot-grace", "10m"); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ := store.Load(ctx)
+	round := st.Round(repo, pr)
+	if round == nil || round.Phase != PhaseCompleted {
+		t.Fatalf("round = %+v, want the completed round left alone by a timing-only adoption", round)
+	}
+	if len(round.ForceCoReviewers) != 0 {
+		t.Errorf("ForceCoReviewers = %v, want no trigger forced by a timing-only adoption", round.ForceCoReviewers)
+	}
+}
+
 // Adopting an exclusion this host already applied is a change for every host
 // that did not, so it still has to pass the claimed-trigger refusal.
 func TestFirstFleetExcludeStillRefusesAClaimedTriggerPost(t *testing.T) {
@@ -711,6 +752,43 @@ func TestFleetDivergenceIncludesAnExplicitlyEmptyHostValue(t *testing.T) {
 	}
 	if len(got) != 1 || !strings.Contains(got[0], `CRQ_EXCLUDE is set to ""`) {
 		t.Fatalf("divergence = %v, want the explicitly empty host value", got)
+	}
+}
+
+// A host copy that agrees with the fleet is the same variable waiting to be
+// fallen back on, and `crq config unset` is what makes it one: the setting goes
+// back to whatever each host says, and by then there is no recorded value left
+// for this report to compare against. A setting the fleet does not record is not
+// that — it is simply this host's to answer, and saying so would name every
+// variable on a machine that has yet to adopt anything.
+func TestFleetDivergenceNamesAHostCopyThatAgrees(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.MinInterval = 5 * time.Minute
+	cfg.ExplicitFleetEnv = map[string]bool{"CRQ_MIN_INTERVAL": true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	got, err := svc.FleetDivergence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("divergence = %v, want nothing reported for a setting the fleet leaves to this host", got)
+	}
+
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("min-interval", "5m")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = svc.FleetDivergence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || !strings.Contains(got[0], "CRQ_MIN_INTERVAL") {
+		t.Fatalf("divergence = %v, want the matching host copy named", got)
 	}
 }
 

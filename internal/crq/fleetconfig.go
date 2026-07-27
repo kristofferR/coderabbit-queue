@@ -430,7 +430,18 @@ const feedbackBotsKey = "feedback-bots"
 // co-reviewer is driven. Those are the ones whose derived views have to be
 // rebuilt, and whose changes existing rounds may have to be reconciled against.
 func isReviewerFleetKey(key string) bool {
-	return key == "required-bots" || key == "cobots" || strings.HasPrefix(key, "cobot-")
+	return isReviewerMembershipFleetKey(key) || strings.HasPrefix(key, "cobot-")
+}
+
+// isReviewerMembershipFleetKey reports whether a setting decides WHO reviews:
+// the reviewer set itself, or which of them a round waits for. The per-bot keys
+// isReviewerFleetKey also covers only say how crq asks a co-reviewer that is
+// already configured — its command, its trigger mode, its self-heal grace — and
+// none of them adds or removes a reviewer.
+//
+// The distinction matters when the fleet adopts a key, see fleetChange.baseline.
+func isReviewerMembershipFleetKey(key string) bool {
+	return key == "required-bots" || key == "cobots"
 }
 
 // FleetKeys lists every setting the fleet owns, in a stable order.

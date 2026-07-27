@@ -1182,3 +1182,42 @@ func TestWatchRereadsTheSkipMarkerBeforeEachCandidate(t *testing.T) {
 		t.Fatalf("round = %+v, want an opted-out PR never queued", round)
 	}
 }
+
+// The candidates are gathered under the policy the pass started with, and `Next`
+// treats its target as a manual request — so a repository the fleet dropped
+// mid-pass still had its PRs enqueued and reviewed by the pass that was already
+// running, in a repository crq no longer watches.
+func TestWatchRereadsTheRepositoryListBeforeEachCandidate(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/repo": true}
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", 1, "aaaaaaaa1"
+	gh.pulls[fakeKey("owner/repo", 1)] = pull
+
+	store := NewMemoryStore(cfg)
+	hooked := &loadHookedStore{StateStore: store}
+	svc := NewService(cfg, gh, hooked, nil)
+	hooked.hook = func() {
+		if err := svc.SetFleetConfig(ctx, "repos", "owner/other"); err != nil {
+			t.Error(err)
+		}
+	}
+
+	var seen []WatchEvent
+	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0),
+		func(e WatchEvent) error { seen = append(seen, e); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 0 {
+		t.Fatalf("events = %+v, want no work in a repository the fleet dropped mid-pass", seen)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("owner/repo", 1); round != nil {
+		t.Fatalf("round = %+v, want an unwatched repository never queued", round)
+	}
+}
