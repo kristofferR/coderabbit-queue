@@ -306,6 +306,15 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if err != nil {
 		return PumpResult{}, err
 	}
+	// Record a rate-limit notice before deciding, whichever round it answered.
+	// A session's push supersedes the round that asked, and the reply used to be
+	// archived unread — so crq believed the account was free and posted the
+	// command again minutes after being told to wait.
+	if updated, err := s.recordObservedBlock(ctx, obs, st, now); err != nil {
+		return PumpResult{}, err
+	} else if updated != nil {
+		st = *updated
+	}
 	global := s.global(st, now)
 	decision := engine.DecideFire(global, *next, obs.eng, now, s.policy())
 	result, err := s.applyFire(ctx, *next, obs.eng, decision, now)
@@ -419,6 +428,39 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 		s.log.Printf("%s#%d resolved without the review queue: %s", repo, pr, d.Reason)
 	}
 	return res, true, nil
+}
+
+// recordObservedBlock folds any rate-limit notice in this observation into the
+// shared account quota, independent of which round it answered.
+//
+// Progress only derives the window for a round that still exists and fired
+// before the notice. Neither survives a fix session's push: the head moves, the
+// round is superseded, and the reply it was waiting for is archived unread. The
+// allowance is not a property of a round, so any current notice from the primary
+// counts here. AcceptAccountBlock still decides whether it replaces the standing
+// window, and never shortens it.
+func (s *Service) recordObservedBlock(ctx context.Context, obs observation, st State, now time.Time) (*State, error) {
+	blk := engine.ObservedAccountBlock(obs.eng, s.policy(), st.Account, now)
+	if blk == nil || s.cfg.DryRun || !engine.AcceptAccountBlock(st.Account.BlockedUntil, blk.Until) {
+		return nil, nil
+	}
+	updated, err := s.store.Update(ctx, func(w *State) error {
+		if !engine.AcceptAccountBlock(w.Account.BlockedUntil, blk.Until) {
+			return ErrNoChange
+		}
+		applyAccountBlock(w, blk, now)
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrNoChange) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if s.log != nil {
+		s.log.Printf("account blocked until %s (observed, not tied to a round)", blk.Until.UTC().Format(time.RFC3339))
+	}
+	return &updated, nil
 }
 
 // applyAccountBlock records an observed account-quota block, whatever observed

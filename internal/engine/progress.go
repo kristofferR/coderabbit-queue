@@ -201,3 +201,54 @@ func reviewMatchesRound(review ReviewSeen, head string, firedAt time.Time) bool 
 	}
 	return notBefore(review.SubmittedAt, firedAt)
 }
+
+// ObservedAccountBlock reports the account-quota block visible in an
+// observation, whatever round it belongs to.
+//
+// The window used to be derived only inside Progress, which needs the round that
+// fired the command to still exist and to have fired before the notice. Neither
+// holds once a fix session pushes: the head moves, the round is superseded, and
+// the rate-limit reply it was waiting for is archived unread. crq then believed
+// the account was free and posted the command again — minutes after being told
+// to wait, over and over.
+//
+// The account allowance is not a property of a round. Any current notice from
+// the primary is evidence about the whole account, so it counts here regardless
+// of which round asked. AcceptAccountBlock still decides whether it replaces the
+// standing window, and never shortens it.
+func ObservedAccountBlock(obs Observation, p Policy, q state.AccountQuota, now time.Time) *AccountBlock {
+	var newest *dialect.BotEvent
+	for i, ev := range obs.Events {
+		if ev.Kind != dialect.EvRateLimited || !sameBot(ev.Bot, p.Bot) {
+			continue
+		}
+		if newest == nil || ev.UpdatedAt.After(newest.UpdatedAt) {
+			newest = &obs.Events[i]
+		}
+	}
+	if newest == nil {
+		return nil
+	}
+	// Only NEW evidence, and an EDIT is not new evidence: CodeRabbit rewrites its
+	// rate-limit notice in place as the window counts down, so treating each edit
+	// as a fresh block would renew it forever from a message crq has already
+	// accounted for. The standing window still applies; when it passes, this
+	// comment is spent.
+	if newest.CommentID != 0 && newest.CommentID == q.RLCommentID {
+		return nil
+	}
+	// A notice whose own window has passed is only worth a fresh fallback block
+	// if crq has not already accounted for it. Without this, every observation of
+	// an hour-old message would start another fallback window — a block that
+	// never ends, from a message that was answered long ago.
+	if newest.Window == nil || !newest.Window.After(now) {
+		if q.CheckedAt != nil && !newest.UpdatedAt.After(*q.CheckedAt) {
+			return nil
+		}
+	}
+	until := resolveBlockWindow(*newest, q, now, p)
+	if !until.After(now) {
+		return nil
+	}
+	return &AccountBlock{Until: until, CommentID: newest.CommentID, CommentUpdated: newest.UpdatedAt}
+}
