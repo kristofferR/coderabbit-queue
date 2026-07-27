@@ -232,6 +232,14 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		if gate != "" && NormalizeRepo(repo) == gate {
 			continue
 		}
+		// CRQ_EXCLUDE means "crq does not go here", and it has to mean that to
+		// every path that acts on a repository. autoReviewPass has always honoured
+		// it; this one did not, so the single setting that reads like a fleet-wide
+		// opt-out silently covered half of what crq does — reviews stopped and the
+		// watcher carried on, which is not a setting anyone can reason about.
+		if s.cfg.ExcludeRepos[NormalizeRepo(repo)] {
+			continue
+		}
 		pulls, err := s.gh.ListPulls(ctx, repo, openPullQuery())
 		if err != nil {
 			// Throttling is the whole fleet's problem and the caller sleeps it

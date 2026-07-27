@@ -1057,3 +1057,34 @@ func dispatchOn() *bool {
 	on := true
 	return &on
 }
+
+// CRQ_EXCLUDE means "crq does not go here", to every path that acts on a
+// repository. autoReviewPass has always honoured it; the watcher did not, so
+// the one setting that reads like a fleet-wide opt-out covered only half of
+// what crq does — reviews stopped and the watcher carried on.
+func TestWatchHonoursTheExcludedRepositories(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/kept": true, "owner/gone": true}
+	cfg.ExcludeRepos = map[string]bool{"owner/gone": true}
+	gh := newFakeGitHub()
+	for _, repo := range []string{"owner/kept", "owner/gone"} {
+		var pull ghapi.Pull
+		pull.State, pull.Number, pull.Head.SHA = "open", 1, "aaaaaaaa1"
+		gh.pulls[fakeKey(repo, 1)] = pull
+	}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	var seen []string
+	if err := svc.watchPass(context.Background(), WatchOptions{}, newDispatchPool(0),
+		func(e WatchEvent) error { seen = append(seen, e.Repo); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	for _, repo := range seen {
+		if NormalizeRepo(repo) == "owner/gone" {
+			t.Errorf("an excluded repository was watched: %v", seen)
+		}
+	}
+	if len(seen) == 0 {
+		t.Error("excluding one repository stopped the rest being watched")
+	}
+}
