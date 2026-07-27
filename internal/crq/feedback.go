@@ -25,7 +25,11 @@ type FeedbackReport struct {
 	Converged  bool              `json:"converged"`
 	ReviewedBy map[string]bool   `json:"reviewed_by"`
 	Findings   []dialect.Finding `json:"findings"`
-	CheckedAt  time.Time         `json:"checked_at"`
+	// Dismissed counts the findings this head's round accounted for through
+	// `crq dismiss`. They are withheld from Findings, so the count is how a
+	// reader sees something was set aside rather than never reported.
+	Dismissed int       `json:"dismissed,omitempty"`
+	CheckedAt time.Time `json:"checked_at"`
 	// Open is whether the PR was open in the same observation Head and
 	// ReviewedBy came from. It is deliberately not serialized — the feedback
 	// JSON contract is frozen — and exists so a caller deciding an action reads
@@ -58,6 +62,16 @@ type FeedbackReport struct {
 	// window entirely — it cannot apply to a round that never spends quota.
 	PrimaryUnavailable       bool   `json:"primary_review_unavailable,omitempty"`
 	PrimaryUnavailableReason string `json:"primary_review_unavailable_reason,omitempty"`
+	// PrimaryAckPending reports that the round still holds the fire slot for a
+	// review command the primary has not acknowledged. A required set that omits
+	// the primary converges without it, so the loop must not read convergence as
+	// permission to release the slot. Not serialized: the feedback JSON contract
+	// is frozen.
+	PrimaryAckPending bool `json:"-"`
+	// config is the reviewer configuration identity that produced this report.
+	// A completion write revalidates it under CAS so an override committed after
+	// observation cannot turn stale convergence into a permanent dedup marker.
+	config Config
 }
 
 // CoReviewerStatus is one co-reviewer's observed state for the current head.
@@ -88,7 +102,8 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// findings from the raw reviews/comments and derives convergence from
 	// engine.Completion over the same snapshot — no second fetch path, and the
 	// "is head reviewed?" rules live only in the engine.
-	obs, err := s.observe(ctx, s.cfg, repo, pr, round, now)
+	cfg := s.cfgFor(st, repo)
+	obs, err := s.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, now)
 	if err != nil {
 		return FeedbackReport{}, err
 	}
@@ -106,6 +121,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		HeadRef:    pull.Head.Ref,
 		HeadRepo:   NormalizeRepo(pull.Head.Repo.FullName),
 		ReviewedBy: map[string]bool{},
+		config:     cfg,
 		Findings:   []dialect.Finding{},
 		CheckedAt:  now,
 	}
@@ -123,13 +139,14 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	if anchorOK {
 		anchorCutoff = completionRound.FiredAt.UTC()
 	}
-	completion := engine.Completion(completionRound, obs.eng, s.cfg.policy())
+	completion := engine.Completion(completionRound, obs.eng, cfg.policy())
 	report.ReviewedBy = completion.ReviewedBy
+	report.PrimaryAckPending = engine.PrimaryAckPending(completionRound, obs.eng, cfg.policy())
 	// Completion does not always arrive as a review: a clean-summary comment, a
 	// paired completion reply and a co-reviewer check run all satisfy it. Anchor
 	// the settle window on the newest of ANY of them, or a round completed by a
 	// comment would settle against a stale timestamp and converge instantly.
-	evidenceBots := s.cfg.evidenceBots()
+	evidenceBots := cfg.evidenceBots()
 	noteEvidence := func(at time.Time) {
 		if at.After(report.LastEvidenceAt) {
 			report.LastEvidenceAt = at
@@ -155,8 +172,8 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		// head commit instead of reporting stale state as current.
 		verdictCutoff = obs.eng.HeadAt
 	}
-	report.CoReviewers = coReviewerStatuses(s.cfg, obs.eng, verdictCutoff)
-	if why := engine.PrimaryUnavailableReason(obs.eng, s.cfg.policy(), head); why != "" {
+	report.CoReviewers = coReviewerStatuses(cfg, obs.eng, verdictCutoff)
+	if why := engine.PrimaryUnavailableReason(obs.eng, cfg.policy(), head); why != "" {
 		report.PrimaryUnavailable = true
 		report.PrimaryUnavailableReason = s.cfg.Bot + " " + why
 	}
@@ -166,7 +183,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// hang convergence if it were) still has its findings reported instead of
 	// dropped. It always includes the required bots: a bot crq waits for whose
 	// findings it didn't surface would hang the loop forever.
-	extractBots := s.cfg.evidenceBots()
+	extractBots := cfg.evidenceBots()
 
 	// Review-body findings — CodeRabbit's detailed and "Prompt for AI agents"
 	// blocks — carry no per-finding resolution state, only the review's commit.
@@ -428,6 +445,29 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	}
 
 	report.Findings = dedupeFindings(report.Findings, suppressPromptAt, settledStableIDs)
+	// Dismissals apply HERE, not in the caller: convergence and `crq loop`'s exit
+	// code are computed from this list, so filtering further out would leave a
+	// dismissed finding permanently actionable everywhere except `crq next`.
+	if round != nil && round.Head == head && len(round.Dismissed) > 0 {
+		kept := make([]dialect.Finding, 0, len(report.Findings))
+		for _, finding := range report.Findings {
+			// Only where the source itself cannot carry a thread. IDs hash the
+			// text, not the source, so a body finding later delivered as an inline
+			// comment through the REST fallback hashes the same — and filtering on
+			// the ID alone would hide a review thread that is open.
+			if dismissibleSources[finding.Source] && finding.ThreadID == "" && round.IsDismissed(finding.ID) {
+				continue
+			}
+			kept = append(kept, finding)
+		}
+		report.Findings = kept
+		// The count is of the DECISIONS this round recorded, not of the findings
+		// that happened to still match one. A bot that edits or deletes the
+		// comment a dismissal was made against leaves nothing to match, and
+		// reporting zero there would make a set-aside finding indistinguishable
+		// from one that was never reported at all.
+		report.Dismissed = len(round.Dismissed)
+	}
 	sort.Slice(report.Findings, func(i, j int) bool {
 		if dialect.RankSeverity(report.Findings[i].Severity) != dialect.RankSeverity(report.Findings[j].Severity) {
 			return dialect.RankSeverity(report.Findings[i].Severity) > dialect.RankSeverity(report.Findings[j].Severity)
@@ -445,7 +485,11 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// quota block qualifies — a round's own awaiting_retry cooldown also
 	// covers non-quota retries (post failures, timeouts) that must keep their
 	// normal retry handling.
-	if s.cfg.RateLimitCoDegrade && !report.Converged && st.Account.BlockedUntil != nil {
+	// Gated on Codex being a reviewer HERE. The degrade releases the head on
+	// Codex's word while the primary's window is shut; on a repository that
+	// excluded Codex, an unsolicited auto-review would otherwise stand in for a
+	// bot nobody asked for.
+	if cfg.RateLimitCoDegrade && cfg.coBotEnabled(dialect.CodexBotLogin) && !report.Converged && st.Account.BlockedUntil != nil {
 		until := st.Account.BlockedUntil.UTC()
 		if until.After(now) && engine.CodexOnlyEligible(completionRound, obs.eng, &until, now) {
 			report.CodeRabbitDeferred = true
@@ -456,7 +500,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	case report.Converged:
 		report.Status = "converged"
 	case report.CodeRabbitDeferred && len(report.Findings) == 0 &&
-		engine.DoneExceptWithEvidence(report.ReviewedBy, s.cfg.Bot, dialect.CodexBotLogin):
+		engine.DoneExceptWithEvidence(report.ReviewedBy, cfg.Bot, dialect.CodexBotLogin):
 		report.Status = "deferred"
 		report.Reason = "codex reviewed clean; coderabbit review deferred until " +
 			report.DeferredUntil.UTC().Format(time.RFC3339) + " (account rate-limited)"
@@ -529,12 +573,19 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		case "skipped":
 			status = "skipped"
 			code = 0
-			s.completeWaitRound(ctx, repo, pr, "")
+			s.completeWaitRound(ctx, repo, pr, "", false, nil)
 		case "held":
 			status = "held"
 		}
 		// The slot wait timed out (CRQ_WAIT_TIMEOUT) without firing a review. Don't
 		// enter the feedback poll — that would burn another feedback timeout and could
+		// return stale pre-existing findings despite no new review round. Report the
+		// timeout so the caller retries later instead. A skipped wait result is
+		// terminal, not retryable, so preserve it as a skipped report.
+		if waitResult.Action == "skipped" {
+			s.completeWaitRound(ctx, repo, pr, "", false, nil)
+		}
+
 		// return stale pre-existing findings despite no new review round. A held
 		// result is administrative, not completion: an already-fired round must
 		// stay open so its acknowledgement still owns the FireSlot.
@@ -589,7 +640,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			report.Status = "feedback"
 			if allReviewed(report.ReviewedBy) {
 				report.Reason = "all required reviewers finished; address findings, push once, and resolve threads"
-				s.completeWaitRound(ctx, repo, pr, head)
+				s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending, &report.config)
 			} else if report.CodeRabbitDeferred && engine.DoneExceptWithEvidence(report.ReviewedBy, s.cfg.Bot, dialect.CodexBotLogin) {
 				// Degraded round: every required bot except the rate-limited
 				// CodeRabbit has finished. These findings are this round's work —
@@ -627,7 +678,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			}
 			if s.cfg.SettleWindow <= 0 || s.clock().Sub(settledAt) >= s.cfg.SettleWindow {
 				if report.Converged {
-					s.completeWaitRound(ctx, repo, pr, head)
+					s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending, &report.config)
 				}
 				return report, 0, nil
 			}
@@ -682,7 +733,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			// A degraded round must not be completed on timeout: marking the head
 			// reviewed would silently cancel the still-owed CodeRabbit review.
 			if !report.CodeRabbitDeferred {
-				s.completeWaitRound(ctx, repo, pr, head)
+				s.completeWaitRound(ctx, repo, pr, head, false, &report.config)
 			}
 			if len(report.Findings) > 0 {
 				report.Status = "feedback"
@@ -790,7 +841,17 @@ func (s *Service) pushWaitDeadline(ctx context.Context, repo string, pr int, hea
 // completeWaitRound ends the wait by completing the fired/reviewing round. The
 // completed round remains as the "this head was reviewed" dedup marker, so a
 // subsequent enqueue/needsReview at the same head is deduped rather than re-fired.
-func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, head string) {
+//
+// holdUnacked leaves alone a round still holding the fire slot for a review
+// command the primary has not acknowledged: with the primary outside the
+// required set the round converges without it, and completing here would release
+// the slot to the next pull request while this one's metered command is
+// unanswered — the same release Progress now withholds. The round stays fired
+// and any Pump finishes it, on the acknowledgement or on the in-flight timeout,
+// and the hold is stamped on the slot so the push this success invites cannot
+// drop it along with the superseded round. Only the convergence callers pass it;
+// a timed-out or never fired wait must still end.
+func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, head string, holdUnacked bool, cfg *Config) error {
 	repo = NormalizeRepo(repo)
 	changed := false
 	state, err := s.store.Update(ctx, func(st *State) error {
@@ -800,6 +861,26 @@ func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, he
 			return ErrNoChange
 		}
 		if head != "" && r.Head != head {
+			return ErrNoChange
+		}
+		if cfg != nil && overrideChanged(st, repo, *cfg) {
+			return ErrNoChange
+		}
+		if holdUnacked && st.FireSlot != nil && st.FireSlot.Key == QueueKey(repo, pr) {
+			// Leaving the round fired keeps the slot only while the round exists,
+			// and converging is precisely the loop's signal to push: the head
+			// advance that follows archives this round, and the slot would be
+			// released with the command it was taken for still unanswered. So
+			// record the hold on the slot itself, where it survives the supersede.
+			// Bounded by the in-flight window, the deadline Progress gives up at.
+			if r.FiredAt != nil {
+				until := r.FiredAt.UTC().Add(s.cfg.InflightTimeout)
+				if until.After(s.clock()) && (st.FireSlot.HoldUntil == nil || st.FireSlot.HoldUntil.Before(until)) {
+					st.HoldSlotUntil(until)
+					changed = true
+					return nil
+				}
+			}
 			return ErrNoChange
 		}
 		if err := r.Complete(); err != nil {
@@ -814,11 +895,12 @@ func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, he
 		if s.log != nil {
 			s.log.Printf("warning: failed to clear feedback wait for %s#%d: %v", repo, pr, err)
 		}
-		return
+		return err
 	}
 	if changed {
 		s.sync(ctx, state)
 	}
+	return nil
 }
 
 // waitToFire runs Wait (enqueue + coordinated fire), riding out GitHub REST rate

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"os/exec"
 	"strings"
 )
 
@@ -117,10 +116,8 @@ func remoteSlugs(remotes string) (repos, owners []string) {
 	return repos, owners
 }
 
+// gitIn runs git in the process's own working directory, which is what target
+// inference is about: the checkout the caller is standing in.
 func gitIn(ctx context.Context, args ...string) (string, error) {
-	out, err := exec.CommandContext(ctx, "git", args...).Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
+	return gitDir(ctx, "", args...)
 }

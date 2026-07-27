@@ -2,7 +2,6 @@ package crq
 
 import (
 	"context"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -31,6 +30,10 @@ type NextReport struct {
 	// Pending lists the required reviewers with no evidence for this head.
 	Pending  []string          `json:"pending,omitempty"`
 	Findings []dialect.Finding `json:"findings"`
+	// Dismissed counts the findings this head's round has accounted for through
+	// `crq dismiss`. They are withheld from Findings, so the count is how a
+	// caller sees that something was set aside rather than never reported.
+	Dismissed int `json:"dismissed,omitempty"`
 
 	ReviewedBy map[string]bool `json:"reviewed_by,omitempty"`
 	// LocalWork records whether crq saw changes the PR head does not have. It
@@ -66,6 +69,16 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 	report, action, feedback, err := s.nextFromState(ctx, repo, pr)
 	if err != nil {
 		return report, err
+	}
+	// Convergence can release the head before the optional primary acknowledges
+	// the metered command. Preserve that slot before telling the caller to push:
+	// the push supersedes this round, so leaving the hold attached only to the
+	// live round would let Normalize release it while the review is still in
+	// flight.
+	if action.Kind == engine.ActionPush && feedback.PrimaryAckPending {
+		if err := s.completeWaitRound(ctx, repo, pr, report.Head, true, &feedback.config); err != nil {
+			return report, err
+		}
 	}
 
 	// Undrained feedback for THIS head: publish nothing. Another review of the
@@ -122,6 +135,10 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 		report.Action = string(engine.ActionWait)
 		report.Reason = "the head moved while deciding; re-reading it"
 		report.Findings = []dialect.Finding{}
+		// Dismissals are head-scoped, so the count read for the old head says
+		// nothing about this one — reporting it beside the new head would credit
+		// the new head with decisions never made about it.
+		report.Dismissed = 0
 		at := s.clock().Add(s.waitTick()).UTC()
 		report.RecheckAfter = &at
 		return report, nil
@@ -225,6 +242,10 @@ func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextR
 	report.LocalWork, report.LocalWorkReason = s.checkLocalWork(ctx,
 		[]string{repo, feedback.HeadRepo}, report.Head, feedback.HeadRef)
 
+	// Feedback has already withheld what this round dismissed — including from
+	// its own convergence verdict — so there is one filter, not one per caller.
+	report.Dismissed = feedback.Dismissed
+
 	in := engine.NextInput{
 		Obs:           engine.Observation{Head: feedback.Head, Open: feedback.Open},
 		Completion:    engine.CompletionStatus{ReviewedBy: feedback.ReviewedBy, Done: allReviewed(feedback.ReviewedBy)},
@@ -303,7 +324,7 @@ func (s *Service) checkLocalWork(ctx context.Context, repos []string, head, head
 	if s.localWorkFn != nil {
 		return s.localWorkFn(ctx, head)
 	}
-	return localWork(ctx, repos, head, headRef)
+	return localWork(ctx, s.cfg.WorkDir, repos, head, headRef)
 }
 
 // localWork reports whether the working copy holds changes the PR head does not
@@ -323,13 +344,15 @@ func (s *Service) checkLocalWork(ctx context.Context, repos []string, head, head
 // `done` rather than `push`. That is the safe direction: `push` is only ever
 // emitted once the head is already released, so a missed one costs one extra
 // call, while a spurious `hold` would stall the loop.
-func localWork(ctx context.Context, repos []string, head, headRef string) (bool, string) {
+// dir is the checkout to inspect; "" means the process's own directory,
+// which is what an agent running crq from its working copy means.
+func localWork(ctx context.Context, dir string, repos []string, head, headRef string) (bool, string) {
 	git := func(args ...string) (string, bool) {
-		out, err := exec.CommandContext(ctx, "git", args...).Output()
+		out, err := gitDir(ctx, dir, args...)
 		if err != nil {
 			return "", false
 		}
-		return strings.TrimSpace(string(out)), true
+		return out, true
 	}
 	if _, ok := git("rev-parse", "--is-inside-work-tree"); !ok {
 		return false, "not run inside a git checkout"

@@ -889,6 +889,36 @@ func TestHeldSlotStopsFreeRunningRoundsToo(t *testing.T) {
 	}
 }
 
+func TestOrphanedSlotHoldLeavesFreeRunningRoundsReady(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(
+		queuedRound("kristofferr/metered", 1, 1, now),
+		queuedRound("kristofferr/free", 2, 2, now),
+	)
+	st.Rounds["kristofferr/free#2"] = func() Round {
+		r := st.Rounds["kristofferr/free#2"]
+		r.CoOnly = true
+		return r
+	}()
+	until := now.Add(time.Hour)
+	st.FireSlot = &FireSlot{
+		Key: "kristofferr/gone#9", Token: "old", Since: now.Add(-time.Minute),
+		HoldUntil: &until,
+	}
+	st.FireSlotHoldUntil = &until
+
+	q := st.Queue(now, 0)
+	if len(q) != 2 {
+		t.Fatalf("Queue = %d entries, want 2", len(q))
+	}
+	if q[0].PR != 2 || q[0].Why != "" || !q[0].ReadyAt.IsZero() {
+		t.Fatalf("quota-free round = %+v, want it ready ahead of the orphaned hold", q[0])
+	}
+	if q[1].PR != 1 || q[1].Why != WaitSlotBusy {
+		t.Fatalf("metered round = %+v, want it blocked by the orphaned hold", q[1])
+	}
+}
+
 // The status line answers "is it still going?" continuously, so a session never
 // has to spend a tool call and a paragraph on it. Each state must read at a
 // glance, and it must never claim a next PR the queue itself will not name.

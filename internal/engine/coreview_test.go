@@ -99,6 +99,18 @@ func TestDecideCoPostTriggerMatrix(t *testing.T) {
 	}
 }
 
+func TestDecideCoPostHonorsReviewerChangeForce(t *testing.T) {
+	cp := CoReviewerPolicy{
+		Login:   "cursor[bot]",
+		Command: "@cursor review",
+		Trigger: TriggerSelfHeal,
+	}
+	round := state.Round{ForceCoReviewers: []string{"cursor[bot]"}}
+	if !DecideCoPost(round, Observation{}, cp, false, time.Now().Add(-time.Minute), time.Now()) {
+		t.Fatal("a newly required self-heal reviewer must be triggered without prior activity")
+	}
+}
+
 // TestCompletionCheckEvidence pins step 2b and the generic dynamic gate: a
 // required check-bearing bot converges on its completed check run alone (the
 // silent-clean Bugbot round), an in-progress check does not, and a

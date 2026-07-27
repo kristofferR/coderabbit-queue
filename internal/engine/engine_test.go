@@ -150,6 +150,30 @@ func TestFailedSummaryParksTheRound(t *testing.T) {
 	}
 }
 
+func TestFailedOptionalPrimaryCompletesConvergedRound(t *testing.T) {
+	r := firedRound(t, "abcdef123")
+	now := t0.Add(time.Minute)
+	p := withCodex(policy, "@codex review")
+	p.RequiredBots = []string{dialect.CodexBotLogin}
+	obs := Observation{
+		Head: "abcdef123", Open: true,
+		Reviews: []ReviewSeen{{
+			Bot: dialect.CodexBotLogin, ReviewID: 4,
+			Commit: "abcdef1234567890", SubmittedAt: t0.Add(30 * time.Second),
+		}},
+		Events: []dialect.BotEvent{{
+			Kind: dialect.EvFailed, Bot: "coderabbitai[bot]", CommentID: 900,
+			CreatedAt: t0.Add(-time.Hour), UpdatedAt: t0.Add(9 * time.Second),
+		}},
+	}
+	if got := Completion(r, obs, p); !got.Done {
+		t.Fatalf("the only required reviewer answered; want convergence, got %+v", got)
+	}
+	if tr := Progress(r, state.AccountQuota{}, obs, now, p); tr.Outcome != OutComplete {
+		t.Fatalf("an optional primary failure must finish a converged round, got %+v", tr)
+	}
+}
+
 func TestReviewAtHeadCompletesRound(t *testing.T) {
 	r := firedRound(t, "abcdef123")
 	obs := Observation{Head: "abcdef123", Open: true,
@@ -163,6 +187,56 @@ func TestReviewAtHeadCompletesRound(t *testing.T) {
 	tr = Progress(r, state.AccountQuota{}, obs, t0.Add(4*time.Minute), policy)
 	if tr.Outcome == OutComplete {
 		t.Fatalf("review of another head must not complete, got %+v", tr)
+	}
+}
+
+// TestFireSlotHeldUntilPrimaryAcknowledges separates convergence from slot
+// release. A repository may leave the primary out of its required set (required
+// Codex only), and then the round converges the moment Codex answers — while the
+// account-metered command it posted is still unacknowledged. Completing there
+// would hand the slot to the next PR mid-review, which is the serialization the
+// whole queue exists for.
+func TestFireSlotHeldUntilPrimaryAcknowledges(t *testing.T) {
+	p := withCodex(policy, "@codex review")
+	p.RequiredBots = []string{dialect.CodexBotLogin}
+	obs := Observation{Head: "abcdef123", Open: true,
+		Reviews: []ReviewSeen{{Bot: dialect.CodexBotLogin, ReviewID: 4, Commit: "abcdef1234567890", SubmittedAt: t0.Add(time.Minute)}}}
+
+	r := firedRound(t, "abcdef123")
+	if got := Completion(r, obs, p); !got.Done {
+		t.Fatalf("the only required reviewer answered; want a converged round, got %+v", got)
+	}
+	if tr := Progress(r, state.AccountQuota{}, obs, t0.Add(2*time.Minute), p); tr.Outcome != KeepWaiting {
+		t.Fatalf("converged is not acknowledged — the slot must stay held, got %+v", tr)
+	}
+	// The primary reacts to the command: the slot has done its job, so the
+	// converged round completes.
+	acked := obs
+	acked.Reacted = true
+	if tr := Progress(r, state.AccountQuota{}, acked, t0.Add(2*time.Minute), p); tr.Outcome != OutComplete {
+		t.Fatalf("an acknowledged converged round must complete, got %+v", tr)
+	}
+	// It never reacts: the in-flight window ends the wait rather than buying a
+	// second metered review no configured reviewer asked for.
+	if tr := Progress(r, state.AccountQuota{}, obs, t0.Add(16*time.Minute), p); tr.Outcome != OutComplete {
+		t.Fatalf("the in-flight timeout must end a converged round, not re-fire it, got %+v", tr)
+	}
+	// A co-only round spent no quota and holds no slot, so it completes at once.
+	co := firedRound(t, "abcdef123")
+	co.CoOnly = true
+	if tr := Progress(co, state.AccountQuota{}, obs, t0.Add(2*time.Minute), p); tr.Outcome != OutComplete {
+		t.Fatalf("a co-only round has no primary command to wait on, got %+v", tr)
+	}
+}
+
+func TestSubmittedPrimaryReviewAcknowledgesTheRound(t *testing.T) {
+	firedAt := t0.Add(-time.Minute)
+	r := state.Round{Phase: state.PhaseFired, Head: "abcdef123", FiredAt: &firedAt}
+	obs := Observation{Reviews: []ReviewSeen{{
+		Bot: "coderabbitai[bot]", Commit: "abcdef1234567890", SubmittedAt: t0,
+	}}}
+	if PrimaryAckPending(r, obs, policy) {
+		t.Fatal("a submitted primary review must acknowledge the command that produced it")
 	}
 }
 
@@ -532,6 +606,42 @@ func TestDecideFireCodexDedupe(t *testing.T) {
 	noCmd = withCodex(noCmd, "")
 	if d := DecideFire(free, queued, obs, now, noCmd); d.Verdict != FireDedupe {
 		t.Fatalf("a required-but-uncommandable codex must dedupe, not wedge, got %+v", d)
+	}
+}
+
+func TestDecideFireForcedCoReviewerGate(t *testing.T) {
+	now := t0.Add(10 * time.Minute)
+	head := "abcdef123"
+	round := state.Round{Repo: "owner/repo", PR: 448, Head: head, Phase: state.PhaseQueued, Seq: 1}
+	obs := Observation{Head: head, Open: true, Reviews: []ReviewSeen{{
+		Bot: policy.Bot, Commit: "abcdef1234567890", SubmittedAt: now,
+	}}}
+	selfHeal := policy
+	selfHeal.CoReviewers = []CoReviewerPolicy{{
+		Login: dialect.CodexBotLogin, Command: "@codex review", Trigger: TriggerSelfHeal,
+	}}
+
+	for _, tc := range []struct {
+		name   string
+		forced bool
+		want   FireVerdict
+	}{
+		{name: "optional self-heal reviewer is not a gate", want: FireDedupe},
+		{name: "forced optional self-heal reviewer gates", forced: true, want: FireCoOnly},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := round
+			if tc.forced {
+				candidate.ForceCoReviewers = []string{dialect.CodexBotLogin}
+			}
+			got := DecideFire(Global{SlotFree: true}, candidate, obs, now, selfHeal)
+			if got.Verdict != tc.want {
+				t.Fatalf("verdict = %v, want %v (%+v)", got.Verdict, tc.want, got)
+			}
+			if tc.forced && (len(got.PostCo) != 1 || !dialect.IsCodexBot(got.PostCo[0])) {
+				t.Fatalf("PostCo = %v, want the forced reviewer", got.PostCo)
+			}
+		})
 	}
 }
 
@@ -940,6 +1050,101 @@ func TestAcceptAccountBlock(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := AcceptAccountBlock(tc.standing, tc.observed); got != tc.want {
 				t.Errorf("AcceptAccountBlock = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A reopened round asks whether the primary already answered THIS round's
+// command, and answering yes writes a completed marker every later same-head
+// check skips — so the gate must hold to Completion's evidence, not to the
+// weaker adoption question CommandHasCompletionReply answers.
+func TestReopenedRoundDedupesOnlyOnCompletionEvidence(t *testing.T) {
+	free := Global{SlotFree: true}
+	now := t0.Add(10 * time.Minute)
+	head := "abcdef123"
+
+	reopened := func(t *testing.T) state.Round {
+		t.Helper()
+		r := firedRound(t, head)
+		if err := r.Complete(); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Reopen(); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	command := dialect.BotEvent{Kind: dialect.EvCommand, Bot: "kristofferR", CommentID: 1001,
+		CreatedAt: t0.Add(2 * time.Second), UpdatedAt: t0.Add(2 * time.Second)}
+	completion := dialect.BotEvent{Kind: dialect.EvCompletion, Bot: "coderabbitai[bot]", CommentID: 1002,
+		AutoReply: true, CreatedAt: t0.Add(time.Minute), UpdatedAt: t0.Add(time.Minute)}
+	priorReview := ReviewSeen{Bot: "coderabbitai[bot]", Commit: "0000000099", SubmittedAt: t0.Add(-time.Hour)}
+
+	cases := []struct {
+		name string
+		obs  Observation
+		want FireVerdict
+	}{
+		{
+			// The reply stands in for a re-review that found nothing new.
+			name: "completion reply with a prior review",
+			obs: Observation{Head: head, Open: true, Reviews: []ReviewSeen{priorReview},
+				Events: []dialect.BotEvent{command, completion}},
+			want: FireDedupe,
+		},
+		{
+			// A clean-summary verdict is Completion's other no-Review evidence.
+			// Reopening the marker for a reviewer change must not buy the same
+			// primary review again.
+			name: "clean summary for this round",
+			obs: Observation{Head: head, Open: true, Events: []dialect.BotEvent{{
+				Kind: dialect.EvNoAction, Bot: "coderabbitai[bot]", CommentID: 1003,
+				CreatedAt: t0.Add(time.Minute), UpdatedAt: t0.Add(time.Minute),
+			}}},
+			want: FireDedupe,
+		},
+		{
+			// Nothing to stand in for: the bot has never submitted a review, so
+			// the head has not been reviewed and the round must still fire.
+			name: "completion reply with no review anywhere",
+			obs: Observation{Head: head, Open: true,
+				Events: []dialect.BotEvent{command, completion}},
+			want: FirePost,
+		},
+		{
+			// The review failed after answering, so the reply describes a review
+			// that did not land.
+			name: "failed summary after the completion reply",
+			obs: Observation{Head: head, Open: true, Reviews: []ReviewSeen{priorReview},
+				Events: []dialect.BotEvent{command, completion,
+					{Kind: dialect.EvFailed, Bot: "coderabbitai[bot]", CommentID: 900,
+						CreatedAt: t0, UpdatedAt: t0.Add(2 * time.Minute)}}},
+			want: FirePost,
+		},
+		{
+			// Each half used to find its own reply: the round's failed command
+			// satisfied the command-id check, while a later successful command
+			// satisfied the completion-evidence check.
+			name: "later command cannot repair this round's failed reply",
+			obs: Observation{Head: head, Open: true, Reviews: []ReviewSeen{priorReview},
+				Events: []dialect.BotEvent{
+					command,
+					completion,
+					{Kind: dialect.EvFailed, Bot: "coderabbitai[bot]", CommentID: 900,
+						CreatedAt: t0, UpdatedAt: t0.Add(2 * time.Minute)},
+					{Kind: dialect.EvCommand, Bot: "kristofferR", CommentID: 2001,
+						CreatedAt: t0.Add(3 * time.Minute), UpdatedAt: t0.Add(3 * time.Minute)},
+					{Kind: dialect.EvCompletion, Bot: "coderabbitai[bot]", CommentID: 2002,
+						AutoReply: true, CreatedAt: t0.Add(4 * time.Minute), UpdatedAt: t0.Add(4 * time.Minute)},
+				}},
+			want: FirePost,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if d := DecideFire(free, reopened(t), tc.obs, now, policy); d.Verdict != tc.want {
+				t.Fatalf("verdict = %v, want %v (%+v)", d.Verdict, tc.want, d)
 			}
 		})
 	}

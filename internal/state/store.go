@@ -43,6 +43,9 @@ type StoreConfig struct {
 	// bots ("" hides the dashboard row, keeping co-bot-less dashboards
 	// byte-identical).
 	CoReviewers string
+	// Host names this process in the state it writes, so the fleet can tell which
+	// binaries are driving and what they understand (see State.NoteWriter).
+	Host string
 	// MinInterval is DecideFire's pacing gate. The dashboard needs it so a queue
 	// entry is not advertised as ready before firing would actually accept it.
 	MinInterval time.Duration
@@ -211,6 +214,7 @@ func (s *GitStateStore) Update(ctx context.Context, mutate func(*State) error) (
 		now := time.Now().UTC()
 		st.Rev++
 		st.UpdatedAt = &now
+		st.NoteWriter(s.cfg.Host, WriterCaps, now)
 		st.Normalize(now)
 		if err := s.compareAndSwap(ctx, &st, rev); err != nil {
 			if errors.Is(err, ErrCASConflict) {

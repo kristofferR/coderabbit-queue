@@ -8,7 +8,7 @@ CLI contract read `README.md` and `llms.txt`; for usage read `crq help`.
 ## Package layout
 
 Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state ← crq`,
-`gh ← {state, crq}`. The engine does no I/O by construction.
+`gh ← {state, crq}`, `workspace ← crq`. The engine does no I/O by construction.
 
 - `internal/dialect/` — ALL bot-text knowledge, zero deps. CodeRabbit/Codex
   completion, rate-limit, paused, in-progress, failed, summary-only-plan,
@@ -26,9 +26,14 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
   The only package (besides dialect) allowed to say "rate limit".
   `ListCheckRuns` fetches a ref's check runs (envelope-paged, ETag'd); matching
   them to a bot is dialect's `ClassifyCheckRun`, never gh's.
+- `internal/workspace/` — reusable repository mirrors, detached PR worktrees,
+  credential-safe Git execution, stale-worktree pruning, and mirror migration.
+  Owns persistent filesystem and process I/O for checkouts; `crq` supplies only
+  configured roots and a current-token resolver.
 - `internal/state/` — persisted schema v4: one `Round` per PR, one global
   `FireSlot`, the CodeRabbit `AccountQuota`, an `Archive` ring. Round transition
-  methods, the CAS store, and dashboard rendering. `Round.CoBots` holds per-
+  methods, durable tombstones for tidied trigger comments, the CAS store, and
+  dashboard rendering. `Round.CoBots` holds per-
   co-reviewer trigger bookkeeping; Codex's entry is **dual-written** to the
   legacy `Codex*` round fields because the fleet shares one state ref across
   binary versions (`Normalize` folds them back on load). `Round` and `State` also
@@ -73,9 +78,25 @@ r.Head == head → skip`. A completed round stays as the "this head was reviewed
 dedup marker. A rate-limited requeue parks the round in `awaiting_retry` (keeping
 its head/attempts/history), it does not delete a fired marker.
 
+The one exception to that skip is `Round.ReviewersChanged`: a reviewer change
+requeues the repository's completed rounds, but only for PRs that are open —
+marking the closed ones instead of handing Pump dead work. A marked round is
+reopened by whichever enqueue path next sees the PR alive, so reopening a PR
+picks up the requirements it missed while it was shut.
+
 The global `FireSlot` allows ≤1 concurrent fire fleet-wide (CAS). A bot ack
 releases the slot while the review keeps running (the round moves to
-`reviewing`); the round itself stays open until `Completion` is done.
+`reviewing`); the round itself stays open until `Completion` is done. The
+converse does not hold: convergence alone never releases the slot. A repository
+whose required set omits the primary converges as soon as its co-reviewers
+answer, and completing there would hand the slot to the next PR while the
+metered command is still unanswered — so a round that spent the quota stays
+`fired` until the primary acknowledges or its in-flight timeout expires. Staying
+`fired` holds the slot only while the round exists, and converging is what tells
+the agent to push, so the loop also stamps `FireSlot.HoldUntil`: the hold belongs
+to the command, not to the head it was posted at, and it outlives the supersede
+that the success it reported invites. Every fire gate asks `SlotHeld`, not
+"is there a round holding it".
 
 ## observe → decide → apply
 

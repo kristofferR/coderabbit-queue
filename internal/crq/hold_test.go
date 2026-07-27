@@ -60,7 +60,7 @@ func TestHoldIsRecheckedWhenTheRoundIsReserved(t *testing.T) {
 	}
 
 	obs := engine.Observation{Open: true, Head: head}
-	res, err := svc.fireRound(ctx, round, obs, true, 0, time.Time{}, "", nil, now)
+	res, err := svc.fireRound(ctx, cfg, round, obs, true, 0, time.Time{}, "", nil, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,11 +80,11 @@ func TestHoldIsRecheckedWhenTheRoundIsReserved(t *testing.T) {
 func TestHoldIsRecheckedByQuotaFreeFirePaths(t *testing.T) {
 	tests := map[string]func(*Service, context.Context, Round, time.Time) error{
 		"co-only": func(s *Service, ctx context.Context, round Round, now time.Time) error {
-			_, err := s.fireCoOnly(ctx, round, []string{dialect.CodexBotLogin}, "primary already reviewed", now)
+			_, err := s.fireCoOnly(ctx, s.cfg, round, []string{dialect.CodexBotLogin}, "primary already reviewed", now)
 			return err
 		},
 		"co-deferred": func(s *Service, ctx context.Context, round Round, now time.Time) error {
-			_, err := s.fireCoDeferred(ctx, round, engine.FireDecision{
+			_, err := s.fireCoDeferred(ctx, s.cfg, round, engine.FireDecision{
 				Verdict: engine.FireCoDeferred,
 				PostCo:  []string{dialect.CodexBotLogin},
 				Reason:  "primary account blocked",
@@ -92,7 +92,7 @@ func TestHoldIsRecheckedByQuotaFreeFirePaths(t *testing.T) {
 			return err
 		},
 		"co-review-wait": func(s *Service, ctx context.Context, round Round, now time.Time) error {
-			_, err := s.fireCoReviewWait(ctx, round, engine.Observation{
+			_, err := s.fireCoReviewWait(ctx, s.cfg, round, engine.Observation{
 				Open:   true,
 				Head:   round.Head,
 				HeadAt: now.Add(-time.Minute),
@@ -177,7 +177,7 @@ func TestHoldStopsInflightCoReviewerSelfHeal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc.selfHealCoReviewers(ctx, round, engine.Observation{Open: true, Head: head}, now)
+	svc.selfHealCoReviewers(ctx, cfg, round, engine.Observation{Open: true, Head: head}, now)
 	if len(gh.posted) != 0 {
 		t.Fatalf("held in-flight round received a co-review trigger: %v", gh.posted)
 	}
