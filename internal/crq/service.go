@@ -302,7 +302,7 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if next == nil {
 		return PumpResult{Action: "idle"}, nil
 	}
-	obs, err := s.observe(ctx, next.Repo, next.PR, next, now)
+	obs, err := s.observe(ctx, s.cfg, next.Repo, next.PR, next, now)
 	if err != nil {
 		return PumpResult{}, err
 	}
@@ -316,7 +316,7 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		st = *updated
 	}
 	global := s.global(st, now)
-	decision := engine.DecideFire(global, *next, obs.eng, now, s.policy())
+	decision := engine.DecideFire(global, *next, obs.eng, now, s.cfg.policy())
 	result, err := s.applyFire(ctx, *next, obs.eng, decision, now)
 	if err != nil {
 		return result, err
@@ -357,7 +357,7 @@ func (s *Service) sweepQuotaFree(ctx context.Context, st State, now time.Time, s
 	if len(queued) == 0 {
 		return PumpResult{}, false, nil
 	}
-	policy := s.policy()
+	policy := s.cfg.policy()
 	global := s.global(st, now)
 	scanned := 0
 	defer func() { s.scanOffset = (s.scanOffset + scanned + 1) % len(queued) }()
@@ -376,7 +376,7 @@ func (s *Service) sweepQuotaFree(ctx context.Context, st State, now time.Time, s
 		// left them behind the account block for hours. The budget above bounds
 		// the cost instead.
 		scanned++
-		obs, err := s.observe(ctx, round.Repo, round.PR, &round, now)
+		obs, err := s.observe(ctx, s.cfg, round.Repo, round.PR, &round, now)
 		if err != nil {
 			continue
 		}
@@ -412,11 +412,11 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 	if round == nil || !round.FireEligible(now) {
 		return PumpResult{}, false, nil
 	}
-	obs, err := s.observe(ctx, repo, pr, round, now)
+	obs, err := s.observe(ctx, s.cfg, repo, pr, round, now)
 	if err != nil {
 		return PumpResult{}, false, err
 	}
-	d := engine.DecideFire(s.global(st, now), *round, obs.eng, now, s.policy())
+	d := engine.DecideFire(s.global(st, now), *round, obs.eng, now, s.cfg.policy())
 	if !quotaFreeVerdict(d.Verdict) {
 		return PumpResult{}, false, nil
 	}
@@ -539,12 +539,12 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 	if err != nil {
 		return PumpResult{}, err
 	}
-	obs, err := s.observe(ctx, slot.Repo, slot.PR, &slot, now)
+	obs, err := s.observe(ctx, s.cfg, slot.Repo, slot.PR, &slot, now)
 	if err != nil {
 		return PumpResult{}, err
 	}
 	s.selfHealCoReviewers(ctx, slot, obs.eng, now)
-	tr := engine.Progress(slot, st.Account, obs.eng, now, s.policy())
+	tr := engine.Progress(slot, st.Account, obs.eng, now, s.cfg.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return PumpResult{Action: "waiting", Repo: slot.Repo, PR: slot.PR, Reason: tr.Reason}, nil
 	}
@@ -678,7 +678,7 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 	if target == nil {
 		return st, nil
 	}
-	obs, err := s.observe(ctx, target.Repo, target.PR, target, now)
+	obs, err := s.observe(ctx, s.cfg, target.Repo, target.PR, target, now)
 	if err != nil {
 		if s.log != nil {
 			s.log.Printf("warning: reviewing-round sweep for %s#%d failed: %v", target.Repo, target.PR, err)
@@ -686,7 +686,7 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 		return st, nil
 	}
 	s.selfHealCoReviewers(ctx, *target, obs.eng, now)
-	tr := engine.Progress(*target, st.Account, obs.eng, now, s.policy())
+	tr := engine.Progress(*target, st.Account, obs.eng, now, s.cfg.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return st, nil
 	}
@@ -886,7 +886,7 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 			// posting a duplicate; recording it here keeps the round "asked". Its
 			// timestamp anchors that bot's cutoff too, or a SHA-less answer that
 			// landed before this adopted fire would never bind to the round.
-			for _, cp := range s.policy().CoReviewerPolicies() {
+			for _, cp := range s.cfg.policy().CoReviewerPolicies() {
 				if hasLogin(postCo, cp.Login) || r.Co(cp.Login).CommandID != 0 {
 					continue
 				}
@@ -1006,8 +1006,8 @@ func hasLogin(logins []string, login string) bool {
 }
 
 // coCommandFor resolves the trigger comment body crq posts for login.
-func (s *Service) coCommandFor(login string) string {
-	for _, cb := range s.cfg.CoBots {
+func (c Config) coCommandFor(login string) string {
+	for _, cb := range c.CoBots {
 		if dialect.NormalizeBotName(cb.Login) == dialect.NormalizeBotName(login) {
 			return cb.Command
 		}
@@ -1203,7 +1203,7 @@ func (s *Service) fireCoReviewWait(ctx context.Context, round Round, obs engine.
 		at    time.Time
 	}
 	var adopts []adoptCmd
-	for _, cp := range s.policy().CoReviewerPolicies() {
+	for _, cp := range s.cfg.policy().CoReviewerPolicies() {
 		cmds := obs.CoSeenFor(cp.Login).Commands
 		id := newestCommandID(cmds)
 		if id == 0 {
@@ -1307,7 +1307,7 @@ func (s *Service) recordFire(ctx context.Context, round Round, token string, com
 // command unset so a later pump's self-heal retries. The fresh-fire path
 // folds the returned id into recordFire's write.
 func (s *Service) postCoTrigger(ctx context.Context, round Round, login string) (int64, time.Time) {
-	command := strings.TrimSpace(s.coCommandFor(login))
+	command := strings.TrimSpace(s.cfg.coCommandFor(login))
 	if command == "" {
 		return 0, time.Time{}
 	}
@@ -1475,7 +1475,7 @@ func (s *Service) selfHealCoReviewers(ctx context.Context, round Round, obs engi
 		return
 	}
 	firedAt := round.FiredAt.UTC()
-	for _, cp := range s.policy().CoReviewerPolicies() {
+	for _, cp := range s.cfg.policy().CoReviewerPolicies() {
 		if round.Co(cp.Login).CommandID != 0 || (dialect.IsCodexBot(cp.Login) && round.CodexCommandID != 0) {
 			continue
 		}
@@ -1759,7 +1759,7 @@ func (s *Service) isCalibrationNoise(c ghapi.IssueComment) bool {
 	if strings.TrimSpace(c.Body) == strings.TrimSpace(s.cfg.RateLimitCommand) {
 		return true
 	}
-	return s.isConfiguredBot(c.User.Login) && strings.Contains(c.Body, s.cfg.CalibrationMarker)
+	return s.cfg.isConfiguredBot(c.User.Login) && strings.Contains(c.Body, s.cfg.CalibrationMarker)
 }
 
 func (s *Service) latestCalibrationReply(ctx context.Context, issue int, after time.Time) (ghapi.IssueComment, bool, error) {
@@ -1770,7 +1770,7 @@ func (s *Service) latestCalibrationReply(ctx context.Context, issue int, after t
 	var best ghapi.IssueComment
 	ok := false
 	for _, comment := range comments {
-		if !s.isConfiguredBot(comment.User.Login) || !comment.UpdatedAt.After(after) {
+		if !s.cfg.isConfiguredBot(comment.User.Login) || !comment.UpdatedAt.After(after) {
 			continue
 		}
 		if !strings.Contains(comment.Body, s.cfg.CalibrationMarker) {
@@ -1800,8 +1800,8 @@ func reviewedByConfiguredBot(reviewedBy map[string]bool, bot string) bool {
 	return false
 }
 
-func (s *Service) isConfiguredBot(login string) bool {
-	return dialect.NormalizeBotName(login) == dialect.NormalizeBotName(s.cfg.Bot)
+func (c Config) isConfiguredBot(login string) bool {
+	return dialect.NormalizeBotName(login) == dialect.NormalizeBotName(c.Bot)
 }
 
 // notBefore reports whether t is at or after baseline. GitHub timestamps are

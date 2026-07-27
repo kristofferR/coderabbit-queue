@@ -168,3 +168,10 @@ func silenceTrigger(coBots []CoBotConfig, login string) []CoBotConfig {
 	}
 	return out
 }
+
+// evidenceBots is the set whose output crq reads: everyone whose findings are
+// surfaced, plus everyone it waits for. The two must never diverge — a bot crq
+// gates on whose findings it did not surface would hang the round forever.
+func (c Config) evidenceBots() map[string]struct{} {
+	return dialect.BotSet(unionBots(c.FeedbackBots, c.RequiredBots))
+}
