@@ -709,6 +709,13 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 	reason, byDesign := "", false
 	var seen string
 	_, err := s.store.Update(ctx, func(st *State) error {
+		// The pass-level snapshot is only an optimization. The switch is an
+		// operator safety gate, so enforce it in the same CAS that grants the
+		// claim; a concurrent off or a failed earlier Load must fail closed.
+		if !st.DrainEnabled(report.Repo) {
+			reason, byDesign = "fix sessions are disabled for this repository", true
+			return ErrNoChange
+		}
 		round := st.Round(report.Repo, report.PR)
 		// What this attempt actually read, recorded before anything acts on it.
 		// Three sessions once ran on one PR at one head while the round showed no

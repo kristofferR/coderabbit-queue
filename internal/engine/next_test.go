@@ -458,23 +458,24 @@ func TestNextActionHoldsConvergenceThroughTheSettleWindow(t *testing.T) {
 func TestADispatchHoldIsNotAReviewRequest(t *testing.T) {
 	now := time.Date(2026, 7, 27, 11, 0, 0, 0, time.UTC)
 	retry := now.Add(10 * time.Minute)
-	round := state.Round{
-		Repo: "o/r", PR: 1, Head: "aaaaaaaa1",
-		// What ClaimDispatch leaves behind for a round it found queued.
-		Phase:             state.PhaseAwaitingRetry,
-		DispatchHoldPhase: state.PhaseQueued,
-		RetryAt:           &retry,
-		EnqueuedAt:        now.Add(-time.Minute),
-	}
+	for _, heldPhase := range []state.Phase{state.PhaseQueued, state.PhaseAwaitingRetry} {
+		round := state.Round{
+			Repo: "o/r", PR: 1, Head: "aaaaaaaa1",
+			Phase:             state.PhaseAwaitingRetry,
+			DispatchHoldPhase: heldPhase,
+			RetryAt:           &retry,
+			EnqueuedAt:        now.Add(-time.Minute),
+		}
 
-	got := NextAction(NextInput{
-		Round:      round,
-		Obs:        Observation{Head: "aaaaaaaa1", Open: true},
-		Completion: CompletionStatus{ReviewedBy: map[string]bool{"coderabbitai[bot]": false}},
-		Primary:    "coderabbitai[bot]",
-		LocalWork:  true,
-	}, now)
-	if got.Kind != ActionPush {
-		t.Fatalf("action = %s (%s), want push: no review was ever requested for this head", got.Kind, got.Reason)
+		got := NextAction(NextInput{
+			Round:      round,
+			Obs:        Observation{Head: "aaaaaaaa1", Open: true},
+			Completion: CompletionStatus{ReviewedBy: map[string]bool{"coderabbitai[bot]": false}},
+			Primary:    "coderabbitai[bot]",
+			LocalWork:  true,
+		}, now)
+		if got.Kind != ActionPush {
+			t.Errorf("held phase %s: action = %s (%s), want push: no review is active for this head", heldPhase, got.Kind, got.Reason)
+		}
 	}
 }

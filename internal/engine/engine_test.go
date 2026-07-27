@@ -88,7 +88,7 @@ func TestUnparseableRateLimitFallsBackConservatively(t *testing.T) {
 	obs := Observation{Head: "a21da4aeb", Open: true,
 		Events: []dialect.BotEvent{rateLimitEvent(555, t0.Add(10*time.Second), nil)}}
 	tr := Progress(r, state.AccountQuota{}, obs, now, policy)
-	if tr.Outcome != OutRetry || !tr.RetryAt.Equal(now.Add(15*time.Minute)) {
+	if tr.Outcome != OutRetry || !tr.RetryAt.Equal(t0.Add(15*time.Minute+10*time.Second)) {
 		t.Fatalf("want the 15m fallback window, got %+v", tr)
 	}
 }

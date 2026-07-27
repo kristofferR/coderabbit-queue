@@ -166,7 +166,9 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 // standing block when the SAME edited account-quota comment is re-observed
 // (CodeRabbit edits one comment in place — a re-observation must not extend
 // the window on every bounce), and fall back to a conservative fixed window
-// when no "available in" duration parsed.
+// when no "available in" duration parsed. A fallback is anchored to the notice,
+// not observation time: otherwise alternating historical notices from different
+// PRs continually renew the single account-wide block.
 func resolveBlockWindow(ev dialect.BotEvent, q state.AccountQuota, now time.Time, p Policy) time.Time {
 	until := ev.Window
 	sameComment := ev.CommentID != 0 && ev.CommentID == q.RLCommentID
@@ -174,7 +176,11 @@ func resolveBlockWindow(ev dialect.BotEvent, q state.AccountQuota, now time.Time
 		until = q.BlockedUntil
 	}
 	if until == nil || !until.After(now) {
-		t := now.Add(p.rateLimitFallback())
+		anchor := ev.ObservedTime()
+		if anchor.IsZero() || anchor.After(now) {
+			anchor = now
+		}
+		t := anchor.Add(p.rateLimitFallback())
 		return t
 	}
 	return until.UTC()

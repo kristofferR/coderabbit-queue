@@ -104,7 +104,7 @@ func TestObservedAccountBlockOutlivesAnInconclusiveCalibration(t *testing.T) {
 	if blk == nil {
 		t.Fatal("a notice crq never accounted for was discarded; the round fires inside the block")
 	}
-	if !blk.Until.Equal(now.Add(p.rateLimitFallback())) {
+	if !blk.Until.Equal(obs.Events[0].UpdatedAt.Add(p.rateLimitFallback())) {
 		t.Errorf("until = %s, want the fallback window", blk.Until)
 	}
 
@@ -114,6 +114,23 @@ func TestObservedAccountBlockOutlivesAnInconclusiveCalibration(t *testing.T) {
 	q = state.AccountQuota{CheckedAt: &checked, RLCommentID: 900, RLCommentUpdated: &seen}
 	if blk := ObservedAccountBlock(obs, p, q, now); blk != nil {
 		t.Errorf("an accounted notice blocked again until %s", blk.Until)
+	}
+}
+
+func TestObservedAccountBlockDoesNotRenewFromAlternatingHistoricalNotices(t *testing.T) {
+	now := time.Date(2026, 7, 27, 1, 30, 0, 0, time.UTC)
+	p := Policy{Bot: "coderabbitai[bot]", RateLimitFallback: 15 * time.Minute}
+	first := now.Add(-40 * time.Minute)
+	second := now.Add(-30 * time.Minute)
+
+	for _, notice := range []dialect.BotEvent{
+		{Kind: dialect.EvRateLimited, Bot: p.Bot, CommentID: 900, UpdatedAt: first},
+		{Kind: dialect.EvRateLimited, Bot: p.Bot, CommentID: 901, UpdatedAt: second},
+	} {
+		obs := Observation{Events: []dialect.BotEvent{notice}}
+		if blk := ObservedAccountBlock(obs, p, state.AccountQuota{}, now); blk != nil {
+			t.Errorf("historical notice %d renewed the account block until %s", notice.CommentID, blk.Until)
+		}
 	}
 }
 

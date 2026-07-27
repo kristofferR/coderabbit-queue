@@ -261,6 +261,12 @@ func reviewRequested(r state.Round) bool {
 	phase := r.Phase
 	if r.DispatchHoldPhase != "" {
 		phase = r.DispatchHoldPhase
+		// A retry records a request that was rejected, not one a reviewer is
+		// currently reading. The dispatch claim prevents that retry from firing,
+		// so the owning session must be allowed to land its replacement head.
+		if phase == state.PhaseAwaitingRetry {
+			return false
+		}
 	}
 	return phase != "" && phase != state.PhaseQueued
 }
