@@ -71,12 +71,13 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 	// is what lets per-repo reviewers substitute one here later without
 	// threading anything new through.
 	cfg := s.cfg
-	if len(collectPosted(st, repo, pr).commands) == 0 {
+	observedPosted := collectPosted(st, repo, pr)
+	if len(observedPosted.commands) == 0 {
 		result.Kept = append(result.Kept, "no round on this pr posted a trigger comment")
 		return result, nil
 	}
 
-	obs, err := s.observe(ctx, cfg, repo, pr, nil, collectPosted(st, repo, pr).commands, s.clock())
+	obs, err := s.observe(ctx, cfg, repo, pr, nil, observedPosted.commands, s.clock())
 	if err != nil {
 		return result, err
 	}
@@ -104,11 +105,22 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 		present[comment.ID] = comment
 	}
 	triggers := cfg.triggerBodies()
+	observedIDs := make(map[int64]bool, len(observedPosted.commands))
+	for _, cmd := range observedPosted.commands {
+		observedIDs[cmd.ID] = true
+	}
 	var commands []engine.CommandComment
+	var missing []PostedCommand
 	edited := 0
 	for _, cmd := range posted.commands {
 		comment, onPR := present[cmd.ID]
 		if !onPR {
+			// The state reload may include a command posted after observation.
+			// Its absence from this older snapshot says nothing; the next pass
+			// can classify it from a fresh comment list.
+			if observedIDs[cmd.ID] {
+				missing = append(missing, PostedCommand{ID: cmd.ID, Bot: cmd.Bot, At: cmd.CreatedAt})
+			}
 			continue
 		}
 		if !isTriggerBody(triggers, cmd.Bot, comment.Body) {
@@ -121,22 +133,34 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 		result.Kept = append(result.Kept, "a trigger comment crq posted no longer reads as one; someone edited it")
 	}
 	if len(commands) == 0 {
+		if !dryRun && !s.cfg.DryRun {
+			if err := s.recordTidyState(ctx, repo, pr, 0, missing); err != nil {
+				return result, err
+			}
+		}
 		result.Kept = append(result.Kept, "every trigger comment crq posted is already gone")
 		return result, nil
 	}
 
+	adoptableFrom, err := s.adoptableFrom(ctx, repo, pr, obs.eng.HeadAt)
+	if err != nil {
+		return result, err
+	}
 	in := engine.TidyInput{
 		Commands:      commands,
 		Live:          posted.live,
 		Superseded:    posted.superseded,
-		AdoptableFrom: s.adoptableFrom(ctx, repo, pr, obs.eng.HeadAt),
+		AdoptableFrom: adoptableFrom,
 	}
 	cursor := st.TidyReactionCursors[QueueKey(repo, pr)]
-	in.AnsweredAt, cursor = s.answered(ctx, repo, pr, obs, commands, posted, cursor)
+	in.AnsweredAt, cursor, err = s.answered(ctx, repo, pr, obs, commands, posted, cursor)
+	if err != nil {
+		return result, err
+	}
 	stale := engine.StaleCommands(in)
 	if len(stale) == 0 {
 		if !dryRun && !s.cfg.DryRun {
-			if err := s.recordTidyState(ctx, repo, pr, cursor, nil); err != nil {
+			if err := s.recordTidyState(ctx, repo, pr, cursor, missing); err != nil {
 				return result, err
 			}
 		}
@@ -153,7 +177,7 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 	for _, command := range commands {
 		byID[command.ID] = PostedCommand{ID: command.ID, Bot: command.Bot, At: command.CreatedAt}
 	}
-	tombstones := make([]PostedCommand, 0, len(stale))
+	tombstones := append(make([]PostedCommand, 0, len(missing)+len(stale)), missing...)
 	for _, id := range stale {
 		tombstones = append(tombstones, byID[id])
 	}
@@ -165,8 +189,12 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 		return result, err
 	}
 
-	var forget []int64
-	for _, id := range stale {
+	var (
+		forget      []int64
+		throttleErr error
+	)
+deleteLoop:
+	for i, id := range stale {
 		snapshot := present[id]
 		latest, err := s.gh.GetIssueComment(ctx, repo, id)
 		switch {
@@ -177,6 +205,11 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 			continue
 		case err != nil:
 			forget = append(forget, id)
+			if ghapi.IsThrottled(err) {
+				throttleErr = err
+				forget = append(forget, stale[i+1:]...)
+				break deleteLoop
+			}
 			result.Failed = append(result.Failed, TidyFailure{ID: id, Error: err.Error()})
 			continue
 		case latest.Body != snapshot.Body || !latest.UpdatedAt.Equal(snapshot.UpdatedAt):
@@ -197,6 +230,11 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 			result.Deleted = append(result.Deleted, id)
 		default:
 			forget = append(forget, id)
+			if ghapi.IsThrottled(err) {
+				throttleErr = err
+				forget = append(forget, stale[i+1:]...)
+				break deleteLoop
+			}
 			// One write failing must not abandon the rest — but it is reported,
 			// not just logged: a caller reading the result is the only one who can
 			// act on "the token cannot delete these".
@@ -213,6 +251,9 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 		}); err != nil {
 			return result, err
 		}
+	}
+	if throttleErr != nil {
+		return result, throttleErr
 	}
 	if s.log != nil && len(result.Deleted) > 0 {
 		s.log.Printf("tidy: %s#%d removed %d spent trigger comment(s)", repo, pr, len(result.Deleted))
@@ -342,21 +383,24 @@ func isTriggerBody(triggers map[string][]string, bot, body string) bool {
 // that no round can ever adopt again, for ever once the PR merges. A zero headAt
 // is the unevaluable guard that keeps every comment, and needs no lookup; a
 // failed lookup falls back to the commit date, which only ever keeps more.
-func (s *Service) adoptableFrom(ctx context.Context, repo string, pr int, headAt time.Time) time.Time {
+func (s *Service) adoptableFrom(ctx context.Context, repo string, pr int, headAt time.Time) (time.Time, error) {
 	if headAt.IsZero() {
-		return headAt
+		return headAt, nil
 	}
 	fp, err := s.headForcePushCutoff(ctx, repo, pr)
 	if err != nil {
+		if ghapi.IsThrottled(err) {
+			return headAt, err
+		}
 		if s.log != nil {
 			s.log.Printf("tidy: %s#%d force-push lookup: %v", repo, pr, err)
 		}
-		return headAt
+		return headAt, nil
 	}
 	if fp.After(headAt) {
-		return fp
+		return fp, nil
 	}
-	return headAt
+	return headAt, nil
 }
 
 // answered is answeredAt plus the evidence only a reaction carries.
@@ -376,7 +420,7 @@ func (s *Service) adoptableFrom(ctx context.Context, repo string, pr int, headAt
 // still unanswered, so the ordinary pass pays for none of them.
 const maxTidyReactionCandidates = 4
 
-func (s *Service) answered(ctx context.Context, repo string, pr int, obs observation, commands []engine.CommandComment, posted postedCommands, cursor int64) (map[string]time.Time, int64) {
+func (s *Service) answered(ctx context.Context, repo string, pr int, obs observation, commands []engine.CommandComment, posted postedCommands, cursor int64) (map[string]time.Time, int64, error) {
 	out := answeredAt(obs)
 	var candidates []engine.CommandComment
 	for _, cmd := range commands {
@@ -386,7 +430,7 @@ func (s *Service) answered(ctx context.Context, repo string, pr int, obs observa
 		candidates = append(candidates, cmd)
 	}
 	if len(candidates) == 0 {
-		return out, cursor
+		return out, cursor, nil
 	}
 	start := 0
 	foundCursor := false
@@ -421,6 +465,9 @@ func (s *Service) answered(ctx context.Context, repo string, pr int, obs observa
 		cursor = cmd.ID
 		reactions, err := s.gh.ListCommentReactions(ctx, repo, cmd.ID)
 		if err != nil {
+			if ghapi.IsThrottled(err) {
+				return out, cursor, err
+			}
 			// Housekeeping: an unreadable reaction keeps the comment, and the
 			// next pass tries again.
 			if s.log != nil {
@@ -435,6 +482,9 @@ func (s *Service) answered(ctx context.Context, repo string, pr int, obs observa
 		if !readPR {
 			readPR = true
 			if onPR, err = s.gh.ListIssueReactions(ctx, repo, pr); err != nil {
+				if ghapi.IsThrottled(err) {
+					return out, cursor, err
+				}
 				if s.log != nil {
 					s.log.Printf("tidy: %s#%d reactions: %v", repo, pr, err)
 				}
@@ -451,6 +501,9 @@ func (s *Service) answered(ctx context.Context, repo string, pr int, obs observa
 		if fired := posted.firedOn[cmd.ID]; fired != 0 {
 			reactions, err := s.gh.ListCommentReactions(ctx, repo, fired)
 			if err != nil {
+				if ghapi.IsThrottled(err) {
+					return out, cursor, err
+				}
 				if s.log != nil {
 					s.log.Printf("tidy: %s reactions on comment %d: %v", repo, fired, err)
 				}
@@ -459,7 +512,7 @@ func (s *Service) answered(ctx context.Context, repo string, pr int, obs observa
 			noteThumbsUp(out, cmd, reactions)
 		}
 	}
-	return out, cursor
+	return out, cursor, nil
 }
 
 // recordTidyState advances the bounded reaction scan and writes command
@@ -551,9 +604,9 @@ func eventAt(e dialect.BotEvent) time.Time {
 //
 // It is best-effort by design. Deleting a comment is housekeeping, and a
 // housekeeping failure must never break the pass that did the real work.
-func (s *Service) tidyAfterPump(ctx context.Context, res PumpResult) {
+func (s *Service) tidyAfterPump(ctx context.Context, res PumpResult) error {
 	if res.Repo == "" || res.PR == 0 {
-		return
+		return nil
 	}
 	switch res.Action {
 	case "cleared", "deduped", "requeued", "skipped":
@@ -572,19 +625,27 @@ func (s *Service) tidyAfterPump(ctx context.Context, res PumpResult) {
 		// it with its commands still live, so it has nothing of its own to remove;
 		// anything older waits for the pass that clears it.
 	default:
-		return
+		return nil
 	}
-	s.tidyProgressed(ctx, res.Repo, res.PR)
+	return s.tidyProgressed(ctx, res.Repo, res.PR)
 }
 
 // tidyProgressed runs a tidy pass for one PR whose round just moved, and
-// swallows the outcome: deleting a comment is housekeeping, and a housekeeping
-// failure must never break the pass that did the real work.
-func (s *Service) tidyProgressed(ctx context.Context, repo string, pr int) {
+// swallows ordinary failures: deleting a comment is housekeeping, and a
+// housekeeping failure must never break the pass that did the real work.
+// GitHub throttles are returned so autoreview can sleep through the reset
+// window instead of continuing to spend requests that are expected to fail.
+func (s *Service) tidyProgressed(ctx context.Context, repo string, pr int) error {
 	if !s.cfg.Tidy {
-		return
+		return nil
 	}
-	if _, err := s.Tidy(ctx, repo, pr, false); err != nil && s.log != nil {
-		s.log.Printf("tidy: %s#%d: %v", repo, pr, err)
+	if _, err := s.Tidy(ctx, repo, pr, false); err != nil {
+		if s.log != nil {
+			s.log.Printf("tidy: %s#%d: %v", repo, pr, err)
+		}
+		if ghapi.IsThrottled(err) {
+			return err
+		}
 	}
+	return nil
 }

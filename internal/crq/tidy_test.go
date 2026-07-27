@@ -181,9 +181,8 @@ func TestTidyDryRunWritesNothing(t *testing.T) {
 	}
 }
 
-// A command crq deleted stays recorded on its round for ever, so a pass that
-// did not check what is still on the PR would DELETE it again every time and
-// read the 404 back as a fresh removal.
+// A command may disappear before crq sees it. It must not be deleted again, but
+// its FIFO position must survive after the round falls out of the archive.
 func TestTidySkipsCommandsAlreadyGone(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
@@ -234,6 +233,13 @@ func TestTidySkipsCommandsAlreadyGone(t *testing.T) {
 	}
 	if len(gh.deleted) != 0 {
 		t.Errorf("issued %d delete(s) for a comment that is not on the pr", len(gh.deleted))
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.TidiedCommands[QueueKey(repo, pr)]; len(got) != 1 || got[0].ID != 100 {
+		t.Fatalf("tidied commands = %v, want a durable tombstone for absent comment 100", got)
 	}
 }
 
@@ -355,6 +361,7 @@ func TestTidyKeepsATriggerEditedDuringThePass(t *testing.T) {
 func TestTidyReportsDeletionFailures(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
+	cfg.Tidy = true
 	gh := newFakeGitHub()
 	gh.graphQL = noForcePush
 	gh.deleteErrs[100] = errors.New("resource not accessible by integration")
@@ -397,6 +404,32 @@ func TestTidyReportsDeletionFailures(t *testing.T) {
 	}
 	if len(result.Failed) != 1 || result.Failed[0].ID != 100 || result.Failed[0].Error == "" {
 		t.Fatalf("failed = %+v, want the refused comment and why", result.Failed)
+	}
+
+	// Ordinary cleanup failures stay best-effort, but a GitHub throttle must
+	// reach autoreview so it sleeps through the reset window.
+	throttle := &ghapi.RateLimitError{Kind: "primary"}
+	delete(gh.deleteErrs, 100)
+	gh.getComment = func(string, int64) (ghapi.IssueComment, error) {
+		return ghapi.IssueComment{}, throttle
+	}
+	if err := svc.tidyProgressed(ctx, repo, pr); !ghapi.IsThrottled(err) {
+		t.Fatalf("tidyProgressed error = %v, want the pre-delete read throttle", err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.TidiedCommands[QueueKey(repo, pr)]; len(got) != 0 {
+		t.Fatalf("failed pre-delete read retained tombstones for present comments: %v", got)
+	}
+
+	// The force-push cutoff is another housekeeping lookup; its throttle must
+	// take the same backoff path.
+	gh.getComment = nil
+	gh.graphQL = func(string, map[string]any, any) error { return throttle }
+	if _, err := svc.Tidy(ctx, repo, pr, false); !ghapi.IsThrottled(err) {
+		t.Fatalf("Tidy error = %v, want the force-push lookup throttle", err)
 	}
 }
 

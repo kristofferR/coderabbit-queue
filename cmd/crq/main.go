@@ -559,8 +559,8 @@ It never deletes the bots' own comments. An auto-generated reply can be a
 rate-limit or skipped-review notice, which crq reads as evidence and surfaces as
 a finding — deleting those would destroy feedback nobody had read yet.
 
-Runs by itself as rounds progress under crq autoreview; CRQ_TIDY=0 turns that
-off. --dry-run reports what it would remove.
+Set CRQ_TIDY=1 to run it automatically as rounds progress under crq autoreview.
+--dry-run reports what it would remove.
 `)
 	case "autoreview", "auto":
 		fmt.Print(`crq autoreview [--once] [--no-incremental]

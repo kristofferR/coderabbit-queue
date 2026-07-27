@@ -175,7 +175,7 @@ finding. Pass `--keep-open` to leave it unresolved deliberately.
 
 crq deletes its own `@coderabbitai review` / `@codex review` comments once the round that posted
 them has progressed and the bot has answered, so a PR driven through a dozen rounds stays readable.
-This happens by itself under `crq autoreview` (`CRQ_TIDY=0` turns it off), or on demand:
+Set `CRQ_TIDY=1` to do this automatically under `crq autoreview`, or run it on demand:
 
 ```bash
 crq tidy "$REPO" "$PR" [--dry-run]

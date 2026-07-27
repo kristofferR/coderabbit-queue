@@ -247,7 +247,9 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		} else if handled {
 			// The quota-free result is the one Pump exposes to its caller, so
 			// preserve the cleanup hook for the slot result it replaces.
-			s.tidyAfterPump(ctx, res)
+			if err := s.tidyAfterPump(ctx, res); err != nil {
+				return res, err
+			}
 			return free, nil
 		}
 		return res, nil
@@ -659,7 +661,9 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 	// A round completed here is invisible to the caller — Pump goes on to report
 	// whatever it fires next, or idle — so this is the only moment that knows the
 	// PR's trigger comments are spent.
-	s.tidyProgressed(ctx, target.Repo, target.PR)
+	if err := s.tidyProgressed(ctx, target.Repo, target.PR); err != nil {
+		return updated, err
+	}
 	return updated, nil
 }
 

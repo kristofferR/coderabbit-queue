@@ -202,8 +202,8 @@ convergence never hides a rebuttal you have not answered. Address it or decline 
 reason; the loop clears it once the bot withdraws (or you stop declining and fix it). Ambiguous bot
 replies surface too — crq errs toward showing a possible rebuttal rather than burying it.
 
-crq removes its own spent `@coderabbitai review` / `@codex review` comments as rounds progress
-(`CRQ_TIDY=0` disables). On demand:
+With `CRQ_TIDY=1`, crq removes its own spent `@coderabbitai review` / `@codex review` comments as
+rounds progress. Automatic tidying is opt-in while older binaries may share the state ref. On demand:
 
 ```bash
 crq tidy REPO PR [--dry-run]

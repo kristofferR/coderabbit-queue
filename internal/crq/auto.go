@@ -72,7 +72,9 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			// A round that just progressed is the moment its trigger comments
 			// stop being needed, so tidying here costs one observation on a PR
 			// crq was already looking at rather than a sweep of the fleet.
-			s.tidyAfterPump(ctx, pumped)
+			if tidyErr := s.tidyAfterPump(ctx, pumped); err == nil {
+				err = tidyErr
+			}
 			if err != nil {
 				if _, ok := ghapi.ThrottleWait(err); ok {
 					if cont, serr := s.sleepThrottle(ctx, opts, "pump", err); serr != nil || !cont {
