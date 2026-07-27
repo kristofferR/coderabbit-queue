@@ -73,7 +73,15 @@ func (w Workspace) git(ctx context.Context, dir string, args ...string) (string,
 	if token == "" {
 		return gitDir(ctx, dir, args...)
 	}
-	full := append([]string{"-c", "credential.helper=", "-c", "credential.helper=" + credentialHelper}, args...)
+	// A linked checkout can write executable configuration into the shared
+	// mirror. Do not let hooks or an fsmonitor command inherit the token from a
+	// later workspace operation.
+	full := append([]string{
+		"-c", "core.hooksPath=" + os.DevNull,
+		"-c", "core.fsmonitor=false",
+		"-c", "credential.helper=",
+		"-c", "credential.helper=" + credentialHelper,
+	}, args...)
 	return gitEnv(ctx, dir, []string{TokenEnv + "=" + token}, full...)
 }
 
@@ -169,10 +177,10 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 				return "", fmt.Errorf("recording pending migration of %s: %w", repo, err)
 			}
 		}
-		if cerr := w.migrateMirror(ctx, path, repo); cerr != nil {
+		if cerr := w.migrateMirror(ctx, path); cerr != nil {
 			return "", fmt.Errorf("configuring %s: %w", repo, cerr)
 		}
-		if ferr := w.fetchMirror(ctx, path); ferr != nil {
+		if ferr := w.fetchMirror(ctx, path, repo); ferr != nil {
 			return "", fmt.Errorf("fetching %s: %w", repo, ferr)
 		}
 		// After the fetch, because it is the fetch that puts the current value of
@@ -295,13 +303,7 @@ func (w Workspace) hasLegacyFetchedHeads(ctx context.Context, path string) bool 
 
 // migrateMirror brings a mirror an older crq left behind up to the rules this
 // one depends on, and is a no-op on a mirror that already follows them.
-func (w Workspace) migrateMirror(ctx context.Context, path, repo string) error {
-	// Linked worktrees share the mirror's remote configuration. A session may
-	// repoint origin for its own push, so restore the repository this mirror
-	// belongs to before trusting origin for the next fetch.
-	if err := w.setConfig(ctx, path, "remote.origin.url", w.remoteURL(repo)); err != nil {
-		return err
-	}
+func (w Workspace) migrateMirror(ctx context.Context, path string) error {
 	// Enforce the refspec on EVERY call, not only at clone time. A mirror
 	// created before this rule still fetches +refs/*:refs/*, and one branch
 	// created in a worktree then wedges every future fetch for the whole
@@ -362,13 +364,17 @@ func (w Workspace) persistCredentialHelper(ctx context.Context, path string) err
 }
 
 // fetchMirror brings the mirror at path up to date.
-func (w Workspace) fetchMirror(ctx context.Context, path string) error {
+func (w Workspace) fetchMirror(ctx context.Context, path, repo string) error {
 	// Two workers fetching one mirror race on git's ref locks, and the loser
 	// reports "cannot lock ref" even though the winner has just made the mirror
 	// current. Retry briefly rather than failing a dispatch over that.
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
-		if _, err = w.git(ctx, path, "fetch", "--prune", "origin", originRefspec, tagRefspec); err == nil {
+		// Use the mirror's repository explicitly. origin is shared with linked
+		// checkouts, and a fork session may have repointed it for its own push.
+		// Refreshing the mirror must neither trust nor rewrite that session's
+		// push destination.
+		if _, err = w.git(ctx, path, "fetch", "--prune", w.remoteURL(repo), originRefspec, tagRefspec); err == nil {
 			return nil
 		}
 		// Only contention is somebody else's success. Expired credentials, an
@@ -615,7 +621,7 @@ func (w Workspace) Checkout(ctx context.Context, repo string, pr int, sha string
 	if err := pruneStaleWork(ctx, mirror, filepath.Dir(prDir)); err != nil {
 		return Checkout{}, err
 	}
-	w.fetchPullRef(ctx, mirror, pr, sha)
+	w.fetchPullRef(ctx, mirror, repo, pr, sha)
 	token := randomToken()
 	dir := filepath.Join(prDir, token)
 	if err := os.MkdirAll(prDir, 0o700); err != nil {
@@ -649,7 +655,7 @@ func (w Workspace) Checkout(ctx context.Context, repo string, pr int, sha string
 // unknown commit. GitHub publishes it as refs/pull/<pr>/head. Best effort on
 // purpose: the checkout that follows is the real check, and its error names the
 // commit that could not be found.
-func (w Workspace) fetchPullRef(ctx context.Context, mirror string, pr int, sha string) {
+func (w Workspace) fetchPullRef(ctx context.Context, mirror, repo string, pr int, sha string) {
 	if pr <= 0 {
 		return
 	}
@@ -657,7 +663,7 @@ func (w Workspace) fetchPullRef(ctx context.Context, mirror string, pr int, sha 
 		return
 	}
 	ref := fmt.Sprintf("+refs/pull/%d/head:refs/remotes/origin/pull/%d", pr, pr)
-	_, _ = w.git(ctx, mirror, "fetch", "origin", ref)
+	_, _ = w.git(ctx, mirror, "fetch", w.remoteURL(repo), ref)
 }
 
 // workPath is the directory holding this PR's checkouts. Owner and name stay

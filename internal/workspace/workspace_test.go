@@ -426,9 +426,9 @@ func TestMirrorMigrationClearsThePushMirrorFlag(t *testing.T) {
 }
 
 // Linked worktrees share remote configuration with the mirror. A session may
-// repoint origin for a fork push, but the next refresh still belongs to the
-// base repository and must fetch from it.
-func TestMirrorRefreshRestoresOriginURL(t *testing.T) {
+// repoint origin for a fork push, but a base-repository refresh must neither
+// trust nor rewrite that session's push destination.
+func TestMirrorRefreshLeavesOriginURLAlone(t *testing.T) {
 	base := t.TempDir()
 	repo := "owner/thing"
 	origin := filepath.Join(base, repo)
@@ -461,8 +461,8 @@ func TestMirrorRefreshRestoresOriginURL(t *testing.T) {
 	if _, err := ws.Mirror(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := gitDir(ctx, mirror, "remote", "get-url", "origin"); err != nil || got != ws.remoteURL(repo) {
-		t.Errorf("origin URL = %q err=%v, want %q", got, err, ws.remoteURL(repo))
+	if got, err := gitDir(ctx, mirror, "remote", "get-url", "origin"); err != nil || got != other {
+		t.Errorf("origin URL = %q err=%v, want the session's %q left alone", got, err, other)
 	}
 	if got, err := gitDir(ctx, mirror, "rev-parse", "refs/remotes/origin/main"); err != nil || got != want {
 		t.Errorf("fetched main = %q err=%v, want base repository head %q", got, err, want)
@@ -593,6 +593,40 @@ func TestCheckoutGitCarriesTheWorkspaceCredentials(t *testing.T) {
 	}
 	if strings.Contains(helper, "ghp_secret_value") {
 		t.Errorf("the token itself reached git's configuration: %q", helper)
+	}
+}
+
+// A checkout can install executable Git configuration in the shared mirror.
+// Later credential-bearing commands must not expose another session's token to
+// that configuration.
+func TestCheckoutGitProtectsCredentialsFromSharedHooks(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	co, err := Workspace{Root: t.TempDir(), Token: "ghp_secret_value"}.Checkout(ctx, repo, 12, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "token")
+	hook := filepath.Join(hooks, "pre-push")
+	script := "#!/bin/sh\nprintf '%s' \"$CRQ_GIT_TOKEN\" >\"" + marker + "\"\n"
+	if err := os.WriteFile(hook, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(ctx, co.Dir, "config", "core.hooksPath", hooks); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := co.Git(ctx, "push", "--dry-run", "origin", "HEAD:refs/heads/token-test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Errorf("shared pre-push hook saw a later checkout's token: %v", err)
 	}
 }
 
