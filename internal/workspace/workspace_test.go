@@ -342,6 +342,27 @@ func TestPruningIgnoresATimestampInTheFuture(t *testing.T) {
 	}
 }
 
+// When the host clock moves backwards, every timestamp in a recently created
+// checkout can be in the future. With no trustworthy age, pruning must preserve
+// the checkout rather than treating the zero time as ancient.
+func TestPruningPreservesACheckoutWithOnlyFutureTimestamps(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "edited.go")
+	if err := os.WriteFile(file, []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	future := now.Add(time.Hour)
+	for _, path := range []string{file, dir} {
+		if err := os.Chtimes(path, future, future); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := newestModTimeAt(dir, now); got != now {
+		t.Errorf("newest modification = %s, want indeterminate checkout preserved at %s", got, now)
+	}
+}
+
 // `clone --bare` copies the remote's branch heads straight into refs/heads, and
 // a refspec set afterwards only governs later fetches. A session could then not
 // create its branch — the name is taken — or would land on the commit the clone
@@ -1132,6 +1153,45 @@ func TestMirrorPersistsTheCredentialHelperForOtherCallers(t *testing.T) {
 	// hand out nothing without TokenEnv set in the environment.
 	if strings.Contains(got, "ghp_secret_value") {
 		t.Error("the token itself was written into the mirror's config")
+	}
+}
+
+// Two dispatches can both observe an old mirror without the helper, then race
+// to install it. Losing config.lock is harmless when the winner wrote the same
+// value, so the loser must retry and verify the resulting configuration.
+func TestCredentialHelperMigrationSurvivesConfigLockContention(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(mirror, "config.lock")
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	winner := make(chan error, 1)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		if err := os.Remove(lock); err != nil {
+			winner <- err
+			return
+		}
+		_, err := gitDir(ctx, mirror, "config", "--local", "--replace-all", "credential.helper", credentialHelper)
+		winner <- err
+	}()
+
+	withToken := Workspace{Token: "ghp_secret_value"}
+	if err := withToken.persistCredentialHelper(ctx, mirror); err != nil {
+		t.Errorf("concurrent credential-helper migration failed: %v", err)
+	}
+	if err := <-winner; err != nil {
+		t.Fatalf("concurrent config writer: %v", err)
 	}
 }
 

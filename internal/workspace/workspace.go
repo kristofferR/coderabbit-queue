@@ -332,10 +332,26 @@ func (w Workspace) persistCredentialHelper(ctx context.Context, path string) err
 	// gitDir, not w.git: w.git injects a credential.helper of its own, so this
 	// read would answer with that injected value and conclude the mirror is
 	// already configured when its config is in fact empty.
-	if cur, err := gitDir(ctx, path, "config", "--local", "--get-all", "credential.helper"); err == nil && cur == credentialHelper {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if cur, gerr := gitDir(ctx, path, "config", "--local", "--get-all", "credential.helper"); gerr == nil && cur == credentialHelper {
+			return nil
+		}
+		if _, err = gitDir(ctx, path, "config", "--local", "--replace-all", "credential.helper", credentialHelper); err == nil {
+			return nil
+		}
+		if !isConfigLockContention(err) {
+			return err
+		}
+		if serr := sleepCtx(ctx, time.Duration(attempt+1)*200*time.Millisecond); serr != nil {
+			return serr
+		}
+	}
+	// Another worker may have installed the same helper while this one waited
+	// for config.lock. Its value is the successful migration we wanted.
+	if cur, gerr := gitDir(ctx, path, "config", "--local", "--get-all", "credential.helper"); gerr == nil && cur == credentialHelper {
 		return nil
 	}
-	_, err := gitDir(ctx, path, "config", "--local", "--replace-all", "credential.helper", credentialHelper)
 	return err
 }
 
@@ -731,8 +747,9 @@ func rootHeartbeatFresh(dir string, now time.Time) bool {
 // Ignored rather than clamped to now: clamping produces exactly the same
 // "touched moments ago" answer on every later scan. A stamp in the future says
 // nothing about when anybody last worked here, so the newest real modification
-// is the honest answer — and a live session's own beat (keepAlive) is always one
-// of those.
+// is the honest answer. If every stamp is in the future, though, the clock may
+// have moved behind a live session's heartbeat; return now because its age is
+// indeterminate and deleting it would risk losing active work.
 func newestModTime(dir string) time.Time {
 	return newestModTimeAt(dir, time.Now())
 }
@@ -752,6 +769,12 @@ func newestModTimeAt(dir string, now time.Time) time.Time {
 		}
 		return nil
 	})
+	// A backward clock adjustment can put the entire live checkout in the
+	// future. With no usable timestamp its age is indeterminate, so preserve it
+	// rather than treating the zero time as ancient.
+	if newest.IsZero() {
+		return now
+	}
 	return newest
 }
 
