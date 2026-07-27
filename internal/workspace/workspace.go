@@ -169,7 +169,7 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 				return "", fmt.Errorf("recording pending migration of %s: %w", repo, err)
 			}
 		}
-		if cerr := w.migrateMirror(ctx, path); cerr != nil {
+		if cerr := w.migrateMirror(ctx, path, repo); cerr != nil {
 			return "", fmt.Errorf("configuring %s: %w", repo, cerr)
 		}
 		if ferr := w.fetchMirror(ctx, path); ferr != nil {
@@ -295,7 +295,13 @@ func (w Workspace) hasLegacyFetchedHeads(ctx context.Context, path string) bool 
 
 // migrateMirror brings a mirror an older crq left behind up to the rules this
 // one depends on, and is a no-op on a mirror that already follows them.
-func (w Workspace) migrateMirror(ctx context.Context, path string) error {
+func (w Workspace) migrateMirror(ctx context.Context, path, repo string) error {
+	// Linked worktrees share the mirror's remote configuration. A session may
+	// repoint origin for its own push, so restore the repository this mirror
+	// belongs to before trusting origin for the next fetch.
+	if err := w.setConfig(ctx, path, "remote.origin.url", w.remoteURL(repo)); err != nil {
+		return err
+	}
 	// Enforce the refspec on EVERY call, not only at clone time. A mirror
 	// created before this rule still fetches +refs/*:refs/*, and one branch
 	// created in a worktree then wedges every future fetch for the whole
@@ -442,6 +448,11 @@ func deleteFetchedHead(ctx context.Context, path, name string) error {
 	if _, err := gitDir(ctx, path, "branch", "-D", "--", name); err != nil {
 		live, lerr := checkedOutBranches(ctx, path)
 		if lerr == nil && live[name] {
+			return nil
+		}
+		// A concurrent migration may have deleted the same legacy branch after
+		// this caller selected it. Its absence is the desired end state.
+		if _, rerr := gitDir(ctx, path, "show-ref", "--verify", "--quiet", "refs/heads/"+name); rerr != nil {
 			return nil
 		}
 		return err
@@ -613,7 +624,14 @@ func (w Workspace) Checkout(ctx context.Context, repo string, pr int, sha string
 	// `--` before the positional arguments: a commit-ish beginning with a dash
 	// would otherwise be read as an option, which is the shape behind a long line
 	// of clone-and-checkout CVEs.
-	if _, err := w.git(ctx, mirror, "worktree", "add", "--detach", "--", dir, sha); err != nil {
+	// A linked checkout can change the mirror's shared configuration. Do not
+	// execute hooks or fsmonitor commands a previous session installed while
+	// materializing repository-controlled content for this one.
+	if _, err := w.git(ctx, mirror,
+		"-c", "core.hooksPath="+os.DevNull,
+		"-c", "core.fsmonitor=false",
+		"worktree", "add", "--detach", "--", dir, sha,
+	); err != nil {
 		return Checkout{}, fmt.Errorf("checking out %s@%s: %w", repo, shortSHA(sha), err)
 	}
 	// Held for as long as the caller's context lives, which is as long as this

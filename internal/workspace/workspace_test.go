@@ -425,6 +425,50 @@ func TestMirrorMigrationClearsThePushMirrorFlag(t *testing.T) {
 	}
 }
 
+// Linked worktrees share remote configuration with the mirror. A session may
+// repoint origin for a fork push, but the next refresh still belongs to the
+// base repository and must fetch from it.
+func TestMirrorRefreshRestoresOriginURL(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	origin := filepath.Join(base, repo)
+	originRepo(t, origin)
+	other := filepath.Join(base, "fork/thing")
+	originRepo(t, other)
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(ctx, mirror, "remote", "set-url", "origin", other); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(origin, "README.md"), []byte("base moved\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "README.md"}, {"commit", "-m", "base moved"}} {
+		if _, err := gitDir(ctx, origin, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := gitDir(ctx, origin, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := gitDir(ctx, mirror, "remote", "get-url", "origin"); err != nil || got != ws.remoteURL(repo) {
+		t.Errorf("origin URL = %q err=%v, want %q", got, err, ws.remoteURL(repo))
+	}
+	if got, err := gitDir(ctx, mirror, "rev-parse", "refs/remotes/origin/main"); err != nil || got != want {
+		t.Errorf("fetched main = %q err=%v, want base repository head %q", got, err, want)
+	}
+}
+
 // The mirror's HEAD exists because the mirror exists, so testing for it after a
 // failed fetch declared every failure contention: expired credentials and an
 // unreachable remote came back as success with stale refs, and the caller met
@@ -1104,6 +1148,49 @@ func TestFetchedHeadDeletionRechecksWorktreeOccupancy(t *testing.T) {
 	}
 	if got, err := gitDir(ctx, mirror, "rev-parse", "refs/heads/feature"); err != nil || got != sha {
 		t.Errorf("checked-out branch = %q err=%v, want it preserved at %q", got, err, sha)
+	}
+}
+
+func TestFetchedHeadDeletionToleratesAConcurrentDeletion(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	if _, err := gitDir(ctx, "", "init", "--bare", "--quiet", repo); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := deleteFetchedHead(ctx, repo, "already-removed"); err != nil {
+		t.Fatalf("deleting an already-removed legacy branch: %v", err)
+	}
+}
+
+// A checkout can install executable Git configuration in the shared mirror.
+// Later worktree creation must not run that session's hook in the daemon.
+func TestCheckoutDisablesSharedExecutableConfiguration(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "post-checkout-ran")
+	hook := filepath.Join(hooks, "post-checkout")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\ntouch \""+marker+"\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(ctx, mirror, "config", "core.hooksPath", hooks); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ws.Checkout(ctx, repo, 14, sha); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Errorf("shared post-checkout hook ran: %v", err)
 	}
 }
 
