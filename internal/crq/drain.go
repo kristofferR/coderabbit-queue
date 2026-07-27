@@ -340,7 +340,10 @@ func drainPath(plan DrainInstall) string {
 // none.
 func (s *Service) drainEnv(plan DrainInstall) map[string]string {
 	env := map[string]string{
-		"CRQ_REPOS":                  strings.Join(plan.Repos, ","),
+		"CRQ_REPOS": strings.Join(plan.Repos, ","),
+		// The denylist travels with the allowlist. Carrying one and not the other
+		// installs a service that watches a repository the operator excluded.
+		"CRQ_EXCLUDE":                strings.Join(sortedRepoList(s.cfg.ExcludeRepos), ","),
 		"CRQ_SCOPE":                  strings.Join(s.cfg.Scope, ","),
 		"CRQ_WATCH_INTERVAL":         s.cfg.WatchInterval.String(),
 		"CRQ_DISPATCH_MAX_ATTEMPTS":  fmt.Sprint(s.cfg.DispatchMaxAttempts),
@@ -518,4 +521,16 @@ func agentInvocation(agent, promptPath string, extra []string) (string, error) {
 // embedded single quote is represented by ending and reopening the quoted word.
 func shellQuote(word string) string {
 	return "'" + strings.ReplaceAll(word, "'", `'"'"'`) + "'"
+}
+
+// sortedRepoList renders a repo set for a unit file, in a stable order: the
+// unit is a file a re-install rewrites, and map order would make every rewrite
+// a different file for the same configuration.
+func sortedRepoList(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for repo := range set {
+		out = append(out, repo)
+	}
+	sort.Strings(out)
+	return out
 }
