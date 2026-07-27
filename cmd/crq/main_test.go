@@ -112,3 +112,41 @@ func TestUnknownFlag(t *testing.T) {
 		t.Errorf("unknownFlag = (%q, %v), want (--wiat, true)", bad, found)
 	}
 }
+
+// parseDismissArgs decides what counts as a finding ID, so a typo must not
+// quietly become one.
+func TestParseDismissArgs(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		rest   []string
+		reason string
+		ok     bool
+	}{
+		{"separate reason", []string{"o/r", "7", "abc", "--reason", "why"}, []string{"o/r", "7", "abc"}, "why", true},
+		{"equals reason", []string{"o/r", "7", "abc", "--reason=why"}, []string{"o/r", "7", "abc"}, "why", true},
+		{"several ids", []string{"o/r", "7", "a", "b", "--reason", "why"}, []string{"o/r", "7", "a", "b"}, "why", true},
+		{"reason first", []string{"--reason", "why", "o/r", "7", "a"}, []string{"o/r", "7", "a"}, "why", true},
+		{"missing value", []string{"o/r", "7", "a", "--reason"}, nil, "", false},
+		{"unknown flag", []string{"o/r", "7", "a", "--resaon", "why"}, nil, "", false},
+		{"empty reason", []string{"o/r", "7", "a", "--reason", ""}, []string{"o/r", "7", "a"}, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rest, reason, ok := parseDismissArgs(tc.args)
+			if ok != tc.ok || reason != tc.reason {
+				t.Fatalf("got rest=%v reason=%q ok=%v, want reason=%q ok=%v", rest, reason, ok, tc.reason, tc.ok)
+			}
+			if !tc.ok {
+				return
+			}
+			if len(rest) != len(tc.rest) {
+				t.Fatalf("rest = %v, want %v", rest, tc.rest)
+			}
+			for i := range rest {
+				if rest[i] != tc.rest[i] {
+					t.Fatalf("rest = %v, want %v", rest, tc.rest)
+				}
+			}
+		})
+	}
+}

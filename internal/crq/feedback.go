@@ -26,7 +26,11 @@ type FeedbackReport struct {
 	Converged  bool              `json:"converged"`
 	ReviewedBy map[string]bool   `json:"reviewed_by"`
 	Findings   []dialect.Finding `json:"findings"`
-	CheckedAt  time.Time         `json:"checked_at"`
+	// Dismissed counts the findings this head's round accounted for through
+	// `crq dismiss`. They are withheld from Findings, so the count is how a
+	// reader sees something was set aside rather than never reported.
+	Dismissed int       `json:"dismissed,omitempty"`
+	CheckedAt time.Time `json:"checked_at"`
 	// Open is whether the PR was open in the same observation Head and
 	// ReviewedBy came from. It is deliberately not serialized — the feedback
 	// JSON contract is frozen — and exists so a caller deciding an action reads
@@ -441,6 +445,29 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	}
 
 	report.Findings = dedupeFindings(report.Findings, suppressPromptAt, settledStableIDs)
+	// Dismissals apply HERE, not in the caller: convergence and `crq loop`'s exit
+	// code are computed from this list, so filtering further out would leave a
+	// dismissed finding permanently actionable everywhere except `crq next`.
+	if round != nil && round.Head == head && len(round.Dismissed) > 0 {
+		kept := make([]dialect.Finding, 0, len(report.Findings))
+		for _, finding := range report.Findings {
+			// Only where the source itself cannot carry a thread. IDs hash the
+			// text, not the source, so a body finding later delivered as an inline
+			// comment through the REST fallback hashes the same — and filtering on
+			// the ID alone would hide a review thread that is open.
+			if dismissibleSources[finding.Source] && finding.ThreadID == "" && round.IsDismissed(finding.ID) {
+				continue
+			}
+			kept = append(kept, finding)
+		}
+		report.Findings = kept
+		// The count is of the DECISIONS this round recorded, not of the findings
+		// that happened to still match one. A bot that edits or deletes the
+		// comment a dismissal was made against leaves nothing to match, and
+		// reporting zero there would make a set-aside finding indistinguishable
+		// from one that was never reported at all.
+		report.Dismissed = len(round.Dismissed)
+	}
 	sort.Slice(report.Findings, func(i, j int) bool {
 		if dialect.RankSeverity(report.Findings[i].Severity) != dialect.RankSeverity(report.Findings[j].Severity) {
 			return dialect.RankSeverity(report.Findings[i].Severity) > dialect.RankSeverity(report.Findings[j].Severity)

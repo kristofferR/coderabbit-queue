@@ -27,7 +27,7 @@ crq next            # inside the checkout: crq finds the PR from the remote and 
 
 | `.action` | what to do |
 |---|---|
-| `fix` | Fix `.findings[]`, validate locally, then `crq resolve` each addressed `.thread_id` (or `crq decline` with a reason). Call again. |
+| `fix` | Fix `.findings[]`, validate locally, then `crq resolve` each addressed `.thread_id` (or `crq decline` with a reason). A finding with no `.thread_id` is cleared with `crq dismiss` once judged, except `source: "review_comment"`: retry it because thread lookup failed. Call again. |
 | `hold` | Do NOT commit or push — a required reviewer has not answered for this head, and moving the head restarts its review (resolving threads does not). Call again at `.recheck_after`. |
 | `push` | The head is released. Commit and push the accumulated fixes once. Call again. |
 | `wait` | Nothing to do until `.recheck_after`. |
@@ -195,6 +195,32 @@ every required reviewer has answered.
 Each session's output is written to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log`
 (last five per PR). Three dispatch attempts in a row that start nothing put `dispatch failing` on the dashboard
 and the status line.
+
+## Findings With No Thread
+
+Review-body findings, review-skipped notices, outside-diff remarks and issue-comment findings have
+no `thread_id`. `crq resolve` and `crq decline` both act on a thread, so neither can touch them — and a
+finding that can never drain blocks every future round on that PR.
+
+```bash
+crq dismiss "$REPO" "$PR" "$FINDING_ID" --reason "why this is being set aside"
+```
+
+Finding IDs come from `.findings[].id`; they are content-derived, not GitHub node IDs, which is why
+the repo and PR are required. A dismissal covers the current head only — push, and the next reviewer
+has to report it again. `crq next` and `crq feedback` both report `dismissed: N` so nothing looks
+silently dropped, and `crq loop` converges on the same filtered list.
+
+Only a finding with no thread can be dismissed. One that has a `thread_id` is refused — resolve or
+decline it, so the decision lands on the PR where the bot can answer it.
+
+Judge the finding first. Dismiss is for one you have decided about, not for clearing the list.
+
+If `crq dismiss` refuses a finding whose source is `review_comment`, crq could not read GitHub's
+review threads (a GraphQL failure) and fell back to REST, which returns no thread IDs. The finding
+does have a thread; retry once crq can read threads again rather than working around it. When
+the notice is a SKIPPED review, narrowing the PR addresses the cause; dismissing only records that
+you chose to proceed at this head.
 
 ## Fleet Auto-Review
 

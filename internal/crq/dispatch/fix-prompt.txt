@@ -32,17 +32,26 @@ Then:
    `gofmt -l . && go vet ./... && go test ./... -count=1`.
 4. Commit — but do NOT push yet. Add no AI attribution to the commit message or
    anywhere else.
-5. For each finding you addressed that has a thread_id:
+5. Account for EVERY finding, or the next step never authorizes your push.
+   With a thread_id, for one you addressed:
      crq resolve <thread-id> [<thread-id>...]
-   For one you are NOT addressing:
+   With a thread_id, for one you are NOT addressing:
      crq decline <thread-id> --reason "why"
-   A decline needs a real reason. Do not decline to clear the list.
+   With NO thread_id — a review-body finding, a review-skipped notice, an
+   outside-diff remark — neither command can touch it, so once you have judged
+   it:
+     crq dismiss "$CRQ_DISPATCH_REPO" "$CRQ_DISPATCH_PR" <finding-id>... --reason "why"
+   A decline or a dismissal needs a real reason. Neither is for clearing the
+   list: judge the finding first, and fix what is real.
 6. Ask crq when the head may move, and push only when it says so:
      crq next "$CRQ_DISPATCH_REPO" "$CRQ_DISPATCH_PR" --wait
    Push (as above) only when `.action` is `push`. Any other action means the
    head must not move yet — `hold` in particular means a required reviewer is
    still reading THIS commit, and pushing would restart or strand its review
    and spend another metered round. Never force-push.
+   If it keeps answering `fix` for findings you have already handled, one of
+   them is threadless and undismissed: step 5 is what clears it. Do not exit
+   with a commit you never pushed — that work is repeated by the next session.
 
 Hard limits: do not open pull requests, do not merge anything, do not force-push,
 do not touch code unrelated to the findings, do not change another repository.

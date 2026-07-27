@@ -50,7 +50,7 @@ crq next                      # inside the checkout, the target is inferred
 
 | `.action` | what to do |
 |---|---|
-| `fix` | Fix `.findings[]`, validate locally, then `crq resolve` each addressed `.thread_id` (or `crq decline` with a reason). Call again. |
+| `fix` | Fix `.findings[]`, validate locally, then `crq resolve` each addressed `.thread_id` (or `crq decline` with a reason). A finding with no `.thread_id` clears with `crq dismiss` once judged — except `source: "review_comment"`, which lost its thread ID to a GraphQL fallback and has to wait for crq to read threads again. Call again. |
 | `hold` | Do NOT commit or push: a required reviewer has not answered for this head, and moving the head restarts its review (resolving threads does not). Call again at `.recheck_after`. |
 | `push` | The head is released. Commit and push the accumulated fixes once. Call again. |
 | `wait` | Nothing to do until `.recheck_after`. |
@@ -248,6 +248,23 @@ A PR whose head branch lives in a FORK is reviewed like any other but not dispat
 would run an agent over a stranger's code with approvals bypassed and a write token in reach. Set
 `CRQ_DISPATCH_FORKS=1` to fix contributor pull requests anyway. That is a trust decision, not a
 sandbox — crq has none to offer.
+
+A finding with no `thread_id` — a review body finding, a review-skipped notice, an outside-diff
+remark, an issue-comment finding — has nothing for `resolve` or `decline` to act on, and would otherwise block every future
+round on that PR. Judge it, then record the decision:
+
+```bash
+crq dismiss REPO PR FINDING_ID [FINDING_ID...] --reason "why this is set aside"
+```
+
+`FINDING_ID` is `.findings[].id` — content-derived, not a GitHub node ID, which is why the repo and
+PR are required. The dismissal covers the current head only; after a push the next reviewer must
+report it again. `crq next` and `crq feedback` report `dismissed: N` so a set-aside finding never
+looks lost, and `crq loop` converges on the same filtered list. A finding that HAS a thread is
+refused: resolve or decline it instead, so the decision lands where the bot can answer it.
+
+For a SKIPPED review specifically, the two remedies differ: narrowing the PR addresses why the
+review was skipped, while `crq dismiss` only records that you chose to proceed at this head.
 
 Current feedback without triggering a review:
 

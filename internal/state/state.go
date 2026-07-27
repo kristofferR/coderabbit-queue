@@ -92,6 +92,19 @@ type Round struct {
 	// These are top-level round members so tolerant old binaries preserve them.
 	DispatchHoldPhase   Phase      `json:"dispatch_hold_phase,omitempty"`
 	DispatchHoldRetryAt *time.Time `json:"dispatch_hold_retry_at,omitempty"`
+	// Dismissed maps the ID of a finding an agent explicitly accounted for to the
+	// reason given. GitHub offers no way to close these: a review-body finding, a
+	// review-skipped notice and an outside-diff remark all lack a review thread,
+	// so `crq resolve` and `crq decline` have nothing to act on and drain-first
+	// can never be satisfied — the round repeats `fix` forever and no new review is ever
+	// requested for the head.
+	//
+	// Scoped to this round on purpose. Finding IDs are content-derived, so a
+	// dismissal that outlived the head would silently swallow the same finding
+	// when the next reviewer reports it again. Superseding the round drops these
+	// with it, which is the same rule body findings already follow: the current
+	// reviewer must report it again.
+	Dismissed map[string]string `json:"dismissed,omitempty"`
 
 	// RetryAt is the earliest time this head may fire again (awaiting_retry).
 	RetryAt *time.Time `json:"retry_at,omitempty"`
@@ -922,6 +935,25 @@ func timeAfter(a, b *time.Time) bool {
 
 func timeEqual(a, b *time.Time) bool {
 	return (a == nil && b == nil) || (a != nil && b != nil && a.Equal(*b))
+}
+
+// Dismiss records a finding ID as accounted for. Returns false when it was
+// already dismissed, so a caller can tell a repeat from a new decision.
+func (r *Round) Dismiss(id, reason string) bool {
+	if id == "" || r.IsDismissed(id) {
+		return false
+	}
+	if r.Dismissed == nil {
+		r.Dismissed = map[string]string{}
+	}
+	r.Dismissed[id] = reason
+	return true
+}
+
+// IsDismissed reports whether this round already accounted for the finding.
+func (r *Round) IsDismissed(id string) bool {
+	_, ok := r.Dismissed[id]
+	return ok
 }
 
 // Queue-entry wait reasons. A waiting round is held by exactly one of these
