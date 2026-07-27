@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
@@ -100,8 +101,7 @@ func (s *Service) SetFleetConfig(ctx context.Context, key, value string) error {
 			return ErrNoChange
 		}
 		st.SetFleetValue(key, value)
-		s.reconcileFleetChange(st, before, s.fleetCfg(*st), open)
-		return nil
+		return s.reconcileFleetChange(st, before, s.fleetCfg(*st), open)
 	})
 	return err
 }
@@ -135,8 +135,7 @@ func (s *Service) UnsetFleetConfig(ctx context.Context, key string) (bool, error
 		if !dropped {
 			return ErrNoChange
 		}
-		s.reconcileFleetChange(st, before, s.fleetCfg(*st), open)
-		return nil
+		return s.reconcileFleetChange(st, before, s.fleetCfg(*st), open)
 	})
 	return dropped, err
 }
@@ -188,8 +187,7 @@ func (s *Service) SeedFleetConfig(ctx context.Context) ([]string, error) {
 		if len(seeded) == 0 {
 			return ErrNoChange
 		}
-		s.reconcileFleetChange(st, before, s.fleetCfg(*st), open)
-		return nil
+		return s.reconcileFleetChange(st, seedBefore(before, seeded), s.fleetCfg(*st), open)
 	})
 	return seeded, err
 }
@@ -286,6 +284,32 @@ func seedsReviewers(st State) bool {
 	return false
 }
 
+// seedBefore is the before-state a seed has to be reconciled against.
+//
+// Seeding records THIS host's own values, so comparing the reviewer policy it
+// writes against the policy this host was already using can only ever say
+// "nothing changed". The fleet-wide before-state is the thing seeding exists to
+// end: another host may have completed a head without a reviewer the seed now
+// makes fleet-required, and that host's completed round is the dedup marker
+// that would keep the newly required bot from ever being triggered.
+//
+// So when a seed records a reviewer key, treat the fleet's previous reviewer
+// set as unknown — no required bot, no co-reviewer — and let the ordinary
+// reviewer-change reconciliation requeue against it. It is conservative, not
+// expensive: a reopened round the primary already answered dedupes at
+// DecideFire's already-reviewed gate instead of buying a second review. A
+// repository that pins its own reviewers still decides its effective set, so
+// its rounds compare equal and are left alone.
+func seedBefore(before Config, seeded []string) Config {
+	for _, key := range seeded {
+		if isReviewerFleetKey(key) {
+			before.RequiredBots, before.CoBots, before.Reviewers = nil, nil, nil
+			break
+		}
+	}
+	return before
+}
+
 func (s *Service) openFleetPRs(ctx context.Context, st State) (map[string]map[int]bool, error) {
 	repos := map[string]bool{}
 	for _, round := range st.Rounds {
@@ -323,7 +347,12 @@ func inaccessibleRepoLookup(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.Status == http.StatusForbidden
 }
 
-func (s *Service) reconcileFleetChange(st *State, before, after Config, open map[string]map[int]bool) {
+// reconcileFleetChange applies what a policy change invalidates — and refuses
+// the change outright when there is a network effect it cannot take back.
+func (s *Service) reconcileFleetChange(st *State, before, after Config, open map[string]map[int]bool) error {
+	if err := checkExcludedTriggerPosts(st, before, after); err != nil {
+		return err
+	}
 	if !sameFoldedSet(before.Scope, after.Scope) {
 		st.Account = AccountQuota{
 			Scope:  strings.Join(after.Scope, ","),
@@ -341,6 +370,36 @@ func (s *Service) reconcileFleetChange(st *State, before, after Config, open map
 		releaseSlot(st, QueueKey(round.Repo, round.PR))
 	}
 	s.reopenForFleetReviewerChange(st, before, after, open)
+	return nil
+}
+
+// checkExcludedTriggerPosts refuses an exclusion that would race a trigger post
+// already claimed for the repository being excluded.
+//
+// The reservation is a fire's commit point, but the command goes to GitHub
+// after it: a round left reserved here is one whose post is already authorized,
+// so retiring it would not stop the excluded repository receiving a review
+// command — it would only destroy the record of quota the account is about to
+// be charged for. As with a hold, the claim and this write are both CAS, which
+// makes either ordering safe: an existing claim rejects the exclusion, and an
+// exclusion recorded first stops the next fire.
+func checkExcludedTriggerPosts(st *State, before, after Config) error {
+	var blocked []string
+	for _, round := range st.Rounds {
+		repo := NormalizeRepo(round.Repo)
+		if !after.ExcludeRepos[repo] || before.ExcludeRepos[repo] {
+			continue
+		}
+		if triggerPostClaimed(&round) {
+			blocked = append(blocked, QueueKey(round.Repo, round.PR))
+		}
+	}
+	if len(blocked) == 0 {
+		return nil
+	}
+	sort.Strings(blocked)
+	return fmt.Errorf("a review trigger is already being posted for %s; wait for it to finish before excluding it",
+		strings.Join(blocked, ", "))
 }
 
 func sameFoldedSet(a, b []string) bool {

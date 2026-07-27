@@ -84,6 +84,27 @@ func fleetSettings() map[string]fleetSetting {
 			},
 			Show: func(cfg Config) string { return strings.Join(cfg.RequiredBots, ",") },
 		},
+		feedbackBotsKey: {
+			Doc: "logins whose findings crq surfaces beyond the ones it waits for (empty follows required-bots and cobots)",
+			Env: "CRQ_FEEDBACK_BOTS",
+			Apply: func(cfg *Config, v string) error {
+				logins := splitList(v)
+				// Present-but-empty is not a choice here either: it is the
+				// environment's "unset", so the surfaced set goes back to being
+				// derived from who reviews, recomputed rather than frozen.
+				cfg.FeedbackBots, cfg.FeedbackBotsExplicit = logins, len(logins) > 0
+				if !cfg.FeedbackBotsExplicit {
+					cfg.FeedbackBots = cfg.reviewerLogins(func(r Reviewer) bool { return r.Required || !r.Metered() })
+				}
+				return nil
+			},
+			Show: func(cfg Config) string {
+				if !cfg.FeedbackBotsExplicit {
+					return ""
+				}
+				return strings.Join(cfg.FeedbackBots, ",")
+			},
+		},
 		"min-interval": {
 			Doc: "floor between two metered reviews",
 			Env: "CRQ_MIN_INTERVAL",
@@ -346,6 +367,14 @@ func fleetCoBotNames(value string) ([]string, error) {
 	return names, nil
 }
 
+// feedbackBotsKey is the one reviewer-view input that does not reshape who
+// reviews: it widens whose findings are read, which decides whether a head
+// comes back as `fix` or as clean. Two hosts answering it differently is the
+// same divergence as one excluding a repository the other reviews — one queue
+// driver reports findings the next considers absent — so it is fleet policy,
+// but it never requeues a round.
+const feedbackBotsKey = "feedback-bots"
+
 // isReviewerFleetKey reports whether a setting reshapes who reviews, or how a
 // co-reviewer is driven. Those are the ones whose derived views have to be
 // rebuilt, and whose changes existing rounds may have to be reconciled against.
@@ -477,9 +506,13 @@ func applyFleet(cfg Config, fleet map[string]string, warn func(string)) Config {
 	return cfg
 }
 
+// touchesReviewers reports whether the recorded policy holds anything the
+// derived reviewer views are built from. feedback-bots is one of those inputs
+// without reshaping who reviews: dropping it has to return the surfaced set to
+// the derived one, which only the rebuild can compute.
 func touchesReviewers(fleet map[string]string) bool {
 	for key := range fleet {
-		if isReviewerFleetKey(key) {
+		if isReviewerFleetKey(key) || key == feedbackBotsKey {
 			return true
 		}
 	}

@@ -429,6 +429,133 @@ func TestFleetExcludeRetiresQueuedRounds(t *testing.T) {
 	}
 }
 
+// A reservation is a fire's commit point, but the review command reaches GitHub
+// after it. Excluding the repository in that window cannot take the post back:
+// retiring the round would only destroy the record of the quota the account is
+// about to be charged for, on a repository crq is no longer meant to touch.
+func TestFleetExcludeRefusesToRaceAClaimedTriggerPost(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.PutRound(Round{Repo: "owner/repo", PR: 7, Head: "abcdef123", Phase: PhaseReserved, Token: "tok"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	err := svc.SetFleetConfig(ctx, "exclude", "owner/repo")
+	if err == nil || !strings.Contains(err.Error(), "already being posted") {
+		t.Fatalf("exclude during a claimed trigger post = %v, want a refusal", err)
+	}
+	st, _, _ := store.Load(ctx)
+	if value, ok := st.FleetValue("exclude"); ok {
+		t.Errorf("exclude = %q, want the refused change not written", value)
+	}
+	if round := st.Round("owner/repo", 7); round == nil || round.Phase != PhaseReserved {
+		t.Fatalf("round = %+v, want the reserved round left alone", round)
+	}
+
+	// A co-reviewer claim is the same promise, and both clear once the post is
+	// recorded — then the exclusion goes through.
+	if _, err := store.Update(ctx, func(st *State) error {
+		r := st.Round("owner/repo", 7)
+		r.Phase = PhaseQueued
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SetFleetConfig(ctx, "exclude", "owner/repo"); err != nil {
+		t.Fatalf("exclude after the post finished = %v, want it recorded", err)
+	}
+}
+
+// Whose findings crq reads decides whether a head comes back as `fix` or as
+// clean, which makes it fleet policy: one queue driver reporting findings the
+// next considers absent is the same divergence as one host excluding a
+// repository the other reviews.
+func TestFleetOwnsTheFeedbackBots(t *testing.T) {
+	ctx := context.Background()
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":        "codex",
+		"CRQ_REQUIRED_BOTS": "coderabbitai[bot]",
+		"CRQ_FEEDBACK_BOTS": "coderabbitai[bot]",
+	})
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if err := svc.SetFleetConfig(ctx, feedbackBotsKey, "coderabbitai[bot],"+dialect.CodexBotLogin); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ := store.Load(ctx)
+	got := svc.fleetCfg(st)
+	if !containsBot(got.FeedbackBots, dialect.CodexBotLogin) {
+		t.Errorf("FeedbackBots = %v, want the fleet's list to win over this host's", got.FeedbackBots)
+	}
+	// And `crq doctor` names the variable still set locally, or the host looks
+	// healthy while it reads a different set.
+	diverged, err := svc.FleetDivergence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(diverged, "\n"), "CRQ_FEEDBACK_BOTS") {
+		t.Errorf("divergence = %v, want the overridden host variable named", diverged)
+	}
+
+	// Recording the empty value is the fleet saying "derive it", which has to
+	// recompute the surfaced set rather than leave this host's explicit one.
+	if err := svc.SetFleetConfig(ctx, feedbackBotsKey, ""); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ = store.Load(ctx)
+	got = svc.fleetCfg(st)
+	if got.FeedbackBotsExplicit || !containsBot(got.FeedbackBots, dialect.CodexBotLogin) {
+		t.Fatalf("FeedbackBots = %v (explicit %v), want the derived set including the enabled co-reviewer",
+			got.FeedbackBots, got.FeedbackBotsExplicit)
+	}
+}
+
+// Seeding writes THIS host's answers, so comparing the reviewer policy it
+// records against the policy this host was already using can only ever say
+// "nothing changed" — while the host that completed the head may have been
+// running an entirely different set. That divergence is what seeding exists to
+// end, so a seeded reviewer key reconciles as if the fleet had no reviewers.
+func TestSeedingReviewerPolicyReopensCompletedRounds(t *testing.T) {
+	ctx := context.Background()
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_REPOS":                "",
+		"CRQ_EXCLUDE":              "",
+		"CRQ_COBOTS":               "codex,bugbot",
+		"CRQ_REQUIRED_BOTS":        "coderabbitai[bot]",
+		"CRQ_COBOT_BUGBOT_CMD":     "bugbot run",
+		"CRQ_COBOT_BUGBOT_TRIGGER": "selfheal",
+	})
+	repo, pr := "owner/repo", 7
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.PutRound(Round{Repo: repo, PR: pr, Head: "abcdef123", Phase: PhaseCompleted})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewService(cfg, gh, store, nil).SeedFleetConfig(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ := store.Load(ctx)
+	round := st.Round(repo, pr)
+	if round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("round = %+v, want the completed round reopened by the seed", round)
+	}
+	if !containsBot(round.ForceCoReviewers, dialect.BugbotLogin) {
+		t.Errorf("ForceCoReviewers = %v, want the seeded self-heal bot nudged once", round.ForceCoReviewers)
+	}
+}
+
 func TestFleetDivergenceIncludesConfigFileValues(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
