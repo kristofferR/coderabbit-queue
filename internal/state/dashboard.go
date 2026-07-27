@@ -255,7 +255,7 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	}
 	fmt.Fprintf(&b, "| **Last review fired** | %s |\n", fmtStamp(st.LastFired, loc))
 	if st.Drain.Unhealthy() {
-		fmt.Fprintf(&b, "\n> 🚨 fix sessions are not starting on %s — %d passes in a row: %s\n",
+		fmt.Fprintf(&b, "\n> 🚨 fix sessions are not starting on %s — %d attempts in a row: %s\n",
 			dash(st.Drain.Host), st.Drain.ConsecutiveFailures, st.Drain.LastError)
 	}
 	if st.Warn != "" {

@@ -691,9 +691,12 @@ func (r *Round) ReleaseDispatch(token string) bool {
 	return true
 }
 
-// DrainUnhealthyAfter is how many consecutive passes may fail to dispatch
-// anything before crq says so out loud. One failure is a transient; three in a
-// row is a dispatcher that is not working.
+// DrainUnhealthyAfter is how many consecutive dispatch attempts may fail to
+// start a session before crq says so out loud. One failure is a transient; three
+// in a row is a dispatcher that is not working.
+//
+// Attempts, not passes: sessions outlive the pass that started them, so their
+// outcomes arrive one at a time and any success resets the count.
 const DrainUnhealthyAfter = 3
 
 // DrainHealth is the watcher's dispatch record: whether fix sessions are
@@ -716,8 +719,8 @@ func (d *DrainHealth) Unhealthy() bool {
 	return d != nil && d.ConsecutiveFailures >= DrainUnhealthyAfter
 }
 
-// NoteDispatch records one pass's outcome: whether any session started, and the
-// reason if none did.
+// NoteDispatch records one dispatch attempt's outcome: whether a session
+// started, and the reason if it did not.
 func (s *State) NoteDispatch(host string, started bool, reason string, now time.Time) {
 	if s.Drain == nil {
 		s.Drain = &DrainHealth{}

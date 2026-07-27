@@ -227,7 +227,7 @@ func run(ctx context.Context, args []string) int {
 	case "drain":
 		fs := flag.NewFlagSet("drain", flag.ContinueOnError)
 		fs.SetOutput(os.Stderr)
-		agent := fs.String("agent", "", "fix agent to run (default: claude on PATH)")
+		agent := fs.String("agent", "", "Claude-compatible fix agent to run (default: claude on PATH)")
 		dryRun := fs.Bool("dry-run", false, "print what would be written and run")
 		sub := ""
 		rest := args[1:]
@@ -596,10 +596,16 @@ It writes the fix prompt, a wrapper, and a service definition for this platform
 platform needs to survive a logout, and starts it. --dry-run prints the paths and
 commands without touching anything.
 
-The agent defaults to "claude" on PATH; pass --agent for something else. It is
-run with permissions bypassed because it is unattended — an interactive prompt
-for "go test" or "git push" would hang forever with nobody to answer it. What
-keeps that bounded is the isolated worktree, one claimed session per PR,
+The agent defaults to "claude" on PATH; --agent takes another path to it, or a
+wrapper around it. The installed service runs the agent with Claude Code's own
+flags (-p, --permission-mode, --output-format), so an agent with a different CLI
+needs its own wrapper script and "crq watch --dispatch -- <cmd>...", which runs
+whatever argv you give it. --agent must name something runnable; a name that
+cannot be resolved is refused here rather than at the first dispatch.
+
+It is run with permissions bypassed because it is unattended — an interactive
+prompt for "go test" or "git push" would hang forever with nobody to answer it.
+What keeps that bounded is the isolated worktree, one claimed session per PR,
 CRQ_DISPATCH_MAX_ATTEMPTS per head, and the prompt's stated scope.
 
 Repositories default to CRQ_REPOS.

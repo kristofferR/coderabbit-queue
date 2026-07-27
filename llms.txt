@@ -209,8 +209,26 @@ that need one:
 crq drain install            # prompt + wrapper + service, started; --dry-run to preview
 ```
 
-Session output goes to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log`. Three passes in a
+Session output goes to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log`. Three dispatch attempts in a
 row that start nothing put `dispatch failing` on the dashboard and the status line.
+
+`crq drain install` runs `crq watch --dispatch`, which you can also run yourself:
+
+```bash
+crq watch [--dispatch] [--once] [--interval 2m] [--concurrency 0] [<repo>...] [-- <cmd>...]
+```
+
+It drives every open PR in `CRQ_REPOS` through the same `crq next` oracle and emits one JSON line
+per PR per pass (`repo`, `pr`, `action`, `findings`, `dispatched`, `skipped`). Without `--dispatch`
+that is all it does. With it, a PR whose action is `fix` is claimed under compare-and-swap and the
+command from `CRQ_DISPATCH_CMD` (or after `--`) runs in a crq-made worktree checked out at that
+head, with `CRQ_DISPATCH_REPO`, `CRQ_DISPATCH_PR`, `CRQ_DISPATCH_HEAD` and `CRQ_DISPATCH_FINDINGS`
+(a JSON file) in its environment. The command is run directly, not through a shell; quoted
+arguments in `CRQ_DISPATCH_CMD` are kept whole. Dispatch is bounded per head by
+`CRQ_DISPATCH_MAX_ATTEMPTS` (default 3) and uncapped in parallel unless
+`CRQ_DISPATCH_CONCURRENCY` sets a valve — fixing findings spends no account quota, so it does not
+queue. `--once` exits non-zero if any PR could not be checked, so cron cannot mistake a partial
+scan for a clean one.
 
 Current feedback without triggering a review:
 

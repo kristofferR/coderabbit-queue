@@ -386,6 +386,8 @@ crq feedback <repo> <pr>  # current normalized findings as JSON, WITHOUT trigger
 crq resolve <thread-id> [<thread-id>...]                    # resolve addressed review threads
 crq decline <thread-id> [...] --reason "<why>" [--resolve]  # record why a finding is declined
 crq drain install         # ⭐ unattended: watch every PR and fix what needs fixing
+crq watch                 #    what the drain runs: drive open PRs through crq next, one JSON
+                          #    line each (--dispatch starts a fix session; --once for cron)
 crq autoreview            # ⭐ review ALL open PRs automatically, rate-coordinated
                           #    (--no-incremental = first review only; --once = single pass for cron)
 crq status                # show the dashboard: queue, in-flight, quota, next slot

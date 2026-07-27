@@ -51,7 +51,14 @@ func (s *Service) InstallDrain(ctx context.Context, agent string, repos []string
 		if err != nil {
 			return DrainInstall{}, fmt.Errorf("no fix agent found: pass --agent <path> (tried \"claude\" on PATH)")
 		}
-	} else if resolved, err := exec.LookPath(agent); err == nil {
+	} else {
+		// A typo here is not a smaller mistake than a missing default: the install
+		// would report success and every dispatch would fail to start a session,
+		// which is the silent nothing this command exists to prevent.
+		resolved, lerr := exec.LookPath(agent)
+		if lerr != nil {
+			return DrainInstall{}, fmt.Errorf("fix agent %q cannot be run: %w", agent, lerr)
+		}
 		agent = resolved
 	}
 	if len(repos) == 0 {
@@ -103,6 +110,11 @@ func (s *Service) InstallDrain(ctx context.Context, agent string, repos []string
 		return plan, err
 	}
 
+	// The agent is invoked with Claude Code's own flags, so --agent takes a
+	// Claude-compatible executable — a wrapper, or a build of it — and not an
+	// agent with a different CLI. Anything else needs its own wrapper script;
+	// `crq watch --dispatch -- <cmd>...` runs whatever argv it is given.
+	//
 	// --output-format stream-json --verbose makes the session write as it works.
 	// Without it the log stays empty until the session ENDS, so a session that
 	// hangs or dies mid-way leaves a zero-byte file — which is the same "output
@@ -134,8 +146,12 @@ exec %q watch --dispatch -- \
 		}
 	}
 
-	// Best-effort: the files are the durable part, and a machine without
-	// systemd/launchd still gets something runnable by hand.
+	// The files are the durable part, and a machine without systemd/launchd still
+	// gets something runnable by hand — but a failure here means the drain is not
+	// running, and reporting `started` for that is the same silent nothing this
+	// command exists to prevent. Say which command failed, and let the caller see
+	// the paths that were written.
+	var failed []string
 	for _, line := range plan.Commands {
 		parts := strings.Fields(strings.ReplaceAll(line, "$(id -u)", currentUID()))
 		if len(parts) == 0 {
@@ -145,15 +161,56 @@ exec %q watch --dispatch -- \
 			parts[len(parts)-1] = os.Getenv("USER")
 		}
 		cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
-		if err := cmd.Run(); err != nil && s.log != nil {
-			s.log.Printf("drain install: %s: %v", line, err)
+		if err := cmd.Run(); err != nil {
+			if s.log != nil {
+				s.log.Printf("drain install: %s: %v", line, err)
+			}
+			failed = append(failed, fmt.Sprintf("%s: %v", line, err))
 		}
+	}
+	if len(failed) > 0 {
+		return plan, fmt.Errorf("the drain files are installed, but starting it failed — run these by hand: %s",
+			strings.Join(failed, "; "))
 	}
 	plan.Started = true
 	return plan, nil
 }
 
 func currentUID() string { return fmt.Sprint(os.Getuid()) }
+
+// drainPath is the PATH the service runs with: this shell's, plus wherever crq
+// and the agent were found.
+//
+// A service manager hands a unit its own minimal PATH, which on launchd is four
+// system directories. The wrapper and the agent are absolute, but the session
+// they start shells out to git, gh, go and crq — and a Homebrew or ~/.local/bin
+// install is invisible from there, so every fix would fail at its first command.
+// The installing shell's PATH is the one where those tools were just resolved.
+func drainPath(plan DrainInstall) string {
+	seen := map[string]bool{}
+	var dirs []string
+	add := func(dir string) {
+		if dir == "" || dir == "." || seen[dir] {
+			return
+		}
+		seen[dir] = true
+		dirs = append(dirs, dir)
+	}
+	paths := []string{plan.Wrapper, plan.Agent}
+	if self, err := os.Executable(); err == nil {
+		paths = append(paths, self) // the session runs `crq resolve` itself
+	}
+	for _, path := range paths {
+		add(filepath.Dir(path))
+	}
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		add(dir)
+	}
+	if len(dirs) == 0 {
+		return "/usr/local/bin:/usr/bin:/bin"
+	}
+	return strings.Join(dirs, string(filepath.ListSeparator))
+}
 
 // drainUnit renders the platform's service definition.
 func (s *Service) drainUnit(plan DrainInstall) string {
@@ -162,6 +219,7 @@ func (s *Service) drainUnit(plan DrainInstall) string {
 		"CRQ_WATCH_INTERVAL":        s.cfg.WatchInterval.String(),
 		"CRQ_DISPATCH_MAX_ATTEMPTS": fmt.Sprint(s.cfg.DispatchMaxAttempts),
 		"CRQ_DISPATCH_CONCURRENCY":  fmt.Sprint(s.cfg.DispatchConcurrency),
+		"PATH":                      drainPath(plan),
 	}
 	logDir := plan.LogDir
 	if plan.Platform == "darwin" {

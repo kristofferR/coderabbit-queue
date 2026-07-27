@@ -3,6 +3,7 @@ package crq
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,12 +49,14 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	report := NextReport{Repo: repo, PR: 4, Head: sha, Action: "fix"}
 	seedRound(t, store, cfg, repo, 4, sha, PhaseQueued, time.Now().UTC(), 0)
 
-	ok, why := svc.dispatch(context.Background(), WatchOptions{
+	pool := newDispatchPool(0)
+	ok, why := svc.startDispatch(context.Background(), WatchOptions{
 		Dispatch: true, Command: []string{script}, MaxAttempts: 3,
-	}, report)
+	}, pool, report)
 	if !ok {
 		t.Fatalf("dispatch did not run: %s", why)
 	}
+	pool.wait()
 
 	var got struct{ Repo, PR, Head, Cwd, Findings string }
 	data, err := os.ReadFile(record)
@@ -129,8 +132,10 @@ func TestDispatchHonoursDryRun(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch "+ran+"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ok, why := svc.dispatch(context.Background(), WatchOptions{Dispatch: true, Command: []string{script}},
-		NextReport{Repo: "o/r", PR: 1, Head: "aaaaaaaa1", Action: "fix"})
+	pool := newDispatchPool(0)
+	ok, why := svc.startDispatch(context.Background(), WatchOptions{Dispatch: true, Command: []string{script}},
+		pool, NextReport{Repo: "o/r", PR: 1, Head: "aaaaaaaa1", Action: "fix"})
+	pool.wait()
 	if ok {
 		t.Error("a dry run dispatched a session")
 	}
@@ -139,6 +144,15 @@ func TestDispatchHonoursDryRun(t *testing.T) {
 	}
 	if _, err := os.Stat(ran); !os.IsNotExist(err) {
 		t.Error("the fix command ran under a dry run")
+	}
+	// Health is a shared CAS write like any other, so a dry run must not record
+	// one — let alone raise a dispatcher alarm nothing caused.
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Drain != nil {
+		t.Errorf("a dry run wrote dispatch health: %+v", st.Drain)
 	}
 }
 
@@ -167,11 +181,13 @@ func TestDispatchKeepsAWorktreeWithUnpushedWork(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\necho fixed >> README.md\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ok, why := svc.dispatch(context.Background(), WatchOptions{Dispatch: true, Command: []string{script}, MaxAttempts: 3},
-		NextReport{Repo: repo, PR: 8, Head: sha, Action: "fix"})
+	pool := newDispatchPool(0)
+	ok, why := svc.startDispatch(context.Background(), WatchOptions{Dispatch: true, Command: []string{script}, MaxAttempts: 3},
+		pool, NextReport{Repo: repo, PR: 8, Head: sha, Action: "fix"})
 	if !ok {
 		t.Fatalf("dispatch failed: %s", why)
 	}
+	pool.wait()
 	found := false
 	_ = filepath.WalkDir(filepath.Join(cfg.WorkspaceRoot, "work"), func(path string, d os.DirEntry, err error) error {
 		if err == nil && d.Name() == "README.md" {
@@ -237,5 +253,152 @@ func TestWatchPassRotatesSoNoPRIsStarved(t *testing.T) {
 	}
 	if len(distinct) < 2 {
 		t.Errorf("the same PR led every pass (%v); the tail can never get a dispatch slot", firstOf)
+	}
+}
+
+// A session that commits its fixes but does not push them leaves a clean working
+// tree, and deleting that worktree destroys the only copy of the fix.
+func TestDispatchKeepsACommittedButUnpushedFix(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey(repo, 11)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, repo, 11, sha, PhaseQueued, time.Now().UTC(), 0)
+
+	script := filepath.Join(t.TempDir(), "fix.sh")
+	body := "#!/bin/sh\necho fixed >> README.md\n" +
+		"git -c user.email=t@example.invalid -c user.name=t commit -qam 'fix the finding'\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := newDispatchPool(0)
+	ok, why := svc.startDispatch(context.Background(), WatchOptions{Dispatch: true, Command: []string{script}, MaxAttempts: 3},
+		pool, NextReport{Repo: repo, PR: 11, Head: sha, Action: "fix"})
+	if !ok {
+		t.Fatalf("dispatch failed: %s", why)
+	}
+	pool.wait()
+
+	found := false
+	_ = filepath.WalkDir(filepath.Join(cfg.WorkspaceRoot, "work"), func(path string, d os.DirEntry, err error) error {
+		if err == nil && d.Name() == "README.md" {
+			if content, rerr := os.ReadFile(path); rerr == nil && strings.Contains(string(content), "fixed") {
+				found = true
+			}
+		}
+		return nil
+	})
+	if !found {
+		t.Error("the session's committed but unpushed fix was deleted with the worktree")
+	}
+}
+
+// A command that never reached a process did not use up the per-head budget: a
+// mistyped fix agent would otherwise spend every attempt without a session ever
+// running, and correcting it would come too late for that head.
+func TestDispatchRefundsTheAttemptWhenTheCommandCannotStart(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey(repo, 6)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, repo, 6, sha, PhaseQueued, time.Now().UTC(), 0)
+
+	pool := newDispatchPool(0)
+	missing := filepath.Join(t.TempDir(), "no-such-agent")
+	if ok, why := svc.startDispatch(context.Background(),
+		WatchOptions{Dispatch: true, Command: []string{missing}, MaxAttempts: 3},
+		pool, NextReport{Repo: repo, PR: 6, Head: sha, Action: "fix"}); !ok {
+		t.Fatalf("the round was not claimed: %s", why)
+	}
+	pool.wait()
+
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(repo, 6)
+	if round == nil || round.Dispatch == nil {
+		t.Fatalf("round = %#v, want the claim released", round)
+	}
+	if round.Dispatch.Attempts != 0 {
+		t.Errorf("attempts = %d, want the budget intact for a session that never started", round.Dispatch.Attempts)
+	}
+}
+
+// Findings on a head crq never queued — a review somebody triggered by hand, or
+// feedback that predates the drain — used to be undispatchable forever, because
+// `Next` returns fix before enqueueing and the claim had nowhere to live.
+func TestClaimDispatchAdoptsAHeadTheQueueNeverSaw(t *testing.T) {
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	report := NextReport{Repo: "owner/thing", PR: 12, Head: "aaaaaaaa1", Action: "fix"}
+
+	if ok, why := svc.claimDispatch(context.Background(), report, "tok", 3); !ok {
+		t.Fatalf("claim refused: %s — these findings can never be drained", why)
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(report.Repo, report.PR)
+	if round == nil || round.Head != report.Head {
+		t.Fatalf("round = %#v, want one tracking the observed head", round)
+	}
+	// Adopting the head must not buy a review: the findings are already in hand.
+	if round.FireEligible(time.Now().UTC()) {
+		t.Error("the adopted round is fire-eligible; dispatching would cost an account-metered review")
+	}
+	if !round.DispatchHeld(time.Now().UTC()) {
+		t.Errorf("dispatch = %#v, want the claim held", round.Dispatch)
+	}
+}
+
+// The prune runs before the new log is created, so it has to leave room for it —
+// otherwise the steady state is one file per PR above the bound.
+func TestSessionLogPruneLeavesRoomForTheNewLog(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 8; i++ {
+		name := fmt.Sprintf("7-abcdef123-2026010%dT000000.log", i)
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pruneSessionLogs(dir, 7)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 4 {
+		t.Errorf("kept %d logs, want 4 so the one about to be written makes 5", len(entries))
+	}
+	// The ones kept are the newest.
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "7-abcdef123-20260103") {
+			t.Errorf("%s was kept over a newer log", e.Name())
+		}
 	}
 }

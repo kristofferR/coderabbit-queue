@@ -427,3 +427,23 @@ func TestLoadConfigRejectsUnknownCoBot(t *testing.T) {
 		t.Fatalf("the error must name the typo and the known bots, got %v", err)
 	}
 }
+
+// CRQ_DISPATCH_CMD is one line of configuration that has to survive a multiword
+// argument: splitting inside the quotes hands the fix agent three prompt
+// fragments instead of one prompt.
+func TestSplitArgvKeepsQuotedArgumentsWhole(t *testing.T) {
+	got := splitArgv(`claude -p "fix these findings" --dir '/tmp/with space'`)
+	want := []string{"claude", "-p", "fix these findings", "--dir", "/tmp/with space"}
+	if len(got) != len(want) {
+		t.Fatalf("argv = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("argv[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	// Still not a shell: nothing here expands what the operator did not write.
+	if argv := splitArgv(`echo $HOME *.go`); len(argv) != 3 || argv[1] != "$HOME" || argv[2] != "*.go" {
+		t.Errorf("argv = %q, want the literal words back", argv)
+	}
+}

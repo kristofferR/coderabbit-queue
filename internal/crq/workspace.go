@@ -233,6 +233,16 @@ func (w Workspace) Checkout(ctx context.Context, repo string, pr int, sha string
 	if err != nil {
 		return Checkout{}, err
 	}
+	// A fork PR's head lives in the contributor's repository, and the mirror
+	// fetches only this one's branches — so the commit is simply absent and the
+	// worktree cannot be created. GitHub publishes it on the BASE repository as
+	// refs/pull/<n>/head, which is the one ref that reaches it from here.
+	if _, err := w.git(ctx, mirror, "cat-file", "-e", sha+"^{commit}"); err != nil {
+		spec := fmt.Sprintf("+refs/pull/%d/head:refs/remotes/origin/pr/%d", pr, pr)
+		if _, ferr := w.git(ctx, mirror, "fetch", "origin", spec); ferr != nil {
+			return Checkout{}, fmt.Errorf("fetching pull %d of %s: %w", pr, repo, ferr)
+		}
+	}
 	prDir, err := w.workPath(repo, pr)
 	if err != nil {
 		return Checkout{}, err

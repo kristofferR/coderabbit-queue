@@ -505,13 +505,38 @@ func ownerOf(repo string) string {
 	return owner
 }
 
-// splitArgv splits a configured command into argv on whitespace. It is
-// deliberately not a shell: a dispatch command runs directly, so nothing here
-// expands a variable, a glob, or a pipe that the operator did not write.
+// splitArgv splits a configured command into argv on whitespace, keeping
+// quoted runs together: 'claude -p "fix these findings"' is three arguments,
+// not five with stray quote characters in them.
+//
+// Quoting is ALL it understands. It is deliberately not a shell: a dispatch
+// command runs directly, so nothing here expands a variable, a glob, or a pipe
+// that the operator did not write. Both quote styles behave the same way, and
+// an unclosed quote simply runs to the end rather than failing a config load
+// over it.
 func splitArgv(value string) []string {
-	fields := strings.Fields(value)
-	if len(fields) == 0 {
-		return nil
+	var argv []string
+	var arg strings.Builder
+	quote := rune(0)
+	quoted := false // "" is an argument, even though it contributes no characters
+	for _, r := range value {
+		switch {
+		case quote != 0 && r == quote:
+			quote = 0
+		case quote == 0 && (r == '"' || r == '\''):
+			quote, quoted = r, true
+		case quote == 0 && (r == ' ' || r == '\t' || r == '\n' || r == '\r'):
+			if arg.Len() > 0 || quoted {
+				argv = append(argv, arg.String())
+				arg.Reset()
+				quoted = false
+			}
+		default:
+			arg.WriteRune(r)
+		}
 	}
-	return fields
+	if arg.Len() > 0 || quoted {
+		argv = append(argv, arg.String())
+	}
+	return argv
 }

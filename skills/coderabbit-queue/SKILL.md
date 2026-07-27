@@ -188,7 +188,7 @@ fetch for every PR; and it resolves threads AFTER pushing, which crq now allows 
 superseded round from a stolen one.
 
 Each session's output is written to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log`
-(last five per PR). Three passes in a row that start nothing puts `dispatch failing` on the dashboard
+(last five per PR). Three dispatch attempts in a row that start nothing put `dispatch failing` on the dashboard
 and the status line.
 
 ## Fleet Auto-Review

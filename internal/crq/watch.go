@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
@@ -68,19 +69,6 @@ type WatchEvent struct {
 // session for one PR, and bounded per head, so a fix that keeps not working
 // stops instead of spending a review round each time.
 func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchEvent) error) error {
-	// Fix sessions run OUTSIDE the pass, and by default without a cap.
-	//
-	// The queue exists for exactly one thing: the account-metered review. Fixing
-	// findings spends none of that allowance, so making a PR wait for a dispatch
-	// slot queues work that has no reason to wait — the same mistake crq already
-	// corrected for co-only rounds, which bypass the slot and the quota gate
-	// entirely. A PR whose findings are ready gets a session now.
-	//
-	// The decisions stay serial on purpose: `Next` is what enqueues and fires, so
-	// deciding one PR at a time is what keeps the metered review in one queue.
-	// Only the sessions overlap.
-	pool := newDispatchPool(opts.Concurrency)
-	defer pool.wait()
 	if opts.Interval <= 0 {
 		opts.Interval = s.cfg.WatchInterval
 	}
@@ -96,11 +84,36 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 	if opts.Dispatch && len(opts.Command) == 0 {
 		return errors.New("dispatch needs a command: set CRQ_DISPATCH_CMD, or pass one after --")
 	}
+	// Fix sessions run OUTSIDE the pass, and by default without a cap.
+	//
+	// The queue exists for exactly one thing: the account-metered review. Fixing
+	// findings spends none of that allowance, so making a PR wait for a dispatch
+	// slot queues work that has no reason to wait — the same mistake crq already
+	// corrected for co-only rounds, which bypass the slot and the quota gate
+	// entirely. A PR whose findings are ready gets a session now.
+	//
+	// The decisions stay serial on purpose: `Next` is what enqueues and fires, so
+	// deciding one PR at a time is what keeps the metered review in one queue.
+	// Only the sessions overlap.
+	//
+	// Built AFTER the fallbacks above: sizing it from the raw option ignored the
+	// cap an operator set in CRQ_DISPATCH_CONCURRENCY unless --concurrency was
+	// also passed, which is precisely the machine that cannot take the load.
+	pool := newDispatchPool(opts.Concurrency)
+	defer pool.wait()
 	for {
 		wait := opts.Interval
 		if err := s.watchPass(ctx, opts, pool, emit); err != nil {
 			reset, throttled := ghapi.ThrottleWait(err)
 			if !throttled {
+				return err
+			}
+			// A one-shot run is somebody's cron or CI job, and it does not get to
+			// sleep out a reset that may be an hour away. Report the throttle:
+			// exiting 0 after checking part of the fleet — or none of it — makes an
+			// incomplete scan look like a clean one, which is the same lie the
+			// per-PR failure path above already refuses to tell.
+			if opts.Once {
 				return err
 			}
 			// Retrying on the ordinary interval hammers an exhausted quota and
@@ -146,7 +159,15 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		pull ghapi.Pull
 	}
 	var candidates []candidate
+	gate := NormalizeRepo(s.cfg.GateRepo)
 	for _, repo := range repos {
+		// The calibration PR is deliberately kept open to probe account quota; it
+		// is not work, and `Next` would enqueue a real review for it — or dispatch
+		// a session against CALIBRATION.md. autoReviewPass excludes the gate
+		// repository for the same reason.
+		if gate != "" && NormalizeRepo(repo) == gate {
+			continue
+		}
 		pulls, err := s.gh.ListPulls(ctx, repo, openPullQuery())
 		if err != nil {
 			return err
@@ -194,11 +215,9 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				Findings: len(report.Findings), At: s.clock().UTC(),
 			}
 			if opts.Dispatch && report.Action == string(engine.ActionFix) {
-				// Started, not finished: the pass moves on to the next PR while
-				// this session runs.
-				event.Dispatched, event.Skipped = pool.start(func() {
-					s.runDispatch(ctx, opts, report)
-				})
+				// Claimed here, run in the pool: the pass moves on to the next PR
+				// while this session runs.
+				event.Dispatched, event.Skipped = s.startDispatch(ctx, opts, pool, report)
 			}
 			if emit != nil {
 				// A consumer that has gone away (a closed pipe, a full
@@ -223,49 +242,86 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 // watcher ran, the queue moved, PRs reported findings — and every dispatch died
 // on a wedged git mirror, in a log line nobody was reading.
 func (s *Service) noteDispatchHealth(ctx context.Context, started bool, reason string) {
-	var unhealthy bool
-	if _, err := s.store.Update(ctx, func(st *State) error {
+	var flipped, unhealthy bool
+	state, err := s.store.Update(ctx, func(st *State) error {
 		was := st.Drain.Unhealthy()
 		st.NoteDispatch(s.cfg.Host, started, reason, s.clock())
-		unhealthy = st.Drain.Unhealthy() && !was
+		unhealthy = st.Drain.Unhealthy()
+		flipped = unhealthy != was
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
 		return
 	}
-	if unhealthy && s.log != nil {
-		s.log.Printf("ALERT: no fix session has started in %d passes — %s", DrainUnhealthyAfter, reason)
+	// The dashboard is where this alert is meant to be read, and a drain that has
+	// stopped working may produce no other write for hours. Only on the flip: the
+	// rendered dashboard does not change for the attempts in between.
+	if flipped {
+		s.sync(ctx, state)
+	}
+	if flipped && unhealthy && s.log != nil {
+		s.log.Printf("ALERT: no fix session has started in %d dispatch attempts — %s", DrainUnhealthyAfter, reason)
 	}
 }
 
-// runDispatch performs one dispatch and records whether a session started. It
-// runs in the pool, off the pass, so a long session delays nothing else.
-func (s *Service) runDispatch(ctx context.Context, opts WatchOptions, report NextReport) {
-	ok, why := s.dispatch(ctx, opts, report)
-	// A round another watcher already holds is not this dispatcher failing.
-	if !ok && strings.Contains(why, "already fixing") {
-		return
+// startDispatch claims the round and hands the session to the pool.
+//
+// The claim is taken HERE, in the pass, rather than inside the session: an event
+// saying `dispatched` is read as "somebody is handling this PR", so a round
+// another watcher holds, or one that has spent its attempts, has to come back as
+// skipped rather than as work in progress.
+func (s *Service) startDispatch(ctx context.Context, opts WatchOptions, pool *dispatchPool, report NextReport) (bool, string) {
+	// DryRun means crq writes nothing and posts nothing. Claiming shared state,
+	// running a code-writing command, and recording dispatch health are all
+	// writes, so this is checked before any of them.
+	if s.cfg.DryRun {
+		return false, "dry run: would dispatch a fix session"
 	}
+	if ok, why := pool.acquire(); !ok {
+		return false, why
+	}
+	token := randomToken()
+	claimed, why := s.claimDispatch(ctx, report, token, opts.MaxAttempts)
+	if !claimed {
+		pool.release()
+		// A round another watcher already holds is not this dispatcher failing.
+		if !strings.Contains(why, "already fixing") {
+			s.noteDispatchHealth(ctx, false, why)
+			if s.log != nil {
+				s.log.Printf("watch: %s#%d not fixed: %s", report.Repo, report.PR, why)
+			}
+		}
+		return false, why
+	}
+	pool.run(func() { s.runDispatch(ctx, opts, report, token) })
+	return true, ""
+}
+
+// runDispatch runs one claimed dispatch and records whether a session started. It
+// runs in the pool, off the pass, so a long session delays nothing else.
+func (s *Service) runDispatch(ctx context.Context, opts WatchOptions, report NextReport, token string) {
+	ok, why := s.dispatch(ctx, opts, report, token)
 	s.noteDispatchHealth(ctx, ok, why)
 	if !ok && s.log != nil {
 		s.log.Printf("watch: %s#%d not fixed: %s", report.Repo, report.PR, why)
 	}
 }
 
-// dispatch claims the round, checks the head out, and runs the fix session.
-func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextReport) (bool, string) {
-	// DryRun means crq writes nothing and posts nothing. Claiming shared state
-	// and running a code-writing command is the largest possible violation of
-	// that, so it is checked before anything else.
-	if s.cfg.DryRun {
-		return false, "dry run: would dispatch a fix session"
-	}
-	token := randomToken()
-	claimed, why := s.claimDispatch(ctx, report, token, opts.MaxAttempts)
-	if !claimed {
-		return false, why
-	}
+// dispatch checks the claimed round's head out and runs the fix session.
+func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextReport, token string) (bool, string) {
+	// Losing the claim means another watcher has taken this round and may be
+	// running its own session. Two sessions writing one worktree is worse than
+	// no session, so the heartbeat cancels this one.
+	//
+	// It starts BEFORE the checkout, not after: a first clone of a large
+	// repository can outlast DispatchTTL, and a claim nobody is refreshing reads
+	// as abandoned — so the takeover this exists to prevent would happen while
+	// this dispatch was still fetching.
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	lost := s.beatDispatch(runCtx, report, token, cancel)
 
-	co, err := s.workspace(ctx).Checkout(ctx, report.Repo, report.PR, report.Head)
+	co, err := s.workspace(runCtx).Checkout(runCtx, report.Repo, report.PR, report.Head)
 	if err != nil {
 		// Nothing ran, so the attempt did not happen: a transient clone failure
 		// must not eat the per-head budget and permanently skip the PR.
@@ -283,13 +339,6 @@ func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextRe
 		return false, err.Error()
 	}
 	defer os.Remove(findingsPath)
-
-	// Losing the claim means another watcher has taken this round and may be
-	// running its own session. Two sessions writing one worktree is worse than
-	// no session, so the heartbeat cancels this one.
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	lost := s.beatDispatch(runCtx, report, token, cancel)
 
 	// A session's output went nowhere, so when one failed there was nothing to
 	// read but the fact that nothing happened. Every session gets a file, and
@@ -317,7 +366,11 @@ func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextRe
 			opts.Command[0], report.Repo, report.PR, report.Head, len(report.Findings), logPath)
 	}
 	runErr := cmd.Run()
-	s.releaseDispatch(context.WithoutCancel(ctx), report, token, true)
+	// A command that never reached a process did not use up the per-head budget.
+	// A missing or non-executable fix agent would otherwise spend every attempt
+	// on a session that never ran, and correcting the configuration would come
+	// too late for that head — the case releaseDispatch's contract is about.
+	s.releaseDispatch(context.WithoutCancel(ctx), report, token, commandStarted(runErr))
 	if lost() {
 		return false, "another watcher took this round; the session was stopped"
 	}
@@ -330,14 +383,62 @@ func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextRe
 	// Keep a worktree the session left work in. Removing it discards fixes that
 	// were made but not pushed, which is the one outcome a fix session must
 	// never suffer.
-	if dirty, err := co.Git(context.WithoutCancel(ctx), "status", "--porcelain"); err == nil && strings.TrimSpace(dirty) != "" {
+	if kept, why := sessionWork(context.WithoutCancel(ctx), co, report.Head); kept {
 		if s.log != nil {
-			s.log.Printf("watch: keeping %s — the session left uncommitted work", co.Dir)
+			s.log.Printf("watch: keeping %s — %s", co.Dir, why)
 		}
 		return true, ""
 	}
 	_ = co.Remove(context.WithoutCancel(ctx))
 	return true, ""
+}
+
+// commandStarted reports whether a failed run got as far as a process. A command
+// that could not be found or could not be executed fails before that, as an
+// *exec.Error or a fork/exec *fs.PathError; a process that ran and exited
+// unsuccessfully gives an *exec.ExitError, and that attempt did happen.
+func commandStarted(err error) bool {
+	if err == nil {
+		return true
+	}
+	var noCommand *exec.Error
+	var noFile *fs.PathError
+	return !errors.As(err, &noCommand) && !errors.As(err, &noFile)
+}
+
+// sessionWork reports whether this checkout holds work that exists nowhere else,
+// and says what it is.
+//
+// A clean working tree is not proof that the session's fixes landed: it also
+// commits, and a commit it did not push lives only here. So anything that cannot
+// be established — an unreadable tree, an unconfirmable push — counts as work
+// worth keeping. The worktree is pruned by age either way; a lost fix is not
+// recoverable at all.
+func sessionWork(ctx context.Context, co Checkout, head string) (bool, string) {
+	dirty, err := co.Git(ctx, "status", "--porcelain")
+	if err != nil {
+		return true, "its working tree could not be read"
+	}
+	if strings.TrimSpace(dirty) != "" {
+		return true, "the session left uncommitted work"
+	}
+	local, err := co.Git(ctx, "rev-parse", "HEAD")
+	if err != nil {
+		return true, "its HEAD could not be read"
+	}
+	if head == "" || strings.HasPrefix(local, head) {
+		return false, "" // still on the reviewed head: nothing was committed here
+	}
+	// The session committed. Ask the remote whether that commit arrived, rather
+	// than assuming a session that exited 0 pushed: fetch, then look for a remote
+	// branch containing it.
+	if _, err := co.Git(ctx, "fetch", "origin"); err != nil {
+		return true, "the session committed, and the push could not be confirmed"
+	}
+	if on, err := co.Git(ctx, "branch", "--remotes", "--contains", local); err != nil || strings.TrimSpace(on) == "" {
+		return true, "the session committed work that is on no remote branch"
+	}
+	return false, ""
 }
 
 // writeFindings puts the findings somewhere the fix session can read and the
@@ -362,7 +463,28 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 	reason := ""
 	_, err := s.store.Update(ctx, func(st *State) error {
 		round := st.Round(report.Repo, report.PR)
-		if round == nil || round.Head != report.Head {
+		if round == nil {
+			// Findings on a head crq never queued: a review somebody triggered by
+			// hand, or feedback that predates the drain. `Next` returns `fix`
+			// before Enqueue in that case — deliberately, so no second review is
+			// bought for a head whose findings are already in hand — which left
+			// the claim nowhere to live and refused these dispatches forever.
+			//
+			// Record the head as reviewed, which it demonstrably is: these
+			// findings are about it. That is the "this head was reviewed" marker,
+			// so the round is NOT fire-eligible and no review is bought here
+			// either.
+			var err error
+			round, err = st.NewRound(report.Repo, report.PR, report.Head, s.clock())
+			if err != nil {
+				return err
+			}
+			if err := round.Dedupe(s.clock()); err != nil {
+				return err
+			}
+			round.Note = "reviewed outside the queue; adopted to fix its findings"
+		}
+		if round.Head != report.Head {
 			reason = "no round for this head"
 			return ErrNoChange
 		}
@@ -412,10 +534,16 @@ func (s *Service) beatDispatch(ctx context.Context, report NextReport, token str
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				taken := false
+				taken, superseded := false, false
 				if _, err := s.store.Update(ctx, func(st *State) error {
 					round := st.Round(report.Repo, report.PR)
-					if round == nil {
+					// A round for ANOTHER head is not this round: superseding is
+					// what this session's own push does, and the fresh round's
+					// claim belongs to whoever takes the new head — reading it as
+					// a theft would kill this session between pushing and
+					// resolving, every time it succeeded.
+					if round == nil || round.Head != report.Head {
+						superseded = true
 						return ErrNoChange
 					}
 					ok, byOther := round.HeartbeatDispatch(token, s.clock())
@@ -437,11 +565,11 @@ func (s *Service) beatDispatch(ctx context.Context, report NextReport, token str
 					stop()
 					return
 				}
-				// The claim is simply gone: the round was superseded, which is
-				// what this session's own push does. Stop heartbeating and let
-				// it finish — resolving its threads comes AFTER the push.
-				if !taken && ctx.Err() == nil {
-					continue
+				// The claim is simply gone, or this head is no longer the one being
+				// worked on. Stop heartbeating and let the session finish —
+				// resolving its threads comes AFTER the push.
+				if superseded {
+					return
 				}
 			}
 		}
@@ -474,29 +602,50 @@ func newDispatchPool(size int) *dispatchPool {
 	return &dispatchPool{slots: make(chan struct{}, size)}
 }
 
-// start runs fn in the pool. It reports whether a session was started, and why
-// not when it was not.
-func (p *dispatchPool) start(fn func()) (bool, string) {
-	if p.slots != nil {
-		select {
-		case p.slots <- struct{}{}:
-		default:
-			// Only reachable when an operator has set a cap. Unfixed findings
-			// waiting on a slot is the shape of problem this whole command
-			// exists to remove, so say so rather than logging it as routine.
-			return false, "at the configured dispatch cap (CRQ_DISPATCH_CONCURRENCY); this PR waits"
-		}
+// acquire takes a slot, reporting why not when every one is busy. It is separate
+// from run so the caller can claim the round — and give the slot back if the
+// claim fails — before anything is said to have been dispatched.
+func (p *dispatchPool) acquire() (bool, string) {
+	if p.slots == nil {
+		return true, ""
 	}
+	select {
+	case p.slots <- struct{}{}:
+		return true, ""
+	default:
+		// Only reachable when an operator has set a cap. Unfixed findings
+		// waiting on a slot is the shape of problem this whole command
+		// exists to remove, so say so rather than logging it as routine.
+		return false, "at the configured dispatch cap (CRQ_DISPATCH_CONCURRENCY); this PR waits"
+	}
+}
+
+// release gives an acquired slot back without running anything.
+func (p *dispatchPool) release() {
+	if p.slots != nil {
+		<-p.slots
+	}
+}
+
+// run runs fn in an already-acquired slot.
+func (p *dispatchPool) run(fn func()) {
 	p.wg.Add(1)
 	go func() {
 		defer func() {
-			if p.slots != nil {
-				<-p.slots
-			}
+			p.release()
 			p.wg.Done()
 		}()
 		fn()
 	}()
+}
+
+// start acquires a slot and runs fn in it, reporting why not when every slot is
+// busy.
+func (p *dispatchPool) start(fn func()) (bool, string) {
+	if ok, why := p.acquire(); !ok {
+		return false, why
+	}
+	p.run(fn)
 	return true, ""
 }
 
@@ -531,8 +680,12 @@ func (s *Service) sessionLog(ctx context.Context, report NextReport) (string, *o
 
 // pruneSessionLogs keeps the most recent few logs per PR. Older ones describe a
 // head nobody is working on any more.
+//
+// It runs BEFORE the new log is created, so it leaves room for it: keeping the
+// full bound here would settle at one more file per PR than the bound says.
 func pruneSessionLogs(dir string, pr int) {
 	const keep = 5
+	room := keep - 1
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -544,11 +697,11 @@ func pruneSessionLogs(dir string, pr int) {
 			mine = append(mine, e.Name())
 		}
 	}
-	if len(mine) <= keep {
+	if len(mine) <= room {
 		return
 	}
 	sort.Strings(mine) // the timestamp is in the name, so this is chronological
-	for _, name := range mine[:len(mine)-keep] {
+	for _, name := range mine[:len(mine)-room] {
 		_ = os.Remove(filepath.Join(dir, name))
 	}
 }
