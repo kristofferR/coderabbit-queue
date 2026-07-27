@@ -328,6 +328,12 @@ func (s *Service) drainEnv(plan DrainInstall) map[string]string {
 	// Explicitly carry an empty set: omitting this key would re-enable every
 	// default co-reviewer when the service starts.
 	env["CRQ_COBOTS"] = strings.Join(coNames, ",")
+	// A workspace supplied by the installing shell is already folded into cfg,
+	// but the service does not inherit that shell. Preserve the effective value
+	// or dispatch silently falls back to another filesystem.
+	if s.cfg.WorkspaceRoot != "" {
+		env["CRQ_WORKSPACE"] = s.cfg.WorkspaceRoot
+	}
 	if path := ConfigPath(); path != "" {
 		env["CRQ_CONFIG"] = path
 	}

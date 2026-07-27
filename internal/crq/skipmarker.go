@@ -33,13 +33,13 @@ func stripCode(body string) string {
 	var out strings.Builder
 	rest := body
 	for {
-		start := strings.Index(rest, "```")
+		start, fence := nextFence(rest)
 		if start < 0 {
 			break
 		}
 		out.WriteString(rest[:start])
 		after := rest[start+3:]
-		end := strings.Index(after, "```")
+		end := strings.Index(after, fence)
 		if end < 0 {
 			// An unclosed fence runs to the end of the body, the way GitHub
 			// renders it.
@@ -69,6 +69,19 @@ func stripCode(body string) string {
 	}
 	spanned.WriteString(text)
 	return spanned.String()
+}
+
+func nextFence(text string) (int, string) {
+	backticks := strings.Index(text, "```")
+	tildes := strings.Index(text, "~~~")
+	switch {
+	case backticks < 0:
+		return tildes, "~~~"
+	case tildes < 0 || backticks < tildes:
+		return backticks, "```"
+	default:
+		return tildes, "~~~"
+	}
 }
 
 func backtickRun(text string) int {

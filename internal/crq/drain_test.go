@@ -173,6 +173,16 @@ func TestDrainEnvCarriesAnIntentionallyEmptySkipMarker(t *testing.T) {
 	}
 }
 
+func TestDrainEnvCarriesConfiguredWorkspace(t *testing.T) {
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = "/mnt/large disk/crq"
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	if got := svc.drainEnv(DrainInstall{})["CRQ_WORKSPACE"]; got != cfg.WorkspaceRoot {
+		t.Fatalf("CRQ_WORKSPACE = %q, want %q", got, cfg.WorkspaceRoot)
+	}
+}
+
 func TestLaunchdUnitEscapesXMLValues(t *testing.T) {
 	cfg := firingConfig()
 	cfg.ReviewCommand = "@bot review <this> & report"

@@ -18,9 +18,12 @@ func TestSkipMarkerHasToBeUsedNotMentioned(t *testing.T) {
 		{"mentioned in a double-backtick code span", "- ``<!-- crq:skip-autoreview -->`` stops fleet auto-review.", false},
 		{"double-backtick span may contain a backtick", "``example ` <!-- crq:skip-autoreview -->``", false},
 		{"mentioned in a fence", "```md\n<!-- crq:skip-autoreview -->\n```\n", false},
+		{"mentioned in a tilde fence", "~~~md\n<!-- crq:skip-autoreview -->\n~~~\n", false},
+		{"backticks inside a tilde fence do not consume later prose", "~~~md\n`example`\n~~~\n<!-- crq:skip-autoreview -->", true},
 		{"documented and then used", "Use `<!-- crq:skip-autoreview -->`.\n\n<!-- crq:skip-autoreview -->", true},
 		{"absent", "An ordinary description.", false},
 		{"unclosed fence swallows the rest, as GitHub renders it", "```\n<!-- crq:skip-autoreview -->", false},
+		{"unclosed tilde fence swallows the rest", "~~~\n<!-- crq:skip-autoreview -->", false},
 		{"a lone backtick is literal, not a span", "a ` tick and <!-- crq:skip-autoreview -->", true},
 	} {
 		if got := cfg.SkipsReview(tc.body); got != tc.skip {
