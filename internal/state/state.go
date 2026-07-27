@@ -533,6 +533,39 @@ func (s *State) NoteWriter(host string, caps int, now time.Time) {
 // on this actually honour it?" An old binary loads an unknown field, writes it
 // back untouched, and keeps deciding from its own fleet-wide configuration.
 func (s *State) LaggingWriters(caps int, now time.Time) []string {
+	var out []string
+	for host := range s.actingWriters(now) {
+		if seen, ok := s.Writers[host]; ok && seen.Caps >= caps && now.Sub(seen.At) <= writerTTL {
+			continue
+		}
+		out = append(out, host)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// AdvancedWriters names the hosts driving this queue with a capability HIGHER
+// than caps — the fleet running a newer binary than the caller's.
+//
+// It is the mirror of LaggingWriters, and answers the question an old CLI has to
+// ask before it deletes a recorded setting it cannot interpret: is anyone acting
+// on it? WriterCaps is bumped exactly when a state field starts changing
+// decisions, so a driver announcing more than this binary knows is the one that
+// wrote that setting and owns whatever cleanup dropping it needs.
+func (s *State) AdvancedWriters(caps int, now time.Time) []string {
+	var out []string
+	for host := range s.actingWriters(now) {
+		if seen, ok := s.Writers[host]; ok && seen.Caps > caps && now.Sub(seen.At) <= writerTTL {
+			out = append(out, host)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// actingWriters names the processes DRIVING this queue: holding the leader lease
+// or the fire slot.
+func (s *State) actingWriters(now time.Time) map[string]bool {
 	acting := map[string]bool{}
 	// The leader identifies itself as "host=<name> pid=<n> run=<id>", which is
 	// exactly the process identity capabilities are recorded under — the run
@@ -543,15 +576,7 @@ func (s *State) LaggingWriters(caps int, now time.Time) []string {
 	if slot := s.SlotRound(); slot != nil && slot.ByHost != "" {
 		acting[slot.ByHost] = true
 	}
-	var out []string
-	for host := range acting {
-		if seen, ok := s.Writers[host]; ok && seen.Caps >= caps && now.Sub(seen.At) <= writerTTL {
-			continue
-		}
-		out = append(out, host)
-	}
-	sort.Strings(out)
-	return out
+	return acting
 }
 
 // RepoReviewers overrides which reviewers run on one repository. A nil slice

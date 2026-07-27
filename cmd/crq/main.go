@@ -575,6 +575,12 @@ func run(ctx context.Context, args []string) int {
 			printJSON(map[string]any{"setting": rest[1], "cleared": dropped})
 			return 0
 		case rest[0] == "seed":
+			// Seeding takes no operand and records every unset fleet key, so a
+			// stray token is a typo for something narrower, not a selector.
+			if len(rest) != 1 {
+				fatal(errors.New("usage: crq config seed"))
+				return 1
+			}
 			seeded, serr := service.SeedFleetConfig(ctx)
 			if serr != nil {
 				fatal(serr)
@@ -1141,7 +1147,9 @@ configuration is the one you mean.
 
 A value this crq cannot read is refused at "set", and one that arrives anyway
 from a newer binary leaves the host on its own value rather than acting on half
-a policy. "crq doctor" reports both that and any variable still set here that
+a policy. "crq config unset" drops such a setting from any host — except while a
+newer crq is driving the queue, since that binary is the one that can reconcile
+its removal. "crq doctor" reports both that and any variable still set here that
 the fleet overrides.
 `)
 	case "doctor":

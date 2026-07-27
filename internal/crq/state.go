@@ -52,6 +52,8 @@ const (
 	CapsRepoOverrides = crqstate.CapsRepoOverrides
 	// CapsFleetPolicy is the binary capability state-backed fleet policy needs.
 	CapsFleetPolicy = crqstate.CapsFleetPolicy
+	// WriterCaps is what THIS binary understands of the shared state.
+	WriterCaps = crqstate.WriterCaps
 )
 
 var (

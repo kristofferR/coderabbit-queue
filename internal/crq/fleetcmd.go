@@ -97,11 +97,16 @@ func (s *Service) SetFleetConfig(ctx context.Context, key, value string) error {
 			return err
 		}
 		before := s.fleetCfg(*st)
-		if current, ok := st.FleetValue(key); ok && current == value {
+		current, recorded := st.FleetValue(key)
+		if recorded && current == value {
 			return ErrNoChange
 		}
 		st.SetFleetValue(key, value)
-		return s.reconcileFleetChange(st, before, s.fleetCfg(*st), open)
+		change := fleetChange{before: before, after: s.fleetCfg(*st)}
+		if !recorded {
+			change.adopted = []string{key}
+		}
+		return s.reconcileFleetChange(st, change, open)
 	})
 	return err
 }
@@ -112,7 +117,8 @@ func (s *Service) SetFleetConfig(ctx context.Context, key, value string) error {
 // A key this binary does not know is refused only when the fleet has not
 // recorded it either. Dropping one it HAS recorded is the remedy `crq doctor`
 // names for a setting a newer crq wrote and this host ignores, and refusing it
-// would leave that key unremovable from every host but the newest.
+// would leave that key unremovable from every host but the newest — but only
+// while no newer binary is driving the queue, see requireNoAdvancedDrivers.
 func (s *Service) UnsetFleetConfig(ctx context.Context, key string) (bool, error) {
 	known := false
 	if _, ok := fleetSettings()[key]; ok {
@@ -130,12 +136,17 @@ func (s *Service) UnsetFleetConfig(ctx context.Context, key string) (bool, error
 		if err := s.requireFleetCapableDrivers(st); err != nil {
 			return err
 		}
+		if !known {
+			if err := s.requireNoAdvancedDrivers(st, key); err != nil {
+				return err
+			}
+		}
 		before := s.fleetCfg(*st)
 		dropped = st.UnsetFleetValue(key)
 		if !dropped {
 			return ErrNoChange
 		}
-		return s.reconcileFleetChange(st, before, s.fleetCfg(*st), open)
+		return s.reconcileFleetChange(st, fleetChange{before: before, after: s.fleetCfg(*st)}, open)
 	})
 	return dropped, err
 }
@@ -187,7 +198,7 @@ func (s *Service) SeedFleetConfig(ctx context.Context) ([]string, error) {
 		if len(seeded) == 0 {
 			return ErrNoChange
 		}
-		return s.reconcileFleetChange(st, seedBefore(before, seeded), s.fleetCfg(*st), open)
+		return s.reconcileFleetChange(st, fleetChange{before: before, after: s.fleetCfg(*st), adopted: seeded}, open)
 	})
 	return seeded, err
 }
@@ -258,6 +269,25 @@ func (s *Service) requireFleetCapableDrivers(st *State) error {
 	return nil
 }
 
+// requireNoAdvancedDrivers refuses to drop a setting this binary cannot
+// interpret while a newer one is driving the queue.
+//
+// Removing a recorded key is the remedy `crq doctor` names for a setting a newer
+// crq wrote, and it has to keep working — an unremovable key would be worse. But
+// the capability fence above only asks for THIS binary's fixed CapsFleetPolicy,
+// which a newer driver passes by definition, so nothing else stops an old CLI
+// deleting a policy it can neither validate nor reconcile. If that key drives
+// reviewers, exclusions or quota, the newer driver sees it vanish without the
+// cleanup its removal calls for. The setting's own binary is the one that may
+// drop it; here the remedy is to run the unset from an upgraded host.
+func (s *Service) requireNoAdvancedDrivers(st *State, key string) error {
+	if ahead := st.AdvancedWriters(WriterCaps, s.clock()); len(ahead) > 0 {
+		return fmt.Errorf("cannot unset %q from this crq: it is not a setting this binary understands, and newer queue drivers are running: %v; upgrade crq on this host and unset it there",
+			key, ahead)
+	}
+	return nil
+}
+
 func (s *Service) prepareFleetReviewerChange(ctx context.Context, key string) (map[string]map[int]bool, error) {
 	if !isReviewerFleetKey(key) {
 		return nil, nil
@@ -284,27 +314,53 @@ func seedsReviewers(st State) bool {
 	return false
 }
 
-// seedBefore is the before-state a seed has to be reconciled against.
+// fleetChange is one policy mutation as reconciliation sees it: the effective
+// configuration before and after it, plus the keys the fleet had no answer for
+// until now.
 //
-// Seeding records THIS host's own values, so comparing the reviewer policy it
-// writes against the policy this host was already using can only ever say
-// "nothing changed". The fleet-wide before-state is the thing seeding exists to
-// end: another host may have completed a head without a reviewer the seed now
-// makes fleet-required, and that host's completed round is the dedup marker
-// that would keep the newly required bot from ever being triggered.
+// Those adopted keys are why `before` cannot be taken at face value. fleetCfg
+// fills an unrecorded setting from THIS host, so the first `crq config set` or
+// `crq config seed` of a value this machine was already using renders before and
+// after identical — while every other host may have been acting under a
+// different one all along. For an adopted key the fleet-wide baseline is
+// unknown, and reconciliation has to assume it differed rather than assume it
+// matched.
+type fleetChange struct {
+	before, after Config
+	adopted       []string
+}
+
+func (c fleetChange) adopts(key string) bool {
+	for _, adopted := range c.adopted {
+		if adopted == key {
+			return true
+		}
+	}
+	return false
+}
+
+// baseline is the pre-change configuration with each adopted key's host fallback
+// removed, so a policy the fleet is only now recording is reconciled as the
+// change it is for everyone else.
 //
-// So when a seed records a reviewer key, treat the fleet's previous reviewer
-// set as unknown — no required bot, no co-reviewer — and let the ordinary
-// reviewer-change reconciliation requeue against it. It is conservative, not
-// expensive: a reopened round the primary already answered dedupes at
-// DecideFire's already-reviewed gate instead of buying a second review. A
-// repository that pins its own reviewers still decides its effective set, so
-// its rounds compare equal and are left alone.
-func seedBefore(before Config, seeded []string) Config {
-	for _, key := range seeded {
+// A reviewer key drops the whole reviewer set: another host may have completed a
+// head without a bot the adoption makes fleet-required, and that host's
+// completed round is the dedup marker that would keep the newly required bot
+// from ever being triggered. It is conservative, not expensive — a reopened
+// round the primary already answered dedupes at DecideFire's already-reviewed
+// gate instead of buying a second review, and a repository that pins its own
+// reviewers still decides its effective set, so its rounds compare equal and are
+// left alone. Adopting `exclude` likewise drops the baseline exclusions, so a
+// repository this host already skipped still has to pass the claimed-trigger
+// refusal that the rest of the fleet never applied to it.
+func (c fleetChange) baseline() Config {
+	before := c.before
+	for _, key := range c.adopted {
 		if isReviewerFleetKey(key) {
 			before.RequiredBots, before.CoBots, before.Reviewers = nil, nil, nil
-			break
+		}
+		if key == "exclude" {
+			before.ExcludeRepos = nil
 		}
 	}
 	return before
@@ -349,11 +405,12 @@ func inaccessibleRepoLookup(err error) bool {
 
 // reconcileFleetChange applies what a policy change invalidates — and refuses
 // the change outright when there is a network effect it cannot take back.
-func (s *Service) reconcileFleetChange(st *State, before, after Config, open map[string]map[int]bool) error {
+func (s *Service) reconcileFleetChange(st *State, change fleetChange, open map[string]map[int]bool) error {
+	before, after := change.baseline(), change.after
 	if err := checkExcludedTriggerPosts(st, before, after); err != nil {
 		return err
 	}
-	if !sameFoldedSet(before.Scope, after.Scope) {
+	if fleetScopeMoved(st, change) {
 		st.Account = AccountQuota{
 			Scope:  strings.Join(after.Scope, ","),
 			Source: "fleet scope changed",
@@ -400,6 +457,22 @@ func checkExcludedTriggerPosts(st *State, before, after Config) error {
 	sort.Strings(blocked)
 	return fmt.Errorf("a review trigger is already being posted for %s; wait for it to finish before excluding it",
 		strings.Join(blocked, ", "))
+}
+
+// fleetScopeMoved reports whether the recorded account quota belongs to an
+// account other than the one the fleet now scans — which is what makes it
+// meaningless rather than merely stale.
+//
+// Ordinarily that is just "did the scope change". Adopting the scope needs the
+// other question: fleetCfg fills an unrecorded setting from THIS host, so the
+// first `crq config set scope` compares equal to itself even when the fleet was
+// scanning something else entirely. The quota's own recorded scope is the one
+// piece of that account's identity that survived, so ask it instead.
+func fleetScopeMoved(st *State, change fleetChange) bool {
+	if change.adopts("scope") {
+		return !sameFoldedSet(splitList(st.Account.Scope), change.after.Scope)
+	}
+	return !sameFoldedSet(change.before.Scope, change.after.Scope)
 }
 
 func sameFoldedSet(a, b []string) bool {

@@ -99,6 +99,31 @@ func TestLaggingWritersMatchesTheFireSlotOwner(t *testing.T) {
 	}
 }
 
+// The mirror question: an old binary about to drop a setting it cannot read has
+// to know whether the crq that wrote it is still driving the queue.
+func TestAdvancedWritersNamesTheNewerDriver(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	st := New()
+	st.Leader = &LeaderLease{Owner: "host=new-mac pid=7", ExpiresAt: now.Add(time.Minute)}
+
+	// A leader running this version is not ahead of it.
+	st.NoteWriter("host=new-mac pid=7", WriterCaps, now)
+	if got := st.AdvancedWriters(WriterCaps, now); len(got) != 0 {
+		t.Errorf("advanced = %v, want none for a leader on this version", got)
+	}
+
+	st.NoteWriter("host=new-mac pid=7", WriterCaps+1, now)
+	if got := st.AdvancedWriters(WriterCaps, now); len(got) != 1 || got[0] != "host=new-mac pid=7" {
+		t.Fatalf("advanced = %v, want the newer leader named", got)
+	}
+
+	// And only while it is driving: a stale stamp says nothing about now.
+	st.Leader.ExpiresAt = now
+	if got := st.AdvancedWriters(WriterCaps, now); len(got) != 0 {
+		t.Errorf("advanced = %v, want none once the lease has lapsed", got)
+	}
+}
+
 // Reopening a round is not a failed attempt. Moving LastAttemptAt would raise
 // the adoption floor past a newly required co-reviewer's own unanswered trigger,
 // so crq would post that bot a second request for the round it is reopening to

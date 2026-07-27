@@ -556,6 +556,118 @@ func TestSeedingReviewerPolicyReopensCompletedRounds(t *testing.T) {
 	}
 }
 
+// The first `crq config set` of a key is the same adoption a seed performs, and
+// the pre-change baseline it is reconciled against comes from THIS host — so
+// recording the value this machine was already using looks like no change at
+// all, while the host that completed the head may have been running another set
+// entirely.
+func TestFirstFleetReviewerValueReopensCompletedRounds(t *testing.T) {
+	ctx := context.Background()
+	required := "coderabbitai[bot]," + dialect.CodexBotLogin
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":        "codex",
+		"CRQ_REQUIRED_BOTS": required,
+	})
+	repo, pr := "owner/repo", 7
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.PutRound(Round{Repo: repo, PR: pr, Head: "abcdef123", Phase: PhaseCompleted})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The same value this host already had: only its absence from the fleet
+	// makes it a change, and that is the change that has to be reconciled.
+	if err := NewService(cfg, gh, store, nil).SetFleetConfig(ctx, "required-bots", required); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ := store.Load(ctx)
+	if round := st.Round(repo, pr); round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("round = %+v, want the completed round reopened by the adoption", round)
+	}
+}
+
+// Adopting an exclusion this host already applied is a change for every host
+// that did not, so it still has to pass the claimed-trigger refusal.
+func TestFirstFleetExcludeStillRefusesAClaimedTriggerPost(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.ExcludeRepos = map[string]bool{"owner/repo": true}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.PutRound(Round{Repo: "owner/repo", PR: 7, Head: "abcdef123", Phase: PhaseReserved, Token: "tok"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := NewService(cfg, newFakeGitHub(), store, nil).SetFleetConfig(ctx, "exclude", "owner/repo")
+	if err == nil || !strings.Contains(err.Error(), "already being posted") {
+		t.Fatalf("adopting an exclusion during a claimed trigger post = %v, want a refusal", err)
+	}
+}
+
+// The recorded quota belongs to whichever account the fleet was scanning, which
+// this host's own scope says nothing about — so adopting the scope is judged
+// against the quota's own recorded one.
+func TestFirstFleetScopeDropsQuotaFromAnotherAccount(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.Scope = []string{"acme"}
+	store := NewMemoryStore(cfg)
+	blocked := time.Date(2026, 7, 27, 13, 0, 0, 0, time.UTC)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Account.BlockedUntil = &blocked
+		st.Account.Scope = "other-org"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := NewService(cfg, newFakeGitHub(), store, nil).SetFleetConfig(ctx, "scope", "acme"); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ := store.Load(ctx)
+	if st.Account.BlockedUntil != nil || st.Account.Scope != "acme" {
+		t.Fatalf("account = %+v, want another account's block dropped", st.Account)
+	}
+}
+
+// Dropping a recorded key this binary cannot read is the remedy doctor names,
+// but it is not this binary's to make while the crq that wrote it is driving the
+// queue: the removal may need cleanup only that version knows how to do.
+func TestUnsettingAnUnknownKeyWaitsForTheNewerDriver(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("some-future-knob", "7")
+		st.Leader = &LeaderLease{Owner: "new-daemon", ExpiresAt: now.Add(time.Minute)}
+		st.NoteWriter("new-daemon", WriterCaps+1, now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	svc.now = func() time.Time { return now }
+
+	if _, err := svc.UnsetFleetConfig(ctx, "some-future-knob"); err == nil || !strings.Contains(err.Error(), "newer queue drivers") {
+		t.Fatalf("unset of an uninterpretable key = %v, want a refusal naming the newer driver", err)
+	}
+	// A setting this binary does understand is still its own to drop: it can
+	// reconcile that removal itself.
+	if err := svc.SetFleetConfig(ctx, "min-interval", "5m"); err != nil {
+		t.Fatal(err)
+	}
+	if dropped, err := svc.UnsetFleetConfig(ctx, "min-interval"); err != nil || !dropped {
+		t.Fatalf("unset of a known key = %v %v, want it dropped", dropped, err)
+	}
+}
+
 func TestFleetDivergenceIncludesConfigFileValues(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
