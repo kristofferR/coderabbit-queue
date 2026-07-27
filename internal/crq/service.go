@@ -56,6 +56,10 @@ type Service struct {
 	// lastParkedSweep rotates sweepParkedClosed's candidate across pumps (see
 	// there); in-memory only, single-writer (the pump caller).
 	lastParkedSweep string
+	// watchOffset rotates where a watch pass starts, so a PR at the tail is not
+	// starved of dispatch slots forever by the ones ahead of it; in-memory only,
+	// single-writer (the watch caller).
+	watchOffset int
 	// scanOffset rotates the bounded quota-free rescue scan's window so a round
 	// past the first few is not starved forever; in-memory only, same writer.
 	scanOffset int

@@ -128,12 +128,34 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	if len(repos) == 0 {
 		return errors.New("nothing to watch: pass a repository, or set CRQ_REPOS")
 	}
+	// Gather every candidate first, then start from a different one each pass.
+	//
+	// A fixed order starves the tail: with three dispatch slots and four PRs
+	// needing fixes, the same three take the slots every pass and the fourth is
+	// told "at dispatch capacity" forever. One PR sat five hours that way while
+	// its findings grew from 15 to 25. This is the same fix the quota-free
+	// rescue scan already needed, for the same reason.
+	type candidate struct {
+		repo string
+		pull ghapi.Pull
+	}
+	var candidates []candidate
 	for _, repo := range repos {
 		pulls, err := s.gh.ListPulls(ctx, repo, openPullQuery())
 		if err != nil {
 			return err
 		}
 		for _, pull := range pulls {
+			candidates = append(candidates, candidate{repo, pull})
+		}
+	}
+	if len(candidates) > 0 {
+		s.watchOffset = (s.watchOffset + 1) % len(candidates)
+	}
+	for i := range candidates {
+		c := candidates[(i+s.watchOffset)%len(candidates)]
+		repo, pull := c.repo, c.pull
+		{
 			if err := ctx.Err(); err != nil {
 				return err
 			}

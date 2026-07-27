@@ -185,3 +185,57 @@ func TestDispatchKeepsAWorktreeWithUnpushedWork(t *testing.T) {
 		t.Error("the session's uncommitted fix was deleted with the worktree")
 	}
 }
+
+// With three dispatch slots and four PRs needing fixes, a fixed pass order gives
+// the same three the slots every time and tells the fourth "at dispatch
+// capacity" forever. One PR sat five hours that way while its findings grew from
+// 15 to 25, so every PR has to reach the front eventually.
+func TestWatchPassRotatesSoNoPRIsStarved(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/r": true}
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	for _, pr := range []int{1, 2, 3, 4} {
+		var p ghapi.Pull
+		p.State = "open"
+		p.Number = pr
+		p.Head.SHA = "aaaaaaaa1"
+		gh.pulls[fakeKey("o/r", pr)] = p
+	}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	// Record the order each pass visits PRs in. Only the ORDER matters here, so
+	// the pool takes every candidate.
+	seen := map[int]int{}
+	firstOf := []int{}
+	for pass := 0; pass < 4; pass++ {
+		var order []int
+		err := svc.watchPass(context.Background(), WatchOptions{}, newDispatchPool(4), func(e WatchEvent) error {
+			order = append(order, e.PR)
+			seen[e.PR]++
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("pass %d: %v", pass, err)
+		}
+		if len(order) == 0 {
+			t.Fatalf("pass %d visited nothing", pass)
+		}
+		firstOf = append(firstOf, order[0])
+	}
+
+	// Every PR was looked at every pass...
+	for pr, n := range seen {
+		if n != 4 {
+			t.Errorf("pr %d seen %d times, want every pass", pr, n)
+		}
+	}
+	// ...and the front of the queue moved, so the tail is not starved of slots.
+	distinct := map[int]bool{}
+	for _, pr := range firstOf {
+		distinct[pr] = true
+	}
+	if len(distinct) < 2 {
+		t.Errorf("the same PR led every pass (%v); the tail can never get a dispatch slot", firstOf)
+	}
+}
