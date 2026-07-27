@@ -523,8 +523,15 @@ func (s *Service) writeFindings(report NextReport) (string, error) {
 // rather than evidence about whether fix sessions can start at all.
 func (s *Service) claimDispatch(ctx context.Context, report NextReport, token string, maxAttempts int) (bool, string, bool) {
 	reason, byDesign := "", false
+	var seen string
 	_, err := s.store.Update(ctx, func(st *State) error {
 		round := st.Round(report.Repo, report.PR)
+		// What this attempt actually read, recorded before anything acts on it.
+		// Three sessions once ran on one PR at one head while the round showed no
+		// claim at all, and no test reproduces it: the tests assert the refusal
+		// and get it. So the next occurrence has to explain itself from the log —
+		// which round each grant saw, and what its claim said at the time.
+		seen = describeDispatchClaim(round, st, report, s.clock())
 		// Somebody is fixing an earlier head of this PR right now, and is entitled
 		// to finish: a session's own push moves the head, so this is what a
 		// successful session looks like from the outside. Superseding its round
@@ -584,7 +591,32 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 	if err != nil {
 		return false, err.Error(), false
 	}
+	if s.log != nil {
+		outcome := "granted"
+		if reason != "" {
+			outcome = "refused (" + reason + ")"
+		}
+		s.log.Printf("dispatch claim %s for %s#%d@%s token=%s: %s",
+			outcome, report.Repo, report.PR, report.Head, token, seen)
+	}
 	return reason == "", reason, byDesign
+}
+
+// describeDispatchClaim renders what a claim attempt read, for the log line
+// above. Seq identifies the round object itself, so two grants naming one Seq
+// mean a claim was lost rather than a round replaced underneath them.
+func describeDispatchClaim(round *Round, st *State, report NextReport, now time.Time) string {
+	if round == nil {
+		return fmt.Sprintf("no round; archived-claim=%t", st.ArchivedDispatchHeld(report.Repo, report.PR, now))
+	}
+	claim := "none"
+	if d := round.Dispatch; d != nil {
+		claim = fmt.Sprintf("token=%s host=%s attempts=%d beat=%s",
+			d.Token, d.Host, d.Attempts, d.Heartbeat.UTC().Format(time.RFC3339))
+	}
+	return fmt.Sprintf("round seq=%d head=%s phase=%s held=%t claim=%s; archived-claim=%t",
+		round.Seq, round.Head, round.Phase, round.DispatchHeld(now), claim,
+		st.ArchivedDispatchHeld(report.Repo, report.PR, now))
 }
 
 // releaseDispatch frees the round. attempted=false also gives the attempt back,
@@ -612,10 +644,9 @@ func (s *Service) releaseDispatch(ctx context.Context, report NextReport, token 
 }
 
 // beatDispatch refreshes the claim while the session runs, so a session that
-// outlives the TTL keeps its round and a crashed watcher's does not.
-// beatDispatch refreshes the claim while the session runs and reports whether it
-// was lost. Losing it means another watcher took the round over, so stop() is
-// called to end this session rather than let two write one worktree.
+// outlives the TTL keeps its round and a crashed watcher's does not. It reports
+// whether the claim was lost: losing it means another watcher took the round
+// over, so stop() ends this session rather than let two write one worktree.
 func (s *Service) beatDispatch(ctx context.Context, report NextReport, token string, stop func()) func() bool {
 	var lost atomic.Bool
 	go func() {

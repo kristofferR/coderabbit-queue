@@ -427,7 +427,9 @@ func TestMirrorMigratesAwayFromMirrorMode(t *testing.T) {
 	if _, err := ws.Mirror(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := gitDir(ctx, mirror, "config", "--get", "remote.origin.mirror"); got != "false" {
+	// Unset or explicitly false: both answer "not a mirror" to git, and which one
+	// migration leaves behind is not something a session can tell apart.
+	if got, _ := gitDir(ctx, mirror, "config", "--get", "remote.origin.mirror"); got != "" && got != "false" {
 		t.Errorf("remote.origin.mirror = %q, want it turned off so sessions can push", got)
 	}
 }
