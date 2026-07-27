@@ -1614,10 +1614,10 @@ func doctor(ctx context.Context) doctorReport {
 // that does the damage is by definition older than the mechanism meant to stop
 // it. Nothing in this build can prevent that, which is why it is worth naming.
 //
-// Compared by content, not by version: every build reports the same
-// "2.0.0-dev", so the version string cannot tell two of them apart. GOPATH/bin
-// is included whether or not it is on PATH — the binary that caused this was
-// not on the daemon's PATH and ran anyway.
+// Compared by content, not by version: the version string only changes at a
+// release, so two builds from either side of one report the same thing and it
+// cannot tell them apart. GOPATH/bin is included whether or not it is on PATH —
+// the binary that caused this was not on the daemon's PATH and ran anyway.
 func otherInstalls() []otherInstall {
 	self, err := os.Executable()
 	if err != nil {

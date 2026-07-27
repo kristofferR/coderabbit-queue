@@ -289,6 +289,21 @@ does have a thread; retry once crq can read threads again rather than working ar
 the notice is a SKIPPED review, narrowing the PR addresses the cause; dismissing only records that
 you chose to proceed at this head.
 
+## Turning the Drain Off Somewhere
+
+Fixing is what watching is for, so it is on for every repository in scope. Where you do not want crq
+writing code — a release branch, a repository you are hand-tuning:
+
+```bash
+crq drain off "$REPO" --reason "hand-tuning the release branch"
+crq drain on "$REPO"          # or: crq drain default "$REPO"
+crq drain                     # what is on, and where an answer was recorded
+```
+
+Off stops FIXING, not watching. The pull request is still observed and still reviewed, so its
+feedback keeps arriving for a person to act on. The setting lives in the state ref, so it applies to
+every host running a drain.
+
 ## Fleet Auto-Review
 
 To keep all open PRs in scope reviewed while CodeRabbit native auto-review is off:

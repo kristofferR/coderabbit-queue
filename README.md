@@ -399,7 +399,10 @@ crq resolve <thread-id> [<thread-id>...]                    # resolve addressed 
 crq decline <thread-id> [...] --reason "<why>" [--resolve]  # record why a finding is declined
 crq drain install         # ⭐ unattended: watch every PR and fix what needs fixing
 crq watch                 #    what the drain runs: drive open PRs through crq next, one JSON
-                          #    line each (--dispatch starts a fix session; --once for cron)
+                          #    line each. Fixing is ON by default (--no-dispatch observes only)
+crq drain                 # which repositories crq may fix
+crq drain off <repo> --reason "<why>"   # stop fixing there; watching and reviewing continue
+crq drain on <repo> | crq drain default <repo>
 crq hold <repo> <pr> --reason "<why>"                       # persistently stop reviews for a PR
 crq unhold <repo> <pr>                                      # resume reviews for a held PR
 crq hold                                                    # list held PRs
@@ -488,7 +491,7 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_ISSUE` | from `init` | dashboard issue number |
 | `CRQ_CAL_PR` | from `init` | calibration PR number |
 | `CRQ_SCOPE` | owner of `CRQ_REPO` | which owners/orgs share this quota (comma-separated) |
-| `CRQ_STATE_REF` | `crq-state-v3` | git ref that stores the typed CAS state |
+| `CRQ_STATE_REF` | `crq-state-v3` | git ref that stores the typed CAS state. The name is fixed; the schema inside it is v4, and a binary that predates a schema **refuses** the payload rather than erasing it — so upgrade every host together |
 | `CRQ_REPOS` | _(all in scope)_ | `autoreview` allowlist — only these `owner/name` repos (comma-separated) |
 | `CRQ_EXCLUDE` | _(none)_ | denylist — crq never reviews, watches or fixes these `owner/name` repos (comma-separated) |
 | `CRQ_AUTOREVIEW_SKIP_AUTHORS` | `dependabot[bot]` | PR authors `autoreview` never enqueues (comma-separated; case and `[bot]` suffix don't matter) — set to empty to auto-review bot PRs too; manual `crq review` is unaffected |

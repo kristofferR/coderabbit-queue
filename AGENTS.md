@@ -31,7 +31,6 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
   Owns persistent filesystem and process I/O for checkouts; `crq` supplies only
   configured roots and a current-token resolver.
 - `internal/state/` — persisted schema v4: one `Round` per PR, one global
-- `internal/state/` — persisted schema v3: one `Round` per PR, one global
   `FireSlot`, the CodeRabbit `AccountQuota`, an `Archive` ring. Round transition
   methods, durable tombstones for tidied trigger comments, the CAS store, and
   dashboard rendering. `Round.CoBots` holds per-

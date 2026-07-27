@@ -15,7 +15,7 @@ import (
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
-const Version = "2.0.0-dev"
+const Version = "2.0.0"
 
 // The GitHub transport tags its User-Agent with the crq version. Version lives
 // in this package, so the wiring stays here now that the gh alias layer is gone.
