@@ -103,11 +103,18 @@ func (s *Service) InstallDrain(ctx context.Context, agent string, repos []string
 		return plan, err
 	}
 
+	// --output-format stream-json --verbose makes the session write as it works.
+	// Without it the log stays empty until the session ENDS, so a session that
+	// hangs or dies mid-way leaves a zero-byte file — which is the same "output
+	// went nowhere" problem, just with a file to show for it.
 	wrapper := fmt.Sprintf(`#!/usr/bin/env bash
 # Installed by "crq drain install". Runs the review drain: crq decides, and a
 # fix session is started for each PR that needs one.
 set -uo pipefail
-exec %q watch --dispatch -- %q -p "$(cat %q)" --permission-mode bypassPermissions
+exec %q watch --dispatch -- \
+  %q -p "$(cat %q)" \
+  --permission-mode bypassPermissions \
+  --output-format stream-json --verbose
 `, self, agent, plan.Prompt)
 
 	for _, f := range []struct {
