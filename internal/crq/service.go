@@ -2430,16 +2430,25 @@ func queuedFeedbackCheckEvery(poll time.Duration) time.Duration {
 	return 30 * time.Second
 }
 
-// sweepParkedClosed abandons one non-firable queued round whose PR has been
-// closed or merged. Cooldowns and administrative holds make rounds invisible
-// to NextEligible, so they need this bounded cleanup path. One pull read per
-// pump, ETag-cached.
+// sweepParkedClosed abandons one waiting round whose PR has been closed or
+// merged. One pull read per pump, ETag-cached, rotating across candidates.
+//
+// Every waiting round is a candidate, not only the parked ones. NextEligible
+// returns the FRONT of the queue and the pump examines that round alone, so a
+// round is invisible for as many reasons as it can be behind something: a
+// cooldown or a hold on itself, and — the one this missed — an account-blocked
+// round ahead of it. Four merged pull requests sat in the rendered queue for an
+// afternoon behind one blocked round, and every pump reported that round again
+// rather than looking past it.
+//
+// The pump's own closed check stays where it is. It drops the front before the
+// quota and pacing gates, which is what keeps a merged PR from holding the slot
+// it is about to be given; this one reaches the rest.
 func (s *Service) sweepParkedClosed(ctx context.Context, st State) (PumpResult, bool, error) {
 	var keys []string
 	for key := range st.Rounds {
 		r := st.Rounds[key]
-		_, held := st.HeldPR(r.Repo, r.PR)
-		if r.Phase == PhaseAwaitingRetry || (r.Phase == PhaseQueued && held) {
+		if r.Phase == PhaseAwaitingRetry || r.Phase == PhaseQueued {
 			keys = append(keys, key)
 		}
 	}
