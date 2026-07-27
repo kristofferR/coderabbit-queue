@@ -76,6 +76,14 @@ func TestFleetRefusesWhatItCannotRead(t *testing.T) {
 	if err := svc.SetFleetConfig(ctx, "nonsense", "1"); err == nil {
 		t.Error("an unknown setting was accepted")
 	}
+	for _, key := range []string{"repos", "exclude"} {
+		if err := svc.SetFleetConfig(ctx, key, "owner-repo"); err == nil {
+			t.Errorf("%s accepted a malformed repository slug", key)
+		}
+	}
+	if err := svc.SetFleetConfig(ctx, "required-bots", ""); err == nil {
+		t.Error("an empty required reviewer set was accepted")
+	}
 
 	// Planted directly, as a newer binary would leave it.
 	if _, err := store.Update(ctx, func(st *State) error {
@@ -164,6 +172,85 @@ func TestFleetMutationsAreInertInDryRun(t *testing.T) {
 	st, _, _ := store.Load(ctx)
 	if value, _ := st.FleetValue("min-interval"); value != "5m" || len(st.FleetConfig) != 1 {
 		t.Fatalf("dry run changed fleet state: %v", st.FleetConfig)
+	}
+}
+
+func TestFleetDryRunStillChecksDriverCompatibility(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Leader = &LeaderLease{Owner: "old-daemon", ExpiresAt: now.Add(time.Minute)}
+		st.NoteWriter("old-daemon", CapsRepoOverrides, now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.DryRun = true
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	svc.now = func() time.Time { return now }
+
+	err := svc.SetFleetConfig(ctx, "min-interval", "5m")
+	if err == nil || !strings.Contains(err.Error(), "lack fleet-policy support") {
+		t.Fatalf("dry-run set with a lagging driver = %v, want a capability refusal", err)
+	}
+}
+
+func TestFleetScopeChangeInvalidatesAccountQuota(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	blocked := time.Date(2026, 7, 27, 13, 0, 0, 0, time.UTC)
+	remaining := 3
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Account.BlockedUntil = &blocked
+		st.Account.Remaining = &remaining
+		st.Account.CheckedAt = &blocked
+		st.Account.CalibAskedAt = &blocked
+		st.Account.RLCommentID = 42
+		st.Account.RLCommentUpdated = &blocked
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := NewService(cfg, newFakeGitHub(), store, nil).SetFleetConfig(ctx, "scope", "other-org"); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ := store.Load(ctx)
+	if st.Account.Scope != "other-org" {
+		t.Fatalf("account scope = %q, want other-org", st.Account.Scope)
+	}
+	if st.Account.BlockedUntil != nil || st.Account.Remaining != nil || st.Account.CheckedAt != nil ||
+		st.Account.CalibAskedAt != nil || st.Account.RLCommentID != 0 || st.Account.RLCommentUpdated != nil {
+		t.Fatalf("old account quota survived the scope change: %+v", st.Account)
+	}
+}
+
+func TestFleetExcludeRetiresQueuedRounds(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.PutRound(Round{
+			Repo: "owner/repo", PR: 7, Head: "abcdef123",
+			Phase: PhaseQueued, EnqueuedAt: time.Now().UTC(),
+		})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := NewService(cfg, newFakeGitHub(), store, nil).SetFleetConfig(ctx, "exclude", "owner/repo"); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ := store.Load(ctx)
+	if round := st.Round("owner/repo", 7); round != nil {
+		t.Fatalf("excluded round remains fire-eligible: %+v", round)
+	}
+	if len(st.Archive) != 1 || st.Archive[0].Phase != PhaseAbandoned {
+		t.Fatalf("excluded round was not archived as abandoned: %+v", st.Archive)
 	}
 }
 

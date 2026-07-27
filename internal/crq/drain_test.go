@@ -69,6 +69,27 @@ func TestInstallDrainHonoursConfiguredDryRun(t *testing.T) {
 	}
 }
 
+func TestInstallDrainUsesFleetRepositories(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = nil
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.SetFleetValue("repos", "owner/fleet-repo")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	plan, err := svc.InstallDrain(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Repos) != 1 || plan.Repos[0] != "owner/fleet-repo" {
+		t.Fatalf("drain repos = %v, want the fleet repository", plan.Repos)
+	}
+}
+
 // A missing agent must fail loudly at install time. Discovering it at the first
 // dispatch means a drain that looks installed and fixes nothing.
 func TestInstallDrainRefusesWithoutAnAgent(t *testing.T) {

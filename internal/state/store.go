@@ -84,10 +84,10 @@ type StateStore interface {
 	SyncDashboard(context.Context, State) error
 }
 
-// GitStateStore persists v4 state as state.json in a git ref, with the same
-// compare-and-swap mechanism as v3 (12 retries on UpdateRef 409/422).
+// GitStateStore persists v5 state as state.json in a git ref, with the same
+// compare-and-swap mechanism as v4 (12 retries on UpdateRef 409/422).
 //
-// V3 is migrated in place; still older payloads are discarded because crq is
+// V4 is migrated in place; still older payloads are discarded because crq is
 // pre-release and they describe a world this binary cannot act on. A NEWER one
 // is refused. The fleet runs mixed binary versions during a rolling deploy, so
 // reinitializing there would mean the first old binary to wake up erases every
@@ -149,9 +149,9 @@ func (s *GitStateStore) Load(ctx context.Context) (State, Revision, error) {
 	if err != nil {
 		return State{}, Revision{}, err
 	}
-	// Peek at the schema version before a full decode. V3 is the one supported
-	// migration: v4 intentionally fences v3 pumping clients from administrative
-	// holds, while preserving every live v3 round during the rollout.
+	// Peek at the schema version before a full decode. V4 is the one supported
+	// migration: v5 intentionally fences v4 pumping clients from fleet policy,
+	// while preserving every live v4 round during the rollout.
 	var probe struct {
 		Version int `json:"v"`
 	}

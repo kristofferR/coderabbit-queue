@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -90,7 +91,11 @@ func (s *Service) RecordCLIQuota(ctx context.Context, report PreflightReport, cl
 		return result, nil
 	}
 
-	applied, standing, err := s.applyAccountBlock(ctx, *until, "coderabbit-cli")
+	applied, standing, err := s.applyAccountBlock(ctx, *until, "coderabbit-cli", cfg, cliOrg)
+	if errors.Is(err, errFleetQuotaChanged) {
+		result.Reason = "fleet policy changed while recording the block; run preflight again"
+		return result, nil
+	}
 	if err != nil {
 		return result, err
 	}
@@ -101,6 +106,8 @@ func (s *Service) RecordCLIQuota(ctx context.Context, report PreflightReport, cl
 	}
 	return result, nil
 }
+
+var errFleetQuotaChanged = errors.New("fleet policy changed while recording cli quota")
 
 // cliOrgMatches reports whether the CLI's current organisation is the account
 // crq queues for. An empty org fails closed: without knowing whose limit this is,

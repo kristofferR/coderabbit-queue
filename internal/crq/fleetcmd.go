@@ -2,7 +2,9 @@ package crq
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 )
 
 // FleetSetting is one policy as `crq config` reports it: what the fleet
@@ -62,14 +64,11 @@ func (s *Service) SetFleetConfig(ctx context.Context, key, value string) error {
 	if err := ValidateFleetSetting(key, value); err != nil {
 		return err
 	}
-	if s.cfg.DryRun {
-		return nil
-	}
 	open, err := s.prepareFleetReviewerChange(ctx, key)
 	if err != nil {
 		return err
 	}
-	_, err = s.store.Update(ctx, func(st *State) error {
+	_, err = s.updateFleet(ctx, func(st *State) error {
 		if err := s.requireFleetCapableDrivers(st); err != nil {
 			return err
 		}
@@ -78,7 +77,7 @@ func (s *Service) SetFleetConfig(ctx context.Context, key, value string) error {
 			return ErrNoChange
 		}
 		st.SetFleetValue(key, value)
-		s.reopenForFleetReviewerChange(st, before, s.fleetCfg(*st), open)
+		s.reconcileFleetChange(st, before, s.fleetCfg(*st), open)
 		return nil
 	})
 	return err
@@ -90,20 +89,12 @@ func (s *Service) UnsetFleetConfig(ctx context.Context, key string) (bool, error
 	if _, ok := fleetSettings()[key]; !ok {
 		return false, fmt.Errorf("unknown setting %q", key)
 	}
-	if s.cfg.DryRun {
-		st, _, err := s.store.Load(ctx)
-		if err != nil {
-			return false, err
-		}
-		_, dropped := st.FleetValue(key)
-		return dropped, nil
-	}
 	open, err := s.prepareFleetReviewerChange(ctx, key)
 	if err != nil {
 		return false, err
 	}
 	dropped := false
-	_, err = s.store.Update(ctx, func(st *State) error {
+	_, err = s.updateFleet(ctx, func(st *State) error {
 		if err := s.requireFleetCapableDrivers(st); err != nil {
 			return err
 		}
@@ -112,7 +103,7 @@ func (s *Service) UnsetFleetConfig(ctx context.Context, key string) (bool, error
 		if !dropped {
 			return ErrNoChange
 		}
-		s.reopenForFleetReviewerChange(st, before, s.fleetCfg(*st), open)
+		s.reconcileFleetChange(st, before, s.fleetCfg(*st), open)
 		return nil
 	})
 	return dropped, err
@@ -133,14 +124,6 @@ func (s *Service) SeedFleetConfig(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if s.cfg.DryRun {
-		for _, key := range FleetKeys() {
-			if _, ok := initial.FleetValue(key); !ok {
-				seeded = append(seeded, key)
-			}
-		}
-		return seeded, nil
-	}
 	var open map[string]map[int]bool
 	if _, ok := initial.FleetValue("required-bots"); !ok {
 		open, err = s.openFleetPRs(ctx, initial)
@@ -148,7 +131,7 @@ func (s *Service) SeedFleetConfig(ctx context.Context) ([]string, error) {
 			return nil, err
 		}
 	}
-	_, err = s.store.Update(ctx, func(st *State) error {
+	_, err = s.updateFleet(ctx, func(st *State) error {
 		if err := s.requireFleetCapableDrivers(st); err != nil {
 			return err
 		}
@@ -164,10 +147,28 @@ func (s *Service) SeedFleetConfig(ctx context.Context) ([]string, error) {
 		if len(seeded) == 0 {
 			return ErrNoChange
 		}
-		s.reopenForFleetReviewerChange(st, before, s.fleetCfg(*st), open)
+		s.reconcileFleetChange(st, before, s.fleetCfg(*st), open)
 		return nil
 	})
 	return seeded, err
+}
+
+// updateFleet runs the exact same mutation for a preview and a real update.
+// Dry-run differs only at the persistence boundary, so validation, capability
+// fences and reconciliation cannot drift from the command it previews.
+func (s *Service) updateFleet(ctx context.Context, mutate func(*State) error) (State, error) {
+	if !s.cfg.DryRun {
+		return s.store.Update(ctx, mutate)
+	}
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return State{}, err
+	}
+	err = mutate(&st)
+	if errors.Is(err, ErrNoChange) {
+		err = nil
+	}
+	return st, err
 }
 
 // FleetDivergence lists the settings whose value on this host differs from what
@@ -228,6 +229,26 @@ func (s *Service) openFleetPRs(ctx context.Context, st State) (map[string]map[in
 		open[repo] = pulls
 	}
 	return open, nil
+}
+
+func (s *Service) reconcileFleetChange(st *State, before, after Config, open map[string]map[int]bool) {
+	if strings.Join(before.Scope, ",") != strings.Join(after.Scope, ",") {
+		st.Account = AccountQuota{
+			Scope:  strings.Join(after.Scope, ","),
+			Source: "fleet scope changed",
+		}
+	}
+	for _, round := range st.Rounds {
+		if round.Phase != PhaseQueued && round.Phase != PhaseAwaitingRetry {
+			continue
+		}
+		if !after.ExcludeRepos[NormalizeRepo(round.Repo)] {
+			continue
+		}
+		st.EndRound(round.Repo, round.PR, "repository excluded by fleet policy")
+		releaseSlot(st, QueueKey(round.Repo, round.PR))
+	}
+	s.reopenForFleetReviewerChange(st, before, after, open)
 }
 
 func (s *Service) reopenForFleetReviewerChange(st *State, before, after Config, open map[string]map[int]bool) {

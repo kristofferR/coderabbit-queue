@@ -3,6 +3,7 @@ package crq
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -115,6 +116,33 @@ func TestRecordCLIQuotaUsesFleetScopeAndFallback(t *testing.T) {
 	want := now.Add(47 * time.Minute)
 	if !got.Applied || got.Until == nil || !got.Until.Equal(want) {
 		t.Fatalf("fleet quota result = %+v, want applied until %s", got, want)
+	}
+}
+
+func TestRecordCLIQuotaRefusesAChangedFleetAccountAtCommit(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	svc, store := cliQuotaService(t, now)
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := svc.fleetCfg(st)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.SetFleetValue("scope", "other-org")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = svc.applyAccountBlock(
+		context.Background(), now.Add(time.Hour), "coderabbit-cli", snapshot, "kristofferR",
+	)
+	if !errors.Is(err, errFleetQuotaChanged) {
+		t.Fatalf("stale quota write = %v, want fleet-account refusal", err)
+	}
+	st, _, _ = store.Load(context.Background())
+	if st.Account.BlockedUntil != nil {
+		t.Fatalf("stale CLI account block was recorded: %+v", st.Account)
 	}
 }
 

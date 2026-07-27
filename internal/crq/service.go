@@ -238,6 +238,11 @@ func (s *Service) Enqueue(ctx context.Context, repo string, pr int) (EnqueueResu
 	result.Head = head
 	state, err := s.store.Update(ctx, func(st *State) error {
 		now := s.clock()
+		if s.fleetCfg(*st).ExcludeRepos[repo] {
+			result.Held = true
+			result.Reason = "repository excluded by fleet policy"
+			return ErrNoChange
+		}
 		if h, held := st.HeldPR(repo, pr); held {
 			// Enqueueing a held PR would queue a round nothing may fire, which
 			// reads on the dashboard as work waiting its turn.
@@ -303,9 +308,13 @@ func (s *Service) enqueueBatch(ctx context.Context, items []queueCandidate) erro
 	}
 	state, err := s.store.Update(ctx, func(st *State) error {
 		now := s.clock()
+		cfg := s.fleetCfg(*st)
 		added := 0
 		for _, it := range items {
 			repo := NormalizeRepo(it.Repo)
+			if cfg.ExcludeRepos[repo] {
+				continue
+			}
 			if _, held := st.HeldPR(repo, it.PR); held {
 				continue
 			}
@@ -724,13 +733,23 @@ func (s *Service) recordDismissal(ctx context.Context, repo string, pr int, head
 // the rest of the CAS writes rather than beside each evidence source.
 //
 // It returns whether anything was written, and the block that stands either way.
-func (s *Service) applyAccountBlock(ctx context.Context, until time.Time, source string) (bool, *time.Time, error) {
+func (s *Service) applyAccountBlock(
+	ctx context.Context,
+	until time.Time,
+	source string,
+	expected Config,
+	cliOrg string,
+) (bool, *time.Time, error) {
 	now := s.clock()
 	// Update swallows ErrNoChange, so whether anything was written has to be
 	// recorded by the mutation itself. It is assigned on every attempt because a
 	// CAS conflict runs the closure again.
 	applied := false
 	state, err := s.store.Update(ctx, func(st *State) error {
+		current := s.fleetCfg(*st)
+		if current.FleetRevision != expected.FleetRevision || !cliOrgMatches(current, cliOrg) {
+			return errFleetQuotaChanged
+		}
 		if !engine.AcceptAccountBlock(st.Account.BlockedUntil, until) {
 			applied = false
 			return ErrNoChange
@@ -740,7 +759,7 @@ func (s *Service) applyAccountBlock(ctx context.Context, until time.Time, source
 		st.Account.BlockedUntil = &at
 		st.Account.CheckedAt = &now
 		st.Account.Source = source
-		st.Account.Scope = strings.Join(s.cfg.Scope, ",")
+		st.Account.Scope = strings.Join(current.Scope, ",")
 		// A reading from outside the PR says nothing about how many reviews are
 		// left, and a stale count beside a fresh block would read as authoritative.
 		st.Account.Remaining = nil
@@ -1012,6 +1031,9 @@ func firedOrEnqueuedAt(r Round) time.Time {
 // is meant to close: SetReviewers commits in between, and the mutation goes on
 // to apply the decision the new configuration would not have made.
 func (s *Service) applyFire(ctx context.Context, cfg Config, round Round, obs engine.Observation, d engine.FireDecision, now time.Time) (PumpResult, error) {
+	if cfg.ExcludeRepos[NormalizeRepo(round.Repo)] {
+		return s.abandonRound(ctx, round, "repository excluded by fleet policy", "skipped")
+	}
 	switch d.Verdict {
 	case engine.FireDrop:
 		return s.abandonRound(ctx, round, "pr closed", "skipped")

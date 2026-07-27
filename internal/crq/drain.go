@@ -52,11 +52,16 @@ type DrainInstall struct {
 // failure this whole feature is about.
 func (s *Service) InstallDrain(ctx context.Context, agent string, agentArgs []string, repos []string, dryRun bool) (DrainInstall, error) {
 	effectiveDryRun := dryRun || s.cfg.DryRun
-	plan, err := DrainPlan(s.cfg, agent, agentArgs, repos, effectiveDryRun)
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return DrainInstall{}, err
+	}
+	effective := s.fleetCfg(st)
+	plan, err := DrainPlan(effective, agent, agentArgs, repos, effectiveDryRun)
 	if err != nil || effectiveDryRun {
 		return plan, err
 	}
-	return s.applyDrain(ctx, plan)
+	return s.applyDrain(ctx, plan, effective)
 }
 
 // DrainPlan computes what an install WOULD write and run, from configuration
@@ -149,7 +154,7 @@ func DrainPlan(cfg Config, agent string, agentArgs []string, repos []string, dry
 }
 
 // applyDrain writes the plan to disk and starts the service.
-func (s *Service) applyDrain(ctx context.Context, plan DrainInstall) (DrainInstall, error) {
+func (s *Service) applyDrain(ctx context.Context, plan DrainInstall, cfg Config) (DrainInstall, error) {
 	invocation, logDir := plan.Invocation, plan.LogDir
 	self, err := os.Executable()
 	if err != nil {
@@ -178,7 +183,7 @@ exec %s watch -- %s
 	}{
 		{plan.Prompt, fixPrompt, 0o644},
 		{plan.Wrapper, wrapper, 0o755},
-		{plan.Unit, s.drainUnit(plan), 0o644},
+		{plan.Unit, drainUnitFor(cfg, plan), 0o644},
 	} {
 		if err := os.MkdirAll(filepath.Dir(f.path), 0o755); err != nil {
 			return plan, err
@@ -339,48 +344,52 @@ func drainPath(plan DrainInstall) string {
 // wrong still reports Started, and the watcher then loads a different queue, or
 // none.
 func (s *Service) drainEnv(plan DrainInstall) map[string]string {
+	return drainEnvFor(s.cfg, plan)
+}
+
+func drainEnvFor(cfg Config, plan DrainInstall) map[string]string {
 	env := map[string]string{
 		"CRQ_REPOS": strings.Join(plan.Repos, ","),
 		// The denylist travels with the allowlist. Carrying one and not the other
 		// installs a service that watches a repository the operator excluded.
-		"CRQ_EXCLUDE":                strings.Join(sortedRepoList(s.cfg.ExcludeRepos), ","),
-		"CRQ_SCOPE":                  strings.Join(s.cfg.Scope, ","),
-		"CRQ_WATCH_INTERVAL":         s.cfg.WatchInterval.String(),
-		"CRQ_DISPATCH_MAX_ATTEMPTS":  fmt.Sprint(s.cfg.DispatchMaxAttempts),
-		"CRQ_DISPATCH_CONCURRENCY":   fmt.Sprint(s.cfg.DispatchConcurrency),
-		"CRQ_DISPATCH_FORKS":         strconv.FormatBool(s.cfg.DispatchForks),
-		"CRQ_AUTOREVIEW_SKIP_MARKER": s.cfg.SkipMarker,
-		"CRQ_BOT":                    s.cfg.Bot,
-		"CRQ_REQUIRED_BOTS":          strings.Join(s.cfg.RequiredBots, ","),
-		"CRQ_FEEDBACK_BOTS":          strings.Join(s.cfg.FeedbackBots, ","),
-		"CRQ_REVIEW_CMD":             s.cfg.ReviewCommand,
-		"CRQ_RATELIMIT_CMD":          s.cfg.RateLimitCommand,
-		"CRQ_RL_MARKER":              s.cfg.RateLimitMarker,
-		"CRQ_CAL_REPLY_MARKER":       s.cfg.CalibrationMarker,
-		"CRQ_REVIEW_DONE_MARKER":     s.cfg.ReviewDoneMarker,
-		"CRQ_COMPLETION_MARKER":      s.cfg.CompletionMarker,
-		"CRQ_MIN_INTERVAL":           s.cfg.MinInterval.String(),
-		"CRQ_INFLIGHT_TIMEOUT":       s.cfg.InflightTimeout.String(),
-		"CRQ_POLL":                   s.cfg.PollInterval.String(),
-		"CRQ_FEEDBACK_WAIT_TIMEOUT":  s.cfg.FeedbackWaitTimeout.String(),
-		"CRQ_SETTLE":                 s.cfg.SettleWindow.String(),
+		"CRQ_EXCLUDE":                strings.Join(sortedRepoList(cfg.ExcludeRepos), ","),
+		"CRQ_SCOPE":                  strings.Join(cfg.Scope, ","),
+		"CRQ_WATCH_INTERVAL":         cfg.WatchInterval.String(),
+		"CRQ_DISPATCH_MAX_ATTEMPTS":  fmt.Sprint(cfg.DispatchMaxAttempts),
+		"CRQ_DISPATCH_CONCURRENCY":   fmt.Sprint(cfg.DispatchConcurrency),
+		"CRQ_DISPATCH_FORKS":         strconv.FormatBool(cfg.DispatchForks),
+		"CRQ_AUTOREVIEW_SKIP_MARKER": cfg.SkipMarker,
+		"CRQ_BOT":                    cfg.Bot,
+		"CRQ_REQUIRED_BOTS":          strings.Join(cfg.RequiredBots, ","),
+		"CRQ_FEEDBACK_BOTS":          strings.Join(cfg.FeedbackBots, ","),
+		"CRQ_REVIEW_CMD":             cfg.ReviewCommand,
+		"CRQ_RATELIMIT_CMD":          cfg.RateLimitCommand,
+		"CRQ_RL_MARKER":              cfg.RateLimitMarker,
+		"CRQ_CAL_REPLY_MARKER":       cfg.CalibrationMarker,
+		"CRQ_REVIEW_DONE_MARKER":     cfg.ReviewDoneMarker,
+		"CRQ_COMPLETION_MARKER":      cfg.CompletionMarker,
+		"CRQ_MIN_INTERVAL":           cfg.MinInterval.String(),
+		"CRQ_INFLIGHT_TIMEOUT":       cfg.InflightTimeout.String(),
+		"CRQ_POLL":                   cfg.PollInterval.String(),
+		"CRQ_FEEDBACK_WAIT_TIMEOUT":  cfg.FeedbackWaitTimeout.String(),
+		"CRQ_SETTLE":                 cfg.SettleWindow.String(),
 		// The quota timings belong here for the same reason as every other
 		// setting: the service does not inherit the shell that installed it. A
 		// deliberately longer fallback set only in that shell was folded into
 		// this config, written into no unit, and then silently replaced by the
 		// default — so the watcher retried a review command earlier than
 		// configured for every account block it could not parse a window from.
-		"CRQ_CALIBRATE_TTL": s.cfg.CalibrationTTL.String(),
-		"CRQ_RL_FALLBACK":   s.cfg.RateLimitFallback.String(),
+		"CRQ_CALIBRATE_TTL": cfg.CalibrationTTL.String(),
+		"CRQ_RL_FALLBACK":   cfg.RateLimitFallback.String(),
 		"PATH":              drainPath(plan),
 	}
-	if s.cfg.RateLimitCoDegrade {
+	if cfg.RateLimitCoDegrade {
 		env["CRQ_RL_CO_DEGRADE"] = "1"
 	} else {
 		env["CRQ_RL_CO_DEGRADE"] = "0"
 	}
-	coNames := make([]string, 0, len(s.cfg.CoBots))
-	for _, co := range s.cfg.CoBots {
+	coNames := make([]string, 0, len(cfg.CoBots))
+	for _, co := range cfg.CoBots {
 		coNames = append(coNames, co.Name)
 		prefix := "CRQ_COBOT_" + strings.ToUpper(co.Name)
 		env[prefix+"_CMD"] = co.Command
@@ -396,7 +405,7 @@ func (s *Service) drainEnv(plan DrainInstall) map[string]string {
 	// or dispatch silently falls back to another filesystem.
 	workspace := plan.Workspace
 	if workspace == "" {
-		workspace = s.cfg.WorkspaceRoot
+		workspace = cfg.WorkspaceRoot
 	}
 	if workspace != "" {
 		env["CRQ_WORKSPACE"] = workspace
@@ -408,24 +417,28 @@ func (s *Service) drainEnv(plan DrainInstall) map[string]string {
 	// the dashboard, and the PR the account quota is probed on. Without the first
 	// two, the watcher cannot even load state — or loads a queue nobody else is
 	// using, which looks exactly like an idle fleet.
-	if s.cfg.GateRepo != "" {
-		env["CRQ_REPO"] = s.cfg.GateRepo
+	if cfg.GateRepo != "" {
+		env["CRQ_REPO"] = cfg.GateRepo
 	}
-	if s.cfg.StateRef != "" {
-		env["CRQ_STATE_REF"] = s.cfg.StateRef
+	if cfg.StateRef != "" {
+		env["CRQ_STATE_REF"] = cfg.StateRef
 	}
-	if s.cfg.DashboardIssue > 0 {
-		env["CRQ_ISSUE"] = fmt.Sprint(s.cfg.DashboardIssue)
+	if cfg.DashboardIssue > 0 {
+		env["CRQ_ISSUE"] = fmt.Sprint(cfg.DashboardIssue)
 	}
-	if s.cfg.CalibrationPR > 0 {
-		env["CRQ_CAL_PR"] = fmt.Sprint(s.cfg.CalibrationPR)
+	if cfg.CalibrationPR > 0 {
+		env["CRQ_CAL_PR"] = fmt.Sprint(cfg.CalibrationPR)
 	}
 	return env
 }
 
 // drainUnit renders the platform's service definition.
 func (s *Service) drainUnit(plan DrainInstall) string {
-	env := s.drainEnv(plan)
+	return drainUnitFor(s.cfg, plan)
+}
+
+func drainUnitFor(cfg Config, plan DrainInstall) string {
+	env := drainEnvFor(cfg, plan)
 	// Sorted: the unit is a file on disk that a re-install rewrites, and map order
 	// would make every rewrite a different file for the same configuration.
 	keys := make([]string, 0, len(env))

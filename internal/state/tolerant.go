@@ -18,8 +18,8 @@ import (
 // Unknown members are therefore carried by default. A load keeps whatever it
 // did not recognise, a save puts it back, and a field this binary has never
 // heard of survives a foreign write untouched. A schema bump is reserved for a
-// compatibility fence: newer state is refused by older binaries, as v4 requires
-// so v3 pumping clients cannot ignore administrative holds.
+// compatibility fence: newer state is refused by older binaries, as v5 requires
+// so v4 pumping clients cannot ignore state-backed fleet policy.
 
 // unknownFields holds JSON members this binary has no field for, verbatim.
 type unknownFields map[string]json.RawMessage

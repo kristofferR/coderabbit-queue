@@ -52,8 +52,9 @@ func fleetSettings() map[string]fleetSetting {
 			Doc: "the repositories crq reviews and watches",
 			Env: "CRQ_REPOS",
 			Apply: func(cfg *Config, v string) error {
-				cfg.AllowRepos = repoSet(v)
-				return nil
+				repos, err := fleetRepoSet(v)
+				cfg.AllowRepos = repos
+				return err
 			},
 			Show: func(cfg Config) string { return strings.Join(sortedRepoKeys(cfg.AllowRepos), ",") },
 		},
@@ -61,8 +62,9 @@ func fleetSettings() map[string]fleetSetting {
 			Doc: "repositories crq never reviews, watches or fixes",
 			Env: "CRQ_EXCLUDE",
 			Apply: func(cfg *Config, v string) error {
-				cfg.ExcludeRepos = repoSet(v)
-				return nil
+				repos, err := fleetRepoSet(v)
+				cfg.ExcludeRepos = repos
+				return err
 			},
 			Show: func(cfg Config) string { return strings.Join(sortedRepoKeys(cfg.ExcludeRepos), ",") },
 		},
@@ -71,6 +73,9 @@ func fleetSettings() map[string]fleetSetting {
 			Env: "CRQ_REQUIRED_BOTS",
 			Apply: func(cfg *Config, v string) error {
 				cfg.RequiredBots = splitList(v)
+				if len(cfg.RequiredBots) == 0 {
+					return fmt.Errorf("at least one required bot is needed")
+				}
 				return nil
 			},
 			Show: func(cfg Config) string { return strings.Join(cfg.RequiredBots, ",") },
@@ -163,6 +168,16 @@ func ValidateFleetSetting(key, value string) error {
 	}
 	probe := Config{}
 	return setting.Apply(&probe, value)
+}
+
+func fleetRepoSet(value string) (map[string]bool, error) {
+	repos := repoSet(value)
+	for repo := range repos {
+		if !validRepoSlug(repo) {
+			return nil, fmt.Errorf("repo must be owner/name, got %q", repo)
+		}
+	}
+	return repos, nil
 }
 
 // applyFleet overlays the fleet's recorded policy onto a host's configuration.
