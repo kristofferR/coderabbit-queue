@@ -193,6 +193,19 @@ func (f *replayFixture) botReview(repo string, pr int, id int64, commitSHA strin
 	f.gh.reviews[key] = append(f.gh.reviews[key], r)
 }
 
+// corpusReview posts a bot review whose body is a captured bot message, for the
+// reviews that carry their findings in the body itself.
+func (f *replayFixture) corpusReview(t *testing.T, repo string, pr int, id int64, commitSHA, corpus string) {
+	t.Helper()
+	body := corpusMessage(t, corpus)
+	f.gh.mu.Lock()
+	defer f.gh.mu.Unlock()
+	r := ghapi.Review{ID: id, CommitID: commitSHA, State: "COMMENTED", SubmittedAt: f.clk.now().UTC(), Body: body}
+	r.User.Login = f.bot
+	key := fakeKey(repo, pr)
+	f.gh.reviews[key] = append(f.gh.reviews[key], r)
+}
+
 func (f *replayFixture) botReviewComment(repo string, pr int, id int64, commitSHA, path string, line int, body string) {
 	f.gh.mu.Lock()
 	defer f.gh.mu.Unlock()

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,9 +39,10 @@ type fakeGitHub struct {
 	graphQL         func(query string, vars map[string]any, out any) error
 	// stateRef is the SHA GetRef reports; tests that exercise `crq wait` move it
 	// to signal "the queue advanced".
-	stateRef  string
-	refReads  int
-	searchPRs []ghapi.SearchPR
+	stateRef    string
+	refReads    int
+	reviewReads int
+	searchPRs   []ghapi.SearchPR
 	// now, when set, timestamps posted comments off the same injected clock the
 	// service uses, so a fire's recorded FiredAt tracks the fake wall clock the
 	// replay suite advances. nil falls back to real time (all existing tests).
@@ -130,7 +133,17 @@ func (f *fakeGitHub) GetCommit(_ context.Context, repo, sha string) (ghapi.Commi
 func (f *fakeGitHub) ListReviews(_ context.Context, repo string, pr int) ([]ghapi.Review, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.reviewReads++
 	return append([]ghapi.Review(nil), f.reviews[fakeKey(repo, pr)]...), nil
+}
+
+// reviewPolls is how many times anything has read this PR's reviews. A test that
+// needs a running loop to have reached its polling cycle waits on this instead of
+// sleeping: a fixed sleep loses under parallel load, and did.
+func (f *fakeGitHub) reviewPolls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.reviewReads
 }
 
 func (f *fakeGitHub) ListIssueComments(_ context.Context, repo string, pr int) ([]ghapi.IssueComment, error) {
@@ -233,6 +246,33 @@ func (f *fakeGitHub) EachOpenPR(_ context.Context, _ string, _ bool, fn func(gha
 		}
 	}
 	return nil
+}
+
+// ListPulls answers the branch->PR lookup target inference uses.
+//
+// It honours the head filter, because a fake that ignores it would let a caller
+// asking for the wrong branch pass: every PR in the repository would come back
+// and a single-result assertion would still hold.
+func (f *fakeGitHub) ListPulls(_ context.Context, repo string, query url.Values) ([]ghapi.Pull, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	wantRef := ""
+	if head := query.Get("head"); head != "" {
+		_, wantRef, _ = strings.Cut(head, ":") // "owner:branch"
+	}
+	var out []ghapi.Pull
+	for key, p := range f.pulls {
+		if !strings.HasPrefix(key, strings.ToLower(repo)+"#") {
+			continue
+		}
+		if wantRef != "" && p.Head.Ref != wantRef {
+			continue
+		}
+		out = append(out, p)
+	}
+	// Deterministic: map iteration order must not decide what a test sees.
+	sort.Slice(out, func(i, j int) bool { return out[i].Number < out[j].Number })
+	return out, nil
 }
 
 // GetRef reports the fake state ref. It is what `crq wait` idles on, so tests
@@ -802,7 +842,7 @@ func TestAdoptableCommandsRequiresExpectedHead(t *testing.T) {
 
 	comments, _ := gh.ListIssueComments(ctx, "owner/repo", 12)
 	reviews, _ := gh.ListReviews(ctx, "owner/repo", 12)
-	cmds, _, err := service.reviewCommands(ctx, "owner/repo", 12, engine.Observation{Head: "abcdef123", Open: true}, time.Time{}, pull, comments, reviews)
+	cmds, _, err := service.reviewCommands(ctx, service.cfg, "owner/repo", 12, engine.Observation{Head: "abcdef123", Open: true}, time.Time{}, pull, comments, reviews)
 	if err != nil || len(cmds) != 0 {
 		t.Fatalf("must not adopt a review command after the PR head changed, cmds=%v err=%v", cmds, err)
 	}
@@ -2456,6 +2496,82 @@ func TestPumpRescuesSummaryOnlyRoundBehindBlockedQueue(t *testing.T) {
 	}
 }
 
+// TestPumpSweepsQuotaFreeRoundWhileTheSlotIsHeld pins the rule the fire slot
+// actually stands for: it serializes ONE account-metered review, and has no
+// authority over work that spends none.
+//
+// Pump used to return the moment it had progressed the slot holder. Its own
+// rescue scan claimed to cover "blocked or slot-busy", but the slot-busy half
+// was unreachable — control never got there. So a summary-only round, whose
+// CodeRabbit review is never coming at all, sat queued for as long as an
+// unrelated PR's review ran.
+func TestPumpSweepsQuotaFreeRoundWhileTheSlotIsHeld(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
+	cfg.FeedbackBots = cfg.RequiredBots
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+
+	// The slot holder: an unrelated PR whose CodeRabbit review is in flight.
+	holderSHA := "1111111111111111"
+	holder := ghapi.Pull{State: "open"}
+	holder.Head.SHA = holderSHA
+	gh.pulls[fakeKey("o/holder", 10)] = holder
+
+	// Behind it: a summary-only PR. CodeRabbit posted only its Free-plan
+	// walkthrough, which is the whole review it will ever produce.
+	backSHA := "2222222222222222"
+	backPull := ghapi.Pull{State: "open"}
+	backPull.Head.SHA = backSHA
+	gh.pulls[fakeKey("o/back", 20)] = backPull
+	walkthrough := ghapi.IssueComment{
+		ID:        900,
+		Body:      corpusMessage(t, "coderabbit/summary-only-free-plan.md"),
+		CreatedAt: now.Add(-time.Minute),
+		UpdatedAt: now.Add(-time.Minute),
+	}
+	walkthrough.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/back", 20)] = []ghapi.IssueComment{walkthrough}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+
+	// The holder is fired and holds the slot; the summary-only round is queued
+	// behind it.
+	seedRound(t, store, cfg, "o/holder", 10, holderSHA, PhaseFired, now.Add(-time.Minute), 701)
+	if _, err := svc.Enqueue(ctx, "o/back", 20); err != nil {
+		t.Fatal(err)
+	}
+	if st, _, err := store.Load(ctx); err != nil {
+		t.Fatal(err)
+	} else if st.SlotRound() == nil {
+		t.Fatal("the test needs the slot held to mean anything")
+	}
+
+	if _, err := svc.Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	st, _, _ := store.Load(ctx)
+	back := st.Round("o/back", 20)
+	if back == nil || back.Phase == PhaseQueued {
+		t.Fatalf("the summary-only round must move while the slot is held, got %#v", back)
+	}
+	// The slot is not what let it move, and it did not take it.
+	if slot := st.SlotRound(); slot == nil || slot.Repo != "o/holder" {
+		t.Fatalf("the slot must still belong to the holder, got %#v", slot)
+	}
+	for _, p := range gh.posted {
+		if strings.Contains(p, cfg.ReviewCommand) {
+			t.Fatalf("a quota-free sweep must never post the CodeRabbit command, posted=%v", gh.posted)
+		}
+	}
+}
+
 // TestWaitResolvesSummaryOnlyWithoutTheQueue pins the architectural rule the
 // dogfood exposed: a summary-only round is NOT a queue citizen. The Seq FIFO and
 // the FireSlot exist solely to serialize CodeRabbit's account-wide review limit,
@@ -2463,9 +2579,10 @@ func TestPumpRescuesSummaryOnlyRoundBehindBlockedQueue(t *testing.T) {
 // an account block, nor another PR holding the slot, may delay it. Its
 // co-reviewers are ready now; the loop must run them now.
 //
-// The starvation is staged at its worst: another PR HOLDS the fire slot, so Pump
-// short-circuits on the slot holder and never reaches the FIFO or its bounded
-// rescue scan at all. Only the direct quota-free path can resolve this round.
+// The starvation is staged at its worst: another PR HOLDS the fire slot. Pump
+// now sweeps quota-free rounds even then (see
+// TestPumpSweepsQuotaFreeRoundWhileTheSlotIsHeld); this pins that Wait resolves
+// the round directly, without depending on a pump happening to run.
 func TestWaitResolvesSummaryOnlyWithoutTheQueue(t *testing.T) {
 	cfg := firingConfig()
 	cfg.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}

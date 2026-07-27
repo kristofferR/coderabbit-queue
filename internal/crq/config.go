@@ -43,7 +43,11 @@ type Config struct {
 	// CoBots are the enabled co-reviewer bots (CRQ_COBOTS + per-bot
 	// CRQ_COBOT_<NAME>_* keys). An entry exists for every wanted or required
 	// co-reviewer; required ones are already folded into RequiredBots.
-	CoBots            []CoBotConfig
+	CoBots []CoBotConfig
+	// Reviewers is the single description of who reviews and what they cost.
+	// Bot / RequiredBots / FeedbackBots / CoBots above are DERIVED from it and
+	// kept only so existing consumers keep compiling; new code should read this.
+	Reviewers         []Reviewer
 	RateLimitCommand  string
 	RateLimitMarker   string
 	CalibrationMarker string
@@ -117,6 +121,19 @@ func LoadConfig() (Config, error) {
 			requiredBots = unionBots(requiredBots, []string{cb.Login})
 		}
 	}
+	// CRQ_BOT may name a registry bot — pointing crq at Codex as the primary is a
+	// real configuration. It is then the primary and must not ALSO be driven as a
+	// co-reviewer: DecideFire posts its review command and fireCoOnly would post
+	// its co-reviewer trigger, asking the same reviewer twice.
+	//
+	// Silenced, not removed. The registry entry is also where that bot's wording
+	// and check-run hooks come from (classifierCoReviewers, coChecksRelevant both
+	// walk CoBots), so dropping it would cost the primary its evidence: a Codex
+	// clean summary would read as a generic no-action event, and a check-only
+	// result would not be fetched at all — crq would fire and then time out with
+	// current-head evidence sitting in front of it. Every trigger post goes
+	// through engine.DecideCoPost, which posts nothing for a never trigger.
+	coBots = silenceTrigger(coBots, bot)
 	// Enabled co-reviewers surface findings without gating: their logins join
 	// the feedback set unless CRQ_FEEDBACK_BOTS overrides explicitly.
 	coLogins := make([]string, 0, len(coBots))
@@ -164,6 +181,21 @@ func LoadConfig() (Config, error) {
 	}
 	if len(cfg.Scope) == 0 && cfg.GateRepo != "" {
 		cfg.Scope = []string{ownerOf(cfg.GateRepo)}
+	}
+	// Built here, after the command is resolved, because the primary's trigger is
+	// part of describing it.
+	cfg.Reviewers = buildReviewers(cfg.Bot, cfg.ReviewCommand, requiredBots, coBots)
+	// The legacy lists are now VIEWS of cfg.Reviewers rather than parallel
+	// parses, so they cannot answer differently from it. An explicit
+	// CRQ_FEEDBACK_BOTS still wins: it is the one list an operator may widen
+	// beyond who reviews (to surface a bot's findings without waiting for it).
+	cfg.RequiredBots = cfg.reviewerLogins(func(r Reviewer) bool { return r.Required })
+	if _, explicit := env["CRQ_FEEDBACK_BOTS"]; !explicit {
+		// Everyone except a primary the operator deliberately left out of
+		// CRQ_REQUIRED_BOTS. That omission is how you say "do not wait for
+		// CodeRabbit here", and surfacing its findings anyway would put the round
+		// back to work over a reviewer nobody asked for.
+		cfg.FeedbackBots = cfg.reviewerLogins(func(r Reviewer) bool { return r.Required || !r.Metered() })
 	}
 	return cfg, nil
 }

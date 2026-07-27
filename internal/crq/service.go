@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,6 +38,9 @@ type GitHubAPI interface {
 	SearchOpenPRs(context.Context, string, bool, int) ([]ghapi.SearchPR, error)
 	EachOpenPR(context.Context, string, bool, func(ghapi.SearchPR) (bool, error)) error
 	GraphQL(context.Context, string, map[string]any, any) error
+	// ListPulls finds pull requests, filtered by the query. crq uses it to map a
+	// checkout's branch to the PR it belongs to.
+	ListPulls(context.Context, string, url.Values) ([]ghapi.Pull, error)
 	// GetRef reads a ref's SHA. It is the cheapest "did anything change?" probe
 	// crq has — a conditional GET that costs no quota while the ref is
 	// unchanged — which is what `crq wait` idles on.
@@ -221,10 +225,28 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		return PumpResult{}, err
 	}
 
-	// 1. The round holding the fire slot: progress it and return, mirroring v2's
-	//    "handle in-flight first" so a single pump never both progresses and fires.
+	// 1. The round holding the fire slot: progress it first, mirroring v2's
+	//    "handle in-flight first" so a single pump never both progresses and
+	//    fires. It does not end the pump, though. The slot serializes the METERED
+	//    fire and nothing else, so rounds whose next step spends no CodeRabbit
+	//    quota still get their turn below.
 	if slot := st.SlotRound(); slot != nil {
-		return s.progressSlotRound(ctx, *slot)
+		res, err := s.progressSlotRound(ctx, *slot)
+		if err != nil {
+			return res, err
+		}
+		// Reload: progressing the slot round may have released it, and the sweep
+		// must not decide against a snapshot that says otherwise.
+		st, _, err = s.store.Load(ctx)
+		if err != nil {
+			return PumpResult{}, err
+		}
+		if free, handled, err := s.sweepQuotaFree(ctx, st, s.clock(), slot.Repo, slot.PR); err != nil {
+			return PumpResult{}, err
+		} else if handled {
+			return free, nil
+		}
+		return res, nil
 	}
 
 	// 2. Reviewing rounds no longer hold the slot; sweep the oldest one toward
@@ -276,66 +298,86 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if next == nil {
 		return PumpResult{Action: "idle"}, nil
 	}
-	obs, err := s.observe(ctx, next.Repo, next.PR, next, now)
+	obs, err := s.observe(ctx, s.cfg, next.Repo, next.PR, next, now)
 	if err != nil {
 		return PumpResult{}, err
 	}
 	global := s.global(st, now)
-	decision := engine.DecideFire(global, *next, obs.eng, now, s.policy())
+	decision := engine.DecideFire(global, *next, obs.eng, now, s.cfg.policy())
 	result, err := s.applyFire(ctx, *next, obs.eng, decision, now)
 	if err != nil {
 		return result, err
 	}
-	// A blocked or slot-busy front of the queue must not starve later PRs of
-	// resolutions that spend NO CodeRabbit quota — a co-reviewer defer, or a
-	// summary-only round whose review is never coming from CodeRabbit at all.
-	// Scan a bounded number of following queued rounds and apply any quota-free
-	// verdict (each costs one observation; ETag caching keeps it cheap).
-	//
-	// The scan is deliberately verdict-driven rather than flag-driven:
-	// `decideCoDeferred` already honours RateLimitCoDegrade internally, so a
-	// disabled degrade simply never yields FireCoDeferred, while a summary-only
-	// round must be rescued regardless of that flag.
+	// A blocked front of the queue must not starve later PRs of resolutions that
+	// spend NO CodeRabbit quota — a co-reviewer defer, or a summary-only round
+	// whose review is never coming from CodeRabbit at all.
 	accountBlocked := global.BlockedUntil != nil && global.BlockedUntil.After(now)
-	if decision.Verdict == engine.FireNo && (accountBlocked || !global.SlotFree) {
-		// Rotate the window start across pumps. A fixed start meant that when the
-		// three rounds behind the FIFO head all needed CodeRabbit, every pump
-		// observed those same three and stopped — a fourth, quota-free round was
-		// never even looked at until the unrelated block cleared.
-		queued := st.QueuedRounds(now)
-		scanned := 0
-		policy := s.policy()
-		for i := range queued {
-			r := queued[(i+s.scanOffset)%len(queued)]
-			if r.Repo == next.Repo && r.PR == next.PR {
-				continue
-			}
-			if scanned >= 3 {
-				break
-			}
-			// No cheap pre-filter here. "Every trigger already posted" is not
-			// proof that nothing is left to do: a primary-unavailable round in
-			// that state still needs its quota-free FireDedupe/FireCoReviewWait,
-			// and a co-review answer to an earlier deferred command needs
-			// collecting. Skipping those left them behind the account block for
-			// hours. The scan budget below bounds the cost instead.
-			scanned++
-			round := r
-			robs, oerr := s.observe(ctx, round.Repo, round.PR, &round, now)
-			if oerr != nil {
-				continue
-			}
-			d := engine.DecideFire(s.global(st, now), round, robs.eng, now, policy)
-			if !quotaFreeVerdict(d.Verdict) {
-				continue
-			}
-			return s.applyFire(ctx, round, robs.eng, d, now)
-		}
-		if len(queued) > 0 {
-			s.scanOffset = (s.scanOffset + scanned + 1) % len(queued)
+	if decision.Verdict == engine.FireNo && accountBlocked {
+		if free, handled, err := s.sweepQuotaFree(ctx, st, now, next.Repo, next.PR); err != nil {
+			return PumpResult{}, err
+		} else if handled {
+			return free, nil
 		}
 	}
 	return result, nil
+}
+
+// sweepQuotaFree gives the queued rounds that spend no CodeRabbit quota their
+// turn when the metered front cannot move — because another PR holds the fire
+// slot, or the account window is shut.
+//
+// Neither of those has any authority here. The slot exists to serialize one
+// account-metered review, and the window bounds that same allowance; a
+// co-reviewer defer or a summary-only round asks for neither. Leaving them in
+// the FIFO is what stranded PRs behind an unrelated block for hours.
+//
+// skipRepo/skipPR is the round the caller already decided about, so one pump
+// never applies two verdicts to it.
+//
+// It observes at most scanBudget rounds per pump and rotates where it starts.
+// A fixed start meant that when the rounds behind the head all needed
+// CodeRabbit, every pump observed those same few and stopped — a quota-free
+// round further back was never even looked at until the unrelated block cleared.
+func (s *Service) sweepQuotaFree(ctx context.Context, st State, now time.Time, skipRepo string, skipPR int) (PumpResult, bool, error) {
+	const scanBudget = 3
+	queued := st.QueuedRounds(now)
+	if len(queued) == 0 {
+		return PumpResult{}, false, nil
+	}
+	policy := s.cfg.policy()
+	global := s.global(st, now)
+	scanned := 0
+	defer func() { s.scanOffset = (s.scanOffset + scanned + 1) % len(queued) }()
+	for i := range queued {
+		round := queued[(i+s.scanOffset)%len(queued)]
+		if round.Repo == skipRepo && round.PR == skipPR {
+			continue
+		}
+		if scanned >= scanBudget {
+			break
+		}
+		// No cheap pre-filter here. "Every trigger already posted" is not proof
+		// that nothing is left to do: a primary-unavailable round in that state
+		// still needs its quota-free FireDedupe/FireCoReviewWait, and a co-review
+		// answer to an earlier deferred command needs collecting. Skipping those
+		// left them behind the account block for hours. The budget above bounds
+		// the cost instead.
+		scanned++
+		obs, err := s.observe(ctx, s.cfg, round.Repo, round.PR, &round, now)
+		if err != nil {
+			continue
+		}
+		d := engine.DecideFire(global, round, obs.eng, now, policy)
+		if !quotaFreeVerdict(d.Verdict) {
+			continue
+		}
+		res, err := s.applyFire(ctx, round, obs.eng, d, now)
+		if err != nil {
+			return PumpResult{}, false, err
+		}
+		return res, true, nil
+	}
+	return PumpResult{}, false, nil
 }
 
 // advanceQuotaFree resolves ONE PR's round directly, bypassing the account-wide
@@ -357,11 +399,11 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 	if round == nil || !round.FireEligible(now) {
 		return PumpResult{}, false, nil
 	}
-	obs, err := s.observe(ctx, repo, pr, round, now)
+	obs, err := s.observe(ctx, s.cfg, repo, pr, round, now)
 	if err != nil {
 		return PumpResult{}, false, err
 	}
-	d := engine.DecideFire(s.global(st, now), *round, obs.eng, now, s.policy())
+	d := engine.DecideFire(s.global(st, now), *round, obs.eng, now, s.cfg.policy())
 	if !quotaFreeVerdict(d.Verdict) {
 		return PumpResult{}, false, nil
 	}
@@ -373,6 +415,92 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 		s.log.Printf("%s#%d resolved without the review queue: %s", repo, pr, d.Reason)
 	}
 	return res, true, nil
+}
+
+// recordDismissal is the effects executor for `crq dismiss`: the CAS write that
+// records which findings a round has accounted for. Dismiss decides WHETHER a
+// dismissal is legitimate; this performs it, so the write surface stays in one
+// file with every other one.
+//
+// seenSeq is the Seq of the round Dismiss read the findings against (0 for
+// none), which is what separates a round left on the PREVIOUS head — the
+// ordinary state after a push — from one another worker moved forward while
+// this call was deciding. Seq is the state's own counter rather than a
+// timestamp, so the two cannot be confused by a fleet whose hosts disagree
+// about the time.
+//
+// allowCreate says whether a round may be created for this head. It is false
+// when other blocking findings remain, because a fresh round is fire-eligible
+// and DecideFire — which never sees findings — could not hold it back.
+//
+// A round tracking a DIFFERENT head is refused when it is not the one Dismiss
+// read: the head moved after the findings were read, so this decision is about
+// a commit nobody is looking at any more, and superseding would archive the
+// newer round and point the queue back at the stale head.
+func (s *Service) recordDismissal(ctx context.Context, repo string, pr int, head string, ids []string, reason string, allowCreate bool, seenSeq int64) (dismissed, already []string, err error) {
+	mutate := func(st *State) error {
+		round := st.Round(repo, pr)
+		switch {
+		case round != nil && round.Head != head && round.Seq != seenSeq:
+			// Not the round Dismiss read: something moved the PR forward
+			// underneath this call, so the decision is about a commit nobody is
+			// looking at any more.
+			return fmt.Errorf("%s#%d moved to %s while dismissing; re-read the findings", repo, pr, round.Head)
+		case !allowCreate && (round == nil || round.Head != head || engine.CanStillFire(*round)):
+			// The guard is about whether a FIRE-ELIGIBLE round would exist with
+			// other findings still open, not about whether a round object
+			// exists. A queued round is just as dangerous as a new one: Pump can
+			// hand it to DecideFire, which sees no findings and cannot enforce
+			// drain-first. So is a round on the previous head, because the
+			// supersede below would replace it with a fresh queued one.
+			return fmt.Errorf("%s#%d has other unaddressed findings at %s: dismiss or resolve them in the same pass, so no round is queued while work is open", repo, pr, head)
+		case round == nil:
+			var err error
+			if round, err = st.NewRound(repo, pr, head, s.clock()); err != nil {
+				return err
+			}
+		case round.Head != head:
+			// The ordinary state after a push: the stored round is still on the
+			// PREVIOUS head, because `crq next` returns on a current-head finding
+			// before it enqueues. Refusing here would leave the new head in the
+			// exact drain-first deadlock this command exists to end.
+			var err error
+			if round, err = st.Supersede(repo, pr, head, s.clock()); err != nil {
+				return err
+			}
+		}
+		// Reset on every CAS attempt: a retry replays this closure, and appending
+		// to the outer slices would report each dismissal once per attempt.
+		dismissed, already = []string{}, nil
+		for _, id := range ids {
+			if round.Dismiss(id, reason) {
+				dismissed = append(dismissed, id)
+			} else {
+				already = append(already, id)
+			}
+		}
+		st.PutRound(*round)
+		return nil
+	}
+	// A dry run must report what a real one would do, refusals included. The one
+	// way it cannot drift from the write is to BE the write, run against a
+	// throwaway copy of the state that nothing stores.
+	if s.cfg.DryRun {
+		st, _, err := s.store.Load(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := mutate(&st); err != nil {
+			return nil, nil, err
+		}
+		return dismissed, already, nil
+	}
+	state, err := s.store.Update(ctx, mutate)
+	if err != nil {
+		return nil, nil, err
+	}
+	s.sync(ctx, state)
+	return dismissed, already, nil
 }
 
 // applyAccountBlock records an observed account-quota block, whatever observed
@@ -445,12 +573,12 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 	if err != nil {
 		return PumpResult{}, err
 	}
-	obs, err := s.observe(ctx, slot.Repo, slot.PR, &slot, now)
+	obs, err := s.observe(ctx, s.cfg, slot.Repo, slot.PR, &slot, now)
 	if err != nil {
 		return PumpResult{}, err
 	}
 	s.selfHealCoReviewers(ctx, slot, obs.eng, now)
-	tr := engine.Progress(slot, st.Account, obs.eng, now, s.policy())
+	tr := engine.Progress(slot, st.Account, obs.eng, now, s.cfg.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return PumpResult{Action: "waiting", Repo: slot.Repo, PR: slot.PR, Reason: tr.Reason}, nil
 	}
@@ -584,7 +712,7 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 	if target == nil {
 		return st, nil
 	}
-	obs, err := s.observe(ctx, target.Repo, target.PR, target, now)
+	obs, err := s.observe(ctx, s.cfg, target.Repo, target.PR, target, now)
 	if err != nil {
 		if s.log != nil {
 			s.log.Printf("warning: reviewing-round sweep for %s#%d failed: %v", target.Repo, target.PR, err)
@@ -592,7 +720,7 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 		return st, nil
 	}
 	s.selfHealCoReviewers(ctx, *target, obs.eng, now)
-	tr := engine.Progress(*target, st.Account, obs.eng, now, s.policy())
+	tr := engine.Progress(*target, st.Account, obs.eng, now, s.cfg.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return st, nil
 	}
@@ -792,7 +920,7 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 			// posting a duplicate; recording it here keeps the round "asked". Its
 			// timestamp anchors that bot's cutoff too, or a SHA-less answer that
 			// landed before this adopted fire would never bind to the round.
-			for _, cp := range s.policy().CoReviewerPolicies() {
+			for _, cp := range s.cfg.policy().CoReviewerPolicies() {
 				if hasLogin(postCo, cp.Login) || r.Co(cp.Login).CommandID != 0 {
 					continue
 				}
@@ -912,8 +1040,8 @@ func hasLogin(logins []string, login string) bool {
 }
 
 // coCommandFor resolves the trigger comment body crq posts for login.
-func (s *Service) coCommandFor(login string) string {
-	for _, cb := range s.cfg.CoBots {
+func (c Config) coCommandFor(login string) string {
+	for _, cb := range c.CoBots {
 		if dialect.NormalizeBotName(cb.Login) == dialect.NormalizeBotName(login) {
 			return cb.Command
 		}
@@ -1109,7 +1237,7 @@ func (s *Service) fireCoReviewWait(ctx context.Context, round Round, obs engine.
 		at    time.Time
 	}
 	var adopts []adoptCmd
-	for _, cp := range s.policy().CoReviewerPolicies() {
+	for _, cp := range s.cfg.policy().CoReviewerPolicies() {
 		cmds := obs.CoSeenFor(cp.Login).Commands
 		id := newestCommandID(cmds)
 		if id == 0 {
@@ -1213,7 +1341,7 @@ func (s *Service) recordFire(ctx context.Context, round Round, token string, com
 // command unset so a later pump's self-heal retries. The fresh-fire path
 // folds the returned id into recordFire's write.
 func (s *Service) postCoTrigger(ctx context.Context, round Round, login string) (int64, time.Time) {
-	command := strings.TrimSpace(s.coCommandFor(login))
+	command := strings.TrimSpace(s.cfg.coCommandFor(login))
 	if command == "" {
 		return 0, time.Time{}
 	}
@@ -1381,7 +1509,7 @@ func (s *Service) selfHealCoReviewers(ctx context.Context, round Round, obs engi
 		return
 	}
 	firedAt := round.FiredAt.UTC()
-	for _, cp := range s.policy().CoReviewerPolicies() {
+	for _, cp := range s.cfg.policy().CoReviewerPolicies() {
 		if round.Co(cp.Login).CommandID != 0 || (dialect.IsCodexBot(cp.Login) && round.CodexCommandID != 0) {
 			continue
 		}
@@ -1650,7 +1778,7 @@ func (s *Service) isCalibrationNoise(c ghapi.IssueComment) bool {
 	if strings.TrimSpace(c.Body) == strings.TrimSpace(s.cfg.RateLimitCommand) {
 		return true
 	}
-	return s.isConfiguredBot(c.User.Login) && strings.Contains(c.Body, s.cfg.CalibrationMarker)
+	return s.cfg.isConfiguredBot(c.User.Login) && strings.Contains(c.Body, s.cfg.CalibrationMarker)
 }
 
 func (s *Service) latestCalibrationReply(ctx context.Context, issue int, after time.Time) (ghapi.IssueComment, bool, error) {
@@ -1661,7 +1789,7 @@ func (s *Service) latestCalibrationReply(ctx context.Context, issue int, after t
 	var best ghapi.IssueComment
 	ok := false
 	for _, comment := range comments {
-		if !s.isConfiguredBot(comment.User.Login) || !comment.UpdatedAt.After(after) {
+		if !s.cfg.isConfiguredBot(comment.User.Login) || !comment.UpdatedAt.After(after) {
 			continue
 		}
 		if !strings.Contains(comment.Body, s.cfg.CalibrationMarker) {
@@ -1691,8 +1819,8 @@ func reviewedByConfiguredBot(reviewedBy map[string]bool, bot string) bool {
 	return false
 }
 
-func (s *Service) isConfiguredBot(login string) bool {
-	return dialect.NormalizeBotName(login) == dialect.NormalizeBotName(s.cfg.Bot)
+func (c Config) isConfiguredBot(login string) bool {
+	return dialect.NormalizeBotName(login) == dialect.NormalizeBotName(c.Bot)
 }
 
 // notBefore reports whether t is at or after baseline. GitHub timestamps are

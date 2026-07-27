@@ -30,6 +30,34 @@ func finding(commit string) dialect.Finding {
 	return dialect.Finding{Bot: "coderabbitai[bot]", Title: "nil deref", Commit: commit, ThreadID: "T1"}
 }
 
+func TestRoundPhaseRules(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		phase           state.Phase
+		reviewRequested bool
+		canStillFire    bool
+	}{
+		{"missing", "", false, false},
+		{"queued", state.PhaseQueued, false, true},
+		{"reserved", state.PhaseReserved, true, true},
+		{"fired", state.PhaseFired, true, false},
+		{"reviewing", state.PhaseReviewing, true, false},
+		{"awaiting retry", state.PhaseAwaitingRetry, true, true},
+		{"completed", state.PhaseCompleted, true, false},
+		{"abandoned", state.PhaseAbandoned, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			round := state.Round{Phase: tc.phase}
+			if got := reviewRequested(round); got != tc.reviewRequested {
+				t.Errorf("reviewRequested(%q) = %t, want %t", tc.phase, got, tc.reviewRequested)
+			}
+			if got := CanStillFire(round); got != tc.canStillFire {
+				t.Errorf("CanStillFire(%q) = %t, want %t", tc.phase, got, tc.canStillFire)
+			}
+		})
+	}
+}
+
 // The action table. Each row is a claim about what a caller must do next, and
 // together they are the whole contract `crq next` exposes.
 func TestNextAction(t *testing.T) {
@@ -157,6 +185,28 @@ func TestNextAction(t *testing.T) {
 				Obs: openObs(), Completion: both(false, false), LocalWork: true,
 			},
 			want: ActionPush,
+		},
+		{
+			// A queued round has asked for nothing either — and `crq dismiss`
+			// creates one to record its decision, so the documented fix flow
+			// reaches here holding the very fixes the review would be spent on.
+			name: "a queued round is not a review to hold for",
+			in: NextInput{
+				Round: state.Round{Phase: state.PhaseQueued},
+				Obs:   openObs(), Completion: both(false, false), LocalWork: true,
+			},
+			want: ActionPush,
+		},
+		{
+			// The other side of that boundary: reserving the slot IS the request,
+			// so the command is imminent and the head must stop moving.
+			name: "a reserved round is a review to hold for",
+			in: NextInput{
+				Round: state.Round{Phase: state.PhaseReserved},
+				Obs:   openObs(), Completion: both(false, false), LocalWork: true,
+				MinDelay: time.Minute,
+			},
+			want: ActionHold, wantAt: t0.Add(time.Minute),
 		},
 		{
 			name: "all answered with staged work means push",

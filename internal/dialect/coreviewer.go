@@ -66,6 +66,22 @@ type CoEvent struct {
 // CoReviewer is one registry entry: the bot's identity plus the wording
 // hooks the rest of crq calls without knowing any bot's phrasing. Function
 // fields are nil when the bot has no such concept.
+// Budget is what a reviewer costs the account, which is the only reason crq
+// queues anything at all. A reviewer whose reviews are metered account-wide must
+// be serialized — one fire at a time, gated on the remaining quota — while one
+// that costs nothing per review has no reason to wait behind anybody.
+//
+// It travels as registry data rather than as a name comparison, so the rules can
+// ask what a reviewer costs instead of asking whether it is CodeRabbit.
+type Budget string
+
+const (
+	// BudgetAccount: reviews draw on a shared account-wide allowance.
+	BudgetAccount Budget = "account"
+	// BudgetNone: reviews cost nothing crq has to ration.
+	BudgetNone Budget = "none"
+)
+
 type CoReviewer struct {
 	Login   string // GitHub login as REST reports it ("cursor[bot]")
 	Name    string // config key ("bugbot") — CRQ_COBOT_<NAME>_* env vars
@@ -85,6 +101,11 @@ type CoReviewer struct {
 	// DefaultTrigger".
 	DefaultTrigger  string
 	RequiredTrigger string
+	// Budget is what this reviewer costs the shared account. Every co-reviewer
+	// here is BudgetNone — that is what makes it a co-reviewer rather than the
+	// metered primary — but it is stated rather than assumed so the queue rules
+	// can read it off the registry.
+	Budget Budget
 
 	// ClassifyComment classifies an issue comment authored by this bot.
 	// Kind EvOther means "no special meaning" (may still be actionable text).
@@ -134,6 +155,7 @@ func KnownCoReviewers() []CoReviewer {
 			Login:   CodexBotLogin,
 			Name:    "codex",
 			Command: "@codex review",
+			Budget:  BudgetNone,
 			// Codex predates the registry: its command env var is still read,
 			// and it only ever triggered at fire time when required.
 			LegacyCommandEnv: "CRQ_CODEX_CMD",
@@ -163,6 +185,7 @@ func KnownCoReviewers() []CoReviewer {
 			Name:           "bugbot",
 			AppSlug:        "cursor",
 			Command:        "bugbot run",
+			Budget:         BudgetNone,
 			TriggerAliases: []string{"bugbot run", "cursor review"},
 			// Auto-reviews every push, so crq only nudges one that went silent.
 			DefaultTrigger: "selfheal",
@@ -178,6 +201,7 @@ func KnownCoReviewers() []CoReviewer {
 			Name:            "macroscope",
 			AppSlug:         "macroscopeapp",
 			Command:         "@macroscope-app review",
+			Budget:          BudgetNone,
 			DefaultTrigger:  "selfheal",
 			ClassifyComment: ClassifyMacroscopeComment,
 			ClassifyCheck:   ClassifyMacroscopeCheck,

@@ -100,21 +100,27 @@ func renderDashboard(st State, cfg Config) string {
 func renderTitle(st State, cfg Config) string {
 	return crqstate.RenderTitle(st, cfg.storeConfig())
 }
+
+// StatusLine renders the queue as a single line for a harness status bar.
+func StatusLine(st State, cfg Config) string {
+	return crqstate.StatusLine(st, cfg.storeConfig())
+}
+
 func issueBody(st State, cfg Config) (string, error) {
 	return crqstate.IssueBody(st, cfg.storeConfig())
 }
 
 // policy assembles the engine Policy from config.
-func (s *Service) policy() engine.Policy {
+func (c Config) policy() engine.Policy {
 	p := engine.Policy{
-		Bot:                s.cfg.Bot,
-		RequiredBots:       s.cfg.RequiredBots,
-		MinInterval:        s.cfg.MinInterval,
-		InflightTimeout:    s.cfg.InflightTimeout,
-		RateLimitFallback:  s.cfg.RateLimitFallback,
-		RateLimitCoDegrade: s.cfg.RateLimitCoDegrade,
+		Bot:                c.Bot,
+		RequiredBots:       c.RequiredBots,
+		MinInterval:        c.MinInterval,
+		InflightTimeout:    c.InflightTimeout,
+		RateLimitFallback:  c.RateLimitFallback,
+		RateLimitCoDegrade: c.RateLimitCoDegrade,
 	}
-	for _, cb := range s.cfg.CoBots {
+	for _, cb := range c.CoBots {
 		p.CoReviewers = append(p.CoReviewers, engine.CoReviewerPolicy{
 			Login:         cb.Login,
 			Command:       cb.Command,

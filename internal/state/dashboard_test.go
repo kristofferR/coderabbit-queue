@@ -848,3 +848,93 @@ func TestHeldSlotStopsFreeRunningRoundsToo(t *testing.T) {
 		t.Error("nothing may be numbered while the slot is held")
 	}
 }
+
+// The status line answers "is it still going?" continuously, so a session never
+// has to spend a tool call and a paragraph on it. Each state must read at a
+// glance, and it must never claim a next PR the queue itself will not name.
+func TestStatusLine(t *testing.T) {
+	now := time.Now().UTC()
+
+	if got := StatusLine(New(), StoreConfig{}); !strings.Contains(got, "idle") {
+		t.Errorf("empty state = %q, want idle", got)
+	}
+
+	ready := stateWith(queuedRound("kristofferr/a", 7, 1, now))
+	if got := StatusLine(ready, StoreConfig{}); !strings.Contains(got, "next #7") {
+		t.Errorf("a ready queue should name what is next, got %q", got)
+	}
+
+	// Blocked: the countdown is the useful part.
+	blockedState := stateWith(queuedRound("kristofferr/a", 7, 1, now))
+	until := now.Add(30 * time.Minute)
+	blockedState.Account.BlockedUntil = &until
+	got := StatusLine(blockedState, StoreConfig{})
+	if !strings.Contains(got, "blocked") {
+		t.Errorf("blocked state = %q, want the block named", got)
+	}
+	if strings.Contains(got, "next #") {
+		t.Errorf("nothing can fire while blocked, so no next may be claimed: %q", got)
+	}
+
+	// Stranded outranks everything, as on the dashboard.
+	strandedState := stateWith(queuedRound("kristofferr/a", 7, 1, now))
+	reserved := now.Add(-time.Minute)
+	strandedState.Rounds["kristofferr/a#7"] = func() Round {
+		r := strandedState.Rounds["kristofferr/a#7"]
+		r.Phase, r.ReservedAt = PhaseReserved, &reserved
+		return r
+	}()
+	stranded := StatusLine(strandedState, StoreConfig{})
+	if !strings.Contains(stranded, "stranded") {
+		t.Errorf("stranded state = %q, want it named first", stranded)
+	}
+	// Precedence, not just presence: a stranded round outranks every state that
+	// clears by itself, so none of those may share the line.
+	for _, lower := range []string{"blocked", "idle", "next #", "reviewing"} {
+		if strings.Contains(stranded, lower) {
+			t.Errorf("stranded line %q must not also report %q", stranded, lower)
+		}
+	}
+
+	// A stranded reservation with a backlog behind it: the earlier precedence
+	// check only proved this when the queue happened to be empty, and "stranded
+	// ... next #8" reads as though the queue is moving.
+	strandedBacklog := stateWith(
+		queuedRound("kristofferr/a", 7, 1, now),
+		queuedRound("kristofferr/a", 8, 2, now),
+	)
+	strandedBacklog.Rounds["kristofferr/a#7"] = func() Round {
+		r := strandedBacklog.Rounds["kristofferr/a#7"]
+		r.Phase, r.ReservedAt = PhaseReserved, &reserved
+		return r
+	}()
+	if got := StatusLine(strandedBacklog, StoreConfig{}); strings.Contains(got, "next #") {
+		t.Errorf("stranded line %q must not point past the stranded round", got)
+	}
+
+	// A quota-free round stays actionable while the account window is shut — that
+	// is the whole point of Queue's exemption — so the line must not call it
+	// blocked and then name what is next in the same breath.
+	blockedButReady := stateWith(func() Round {
+		r := queuedRound("kristofferr/a", 9, 1, now)
+		r.CoOnly = true
+		return r
+	}())
+	blockedButReady.Account.BlockedUntil = &until
+	line := StatusLine(blockedButReady, StoreConfig{})
+	if strings.Contains(line, "blocked") && strings.Contains(line, "next #") {
+		t.Errorf("status line %q says blocked and names a next PR at once", line)
+	}
+
+	// It is a status LINE: anything multi-line corrupts the bar it renders into.
+	for _, line := range []string{
+		StatusLine(New(), StoreConfig{}),
+		StatusLine(ready, StoreConfig{}),
+		StatusLine(blockedState, StoreConfig{}),
+		stranded,
+	} {
+		if strings.ContainsAny(line, "\r\n") {
+			t.Errorf("status line contains a newline: %q", line)
+		}
+	}
+}

@@ -25,7 +25,11 @@ type FeedbackReport struct {
 	Converged  bool              `json:"converged"`
 	ReviewedBy map[string]bool   `json:"reviewed_by"`
 	Findings   []dialect.Finding `json:"findings"`
-	CheckedAt  time.Time         `json:"checked_at"`
+	// Dismissed counts the findings this head's round accounted for through
+	// `crq dismiss`. They are withheld from Findings, so the count is how a
+	// reader sees something was set aside rather than never reported.
+	Dismissed int       `json:"dismissed,omitempty"`
+	CheckedAt time.Time `json:"checked_at"`
 	// Open is whether the PR was open in the same observation Head and
 	// ReviewedBy came from. It is deliberately not serialized — the feedback
 	// JSON contract is frozen — and exists so a caller deciding an action reads
@@ -88,7 +92,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// findings from the raw reviews/comments and derives convergence from
 	// engine.Completion over the same snapshot — no second fetch path, and the
 	// "is head reviewed?" rules live only in the engine.
-	obs, err := s.observe(ctx, repo, pr, round, now)
+	obs, err := s.observe(ctx, s.cfg, repo, pr, round, now)
 	if err != nil {
 		return FeedbackReport{}, err
 	}
@@ -123,13 +127,13 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	if anchorOK {
 		anchorCutoff = completionRound.FiredAt.UTC()
 	}
-	completion := engine.Completion(completionRound, obs.eng, s.policy())
+	completion := engine.Completion(completionRound, obs.eng, s.cfg.policy())
 	report.ReviewedBy = completion.ReviewedBy
 	// Completion does not always arrive as a review: a clean-summary comment, a
 	// paired completion reply and a co-reviewer check run all satisfy it. Anchor
 	// the settle window on the newest of ANY of them, or a round completed by a
 	// comment would settle against a stale timestamp and converge instantly.
-	evidenceBots := dialect.BotSet(unionBots(s.cfg.FeedbackBots, s.cfg.RequiredBots))
+	evidenceBots := s.cfg.evidenceBots()
 	noteEvidence := func(at time.Time) {
 		if at.After(report.LastEvidenceAt) {
 			report.LastEvidenceAt = at
@@ -156,7 +160,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		verdictCutoff = obs.eng.HeadAt
 	}
 	report.CoReviewers = coReviewerStatuses(s.cfg, obs.eng, verdictCutoff)
-	if why := engine.PrimaryUnavailableReason(obs.eng, s.policy(), head); why != "" {
+	if why := engine.PrimaryUnavailableReason(obs.eng, s.cfg.policy(), head); why != "" {
 		report.PrimaryUnavailable = true
 		report.PrimaryUnavailableReason = s.cfg.Bot + " " + why
 	}
@@ -166,7 +170,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// hang convergence if it were) still has its findings reported instead of
 	// dropped. It always includes the required bots: a bot crq waits for whose
 	// findings it didn't surface would hang the loop forever.
-	extractBots := dialect.BotSet(unionBots(s.cfg.FeedbackBots, s.cfg.RequiredBots))
+	extractBots := s.cfg.evidenceBots()
 
 	// Review-body findings — CodeRabbit's detailed and "Prompt for AI agents"
 	// blocks — carry no per-finding resolution state, only the review's commit.
@@ -188,7 +192,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		// before that round belongs to the previous head. Unresolved threads are
 		// still surfaced below across commits, while thread-less body findings
 		// must be re-reported by the current round instead of trapping the loop.
-		if anchorOK && s.isConfiguredBot(login) &&
+		if anchorOK && s.cfg.isConfiguredBot(login) &&
 			(head == "" || !strings.HasPrefix(review.CommitID, head)) &&
 			!notBefore(review.SubmittedAt, anchorCutoff) {
 			continue
@@ -362,7 +366,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		if !dialect.InBots(extractBots, comment.User.Login) {
 			continue
 		}
-		if s.cr.IsReviewSkipped(comment.Body) && s.isConfiguredBot(comment.User.Login) &&
+		if s.cr.IsReviewSkipped(comment.Body) && s.cfg.isConfiguredBot(comment.User.Login) &&
 			skipAppliesToHead(comment.Body, head) &&
 			!skipPredatesHead(comment, headCutoffOf) {
 			// Checked BEFORE the rate-limit guard below: the skip notice embeds
@@ -406,7 +410,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		if _, ok := coEventKinds[comment.ID]; ok {
 			continue
 		}
-		if s.isConfiguredBot(comment.User.Login) {
+		if s.cfg.isConfiguredBot(comment.User.Login) {
 			continue
 		}
 		if dialect.IsNonActionableText(comment.Body) {
@@ -428,6 +432,29 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	}
 
 	report.Findings = dedupeFindings(report.Findings, suppressPromptAt, settledStableIDs)
+	// Dismissals apply HERE, not in the caller: convergence and `crq loop`'s exit
+	// code are computed from this list, so filtering further out would leave a
+	// dismissed finding permanently actionable everywhere except `crq next`.
+	if round != nil && round.Head == head && len(round.Dismissed) > 0 {
+		kept := make([]dialect.Finding, 0, len(report.Findings))
+		for _, finding := range report.Findings {
+			// Only where the source itself cannot carry a thread. IDs hash the
+			// text, not the source, so a body finding later delivered as an inline
+			// comment through the REST fallback hashes the same — and filtering on
+			// the ID alone would hide a review thread that is open.
+			if dismissibleSources[finding.Source] && finding.ThreadID == "" && round.IsDismissed(finding.ID) {
+				continue
+			}
+			kept = append(kept, finding)
+		}
+		report.Findings = kept
+		// The count is of the DECISIONS this round recorded, not of the findings
+		// that happened to still match one. A bot that edits or deletes the
+		// comment a dismissal was made against leaves nothing to match, and
+		// reporting zero there would make a set-aside finding indistinguishable
+		// from one that was never reported at all.
+		report.Dismissed = len(round.Dismissed)
+	}
 	sort.Slice(report.Findings, func(i, j int) bool {
 		if dialect.RankSeverity(report.Findings[i].Severity) != dialect.RankSeverity(report.Findings[j].Severity) {
 			return dialect.RankSeverity(report.Findings[i].Severity) > dialect.RankSeverity(report.Findings[j].Severity)
