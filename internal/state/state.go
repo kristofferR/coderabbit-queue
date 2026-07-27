@@ -1,4 +1,4 @@
-// Package state defines crq's persisted schema v3: one Round per tracked PR,
+// Package state defines crq's persisted schema v4: one Round per tracked PR,
 // a single global fire slot, and the CodeRabbit account quota. A Round is
 // never deleted, only transitioned (or archived when superseded by a new
 // head) — the invariant that makes "forgot we already requested a review at
@@ -319,17 +319,45 @@ type AccountQuota struct {
 }
 
 type LeaderLease struct {
-	Owner     string    `json:"owner"`
-	Token     string    `json:"token"`
-	ExpiresAt time.Time `json:"expires_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Owner        string    `json:"owner"`
+	Token        string    `json:"token"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Capabilities []string  `json:"capabilities,omitempty"`
 }
 
-// State is schema v3. It persists as state.json in the git state ref exactly
-// like v2; only the payload shape changed (no migration — v2 payloads
-// auto-reinit, crq is pre-release).
+// HasCapability reports whether the active daemon understands a state feature.
+func (l LeaderLease) HasCapability(want string) bool {
+	for _, capability := range l.Capabilities {
+		if capability == want {
+			return true
+		}
+	}
+	return false
+}
+
+// LeaderCapabilityLease dual-writes the active leader's capabilities at the
+// top level. Older schema-v3 binaries preserve unknown top-level members, while
+// they drop unknown members nested inside LeaderLease. The token prevents a
+// preserved capability list from being attributed to a different leader.
+type LeaderCapabilityLease struct {
+	Token        string   `json:"token"`
+	Capabilities []string `json:"capabilities,omitempty"`
+}
+
+func (l LeaderCapabilityLease) HasCapability(want string) bool {
+	for _, capability := range l.Capabilities {
+		if capability == want {
+			return true
+		}
+	}
+	return false
+}
+
+// State is schema v4. It persists as state.json in the existing git state ref;
+// v3 is migrated in place so its live rounds survive the compatibility fence.
 type State struct {
-	Version int   `json:"v"` // 3
+	Version int   `json:"v"` // 4
 	Rev     int64 `json:"rev"`
 	NextSeq int64 `json:"next_seq"`
 
@@ -349,11 +377,22 @@ type State struct {
 	Account               AccountQuota `json:"account"`
 	Leader                *LeaderLease `json:"leader,omitempty"`
 
+	// LeaderCapabilities is outside Leader so old binaries' tolerant state
+	// writer carries it across lease renewals and unrelated state mutations.
+	LeaderCapabilities *LeaderCapabilityLease `json:"leader_capabilities,omitempty"`
+
 	// CalibrationIssue overrides the configured calibration PR/issue when the
 	// original hit GitHub's hard 2500-comment cap and crq rotated to a fresh
 	// one. Persisted in the shared state so the whole fleet uses the new issue.
 	CalibrationIssue int `json:"calibration_issue,omitempty"`
 
+	// Holds are the PRs crq must not fire a review for, keyed by "owner/name#pr".
+	//
+	// Holding used to take two commands that could not be one: the skip marker
+	// stops fleet auto-review from enqueueing, `crq cancel` stops the pump, and
+	// between the two a daemon fired anyway. A hold is one fact, in the state
+	// every firing path already reads.
+	Holds map[string]Hold `json:"holds,omitempty"`
 	// Writers records which hosts have written this state and what they can do,
 	// so a feature that only SOME binaries understand can say so instead of
 	// pretending agreement. Sharing a ref stops an old binary erasing a new
@@ -393,6 +432,23 @@ type State struct {
 	// tolerant.go.
 	unknown unknownFields
 }
+
+// LeaderHasCapability reports whether the current lease holder advertises a
+// capability, accepting either the nested representation or its rolling-
+// deployment-safe top-level copy.
+func (s State) LeaderHasCapability(want string) bool {
+	if s.Leader == nil {
+		return false
+	}
+	if s.Leader.HasCapability(want) {
+		return true
+	}
+	return s.LeaderCapabilities != nil &&
+		s.LeaderCapabilities.Token == s.Leader.Token &&
+		s.LeaderCapabilities.HasCapability(want)
+}
+
+const SchemaVersion = 4
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
@@ -505,8 +561,6 @@ func (s *State) ClearRepoOverride(repo string) bool {
 func normalizeRepoKey(repo string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(repo), ".git"))
 }
-
-const SchemaVersion = 3
 
 // ArchiveMax bounds the finished-rounds ring. Active rounds are never
 // evicted — only Archive is trimmed — so a live "already fired at this head"
@@ -887,7 +941,10 @@ func (s *State) NextEligible(now time.Time) *Round {
 	var best *Round
 	for key := range s.Rounds {
 		r := s.Rounds[key]
-		if !r.FireEligible(now) {
+		// Held PRs are skipped HERE, in the one place a round is chosen to fire,
+		// rather than at each caller. An exemption that has to be remembered at
+		// every site is one that will be missed at one of them.
+		if !r.FireEligible(now) || s.isHeld(r) {
 			continue
 		}
 		if best == nil || r.Seq < best.Seq {
@@ -902,12 +959,52 @@ func (s *State) NextEligible(now time.Time) *Round {
 func (s *State) QueuedRounds(now time.Time) []Round {
 	var out []Round
 	for _, r := range s.Rounds {
-		if r.FireEligible(now) {
+		if r.FireEligible(now) && !s.isHeld(r) {
 			out = append(out, r)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
 	return out
+}
+
+// Hold records why a PR is held out of the review queue.
+type Hold struct {
+	Reason string    `json:"reason,omitempty"`
+	By     string    `json:"by,omitempty"`
+	At     time.Time `json:"at"`
+}
+
+// Hold marks repo#pr as not to be reviewed, replacing any earlier hold.
+func (s *State) Hold(repo string, pr int, reason, by string, now time.Time) {
+	if s.Holds == nil {
+		s.Holds = map[string]Hold{}
+	}
+	s.Holds[holdKey(repo, pr)] = Hold{Reason: reason, By: by, At: now.UTC()}
+}
+
+// Unhold releases a hold, reporting whether one was there.
+func (s *State) Unhold(repo string, pr int) bool {
+	key := holdKey(repo, pr)
+	if _, ok := s.Holds[key]; !ok {
+		return false
+	}
+	delete(s.Holds, key)
+	return true
+}
+
+// HeldPR reports whether repo#pr is held, and why.
+func (s *State) HeldPR(repo string, pr int) (Hold, bool) {
+	h, ok := s.Holds[holdKey(repo, pr)]
+	return h, ok
+}
+
+func (s *State) isHeld(r Round) bool {
+	_, held := s.HeldPR(r.Repo, r.PR)
+	return held
+}
+
+func holdKey(repo string, pr int) string {
+	return fmt.Sprintf("%s#%d", normalizeRepoKey(repo), pr)
 }
 
 // RecordPosted remembers a trigger comment crq WROTE for this round, addressed
@@ -1084,6 +1181,11 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 	var queued, freeRunning []QueueEntry
 	for _, r := range s.Rounds {
 		if r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry {
+			continue
+		}
+		// A held round is not waiting its turn — nothing will take it — so
+		// showing it in the queue tells the reader the opposite of the truth.
+		if s.isHeld(r) {
 			continue
 		}
 		e := QueueEntry{Round: r}

@@ -116,6 +116,16 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 	if err != nil {
 		return report, err
 	}
+	if enqueued.Held {
+		// Findings were drained above before Enqueue was allowed to write.
+		// Once that work is clear, a hold is actionable administrative state,
+		// not an ordinary reviewer wait: there is no recheck time that can make
+		// progress without somebody releasing it.
+		report.Action = string(engine.ActionBlocked)
+		report.Reason = enqueued.Reason
+		report.RecheckAfter = nil
+		return report, nil
+	}
 	// Enqueue re-reads the head. If it moved in between, every conclusion above
 	// describes a head that is no longer current — and returning `done` for it
 	// would stop a caller just as an unreviewed head was queued. Say so and let

@@ -175,6 +175,7 @@ func (s *Service) releaseLeader(ctx context.Context, token string) error {
 			return ErrNoChange
 		}
 		st.Leader = nil
+		st.LeaderCapabilities = nil
 		released = true
 		return nil
 	})
@@ -199,7 +200,17 @@ func (s *Service) renewLeader(ctx context.Context, owner, token string) (State, 
 			held = false
 			return ErrNoChange
 		}
-		st.Leader = &LeaderLease{Owner: owner, Token: token, ExpiresAt: expires, UpdatedAt: now}
+		st.Leader = &LeaderLease{
+			Owner:        owner,
+			Token:        token,
+			ExpiresAt:    expires,
+			UpdatedAt:    now,
+			Capabilities: []string{leaderCapabilityHolds},
+		}
+		st.LeaderCapabilities = &LeaderCapabilityLease{
+			Token:        token,
+			Capabilities: []string{leaderCapabilityHolds},
+		}
 		held = true
 		return nil
 	})
@@ -251,7 +262,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			if s.cfg.SkipAuthors[dialect.NormalizeBotName(strings.ToLower(pr.Author))] {
 				return false, nil
 			}
-			if s.cfg.SkipMarker != "" && strings.Contains(pr.Body, s.cfg.SkipMarker) {
+			if s.cfg.SkipsReview(pr.Body) {
 				return false, nil
 			}
 			scanned++

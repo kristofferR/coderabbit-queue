@@ -117,7 +117,8 @@ func (s *Service) WaitForAction(ctx context.Context, repo string, pr int) (NextR
 		now := s.clock()
 		round := st.Round(repo, pr)
 		untracked := round == nil || (report.Head != "" && round.Head != report.Head)
-		if untracked || !leaderLive(st, now) {
+		_, held := st.HeldPR(repo, pr)
+		if !held && (untracked || !leaderLive(st, now)) {
 			if _, nerr := s.Next(ctx, repo, pr); nerr != nil {
 				return report, nerr
 			}

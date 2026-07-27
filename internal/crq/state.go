@@ -25,6 +25,8 @@ type (
 	Revision      = crqstate.Revision
 	StateStore    = crqstate.StateStore
 	StoreConfig   = crqstate.StoreConfig
+
+	LeaderCapabilityLease = crqstate.LeaderCapabilityLease
 )
 
 const (
@@ -92,7 +94,7 @@ func NewMemoryStore(cfg Config) *crqstate.MemoryStore {
 	return crqstate.NewMemoryStore(cfg.storeConfig())
 }
 
-// DefaultState returns a fresh v3 state seeded with the configured scope, used
+// DefaultState returns a fresh current-schema state seeded with the configured scope, used
 // by tests and init.
 func DefaultState(cfg Config) State {
 	st := crqstate.New()

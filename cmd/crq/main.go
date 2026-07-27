@@ -247,6 +247,49 @@ func run(ctx context.Context, args []string) int {
 		}
 		printJSON(result)
 		return 0
+	case "hold", "unhold":
+		if args[0] == "hold" && len(args[1:]) == 0 {
+			if err := cfg.RequireState(); err != nil {
+				fatal(err)
+				return 1
+			}
+			holds, herr := service.Holds(ctx)
+			if herr != nil {
+				fatal(herr)
+				return 1
+			}
+			printJSON(holds)
+			return 0
+		}
+		rest, reason, ok := parseReasonArgs(args[1:])
+		// Exactly two: `crq hold owner/repo 12 13` is a malformed administrative
+		// command, and silently holding 12 is the wrong answer to it.
+		if !ok || len(rest) != 2 || (args[0] == "unhold" && hasReasonArg(args[1:])) {
+			fatal(errors.New(`usage: crq hold <repo> <pr> --reason "<why>" | crq unhold <repo> <pr>`))
+			return 1
+		}
+		repo, pr, valid := repoPR(rest[:2])
+		if !valid {
+			fatal(fmt.Errorf("bad target %q %q", rest[0], rest[1]))
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		var result crq.HoldResult
+		var herr error
+		if args[0] == "hold" {
+			result, herr = service.Hold(ctx, repo, pr, reason)
+		} else {
+			result, herr = service.Unhold(ctx, repo, pr)
+		}
+		if herr != nil {
+			fatal(herr)
+			return 1
+		}
+		printJSON(result)
+		return 0
 	case "tidy":
 		dryRun := hasFlag(args[1:], "--dry-run")
 		repo, pr, ok := repoPR(positional(args[1:]))
@@ -430,6 +473,9 @@ USAGE
   crq decline <thread-id> [...] --reason "<why>" [--keep-open]
                                    reply on a thread to record why a finding is declined
                                    (resolves it; --keep-open leaves it open)
+  crq hold <repo> <pr> --reason "<why>"
+                                   stop crq reviewing a PR (crq hold lists them)
+  crq unhold <repo> <pr>           put it back in the queue
   crq tidy <repo> <pr> [--dry-run] remove crq's own spent review-trigger comments
   crq reviewers <repo>             which bots review this project (and what each costs)
   crq reviewers set <repo> [--bots <a,b>] [--required <a,b>]
@@ -591,6 +637,23 @@ replies contesting the decline, crq re-surfaces that reply as its own finding.
 
 Pass --keep-open to leave it unresolved anyway (an on-the-record disagreement you
 intend to keep working). Thread IDs come from .findings[].thread_id.
+`)
+	case "hold", "unhold":
+		fmt.Print(`crq hold <repo> <pr> --reason "<why>"
+crq unhold <repo> <pr>
+crq hold                             (lists what is held)
+
+Stop crq requesting reviews for a PR, in one write.
+
+Holding used to take two commands that could not be one: the skip marker stops
+fleet auto-review from enqueueing, crq cancel stops the pump, and between the two
+a daemon fired anyway. A hold is a single fact recorded where every firing path
+already looks, so there is no window between the halves.
+
+A hold does not cancel a review already in flight — that one is bought, and its
+findings are still worth having. It stops the next one. The reason is required:
+it is the note to whoever finds the PR stopped. A live autoreview daemon that
+advertises hold support is required, so its lease keeps an older standby out.
 `)
 	case "tidy":
 		fmt.Print(`crq tidy <repo> <pr> [--dry-run]
@@ -867,6 +930,38 @@ func codeRabbitOrg(ctx context.Context, binary string) string {
 		tools["coderabbit"] = checkTool(ctx, "coderabbit", "--version")
 	}
 	return checkCodeRabbitAuth(ctx, tools).CurrentOrg
+}
+
+// parseReasonArgs splits positional arguments from a --reason value. An
+// unrecognized flag is an error rather than a positional: a typo like --resaon
+// must fail loudly, not silently become part of the target.
+func parseReasonArgs(args []string) (rest []string, reason string, ok bool) {
+	for i := 0; i < len(args); i++ {
+		switch arg := args[i]; {
+		case arg == "--reason":
+			if i+1 >= len(args) {
+				return nil, "", false
+			}
+			reason = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--reason="):
+			reason = strings.TrimPrefix(arg, "--reason=")
+		case strings.HasPrefix(arg, "-"):
+			return nil, "", false
+		default:
+			rest = append(rest, arg)
+		}
+	}
+	return rest, reason, true
+}
+
+func hasReasonArg(args []string) bool {
+	for _, arg := range args {
+		if arg == "--reason" || strings.HasPrefix(arg, "--reason=") {
+			return true
+		}
+	}
+	return false
 }
 
 // runReviewers handles `crq reviewers [set|clear] <repo> [flags]`.

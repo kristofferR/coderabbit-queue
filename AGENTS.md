@@ -30,7 +30,7 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
   credential-safe Git execution, stale-worktree pruning, and mirror migration.
   Owns persistent filesystem and process I/O for checkouts; `crq` supplies only
   configured roots and a current-token resolver.
-- `internal/state/` — persisted schema v3: one `Round` per PR, one global
+- `internal/state/` — persisted schema v4: one `Round` per PR, one global
   `FireSlot`, the CodeRabbit `AccountQuota`, an `Archive` ring. Round transition
   methods, durable tombstones for tidied trigger comments, the CAS store, and
   dashboard rendering. `Round.CoBots` holds per-
@@ -39,12 +39,9 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
   binary versions (`Normalize` folds them back on load). `Round` and `State` also
   **round-trip unknown JSON members** (`tolerant.go`), so a field a newer binary
   added survives being read and rewritten by an older one — which is what makes
-  adding one safe without another dual-write, and without a schema bump (an
-  unknown version auto-reinitialises and would erase the fleet's rounds).
-  `FireSlot.HoldUntil` is the compatibility exception for the binary immediately
-  before nested slot tolerance: its deadline is mirrored at the tolerant top
-  level and in the legacy pacing anchor so that writer both preserves and
-  honours it during a rolling deployment.
+  ordinary additions safe without another dual-write or schema bump. Schema v4
+  is the deliberate exception: older v3 clients refuse it, fencing pumping
+  clients that cannot enforce administrative holds.
 - `internal/engine/` — PURE decision logic, `now` passed in, no ctx/gh:
   `DecideFire` (the single fire owner), `Progress` (fired/reviewing round
   transitions), `Completion` (the one "is the round done?"), `BlockingFindings`

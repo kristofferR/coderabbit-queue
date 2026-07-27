@@ -182,6 +182,21 @@ thread left open keeps its finding actionable and `crq next` would repeat `fix` 
 disagreement is not lost: if the bot contests the decline, crq re-surfaces that reply as its own
 finding. Pass `--keep-open` to leave it unresolved deliberately.
 
+## Holding a PR
+
+To stop crq reviewing a PR — a draft you are still shaping, a branch waiting on a decision:
+
+```bash
+crq hold "$REPO" "$PR" --reason "waiting on the API decision"
+crq unhold "$REPO" "$PR"
+crq hold                                   # what is held
+```
+
+One write, honoured by every path that picks a round to fire, so there is no window in which a daemon
+fires anyway. Creating a hold requires a live autoreview daemon that advertises hold support, so an
+older standby cannot acquire the fleet lease while that daemon maintains it. It does not cancel a
+review already in flight; that one is bought.
+
 ## Spent Trigger Comments
 
 crq deletes its own `@coderabbitai review` / `@codex review` comments once the round that posted

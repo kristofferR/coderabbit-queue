@@ -359,6 +359,26 @@ func (s *failNthUpdateStore) Update(ctx context.Context, mutate func(*State) err
 	return s.StateStore.Update(ctx, mutate)
 }
 
+type holdAfterEnqueueStore struct {
+	StateStore
+	held bool
+}
+
+func (s *holdAfterEnqueueStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {
+	state, err := s.StateStore.Update(ctx, mutate)
+	if err != nil || s.held {
+		return state, err
+	}
+	s.held = true
+	if _, err := s.StateStore.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting on a decision", "operator", time.Now())
+		return nil
+	}); err != nil {
+		return State{}, err
+	}
+	return state, nil
+}
+
 // retryNoChangeStore invokes the mutate closure twice within one Update: first
 // against a state whose round holds the fire slot, then a fresh state with no
 // round. It verifies recordFire resets its `recorded` flag between attempts.
@@ -659,6 +679,38 @@ func TestEnqueueBatchAppendsOncePerPR(t *testing.T) {
 	st2, _, _ := svc.store.Load(ctx)
 	if len(st2.QueuedRounds(time.Now().UTC())) != 2 {
 		t.Fatalf("expected still 2 after re-batch, got %d", len(st2.QueuedRounds(time.Now().UTC())))
+	}
+}
+
+func TestEnqueueBatchSkipsHeldPRsUnderCAS(t *testing.T) {
+	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, Host: "h"}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("o/held", 1, "waiting on a decision", "operator", now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	items := []queueCandidate{
+		{Repo: "o/held", PR: 1, Head: "aaaaaaaa1"},
+		{Repo: "o/ready", PR: 2, Head: "bbbbbbbb2"},
+	}
+	if err := svc.enqueueBatch(ctx, items); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Round("o/held", 1); got != nil {
+		t.Fatalf("held PR acquired a hidden queue position: %+v", got)
+	}
+	if got := st.Round("o/ready", 2); got == nil || got.Seq != 1 {
+		t.Fatalf("ready PR should receive the first queue position, got %+v", got)
 	}
 }
 
@@ -1553,6 +1605,106 @@ func TestWaitReenqueuesAfterClearingStaleRound(t *testing.T) {
 	}
 }
 
+func TestWaitReturnsWhenPRIsHeld(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.WaitTimeout = 0
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls["owner/repo#12"] = pull
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting on a decision", "operator", time.Now())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(cfg, gh, store, nil)
+
+	result, code, err := service.Wait(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 2 || result.Action != "held" || result.Reason != "held: waiting on a decision" {
+		t.Fatalf("held PR should terminate the legacy wait, code=%d result=%#v", code, result)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Round("owner/repo", 12); got != nil {
+		t.Fatalf("held PR enqueued a round: %+v", got)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("held PR posted %d review commands", len(gh.posted))
+	}
+}
+
+func TestWaitReturnsWhenPRIsHeldAfterEnqueue(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.WaitTimeout = 100 * time.Millisecond
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls["owner/repo#12"] = pull
+	store := &holdAfterEnqueueStore{StateStore: NewMemoryStore(cfg)}
+	service := NewService(cfg, gh, store, nil)
+
+	result, code, err := service.Wait(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 2 || result.Action != "held" || result.Reason != "held: waiting on a decision" {
+		t.Fatalf("hold created after enqueue should terminate the wait, code=%d result=%#v", code, result)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("held PR posted %d review commands", len(gh.posted))
+	}
+}
+
+func TestLoopLeavesHeldInflightRoundOpen(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls["owner/repo#12"] = pull
+	store := NewMemoryStore(cfg)
+	firedAt := time.Now().Add(-time.Minute)
+	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseFired, firedAt, 7)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting on a decision", "operator", time.Now())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(cfg, gh, store, nil)
+
+	report, code, err := service.Loop(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 2 || report.Status != "held" || report.Reason != "held: waiting on a decision" {
+		t.Fatalf("held in-flight loop result: code=%d report=%#v", code, report)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round("owner/repo", 12)
+	if round == nil || round.Phase != PhaseFired {
+		t.Fatalf("held in-flight round was completed: %+v", round)
+	}
+	if st.FireSlot == nil || st.FireSlot.Key != QueueKey("owner/repo", 12) {
+		t.Fatalf("held in-flight round lost its fire slot: %+v", st.FireSlot)
+	}
+}
+
 func TestWaitFiresRealReviewWhenOnlyCarriedThreadVisible(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
@@ -1896,6 +2048,82 @@ func TestPumpDropsClosedPRWhileReviewQuotaIsBlocked(t *testing.T) {
 	}
 	if len(gh.posted) != 0 {
 		t.Fatalf("must not post a review to a merged PR, posted %d", len(gh.posted))
+	}
+}
+
+func TestPumpDropsClosedPRWhileHeld(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	pull := ghapi.Pull{State: "closed", Merged: true}
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+
+	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseQueued, time.Now().UTC(), 0)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting on a decision", "operator", time.Now().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "skipped" || pumped.Reason != "pr closed" {
+		t.Fatalf("expected held closed PR cleanup, got %#v", pumped)
+	}
+	if containsActiveRound(store, t, "owner/repo", 12) {
+		t.Fatal("closed PR should not remain active merely because it is held")
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, archived := range st.Archive {
+		if archived.Repo == "owner/repo" && archived.PR == 12 && archived.Phase == PhaseAbandoned {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("closed PR cleanup did not preserve the abandoned round in the archive")
+	}
+}
+
+func TestDryRunReportsClosedHeldPRWithoutMutatingState(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.DryRun = true
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey("owner/repo", 12)] = ghapi.Pull{State: "closed", Merged: true}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+
+	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseQueued, time.Now().UTC(), 0)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting on a decision", "operator", time.Now().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "skipped" || pumped.Reason != "pr closed" {
+		t.Fatalf("dry-run should report held closed PR cleanup, got %#v", pumped)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("owner/repo", 12); round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("dry-run mutated held round: %#v", round)
 	}
 }
 
