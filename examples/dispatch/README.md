@@ -5,7 +5,14 @@
 ```bash
 crq drain install                 # prompt + wrapper + service, started
 crq drain install --dry-run       # print what it would write first
+
+# a different agent, and its own model/effort settings
+crq drain install --agent codex --agent-args '-c model_reasoning_effort=high'
 ```
+
+crq knows how to CALL claude and codex, and nothing about which model either
+should use — that is the agent's own configuration, or `--agent-args`. A queue
+choosing your model would be the wrong thing owning that decision.
 
 That writes the fix prompt, a wrapper, and a systemd user unit (or a launchd
 agent on macOS), enables lingering so it survives a logout, and starts it. There

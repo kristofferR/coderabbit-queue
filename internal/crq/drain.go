@@ -22,16 +22,20 @@ var fixPrompt string
 // DrainInstall describes what an install would do, so --dry-run can print it and
 // the result can be reported.
 type DrainInstall struct {
-	Platform string   `json:"platform"`
-	Prompt   string   `json:"prompt"`
-	Wrapper  string   `json:"wrapper"`
-	Unit     string   `json:"unit"`
-	LogDir   string   `json:"log_dir"`
-	Agent    string   `json:"agent"`
-	Repos    []string `json:"repos"`
-	Commands []string `json:"commands"`
-	DryRun   bool     `json:"dry_run,omitempty"`
-	Started  bool     `json:"started,omitempty"`
+	Platform string `json:"platform"`
+	Prompt   string `json:"prompt"`
+	Wrapper  string `json:"wrapper"`
+	Unit     string `json:"unit"`
+	LogDir   string `json:"log_dir"`
+	Agent    string `json:"agent"`
+	// Invocation is the exact command the wrapper runs, so --dry-run shows what
+	// the fix session will actually be — including the model, which is the
+	// agent's business and not crq's to hardcode.
+	Invocation string   `json:"invocation,omitempty"`
+	Repos      []string `json:"repos"`
+	Commands   []string `json:"commands"`
+	DryRun     bool     `json:"dry_run,omitempty"`
+	Started    bool     `json:"started,omitempty"`
 }
 
 // InstallDrain sets up the unattended review drain: the prompt, a wrapper, a
@@ -42,7 +46,7 @@ type DrainInstall struct {
 // files, remember `loginctl enable-linger`, and get the environment right — and
 // a setup people get wrong is a setup that silently does nothing, which is the
 // failure this whole feature is about.
-func (s *Service) InstallDrain(ctx context.Context, agent string, repos []string, dryRun bool) (DrainInstall, error) {
+func (s *Service) InstallDrain(ctx context.Context, agent string, agentArgs []string, repos []string, dryRun bool) (DrainInstall, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return DrainInstall{}, err
@@ -104,6 +108,12 @@ func (s *Service) InstallDrain(ctx context.Context, agent string, repos []string
 			"systemctl --user enable --now crq-drain",
 		}
 	}
+	invocation, err := agentInvocation(agent, plan.Prompt, agentArgs)
+	if err != nil {
+		return plan, err
+	}
+	plan.Invocation = invocation
+
 	if dryRun {
 		return plan, nil
 	}
@@ -119,19 +129,12 @@ func (s *Service) InstallDrain(ctx context.Context, agent string, repos []string
 	// agent with a different CLI. Anything else needs its own wrapper script;
 	// `crq watch --dispatch -- <cmd>...` runs whatever argv it is given.
 	//
-	// --output-format stream-json --verbose makes the session write as it works.
-	// Without it the log stays empty until the session ENDS, so a session that
-	// hangs or dies mid-way leaves a zero-byte file — which is the same "output
-	// went nowhere" problem, just with a file to show for it.
 	wrapper := fmt.Sprintf(`#!/usr/bin/env bash
 # Installed by "crq drain install". Runs the review drain: crq decides, and a
 # fix session is started for each PR that needs one.
 set -uo pipefail
-exec %q watch --dispatch -- \
-  %q -p "$(cat %q)" \
-  --permission-mode bypassPermissions \
-  --output-format stream-json --verbose
-`, self, agent, plan.Prompt)
+exec %q watch --dispatch -- %s
+`, self, invocation)
 
 	for _, f := range []struct {
 		path string
@@ -335,4 +338,37 @@ StandardError=append:%s/drain.err
 [Install]
 WantedBy=default.target
 `, lines.String(), plan.Wrapper, logDir, logDir)
+}
+
+// agentInvocation renders the shell words that run one fix session.
+//
+// crq knows how to CALL the agents it ships support for, and nothing about which
+// model they should use — that belongs in the agent's own configuration or in
+// --agent-args, not baked into a queue. Both known agents are given the two
+// things a session needs: the prompt, and permission to act without a human
+// there to approve each step.
+func agentInvocation(agent, promptPath string, extra []string) (string, error) {
+	quoted := make([]string, 0, len(extra))
+	for _, a := range extra {
+		quoted = append(quoted, fmt.Sprintf("%q", a))
+	}
+	args := strings.Join(quoted, " ")
+	switch filepath.Base(agent) {
+	case "claude":
+		// stream-json so the session log fills as it works rather than only at
+		// the end, where a hung session would leave an empty file.
+		return fmt.Sprintf(`%q -p "$(cat %q)" --permission-mode bypassPermissions --output-format stream-json --verbose %s`,
+			agent, promptPath, args), nil
+	case "codex":
+		// exec is codex's non-interactive form; the prompt is its final
+		// positional argument. --skip-git-repo-check because the session runs in
+		// a detached worktree crq created.
+		return fmt.Sprintf(`%q exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox %s "$(cat %q)"`,
+			agent, args, promptPath), nil
+	default:
+		if len(extra) == 0 {
+			return "", fmt.Errorf("crq does not know how to invoke %q: pass --agent-args with the flags it needs (the prompt is at %s)", agent, promptPath)
+		}
+		return fmt.Sprintf(`%q %s "$(cat %q)"`, agent, args, promptPath), nil
+	}
 }

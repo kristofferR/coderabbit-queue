@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -16,14 +17,15 @@ func TestInstallDrainPlansWithoutWriting(t *testing.T) {
 	cfg.AllowRepos = map[string]bool{"owner/name": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	plan, err := svc.InstallDrain(context.Background(), "/bin/echo", nil, true)
+	agent := fakeAgent(t, "claude")
+	plan, err := svc.InstallDrain(context.Background(), agent, nil, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !plan.DryRun || plan.Started {
 		t.Errorf("plan = %+v, want a dry run that started nothing", plan)
 	}
-	if plan.Agent != "/bin/echo" {
+	if plan.Agent != agent {
 		t.Errorf("agent = %q, want the one asked for", plan.Agent)
 	}
 	if len(plan.Repos) != 1 || plan.Repos[0] != "owner/name" {
@@ -53,7 +55,7 @@ func TestInstallDrainRefusesWithoutAnAgent(t *testing.T) {
 	cfg.AllowRepos = map[string]bool{"owner/name": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	_, err := svc.InstallDrain(context.Background(), "definitely-not-a-real-binary", nil, true)
+	_, err := svc.InstallDrain(context.Background(), "definitely-not-a-real-binary", nil, nil, true)
 	if err == nil {
 		t.Skip("a binary by that name exists on this machine")
 	}
@@ -82,7 +84,7 @@ func TestDrainUnitCarriesTheConfigurationTheInstallRead(t *testing.T) {
 	cfg.CalibrationPR = 1
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	plan, err := svc.InstallDrain(context.Background(), "/bin/echo", nil, true)
+	plan, err := svc.InstallDrain(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +116,7 @@ func TestInstallDrainNamesALogDirectory(t *testing.T) {
 	cfg.AllowRepos = map[string]bool{"owner/name": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	plan, err := svc.InstallDrain(context.Background(), "/bin/echo", nil, true)
+	plan, err := svc.InstallDrain(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,4 +127,62 @@ func TestInstallDrainNamesALogDirectory(t *testing.T) {
 	if !strings.Contains(unit, plan.LogDir) {
 		t.Errorf("the unit does not write into the directory the install creates:\n%s", unit)
 	}
+}
+
+// crq knows how to CALL the agents it supports and nothing about which model
+// they should use — that belongs in the agent's own config or in --agent-args.
+// Getting this wrong is invisible until a session starts and dies on a flag the
+// binary does not have.
+func TestAgentInvocationPerAgent(t *testing.T) {
+	prompt := "/tmp/p.txt"
+
+	claude, err := agentInvocation("/usr/bin/claude", prompt, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"-p ", "bypassPermissions", "stream-json", prompt} {
+		if !strings.Contains(claude, want) {
+			t.Errorf("claude invocation %q missing %q", claude, want)
+		}
+	}
+
+	codex, err := agentInvocation("/usr/bin/codex", prompt, []string{"-c", "model_reasoning_effort=high"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "model_reasoning_effort=high", prompt} {
+		if !strings.Contains(codex, want) {
+			t.Errorf("codex invocation %q missing %q", codex, want)
+		}
+	}
+	// Codex takes the prompt as a positional; claude's -p is not its flag.
+	if strings.Contains(codex, "--permission-mode") || strings.Contains(codex, "-p ") {
+		t.Errorf("codex invocation carries claude's flags: %q", codex)
+	}
+
+	// No model anywhere: a queue does not choose the model.
+	for _, inv := range []string{claude, codex} {
+		if strings.Contains(inv, "--model") || strings.Contains(inv, "-m ") {
+			t.Errorf("invocation hardcodes a model: %q", inv)
+		}
+	}
+
+	// An unknown agent is refused rather than invoked with a guess.
+	if _, err := agentInvocation("/usr/bin/mystery", prompt, nil); err == nil {
+		t.Error("an unknown agent must be refused unless --agent-args says how to call it")
+	}
+	if got, err := agentInvocation("/usr/bin/mystery", prompt, []string{"--run"}); err != nil || !strings.Contains(got, "--run") {
+		t.Errorf("an unknown agent with explicit args should be honoured, got %q err=%v", got, err)
+	}
+}
+
+// fakeAgent is an executable with the given name, so an install test exercises
+// the real "does this agent exist and how is it called" path.
+func fakeAgent(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

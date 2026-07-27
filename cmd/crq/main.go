@@ -227,7 +227,8 @@ func run(ctx context.Context, args []string) int {
 	case "drain":
 		fs := flag.NewFlagSet("drain", flag.ContinueOnError)
 		fs.SetOutput(os.Stderr)
-		agent := fs.String("agent", "", "Claude-compatible fix agent to run (default: claude on PATH)")
+		agent := fs.String("agent", "", "fix agent to run: claude or codex (default: claude on PATH)")
+		agentArgs := fs.String("agent-args", "", "extra flags for the agent, e.g. model and reasoning effort")
 		dryRun := fs.Bool("dry-run", false, "print what would be written and run")
 		sub := ""
 		rest := args[1:]
@@ -245,7 +246,7 @@ func run(ctx context.Context, args []string) int {
 			fatal(err)
 			return 1
 		}
-		plan, ierr := service.InstallDrain(ctx, *agent, fs.Args(), *dryRun)
+		plan, ierr := service.InstallDrain(ctx, *agent, strings.Fields(*agentArgs), fs.Args(), *dryRun)
 		if ierr != nil {
 			fatal(ierr)
 			return 1
