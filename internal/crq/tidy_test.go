@@ -485,6 +485,61 @@ func TestTidyCountsACodexThumbsUpOnThePR(t *testing.T) {
 	}
 }
 
+// The third place observe() reads a Codex thumbs-up from is the command the
+// round fired on, which for a Codex-gated round is CodeRabbit's — not the
+// "@codex review" crq posted beside it. A round that completed from one of those
+// leaves its own trigger looking like nobody ever read it.
+func TestTidyCountsACodexThumbsUpOnTheFiredCommand(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = []CoBotConfig{{Login: dialect.CodexBotLogin, Name: "codex", Command: "@codex review"}}
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+	repo, pr := "o/r", 21
+
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "bbbbbbbb2"
+	gh.pulls[fakeKey(repo, pr)] = pull
+	gh.commits["bbbbbbbb2"] = commitAt(now.Add(-10 * time.Minute))
+
+	add := func(id int64, body string) {
+		c := ghapi.IssueComment{ID: id, Body: body, CreatedAt: now.Add(-2 * time.Hour)}
+		c.User.Login = "kristofferR"
+		gh.comments[fakeKey(repo, pr)] = append(gh.comments[fakeKey(repo, pr)], c)
+	}
+	add(100, cfg.ReviewCommand) // the round's own fire, adopted from a person
+	add(101, "@codex review")   // and the co-reviewer trigger crq posted beside it
+	// Codex's whole answer, left on the command that fired the round.
+	thumb := ghapi.Reaction{ID: 1, Content: "+1", CreatedAt: now.Add(-100 * time.Minute)}
+	thumb.User.Login = dialect.CodexBotLogin
+	gh.reactions[100] = []ghapi.Reaction{thumb}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		return completedRound(st, repo, pr, now, func(r *Round) error {
+			if err := r.Fire(100, now.Add(-2*time.Hour)); err != nil {
+				return err
+			}
+			r.SetCoCommand(dialect.CodexBotLogin, 101, now.Add(-2*time.Hour))
+			r.RecordPosted(dialect.CodexBotLogin, 101, now.Add(-2*time.Hour))
+			return nil
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.Tidy(ctx, repo, pr, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Deleted) != 1 || result.Deleted[0] != 101 {
+		t.Fatalf("deleted = %v (kept: %v), want the trigger the reaction on the fired command answered", result.Deleted, result.Kept)
+	}
+}
+
 // A pump that changed nothing must not buy a second observation of the PR it
 // just observed: a long review is polled for hours, and housekeeping that
 // re-reads it every poll spends the REST quota the queue runs on.

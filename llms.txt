@@ -211,8 +211,9 @@ crq tidy REPO PR [--dry-run]
 
 Only comments crq posted (never one it adopted — that comment is someone else's), only while the
 comment still reads as that one-line command (an edited one is someone's words), only from rounds
-that have progressed, only after the bot answered, only once the comment predates the current head
-(a command crq's own retry replaced is spent regardless, and an unreadable head keeps everything),
+that have progressed, only after the bot answered, only once the comment is too old for crq to adopt
+again — older than the head commit, or than a later force-push (a command crq's own retry replaced is
+spent regardless, and an unreadable head keeps everything),
 and never the bots' own comments. Deletions GitHub refuses are reported in `.failed[]`.
 
 Current feedback without triggering a review:

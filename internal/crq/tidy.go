@@ -124,7 +124,7 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 		Live:          posted.live,
 		Superseded:    posted.superseded,
 		AdoptableFrom: s.adoptableFrom(ctx, repo, pr, obs.eng.HeadAt),
-		AnsweredAt:    s.answered(ctx, repo, pr, obs, commands, posted.live),
+		AnsweredAt:    s.answered(ctx, repo, pr, obs, commands, posted),
 	}
 	stale := engine.StaleCommands(in)
 	if len(stale) == 0 {
@@ -174,12 +174,16 @@ type postedCommands struct {
 	// superseded are commands their own round replaced with a newer one, so
 	// they can never be adopted again whatever phase that round is in.
 	superseded map[int64]bool
+	// firedOn maps a posted trigger to the primary command its round fired on,
+	// when that is another comment. observe() reads a Codex thumbs-up from there
+	// too, so it is a reaction source tidying needs — never a delete candidate.
+	firedOn map[int64]int64
 }
 
 // collectPosted gathers the trigger comments crq posted for repo#pr, from the
 // open round and from every archived round of the same PR.
 func collectPosted(st State, repo string, pr int) postedCommands {
-	out := postedCommands{live: map[int64]bool{}, superseded: map[int64]bool{}}
+	out := postedCommands{live: map[int64]bool{}, superseded: map[int64]bool{}, firedOn: map[int64]int64{}}
 	collect := func(r Round, progressed bool) {
 		current := map[int64]bool{}
 		if r.CommandID != 0 {
@@ -198,6 +202,9 @@ func collectPosted(st State, repo string, pr int) postedCommands {
 		for _, p := range r.PostedCommands {
 			if !current[p.ID] {
 				out.superseded[p.ID] = true
+			}
+			if r.CommandID != 0 && r.CommandID != p.ID {
+				out.firedOn[p.ID] = r.CommandID
 			}
 			out.commands = append(out.commands, engine.CommandComment{
 				ID: p.ID, Bot: dialect.NormalizeBotName(p.Bot), CreatedAt: p.At.UTC(),
@@ -282,16 +289,18 @@ func (s *Service) adoptableFrom(ctx context.Context, repo string, pr int, headAt
 // only for a round that has fired, and tidying observes with no round at all, so
 // they are read here.
 //
-// Both of observe's sources count, because either completes the round: the
-// trigger comment itself, read once per candidate nothing else has answered, and
-// the PR — Codex answers a command in the PR description by reacting there —
-// read at most once per pass, and only when a candidate is still unanswered.
-func (s *Service) answered(ctx context.Context, repo string, pr int, obs observation, commands []engine.CommandComment, live map[int64]bool) map[string]time.Time {
+// All of observe's sources count, because each completes the round: the trigger
+// comment itself, read once per candidate nothing else has answered; the PR —
+// Codex answers a command in the PR description by reacting there — read at most
+// once per pass; and the primary command the candidate's own round fired on,
+// which is where observe() looks first. Each is read only while a candidate is
+// still unanswered, so the ordinary pass pays for none of them.
+func (s *Service) answered(ctx context.Context, repo string, pr int, obs observation, commands []engine.CommandComment, posted postedCommands) map[string]time.Time {
 	out := answeredAt(obs)
 	var onPR []ghapi.Reaction
 	readPR := false
 	for _, cmd := range commands {
-		if live[cmd.ID] || !dialect.IsCodexBot(cmd.Bot) || answeredSince(out, cmd) {
+		if posted.live[cmd.ID] || !dialect.IsCodexBot(cmd.Bot) || answeredSince(out, cmd) {
 			continue
 		}
 		reactions, err := s.gh.ListCommentReactions(ctx, repo, cmd.ID)
@@ -317,6 +326,22 @@ func (s *Service) answered(ctx context.Context, repo string, pr int, obs observa
 			}
 		}
 		noteThumbsUp(out, cmd, onPR)
+		if answeredSince(out, cmd) {
+			continue
+		}
+		// Last, the command this trigger's own round fired on. A round gated on
+		// Codex completes on a thumbs-up left there too, and a round that ended
+		// that way leaves its trigger looking like nobody ever read it.
+		if fired := posted.firedOn[cmd.ID]; fired != 0 {
+			reactions, err := s.gh.ListCommentReactions(ctx, repo, fired)
+			if err != nil {
+				if s.log != nil {
+					s.log.Printf("tidy: %s reactions on comment %d: %v", repo, fired, err)
+				}
+				continue
+			}
+			noteThumbsUp(out, cmd, reactions)
+		}
 	}
 	return out
 }

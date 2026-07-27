@@ -217,7 +217,8 @@ As each round progresses the daemon also **deletes crq's own spent trigger comme
 `@coderabbitai review` / `@codex review` one-liners it posted, which otherwise bury the conversation a
 human came to read. It removes a comment only when crq wrote it (never one it adopted from a person,
 never a bot's own comment, and never one edited into something else), only from a round that has moved
-on, only after the bot answered it, and only once it predates the current head. Set `CRQ_TIDY=0` to
+on, only after the bot answered it, and only once it is too old to adopt again (older than the head
+commit, or than a later force-push). Set `CRQ_TIDY=0` to
 keep every comment, or run a pass by hand with `crq tidy <repo> <pr>` (`--dry-run` reports what it
 would remove).
 
