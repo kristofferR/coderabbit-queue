@@ -25,6 +25,7 @@ type DrainInstall struct {
 	Prompt   string   `json:"prompt"`
 	Wrapper  string   `json:"wrapper"`
 	Unit     string   `json:"unit"`
+	LogDir   string   `json:"log_dir"`
 	Agent    string   `json:"agent"`
 	Repos    []string `json:"repos"`
 	Commands []string `json:"commands"`
@@ -66,8 +67,14 @@ func (s *Service) InstallDrain(ctx context.Context, agent string, repos []string
 	if err != nil {
 		return DrainInstall{}, err
 	}
+	// The service writes its output here. systemd refuses to start a unit whose
+	// StandardOutput path cannot be opened (209/STDOUT), so the directory has to
+	// exist before the unit does — a service that will not start is exactly the
+	// silent nothing this command exists to prevent.
+	logDir := filepath.Join(home, ".local", "state", "crq")
 	plan := DrainInstall{
 		Platform: runtime.GOOS,
+		LogDir:   logDir,
 		Prompt:   filepath.Join(home, ".local", "share", "crq", "fix-prompt.txt"),
 		Wrapper:  filepath.Join(home, ".local", "bin", "crq-drain"),
 		Agent:    agent,
@@ -91,6 +98,9 @@ func (s *Service) InstallDrain(ctx context.Context, agent string, repos []string
 	}
 	if dryRun {
 		return plan, nil
+	}
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return plan, err
 	}
 
 	wrapper := fmt.Sprintf(`#!/usr/bin/env bash
@@ -146,7 +156,7 @@ func (s *Service) drainUnit(plan DrainInstall) string {
 		"CRQ_DISPATCH_MAX_ATTEMPTS": fmt.Sprint(s.cfg.DispatchMaxAttempts),
 		"CRQ_DISPATCH_CONCURRENCY":  fmt.Sprint(s.cfg.DispatchConcurrency),
 	}
-	logDir := filepath.Join(os.Getenv("HOME"), ".local", "state", "crq")
+	logDir := plan.LogDir
 	if plan.Platform == "darwin" {
 		var entries strings.Builder
 		for k, v := range env {

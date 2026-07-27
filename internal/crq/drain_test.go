@@ -28,7 +28,7 @@ func TestInstallDrainPlansWithoutWriting(t *testing.T) {
 	if len(plan.Repos) != 1 || plan.Repos[0] != "owner/name" {
 		t.Errorf("repos = %v, want the configured fleet", plan.Repos)
 	}
-	for _, path := range []string{plan.Prompt, plan.Wrapper, plan.Unit} {
+	for _, path := range []string{plan.Prompt, plan.Wrapper, plan.Unit, plan.LogDir} {
 		if path == "" {
 			t.Fatalf("plan = %+v, want every path named so --dry-run is reviewable", plan)
 		}
@@ -64,5 +64,26 @@ func TestEmbeddedPromptCarriesTheRulesThatCostUs(t *testing.T) {
 		if !strings.Contains(fixPrompt, want) {
 			t.Errorf("the embedded fix prompt no longer mentions %q", want)
 		}
+	}
+}
+
+// systemd refuses to start a unit whose StandardOutput path cannot be opened
+// (209/STDOUT), so a log directory that does not exist is a service that never
+// runs — the silent nothing this command exists to prevent.
+func TestInstallDrainNamesALogDirectory(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/name": true}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	plan, err := svc.InstallDrain(context.Background(), "/bin/echo", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.LogDir == "" {
+		t.Fatal("no log directory planned; the unit would reference a path nothing creates")
+	}
+	unit := svc.drainUnit(plan)
+	if !strings.Contains(unit, plan.LogDir) {
+		t.Errorf("the unit does not write into the directory the install creates:\n%s", unit)
 	}
 }
