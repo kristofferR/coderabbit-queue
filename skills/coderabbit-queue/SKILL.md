@@ -182,7 +182,9 @@ crq hold                                   # what is held
 ```
 
 One write, honoured by every path that picks a round to fire, so there is no window in which a daemon
-fires anyway. It does not cancel a review already in flight; that one is bought.
+fires anyway. Creating a hold requires a live autoreview daemon that advertises hold support, so an
+older standby cannot acquire the fleet lease while that daemon maintains it. It does not cancel a
+review already in flight; that one is bought.
 
 ## Fleet Auto-Review
 

@@ -14,7 +14,13 @@ import (
 func (f *replayFixture) leader(until time.Time) {
 	f.t.Helper()
 	if _, err := f.svc.store.Update(f.ctx, func(st *State) error {
-		st.Leader = &LeaderLease{Owner: "daemon", Token: "t", ExpiresAt: until, UpdatedAt: f.clk.now()}
+		st.Leader = &LeaderLease{
+			Owner:        "daemon",
+			Token:        "t",
+			ExpiresAt:    until,
+			UpdatedAt:    f.clk.now(),
+			Capabilities: []string{leaderCapabilityHolds},
+		}
 		return nil
 	}); err != nil {
 		f.t.Fatalf("set leader: %v", err)
@@ -258,6 +264,7 @@ func TestWaitParksAnAdministrativelyHeldPR(t *testing.T) {
 	f.openPull(repo, pr, head)
 	f.setCommitDate(head, base.Add(-time.Minute))
 	f.setLocalWork(false, "")
+	f.leader(f.clk.now().Add(time.Hour))
 	if _, err := f.svc.Hold(f.ctx, repo, pr, "waiting on a decision"); err != nil {
 		t.Fatal(err)
 	}

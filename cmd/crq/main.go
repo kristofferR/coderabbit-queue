@@ -241,7 +241,7 @@ func run(ctx context.Context, args []string) int {
 		rest, reason, ok := parseReasonArgs(args[1:])
 		// Exactly two: `crq hold owner/repo 12 13` is a malformed administrative
 		// command, and silently holding 12 is the wrong answer to it.
-		if !ok || len(rest) != 2 {
+		if !ok || len(rest) != 2 || (args[0] == "unhold" && hasReasonArg(args[1:])) {
 			fatal(errors.New(`usage: crq hold <repo> <pr> --reason "<why>" | crq unhold <repo> <pr>`))
 			return 1
 		}
@@ -570,7 +570,8 @@ already looks, so there is no window between the halves.
 
 A hold does not cancel a review already in flight — that one is bought, and its
 findings are still worth having. It stops the next one. The reason is required:
-it is the note to whoever finds the PR stopped.
+it is the note to whoever finds the PR stopped. A live autoreview daemon that
+advertises hold support is required, so its lease keeps an older standby out.
 `)
 	case "autoreview", "auto":
 		fmt.Print(`crq autoreview [--once] [--no-incremental]
@@ -779,6 +780,15 @@ func parseReasonArgs(args []string) (rest []string, reason string, ok bool) {
 		}
 	}
 	return rest, reason, true
+}
+
+func hasReasonArg(args []string) bool {
+	for _, arg := range args {
+		if arg == "--reason" || strings.HasPrefix(arg, "--reason=") {
+			return true
+		}
+	}
+	return false
 }
 
 func repoPR(args []string) (string, int, bool) {

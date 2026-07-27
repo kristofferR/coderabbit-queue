@@ -120,10 +120,10 @@ func (s *Service) Hold(ctx context.Context, repo string, pr int, reason string) 
 	now := s.clock().UTC()
 	state, err := s.store.Update(ctx, func(st *State) error {
 		// An older daemon preserves Holds as unknown JSON but cannot enforce it.
-		// Refuse success while one owns the fleet lease; once a capable leader
-		// owns the lease, CAS keeps the old daemon from firing during rollout.
-		if st.Leader != nil && st.Leader.ExpiresAt.After(now) && !st.Leader.HasCapability(leaderCapabilityHolds) {
-			return errors.New("the active autoreview leader does not support administrative holds; upgrade it or wait for its lease to expire")
+		// Require a capable live leader: without one, an older standby could
+		// acquire the expired/empty lease immediately after this write.
+		if st.Leader == nil || !st.Leader.ExpiresAt.After(now) || !st.Leader.HasCapability(leaderCapabilityHolds) {
+			return errors.New("administrative holds require a live hold-capable autoreview leader; start or upgrade the daemon and try again")
 		}
 		st.Hold(repo, pr, reason, s.cfg.Host, now)
 		return nil
@@ -253,6 +253,9 @@ func (s *Service) enqueueBatch(ctx context.Context, items []queueCandidate) erro
 		added := 0
 		for _, it := range items {
 			repo := NormalizeRepo(it.Repo)
+			if _, held := st.HeldPR(repo, it.PR); held {
+				continue
+			}
 			if r := st.Round(repo, it.PR); r != nil {
 				if r.Head == it.Head {
 					continue
@@ -1535,6 +1538,9 @@ func (s *Service) selfHealCoReviewers(ctx context.Context, round Round, obs engi
 		updated, err := s.store.Update(ctx, func(st *State) error {
 			r := st.Round(round.Repo, round.PR)
 			if !sameRound(r, round) || r.Co(login).CommandID != 0 {
+				return ErrNoChange
+			}
+			if _, held := st.HeldPR(round.Repo, round.PR); held {
 				return ErrNoChange
 			}
 			if c := r.Co(login); c.ClaimedAt != nil && now.Sub(c.ClaimedAt.UTC()) < triggerClaimTTL {

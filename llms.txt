@@ -210,6 +210,8 @@ crq unhold REPO PR
 crq hold                      # list
 ```
 
+A live autoreview daemon that advertises hold support is required when creating a hold.
+
 Current feedback without triggering a review:
 
 ```bash

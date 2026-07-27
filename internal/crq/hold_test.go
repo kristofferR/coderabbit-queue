@@ -10,6 +10,22 @@ import (
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
+func setHoldCapableLeader(t *testing.T, ctx context.Context, store StateStore, now time.Time) {
+	t.Helper()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Leader = &LeaderLease{
+			Owner:        "current-daemon",
+			Token:        "leader",
+			ExpiresAt:    now.Add(time.Hour),
+			UpdatedAt:    now,
+			Capabilities: []string{leaderCapabilityHolds},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // The race crq hold exists to close is between selecting a round and writing the
 // reservation. Checking the hold only at selection leaves exactly that window
 // open, so the command could return successfully while a daemon fired anyway.
@@ -29,6 +45,7 @@ func TestHoldIsRecheckedWhenTheRoundIsReserved(t *testing.T) {
 	svc := NewService(cfg, gh, store, nil)
 	now := time.Now().UTC()
 	seedRound(t, store, cfg, repo, pr, head, PhaseQueued, now, 0)
+	setHoldCapableLeader(t, ctx, store, now)
 
 	// The hold lands after the round was chosen, which is the whole point.
 	round := func() Round {
@@ -97,6 +114,7 @@ func TestHoldIsRecheckedByQuotaFreeFirePaths(t *testing.T) {
 			svc.now = func() time.Time { return now }
 			repo, pr, head := "o/r", 4, "bbbbbbbb1"
 			seedRound(t, store, cfg, repo, pr, head, PhaseQueued, now.Add(-time.Minute), 0)
+			setHoldCapableLeader(t, ctx, store, now)
 
 			st, _, err := store.Load(ctx)
 			if err != nil {
@@ -124,6 +142,54 @@ func TestHoldIsRecheckedByQuotaFreeFirePaths(t *testing.T) {
 	}
 }
 
+func TestHoldStopsInflightCoReviewerSelfHeal(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	cfg.RequiredBots = append(cfg.RequiredBots, dialect.CodexBotLogin)
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+	repo, pr, head := "o/r", 6, "cccccccc1"
+	seedRound(t, store, cfg, repo, pr, head, PhaseQueued, now.Add(-time.Minute), 0)
+	setHoldCapableLeader(t, ctx, store, now)
+	if _, err := store.Update(ctx, func(st *State) error {
+		r := st.Round(repo, pr)
+		if err := r.Reserve("token", cfg.Host, now.Add(-time.Minute)); err != nil {
+			return err
+		}
+		if err := r.Fire(123, now.Add(-time.Minute)); err != nil {
+			return err
+		}
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := *st.Round(repo, pr)
+	if _, err := svc.Hold(ctx, repo, pr, "waiting on a decision"); err != nil {
+		t.Fatal(err)
+	}
+
+	svc.selfHealCoReviewers(ctx, round, engine.Observation{Open: true, Head: head}, now)
+	if len(gh.posted) != 0 {
+		t.Fatalf("held in-flight round received a co-review trigger: %v", gh.posted)
+	}
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim := st.Round(repo, pr).Co(dialect.CodexBotLogin).ClaimedAt; claim != nil {
+		t.Fatalf("held in-flight round acquired a co-review claim: %s", claim)
+	}
+}
+
 // A rolling deployment can leave an older daemon holding the leader lease.
 // Such a daemon preserves Holds in JSON but does not enforce them, so the
 // command must not claim success until a capable leader owns the fleet.
@@ -135,6 +201,9 @@ func TestHoldRequiresACapableLiveLeader(t *testing.T) {
 	svc := NewService(cfg, newFakeGitHub(), store, nil)
 	svc.now = func() time.Time { return now }
 
+	if _, err := svc.Hold(ctx, "o/r", 5, "waiting on a decision"); err == nil {
+		t.Fatal("hold succeeded without a live capable daemon")
+	}
 	if _, err := store.Update(ctx, func(st *State) error {
 		st.Leader = &LeaderLease{
 			Owner:     "old-daemon",

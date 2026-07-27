@@ -23,49 +23,102 @@ func (c Config) SkipsReview(body string) bool {
 	return strings.Contains(stripCode(body), marker)
 }
 
-// stripCode removes fenced blocks and inline code spans from Markdown.
-//
-// Fences first: a fence may contain unbalanced backticks that would otherwise
-// make the span pass read the rest of the document as code. Neither pass tries
-// to be a Markdown parser — anything it gets wrong only means a marker is read
-// where GitHub renders one, which is the reading that was already happening.
+// stripCode removes fenced blocks and inline code spans from Markdown. Delimiter
+// runs are significant in both forms: a four-backtick fence may contain triple
+// backticks, and a double-backtick span may contain a single literal backtick.
 func stripCode(body string) string {
-	var out strings.Builder
-	rest := body
-	for {
-		start := strings.Index(rest, "```")
-		if start < 0 {
-			break
-		}
-		out.WriteString(rest[:start])
-		after := rest[start+3:]
-		end := strings.Index(after, "```")
-		if end < 0 {
-			// An unclosed fence runs to the end of the body, the way GitHub
-			// renders it.
-			return out.String()
-		}
-		rest = after[end+3:]
-	}
-	out.WriteString(rest)
+	return stripCodeSpans(stripFencedCode(body))
+}
 
-	text := out.String()
-	var spanned strings.Builder
-	for {
-		start := strings.Index(text, "`")
-		if start < 0 {
-			break
+func stripFencedCode(body string) string {
+	var out strings.Builder
+	var fence byte
+	fenceLen := 0
+	for _, line := range strings.SplitAfter(body, "\n") {
+		delimiter, run, tail, ok := markdownFence(line)
+		if fence == 0 {
+			if ok && (delimiter != '`' || !strings.Contains(tail, "`")) {
+				fence, fenceLen = delimiter, run
+				if strings.HasSuffix(line, "\n") {
+					out.WriteByte('\n')
+				}
+				continue
+			}
+			out.WriteString(line)
+			continue
 		}
-		spanned.WriteString(text[:start])
-		after := text[start+1:]
-		end := strings.Index(after, "`")
-		if end < 0 {
-			// An unmatched backtick is a literal one, not the start of a span.
-			spanned.WriteString(after)
-			return spanned.String()
+		if ok && delimiter == fence && run >= fenceLen && strings.TrimSpace(tail) == "" {
+			fence, fenceLen = 0, 0
 		}
-		text = after[end+1:]
+		if strings.HasSuffix(line, "\n") {
+			out.WriteByte('\n')
+		}
 	}
-	spanned.WriteString(text)
-	return spanned.String()
+	return out.String()
+}
+
+// markdownFence recognizes a CommonMark fence delimiter: at most three leading
+// spaces followed by a run of at least three backticks or tildes.
+func markdownFence(line string) (delimiter byte, run int, tail string, ok bool) {
+	line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+	start := 0
+	for start < len(line) && start < 3 && line[start] == ' ' {
+		start++
+	}
+	if start >= len(line) || (line[start] != '`' && line[start] != '~') {
+		return 0, 0, "", false
+	}
+	delimiter = line[start]
+	end := start
+	for end < len(line) && line[end] == delimiter {
+		end++
+	}
+	if end-start < 3 {
+		return 0, 0, "", false
+	}
+	return delimiter, end - start, line[end:], true
+}
+
+func stripCodeSpans(text string) string {
+	var out strings.Builder
+	for i := 0; i < len(text); {
+		if text[i] != '`' {
+			out.WriteByte(text[i])
+			i++
+			continue
+		}
+		runEnd := i
+		for runEnd < len(text) && text[runEnd] == '`' {
+			runEnd++
+		}
+		run := runEnd - i
+		closeEnd := matchingBacktickRun(text, runEnd, run)
+		if closeEnd < 0 {
+			out.WriteString(text[i:runEnd])
+			i = runEnd
+			continue
+		}
+		// Keep prose on either side from being joined into a false marker.
+		out.WriteByte(' ')
+		i = closeEnd
+	}
+	return out.String()
+}
+
+func matchingBacktickRun(text string, start, want int) int {
+	for i := start; i < len(text); {
+		if text[i] != '`' {
+			i++
+			continue
+		}
+		end := i
+		for end < len(text) && text[end] == '`' {
+			end++
+		}
+		if end-i == want {
+			return end
+		}
+		i = end
+	}
+	return -1
 }

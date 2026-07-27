@@ -622,6 +622,38 @@ func TestEnqueueBatchAppendsOncePerPR(t *testing.T) {
 	}
 }
 
+func TestEnqueueBatchSkipsHeldPRsUnderCAS(t *testing.T) {
+	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, Host: "h"}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("o/held", 1, "waiting on a decision", "operator", now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	items := []queueCandidate{
+		{Repo: "o/held", PR: 1, Head: "aaaaaaaa1"},
+		{Repo: "o/ready", PR: 2, Head: "bbbbbbbb2"},
+	}
+	if err := svc.enqueueBatch(ctx, items); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Round("o/held", 1); got != nil {
+		t.Fatalf("held PR acquired a hidden queue position: %+v", got)
+	}
+	if got := st.Round("o/ready", 2); got == nil || got.Seq != 1 {
+		t.Fatalf("ready PR should receive the first queue position, got %+v", got)
+	}
+}
+
 func TestLatestCalibrationReplyToleratesBotSuffix(t *testing.T) {
 	cfg := Config{Bot: "coderabbitai", GateRepo: "o/gate", CalibrationPR: 1, CalibrationMarker: "auto-generated reply by CodeRabbit"}
 	gh := newFakeGitHub()

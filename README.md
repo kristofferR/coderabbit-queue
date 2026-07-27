@@ -408,7 +408,9 @@ feedback. crq keys resolution off GitHub's own thread state, so a finding keeps 
 
 Use `crq hold` for an administrative pause: the hold survives autoreview passes and prevents both
 primary and co-reviewer triggers until `crq unhold`. `crq cancel` only abandons the current round,
-so fleet autoreview may discover the still-open PR and enqueue it again.
+so fleet autoreview may discover the still-open PR and enqueue it again. Creating a hold requires a
+live autoreview daemon that advertises hold support; this keeps an older standby from acquiring the
+fleet lease while the active daemon maintains it.
 
 <details>
 <summary>Feedback JSON shape</summary>
