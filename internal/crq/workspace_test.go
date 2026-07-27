@@ -3,6 +3,7 @@ package crq
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -506,4 +507,76 @@ func TestCheckoutSweepsAnotherPullRequestsAbandonedWorktree(t *testing.T) {
 	if _, err := os.Stat(live.Dir); err != nil {
 		t.Errorf("a live worktree was swept: %v", err)
 	}
+}
+
+func TestMirrorReturnsNonContentionFetchFailures(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(t.TempDir(), "missing-origin")
+	if _, err := gitDir(ctx, mirror, "config", "remote.origin.url", missing); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Mirror(ctx, repo); err == nil {
+		t.Fatal("an unavailable remote was hidden by the existing mirror")
+	} else if isRefLockContention(err) {
+		t.Fatalf("an unavailable remote was misclassified as ref-lock contention: %v", err)
+	}
+}
+
+func TestCredentialHelperAnswersOnlyForGitHub(t *testing.T) {
+	ask := func(request string) string {
+		t.Helper()
+		cmd := exec.Command("sh", "-c", strings.TrimPrefix(credentialHelper, "!")+" get")
+		cmd.Stdin = strings.NewReader(request)
+		cmd.Env = append(os.Environ(), gitTokenEnv+"=ghp_secret_value")
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("credential helper failed on %q: %v", request, err)
+		}
+		return string(out)
+	}
+
+	if got := ask("protocol=https\nhost=github.com\n\n"); !strings.Contains(got, "password=ghp_secret_value") {
+		t.Errorf("helper answered github.com with %q, want the token", got)
+	}
+	for _, request := range []string{
+		"protocol=https\nhost=evil.example\n\n",
+		"protocol=https\nhost=github.com.evil.example\n\n",
+		"protocol=http\nhost=github.com\n\n",
+	} {
+		if got := ask(request); strings.Contains(got, "ghp_secret_value") {
+			t.Errorf("helper leaked the token to %q: %q", request, got)
+		}
+	}
+}
+
+func TestALiveCheckoutKeepsItselfFromBeingPruned(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Now().Add(-2 * staleWorkAge)
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if since := time.Since(newestModTime(dir)); since < staleWorkAge {
+		t.Fatalf("checkout reads as %s old, want it stale before the heartbeat", since)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go keepAlive(ctx, dir, time.Millisecond)
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		if time.Since(newestModTime(dir)) < time.Minute {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Error("an idle checkout still reads as abandoned while its owner is alive")
 }

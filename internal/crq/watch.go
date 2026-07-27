@@ -141,6 +141,11 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 
 func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispatchPool, emit func(WatchEvent) error) error {
 	var failures []string
+	type pendingEvent struct {
+		event  WatchEvent
+		result <-chan dispatchResult
+	}
+	var pending []pendingEvent
 	repos := opts.Repos
 	if len(repos) == 0 {
 		for repo := range s.cfg.AllowRepos {
@@ -249,7 +254,15 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			if opts.Dispatch && report.Action == string(engine.ActionFix) {
 				// Claimed here, run in the pool: the pass moves on to the next PR
 				// while this session runs.
-				event.Dispatched, event.Skipped = s.startDispatch(ctx, opts, pool, report)
+				var result <-chan dispatchResult
+				event.Dispatched, event.Skipped, result = s.startDispatchResult(ctx, opts, pool, report)
+				if opts.Once {
+					pending = append(pending, pendingEvent{event: event, result: result})
+					continue
+				}
+			} else if opts.Once {
+				pending = append(pending, pendingEvent{event: event})
+				continue
 			}
 			if emit != nil {
 				// A consumer that has gone away (a closed pipe, a full
@@ -257,6 +270,30 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				// firing reviews and starting sessions. Stop instead.
 				if err := emit(event); err != nil {
 					return fmt.Errorf("emitting %s#%d: %w", repo, pull.Number, err)
+				}
+			}
+		}
+	}
+	if opts.Once {
+		// A one-shot invocation is a cron/CI result, not a long-lived observer.
+		// Wait for every session it started and make both its events and its exit
+		// status describe the outcome, rather than only the successful handoff to
+		// a goroutine.
+		pool.wait()
+		for _, item := range pending {
+			event := item.event
+			if item.result != nil {
+				result := <-item.result
+				if !result.ok {
+					event.Dispatched = false
+					event.Skipped = result.reason
+					failures = append(failures,
+						fmt.Sprintf("%s#%d: %s", event.Repo, event.PR, result.reason))
+				}
+			}
+			if emit != nil {
+				if err := emit(event); err != nil {
+					return fmt.Errorf("emitting %s#%d: %w", event.Repo, event.PR, err)
 				}
 			}
 		}
@@ -303,14 +340,27 @@ func (s *Service) noteDispatchHealth(ctx context.Context, started bool, reason s
 // another watcher holds, or one that has spent its attempts, has to come back as
 // skipped rather than as work in progress.
 func (s *Service) startDispatch(ctx context.Context, opts WatchOptions, pool *dispatchPool, report NextReport) (bool, string) {
+	ok, why, _ := s.startDispatchResult(ctx, opts, pool, report)
+	return ok, why
+}
+
+// startDispatchResult is startDispatch plus the eventual session result. The
+// buffered channel lets ordinary continuous watches fire and forget, while a
+// one-shot watch can wait for an honest exit status and event.
+func (s *Service) startDispatchResult(
+	ctx context.Context,
+	opts WatchOptions,
+	pool *dispatchPool,
+	report NextReport,
+) (bool, string, <-chan dispatchResult) {
 	// DryRun means crq writes nothing and posts nothing. Claiming shared state,
 	// running a code-writing command, and recording dispatch health are all
 	// writes, so this is checked before any of them.
 	if s.cfg.DryRun {
-		return false, "dry run: would dispatch a fix session"
+		return false, "dry run: would dispatch a fix session", nil
 	}
 	if ok, why := pool.acquire(); !ok {
-		return false, why
+		return false, why, nil
 	}
 	token := randomToken()
 	claimed, why, byDesign := s.claimDispatch(ctx, report, token, opts.MaxAttempts)
@@ -327,19 +377,29 @@ func (s *Service) startDispatch(ctx context.Context, opts WatchOptions, pool *di
 				s.log.Printf("watch: %s#%d not fixed: %s", report.Repo, report.PR, why)
 			}
 		}
-		return false, why
+		return false, why, nil
 	}
-	pool.run(func() { s.runDispatch(ctx, opts, report, token) })
-	return true, ""
+	result := make(chan dispatchResult, 1)
+	pool.run(func() {
+		result <- s.runDispatch(ctx, opts, report, token)
+		close(result)
+	})
+	return true, "", result
+}
+
+type dispatchResult struct {
+	ok     bool
+	reason string
 }
 
 // runDispatch runs one claimed dispatch and records whether a session started. It
 // runs in the pool, off the pass, so a long session delays nothing else.
-func (s *Service) runDispatch(ctx context.Context, opts WatchOptions, report NextReport, token string) {
+func (s *Service) runDispatch(ctx context.Context, opts WatchOptions, report NextReport, token string) dispatchResult {
 	ok, why := s.dispatch(ctx, opts, report, token)
 	if !ok && s.log != nil {
 		s.log.Printf("watch: %s#%d not fixed: %s", report.Repo, report.PR, why)
 	}
+	return dispatchResult{ok: ok, reason: why}
 }
 
 // dispatch checks the claimed round's head out and runs the fix session.

@@ -200,6 +200,55 @@ func TestWatchClaimsCarriedFeedbackBeforeAdvancingTheQueue(t *testing.T) {
 	}
 }
 
+func TestOneShotWatchReportsDispatchFailure(t *testing.T) {
+	base := t.TempDir()
+	repo, pr := "owner/thing", 13
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{repo: true}
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", pr, sha
+	gh.pulls[fakeKey(repo, pr)] = pull
+	created := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	gh.graphQL = func(query string, _ map[string]any, out any) error {
+		if strings.Contains(query, "reviewThreads") {
+			payload := `{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},` +
+				`"nodes":[{"id":"THREAD1","isResolved":false,"isOutdated":false,"path":"a.go","line":1,` +
+				`"comments":{"nodes":[{"databaseId":55,"body":"Finding","url":"http://x","path":"a.go","line":1,` +
+				`"createdAt":"` + created + `","author":{"login":"coderabbitai[bot]"},"commit":{"oid":"oldhead123456"}}]}}]}}}}`
+			return json.Unmarshal([]byte(payload), out)
+		}
+		return noForcePush(query, nil, out)
+	}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+	script := filepath.Join(t.TempDir(), "session.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 17\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var events []WatchEvent
+	err := svc.Watch(context.Background(), WatchOptions{
+		Repos: []string{repo}, Once: true, Dispatch: true,
+		Command: []string{script}, MaxAttempts: 3,
+	}, func(event WatchEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "fix session failed") {
+		t.Fatalf("Watch error = %v, want the asynchronous dispatch failure", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %#v, want the PR's actual dispatch result", events)
+	}
+	if events[0].Dispatched || !strings.Contains(events[0].Skipped, "fix session failed") {
+		t.Errorf("event = %#v, want dispatched=false with the session failure", events[0])
+	}
+}
+
 // One repository renamed, deleted, or unreadable by this token used to abort the
 // whole pass. The service restarts into the same list and hits it again, so every
 // healthy repository after it gets no events and no fix sessions — indefinitely.

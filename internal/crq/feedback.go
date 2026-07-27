@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -99,8 +100,8 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// away, and the next fire went out inside a window the bot had already
 	// stated. It is the one write on this path, it happens once per notice rather
 	// than once per poll, and all it can do is stop a review.
-	if _, rerr := s.recordObservedBlock(ctx, obs, st, now); rerr != nil && s.log != nil {
-		s.log.Printf("recording the account block observed on %s: %v", QueueKey(repo, pr), rerr)
+	if _, err := s.recordObservedBlock(ctx, obs, st, now); err != nil {
+		return FeedbackReport{}, fmt.Errorf("recording the account block observed on %s: %w", QueueKey(repo, pr), err)
 	}
 	pull := obs.pull
 	head := ""

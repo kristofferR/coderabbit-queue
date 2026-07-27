@@ -58,12 +58,13 @@ func DefaultWorkspaceRoot() (string, error) {
 // the mirror, so dispatch puts this in the session's environment.
 const gitTokenEnv = "CRQ_GIT_TOKEN"
 
-// credentialHelper answers git's credential query from the environment.
+// credentialHelper answers git's credential query from the environment, but
+// only for HTTPS requests to github.com.
 //
-// It stays silent when the variable is unset, so recording it in a mirror's
-// config cannot answer with an empty password for a host whose own helper would
-// have supplied a real one.
-const credentialHelper = `!f() { test "$1" = get && test -n "$` + gitTokenEnv + `" && printf 'username=x-access-token\npassword=%s\n' "$` + gitTokenEnv + `"; }; f`
+// Repository content can select other endpoints through submodules or LFS. The
+// helper therefore reads the protocol and host Git supplies on stdin and stays
+// silent for every other destination, as well as when the token is unset.
+const credentialHelper = `!f() { p=; h=; while IFS= read -r l; do case "$l" in protocol=*) p=${l#protocol=} ;; host=*) h=${l#host=} ;; esac; done; if test "$1" = get && test "$p" = https && test "$h" = github.com && test -n "$` + gitTokenEnv + `"; then printf 'username=x-access-token\npassword=%s\n' "$` + gitTokenEnv + `"; fi; }; f`
 
 // git runs a git command for this workspace, injecting credentials when a token
 // is configured.
@@ -158,17 +159,20 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 			if _, ferr = w.git(ctx, path, "fetch", "--prune", "origin"); ferr == nil {
 				return path, nil
 			}
+			// Only contention is somebody else's success. Expired
+			// credentials, an unreachable remote, or a corrupt mirror must
+			// reach the caller instead of handing it stale refs.
+			if !isRefLockContention(ferr) {
+				return "", fmt.Errorf("fetching %s: %w", repo, ferr)
+			}
 			if err := sleepCtx(ctx, time.Duration(attempt+1)*200*time.Millisecond); err != nil {
 				return "", err
 			}
 		}
-		// Still contended. The mirror exists and another worker is updating it,
-		// so returning an error here fails a dispatch over somebody else's
-		// success — the case concurrent dispatch is supposed to survive.
-		if _, statErr := os.Stat(filepath.Join(path, "HEAD")); statErr == nil {
-			return path, nil
-		}
-		return path, fmt.Errorf("fetching %s: %w", repo, ferr)
+		// Still contended. Another worker is updating the existing mirror, so
+		// failing this dispatch would reject the concurrency this retry
+		// exists to support.
+		return path, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
@@ -218,6 +222,19 @@ func (w Workspace) remoteURL(repo string) string {
 // worktrees: a session's branch there must survive a fetch, and a branch checked
 // out in a worktree makes any fetch that would update it fail outright.
 const originRefspec = "+refs/heads/*:refs/remotes/origin/*"
+
+// isRefLockContention reports whether a fetch failed because another process
+// held Git's ref locks. It is the only fetch error another worker can resolve
+// for us, so it is the only one Mirror retries and eventually tolerates.
+func isRefLockContention(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "cannot lock ref") ||
+		(strings.Contains(msg, ".lock") &&
+			(strings.Contains(msg, "file exists") || strings.Contains(msg, "another git process")))
+}
 
 // configureOrigin makes the mirror behave like an ordinary remote, on every call
 // rather than only at clone time: a mirror created before any of these rules
@@ -277,6 +294,9 @@ type Checkout struct {
 	// auth is the workspace's credential, so a git command run IN this checkout
 	// reaches the remote the same way the fetch that created it did.
 	auth string
+	// stop ends the filesystem heartbeat that keeps a live checkout from being
+	// mistaken for abandoned.
+	stop context.CancelFunc
 }
 
 // Checkout creates a worktree of repo at sha, on a detached HEAD.
@@ -326,7 +346,12 @@ func (w Workspace) Checkout(ctx context.Context, repo string, pr int, sha string
 	if _, err := w.git(ctx, mirror, "worktree", "add", "--detach", dir, sha); err != nil {
 		return Checkout{}, fmt.Errorf("checking out %s@%s: %w", repo, shortSHA(sha), err)
 	}
-	return Checkout{Dir: dir, Repo: NormalizeRepo(repo), PR: pr, mirror: mirror, token: token, auth: w.Token}, nil
+	alive, stop := context.WithCancel(ctx)
+	go keepAlive(alive, dir, heartbeatInterval)
+	return Checkout{
+		Dir: dir, Repo: NormalizeRepo(repo), PR: pr, mirror: mirror,
+		token: token, auth: w.Token, stop: stop,
+	}, nil
 }
 
 // workPath is the directory holding this PR's checkouts. Owner and name stay
@@ -349,6 +374,26 @@ func (w Workspace) workPath(repo string, pr int) (string, error) {
 // disk filling up.
 const staleWorkAge = 12 * time.Hour
 
+// heartbeatInterval is far inside staleWorkAge, so only a checkout whose owner
+// has stopped refreshing it can age out.
+const heartbeatInterval = 15 * time.Minute
+
+// keepAlive refreshes a checkout's own directory timestamp until its owner is
+// done. A marker file inside the checkout would appear in git status and could
+// be committed by the fix session, while the directory timestamp is already
+// included by newestModTime.
+func keepAlive(ctx context.Context, dir string, every time.Duration) {
+	for {
+		if err := sleepCtx(ctx, every); err != nil {
+			return
+		}
+		now := time.Now()
+		if err := os.Chtimes(dir, now, now); err != nil {
+			return
+		}
+	}
+}
+
 // pruneStaleWork removes checkouts under prDir that nothing has touched for
 // staleWorkAge, leaving live ones alone.
 func (w Workspace) pruneStaleWork(ctx context.Context, mirror, prDir string) error {
@@ -361,9 +406,9 @@ func (w Workspace) pruneStaleWork(ctx context.Context, mirror, prDir string) err
 	}
 	for _, entry := range entries {
 		dir := filepath.Join(prDir, entry.Name())
-		// The NEWEST file in the checkout, not the directory's own timestamp:
+		// The NEWEST file in the checkout, including the directory heartbeat:
 		// editing a file or running a build inside leaves the root's mtime
-		// untouched, so a busy session would read as abandoned.
+		// untouched, while a live idle session refreshes it via keepAlive.
 		if touched := newestModTime(dir); time.Since(touched) < staleWorkAge {
 			continue
 		}
@@ -418,6 +463,9 @@ func newestModTime(dir string) time.Time {
 
 // Remove deletes the worktree. Safe to call on an already-removed one.
 func (c Checkout) Remove(ctx context.Context) error {
+	if c.stop != nil {
+		c.stop()
+	}
 	if c.mirror == "" || c.Dir == "" || filepath.Base(c.Dir) != c.token {
 		// Not this handle's directory: a later checkout replaced it, and removing
 		// it would delete a worktree somebody else is using.
