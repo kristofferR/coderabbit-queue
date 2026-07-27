@@ -38,8 +38,11 @@ type AutofixInstall struct {
 	Invocation string   `json:"invocation,omitempty"`
 	Repos      []string `json:"repos"`
 	Commands   []string `json:"commands"`
-	DryRun     bool     `json:"dry_run,omitempty"`
-	Started    bool     `json:"started,omitempty"`
+	// Retire is the pre-rename watcher this install shuts down, when one is
+	// still on disk. Empty when there is nothing to retire.
+	Retire  string `json:"retire,omitempty"`
+	DryRun  bool   `json:"dry_run,omitempty"`
+	Started bool   `json:"started,omitempty"`
 }
 
 // InstallAutofix sets up unattended autofix: the prompt, a wrapper, a
@@ -122,12 +125,22 @@ func AutofixPlan(cfg Config, agent string, agentArgs []string, repos []string, d
 	switch runtime.GOOS {
 	case "darwin":
 		plan.Unit = filepath.Join(home, "Library", "LaunchAgents", "no.kristofferr.crq-autofix.plist")
+		plan.Retire = legacyWatcherUnit(filepath.Join(home, "Library", "LaunchAgents", "no.kristofferr.crq-drain.plist"))
 		plan.Commands = []string{
 			"launchctl bootout gui/$(id -u)/no.kristofferr.crq-autofix",
 			"launchctl bootstrap gui/$(id -u) " + plan.Unit,
 		}
+		if plan.Retire != "" {
+			// Both halves: bootout stops it now, disable keeps launchd from
+			// bootstrapping the plist again at the next login.
+			plan.Commands = append([]string{
+				"launchctl disable gui/$(id -u)/no.kristofferr.crq-drain",
+				"launchctl bootout gui/$(id -u)/no.kristofferr.crq-drain",
+			}, plan.Commands...)
+		}
 	default:
 		plan.Unit = filepath.Join(home, ".config", "systemd", "user", "crq-autofix.service")
+		plan.Retire = legacyWatcherUnit(filepath.Join(home, ".config", "systemd", "user", "crq-drain.service"))
 		plan.Commands = []string{
 			"loginctl enable-linger " + os.Getenv("USER"),
 			"systemctl --user daemon-reload",
@@ -137,6 +150,9 @@ func AutofixPlan(cfg Config, agent string, agentArgs []string, repos []string, d
 			// silently kept the old one going. An install that appears to succeed
 			// and changes nothing is the worst of both.
 			"systemctl --user restart crq-autofix",
+		}
+		if plan.Retire != "" {
+			plan.Commands = append([]string{"systemctl --user disable --now crq-drain"}, plan.Commands...)
 		}
 	}
 	invocation, err := agentInvocation(agent, plan.Prompt, agentArgs)
@@ -237,17 +253,43 @@ func writeAutofixFile(path, body string, mode os.FileMode) error {
 func autofixCommandArgs(plan AutofixInstall) [][]string {
 	if plan.Platform == "darwin" {
 		domain := "gui/" + currentUID()
-		return [][]string{
+		args := [][]string{
 			{"launchctl", "bootout", domain + "/no.kristofferr.crq-autofix"},
 			{"launchctl", "bootstrap", domain, plan.Unit},
 		}
+		if plan.Retire != "" {
+			args = append([][]string{
+				{"launchctl", "disable", domain + "/no.kristofferr.crq-drain"},
+				{"launchctl", "bootout", domain + "/no.kristofferr.crq-drain"},
+			}, args...)
+		}
+		return args
 	}
-	return [][]string{
+	args := [][]string{
 		{"loginctl", "enable-linger", os.Getenv("USER")},
 		{"systemctl", "--user", "daemon-reload"},
 		{"systemctl", "--user", "enable", "crq-autofix"},
 		{"systemctl", "--user", "restart", "crq-autofix"},
 	}
+	if plan.Retire != "" {
+		args = append([][]string{{"systemctl", "--user", "disable", "--now", "crq-drain"}}, args...)
+	}
+	return args
+}
+
+// legacyWatcherUnit reports the pre-rename watcher's unit, if it is still there.
+//
+// The rename is a hard break in the state and the CLI, but a break in naming
+// stops nothing that is already running: a host that ran `crq drain install`
+// keeps an enabled crq-drain unit, and installing autofix beside it leaves two
+// watchers scanning the same fleet and racing each other's dispatch claims.
+// Detected from disk rather than attempted blindly, so a first install neither
+// runs a pointless command nor has to read failure text to know it was benign.
+func legacyWatcherUnit(path string) string {
+	if _, err := os.Stat(path); err != nil {
+		return ""
+	}
+	return path
 }
 
 func currentUID() string { return fmt.Sprint(os.Getuid()) }

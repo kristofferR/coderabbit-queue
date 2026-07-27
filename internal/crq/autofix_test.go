@@ -76,6 +76,58 @@ func TestAutofixPlanOrdersTheFleetTheSameWayEveryTime(t *testing.T) {
 	}
 }
 
+// The rename breaks the state and the CLI, but a break in naming stops nothing
+// that is already running: a host that ran the pre-rename installer keeps an
+// enabled crq-drain unit, and installing autofix beside it left two watchers
+// scanning the same fleet and racing each other's dispatch claims.
+func TestAutofixPlanRetiresThePreRenameWatcher(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/name": true}
+	agent := fakeAgent(t, "claude")
+
+	// A host that never ran the old installer must not be told to retire it.
+	clean, err := AutofixPlan(cfg, agent, nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clean.Retire != "" {
+		t.Errorf("retire = %q on a host with no legacy unit", clean.Retire)
+	}
+	for _, c := range clean.Commands {
+		if strings.Contains(c, "crq-drain") {
+			t.Errorf("commands = %v, want nothing about a watcher that was never installed", clean.Commands)
+		}
+	}
+
+	legacy := filepath.Join(home, ".config", "systemd", "user", "crq-drain.service")
+	if runtime.GOOS == "darwin" {
+		legacy = filepath.Join(home, "Library", "LaunchAgents", "no.kristofferr.crq-drain.plist")
+	}
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte("legacy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := AutofixPlan(cfg, agent, nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Retire != legacy {
+		t.Errorf("retire = %q, want the legacy unit %q", plan.Retire, legacy)
+	}
+	if len(plan.Commands) == 0 || !strings.Contains(plan.Commands[0], "crq-drain") {
+		t.Fatalf("commands = %v, want the legacy watcher stopped before the new one starts", plan.Commands)
+	}
+	// applyAutofix pairs the two by index and refuses to run a mismatch.
+	if got, want := len(autofixCommandArgs(plan)), len(plan.Commands); got != want {
+		t.Errorf("argv count = %d, want %d — the plan and what it runs must be the same list", got, want)
+	}
+}
+
 func TestInstallAutofixHonoursConfiguredDryRun(t *testing.T) {
 	cfg := firingConfig()
 	cfg.DryRun = true
