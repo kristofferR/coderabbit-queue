@@ -2,8 +2,12 @@ package crq
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 // One setting, one place. A host that carries its own answer for something the
@@ -115,5 +119,141 @@ func TestSeedingDoesNotOverwriteWhatTheFleetAlreadySays(t *testing.T) {
 	// Everything else it had no answer for is now recorded.
 	if v, ok := st.FleetValue("settle"); !ok || v == "" {
 		t.Errorf("settle = %q %v, want this host's value seeded", v, ok)
+	}
+}
+
+func TestFleetRequiredBotsRebuildsDerivedReviewers(t *testing.T) {
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":        "codex",
+		"CRQ_REQUIRED_BOTS": "coderabbitai[bot]",
+	})
+	st := DefaultState(cfg)
+	st.SetFleetValue("required-bots", "coderabbitai[bot],"+dialect.CodexBotLogin)
+
+	got := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil).fleetCfg(st)
+	if !containsBot(got.RequiredBots, dialect.CodexBotLogin) {
+		t.Fatalf("RequiredBots = %v, want fleet-required codex", got.RequiredBots)
+	}
+	if len(got.CoBots) != 1 || !got.CoBots[0].Required || got.CoBots[0].Trigger != "always" {
+		t.Fatalf("CoBots = %+v, want required codex with its required trigger", got.CoBots)
+	}
+}
+
+func TestFleetMutationsAreInertInDryRun(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("min-interval", "5m")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.DryRun = true
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if err := svc.SetFleetConfig(ctx, "min-interval", "10m"); err != nil {
+		t.Fatal(err)
+	}
+	if dropped, err := svc.UnsetFleetConfig(ctx, "min-interval"); err != nil || !dropped {
+		t.Fatalf("dry-run unset = %v, %v; want the report without a write", dropped, err)
+	}
+	if seeded, err := svc.SeedFleetConfig(ctx); err != nil || len(seeded) == 0 {
+		t.Fatalf("dry-run seed = %v, %v; want missing keys reported", seeded, err)
+	}
+	st, _, _ := store.Load(ctx)
+	if value, _ := st.FleetValue("min-interval"); value != "5m" || len(st.FleetConfig) != 1 {
+		t.Fatalf("dry run changed fleet state: %v", st.FleetConfig)
+	}
+}
+
+func TestFleetDivergenceIncludesConfigFileValues(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.MinInterval = time.Minute
+	cfg.ExplicitFleetEnv = map[string]bool{"CRQ_MIN_INTERVAL": true}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("min-interval", "5m")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := NewService(cfg, newFakeGitHub(), store, nil).FleetDivergence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || !strings.Contains(got[0], "CRQ_MIN_INTERVAL") {
+		t.Fatalf("divergence = %v, want the explicitly loaded config-file value", got)
+	}
+}
+
+func TestFleetRevisionInvalidatesAStaleDecision(t *testing.T) {
+	cfg := firingConfig()
+	st := DefaultState(cfg)
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	snapshot := svc.cfgFor(st, "owner/repo")
+	st.SetFleetValue("min-interval", "5m")
+	if !overrideChanged(&st, "owner/repo", snapshot) {
+		t.Error("a fleet policy change did not invalidate the earlier decision")
+	}
+}
+
+func TestFleetSettleWindowShapesNext(t *testing.T) {
+	cfg := firingConfig()
+	cfg.SettleWindow = 0
+	st := DefaultState(cfg)
+	st.SetFleetValue("settle", "5m")
+	effective := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil).fleetCfg(st)
+	evidence := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	got := settleUntil(FeedbackReport{LastEvidenceAt: evidence}, effective.SettleWindow)
+	want := evidence.Add(5 * time.Minute)
+	if got == nil || !got.Equal(want) {
+		t.Fatalf("settle until = %v, want %s", got, want)
+	}
+}
+
+func TestFleetPolicyRefusesALaggingQueueDriver(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Leader = &LeaderLease{Owner: "old-daemon", ExpiresAt: now.Add(time.Minute)}
+		st.NoteWriter("old-daemon", CapsRepoOverrides, now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	svc.now = func() time.Time { return now }
+	if err := svc.SetFleetConfig(ctx, "min-interval", "5m"); err == nil || !strings.Contains(err.Error(), "lack fleet-policy support") {
+		t.Fatalf("set with a lagging driver = %v, want a capability refusal", err)
+	}
+}
+
+func TestFleetReviewerChangeReopensCompletedRounds(t *testing.T) {
+	ctx := context.Background()
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":        "codex",
+		"CRQ_REQUIRED_BOTS": "coderabbitai[bot]",
+	})
+	repo, pr := "owner/repo", 7
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.PutRound(Round{Repo: repo, PR: pr, Head: "abcdef123", Phase: PhaseCompleted})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+	if err := svc.SetFleetConfig(ctx, "required-bots", "coderabbitai[bot],"+dialect.CodexBotLogin); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ := store.Load(ctx)
+	if round := st.Round(repo, pr); round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("round = %+v, want completed round reopened", round)
 	}
 }

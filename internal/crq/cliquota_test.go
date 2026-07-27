@@ -98,6 +98,26 @@ func TestRecordCLIQuotaRefusesAnotherAccount(t *testing.T) {
 	}
 }
 
+func TestRecordCLIQuotaUsesFleetScopeAndFallback(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	svc, store := cliQuotaService(t, now)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.SetFleetValue("scope", "fleet-org")
+		st.SetFleetValue("rate-limit-fallback", "47m")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.RecordCLIQuota(context.Background(), blockedReport(t, "soon"), "fleet-org")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := now.Add(47 * time.Minute)
+	if !got.Applied || got.Until == nil || !got.Until.Equal(want) {
+		t.Fatalf("fleet quota result = %+v, want applied until %s", got, want)
+	}
+}
+
 // A window read from a PR comment is authoritative about the whole account; a
 // local reading may be a narrower limit. Extending is safe, shortening is not.
 func TestRecordCLIQuotaNeverShortensAStandingBlock(t *testing.T) {

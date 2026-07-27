@@ -933,6 +933,12 @@ func TestStatusLine(t *testing.T) {
 	if got := StatusLine(ready, StoreConfig{}); !strings.Contains(got, "next #7") {
 		t.Errorf("a ready queue should name what is next, got %q", got)
 	}
+	fleetPaced := stateWith(queuedRound("kristofferr/a", 7, 1, now))
+	fleetPaced.LastFired = &now
+	fleetPaced.SetFleetValue("min-interval", "1h")
+	if got := StatusLine(fleetPaced, StoreConfig{MinInterval: 0}); strings.Contains(got, "next #7") {
+		t.Errorf("fleet pacing must keep status from claiming the round is ready: %q", got)
+	}
 
 	// Blocked: the countdown is the useful part.
 	blockedState := stateWith(queuedRound("kristofferr/a", 7, 1, now))

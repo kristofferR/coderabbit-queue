@@ -194,6 +194,21 @@ func applyFleet(cfg Config, fleet map[string]string, warn func(string)) Config {
 		}
 		cfg = candidate
 	}
+	// RequiredBots is the input to the derived reviewer views. Applying it as a
+	// scalar without rebuilding those views can leave a required co-reviewer
+	// disabled or carrying its optional trigger mode.
+	if _, ok := fleet["required-bots"]; ok {
+		enabled := make([]string, 0, len(cfg.CoBots))
+		for _, cb := range cfg.CoBots {
+			enabled = append(enabled, cb.Login)
+		}
+		cfg = cfg.ForRepo(RepoReviewers{
+			CoBots:      enabled,
+			SetCoBots:   true,
+			Required:    cfg.RequiredBots,
+			SetRequired: true,
+		})
+	}
 	return cfg
 }
 

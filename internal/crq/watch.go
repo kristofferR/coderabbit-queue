@@ -179,6 +179,11 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 
 func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispatchPool, emit func(WatchEvent) error) error {
 	var failures []string
+	state, _, err := s.store.Load(ctx)
+	if err != nil {
+		return err
+	}
+	cfg := s.fleetCfg(state)
 	type pendingEvent struct {
 		event  WatchEvent
 		result <-chan dispatchResult
@@ -190,10 +195,10 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	// repository names straight over the fix command, and every dispatch in the
 	// fleet died with "fork/exec kristofferr/coderabbit-queue: no such file or
 	// directory". A caller's slice is the caller's.
-	repos := make([]string, 0, len(opts.Repos)+len(s.cfg.AllowRepos))
+	repos := make([]string, 0, len(opts.Repos)+len(cfg.AllowRepos))
 	repos = append(repos, opts.Repos...)
 	if len(repos) == 0 {
-		for repo := range s.cfg.AllowRepos {
+		for repo := range cfg.AllowRepos {
 			repos = append(repos, repo)
 		}
 		sort.Strings(repos) // stable order: a pass must not depend on map iteration
@@ -213,16 +218,14 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		pull ghapi.Pull
 	}
 	var candidates []candidate
-	gate := NormalizeRepo(s.cfg.GateRepo)
+	gate := NormalizeRepo(cfg.GateRepo)
 	// Which repositories may be FIXED is per repository, read once for the pass.
 	// Watching is unaffected: a repository with draining off is still observed
 	// and still reviewed, so its feedback arrives for a person to act on.
 	drainOff := map[string]bool{}
-	if st, _, err := s.store.Load(ctx); err == nil {
-		for _, repo := range repos {
-			if !st.DrainEnabled(repo) {
-				drainOff[NormalizeRepo(repo)] = true
-			}
+	for _, repo := range repos {
+		if !state.DrainEnabled(repo) {
+			drainOff[NormalizeRepo(repo)] = true
 		}
 	}
 	for _, repo := range repos {
@@ -238,7 +241,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		// it; this one did not, so the single setting that reads like a fleet-wide
 		// opt-out silently covered half of what crq does — reviews stopped and the
 		// watcher carried on, which is not a setting anyone can reason about.
-		if s.cfg.ExcludeRepos[NormalizeRepo(repo)] {
+		if cfg.ExcludeRepos[NormalizeRepo(repo)] {
 			continue
 		}
 		pulls, err := s.gh.ListPulls(ctx, repo, openPullQuery())
@@ -278,7 +281,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			// the shared quota. Next is a MUTATING oracle — it enqueues and can
 			// fire — so the marker has to be honoured before calling it, not
 			// after.
-			if s.cfg.SkipsReview(pull.Body) {
+			if cfg.SkipsReview(pull.Body) {
 				event := WatchEvent{
 					Repo: repo, PR: pull.Number,
 					Action: "skipped", Reason: "fleet auto-review skip marker present",

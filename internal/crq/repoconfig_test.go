@@ -67,6 +67,38 @@ func TestRepoOverrideReachesTheDecision(t *testing.T) {
 	}
 }
 
+func TestClearReviewersComparesAgainstFleetPolicy(t *testing.T) {
+	ctx := context.Background()
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":        "codex",
+		"CRQ_REQUIRED_BOTS": "coderabbitai[bot]",
+	})
+	repo, pr := "owner/repo", 19
+	now := time.Now().UTC()
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("required-bots", "coderabbitai[bot],"+dialect.CodexBotLogin)
+		st.SetRepoOverride(repo, RepoReviewers{
+			Required:    []string{"coderabbitai[bot]"},
+			SetRequired: true,
+			UpdatedAt:   &now,
+		})
+		st.PutRound(Round{Repo: repo, PR: pr, Head: "abcdef123", Phase: PhaseCompleted})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewService(cfg, gh, store, nil).ClearReviewers(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ := store.Load(ctx)
+	if round := st.Round(repo, pr); round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("round = %+v, want clearing to the fleet reviewer set to reopen it", round)
+	}
+}
+
 // The override must be able to ADD a reviewer, not only subtract one. Resolving
 // choices against the fleet's enabled list made "which bots for which project"
 // a one-way filter: with CRQ_COBOTS=codex, asking for bugbot was rejected as

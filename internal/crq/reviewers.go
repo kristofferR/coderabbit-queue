@@ -339,10 +339,23 @@ func (s *Service) cfgFor(st State, repo string) Config {
 // the base every other decision starts from, and the reason a setting only has
 // to be changed in one place for every machine to follow it.
 func (s *Service) fleetCfg(st State) Config {
-	if len(st.FleetConfig) == 0 {
-		return s.cfg
+	cfg := s.cfg
+	if len(st.FleetConfig) != 0 {
+		cfg = applyFleet(cfg, st.FleetConfig, s.warnOnce)
 	}
-	return applyFleet(s.cfg, st.FleetConfig, s.warnOnce)
+	cfg.FleetRevision = fleetRevision(st)
+	return cfg
+}
+
+func fleetRevision(st State) string {
+	var b strings.Builder
+	for _, key := range st.FleetKeys() {
+		b.WriteString(key)
+		b.WriteByte(0)
+		b.WriteString(st.FleetConfig[key])
+		b.WriteByte(0)
+	}
+	return b.String()
 }
 
 // warnOnce logs a fleet-configuration complaint at most once per process. The
@@ -374,6 +387,9 @@ func (s *Service) warnOnce(msg string) {
 // reads is the state the write lands on; a separate read beforehand would leave
 // the same window one step earlier.
 func overrideChanged(st *State, repo string, cfg Config) bool {
+	if fleetRevision(*st) != cfg.FleetRevision {
+		return true
+	}
 	ov, _ := st.RepoOverride(repo)
 	switch {
 	case ov.UpdatedAt == nil && cfg.OverrideAt == nil:

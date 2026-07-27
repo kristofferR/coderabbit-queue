@@ -1868,7 +1868,7 @@ func (s *Service) Status(ctx context.Context) (State, string, error) {
 	if err != nil {
 		return State{}, "", err
 	}
-	return state, renderDashboard(state, s.cfg), nil
+	return state, renderDashboard(state, s.fleetCfg(state)), nil
 }
 
 func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
@@ -1876,22 +1876,24 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 	if err != nil {
 		return State{}, err
 	}
-	if s.cfg.CalibrationPR <= 0 {
+	cfg := s.fleetCfg(state)
+	if cfg.CalibrationPR <= 0 {
 		return state, nil
 	}
 	now := s.clock()
 	// Honor the freshness shortcut only when the last reading was conclusive. If a
 	// probe is still pending (CalibAskedAt set, no reply yet), keep re-checking so a
 	// late "account blocked" reply isn't ignored for the full TTL.
-	if state.Account.CalibAskedAt == nil && state.Account.CheckedAt != nil && now.Sub(*state.Account.CheckedAt) < s.cfg.CalibrationTTL {
+	if state.Account.CalibAskedAt == nil && state.Account.CheckedAt != nil && now.Sub(*state.Account.CheckedAt) < cfg.CalibrationTTL {
 		return state, nil
 	}
-	quota, err := s.readQuota(ctx, s.calibrationIssue(state), now, state.Account.CalibAskedAt)
+	quota, err := s.readQuota(ctx, s.calibrationIssue(state), now, state.Account.CalibAskedAt, cfg)
 	if err != nil {
 		return state, err
 	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
-		if st.Account.CalibAskedAt == nil && st.Account.CheckedAt != nil && now.Sub(*st.Account.CheckedAt) < s.cfg.CalibrationTTL {
+		currentTTL := s.fleetCfg(*st).CalibrationTTL
+		if st.Account.CalibAskedAt == nil && st.Account.CheckedAt != nil && now.Sub(*st.Account.CheckedAt) < currentTTL {
 			return ErrNoChange
 		}
 		// A fresh reading replaces the whole quota; carry the account-quota comment
@@ -1987,10 +1989,10 @@ func (s *Service) rotateCalibration(ctx context.Context, oldIssue int) (int, err
 	return issue.Number, nil
 }
 
-func (s *Service) readQuota(ctx context.Context, issue int, now time.Time, pendingAsked *time.Time) (AccountQuota, error) {
-	quota := AccountQuota{Scope: strings.Join(s.cfg.Scope, ","), Source: "calibrate", CheckedAt: &now}
-	cutoff := now.Add(-s.cfg.CalibrationTTL)
-	keepAfter := now.Add(-2 * s.cfg.CalibrationTTL)
+func (s *Service) readQuota(ctx context.Context, issue int, now time.Time, pendingAsked *time.Time, cfg Config) (AccountQuota, error) {
+	quota := AccountQuota{Scope: strings.Join(cfg.Scope, ","), Source: "calibrate", CheckedAt: &now}
+	cutoff := now.Add(-cfg.CalibrationTTL)
+	keepAfter := now.Add(-2 * cfg.CalibrationTTL)
 	if reply, ok, err := s.latestCalibrationReply(ctx, issue, cutoff); err != nil {
 		return quota, err
 	} else if ok {

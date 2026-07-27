@@ -3,7 +3,6 @@ package crq
 import (
 	"context"
 	"fmt"
-	"os"
 )
 
 // FleetSetting is one policy as `crq config` reports it: what the fleet
@@ -22,6 +21,8 @@ type FleetSetting struct {
 	// Error is why a recorded value was not applied, when this binary could not
 	// read it.
 	Error string `json:"error,omitempty"`
+	// Lagging names active queue drivers that cannot enforce fleet policy.
+	Lagging []string `json:"lagging_hosts,omitempty"`
 }
 
 // FleetConfig reports every fleet setting, in force and as this host has it.
@@ -32,12 +33,13 @@ func (s *Service) FleetConfig(ctx context.Context) ([]FleetSetting, error) {
 	}
 	settings := fleetSettings()
 	effective := s.fleetCfg(st)
+	lagging := st.LaggingWriters(CapsFleetPolicy, s.clock())
 	out := make([]FleetSetting, 0, len(settings))
 	for _, key := range FleetKeys() {
 		setting := settings[key]
 		item := FleetSetting{
 			Key: key, Doc: setting.Doc, Env: setting.Env,
-			Value: setting.Show(effective), Source: "host",
+			Value: setting.Show(effective), Source: "host", Lagging: lagging,
 		}
 		if recorded, ok := st.FleetValue(key); ok {
 			item.Source = "fleet"
@@ -60,8 +62,23 @@ func (s *Service) SetFleetConfig(ctx context.Context, key, value string) error {
 	if err := ValidateFleetSetting(key, value); err != nil {
 		return err
 	}
-	_, err := s.store.Update(ctx, func(st *State) error {
+	if s.cfg.DryRun {
+		return nil
+	}
+	open, err := s.prepareFleetReviewerChange(ctx, key)
+	if err != nil {
+		return err
+	}
+	_, err = s.store.Update(ctx, func(st *State) error {
+		if err := s.requireFleetCapableDrivers(st); err != nil {
+			return err
+		}
+		before := s.fleetCfg(*st)
+		if current, ok := st.FleetValue(key); ok && current == value {
+			return ErrNoChange
+		}
 		st.SetFleetValue(key, value)
+		s.reopenForFleetReviewerChange(st, before, s.fleetCfg(*st), open)
 		return nil
 	})
 	return err
@@ -73,12 +90,29 @@ func (s *Service) UnsetFleetConfig(ctx context.Context, key string) (bool, error
 	if _, ok := fleetSettings()[key]; !ok {
 		return false, fmt.Errorf("unknown setting %q", key)
 	}
+	if s.cfg.DryRun {
+		st, _, err := s.store.Load(ctx)
+		if err != nil {
+			return false, err
+		}
+		_, dropped := st.FleetValue(key)
+		return dropped, nil
+	}
+	open, err := s.prepareFleetReviewerChange(ctx, key)
+	if err != nil {
+		return false, err
+	}
 	dropped := false
-	_, err := s.store.Update(ctx, func(st *State) error {
+	_, err = s.store.Update(ctx, func(st *State) error {
+		if err := s.requireFleetCapableDrivers(st); err != nil {
+			return err
+		}
+		before := s.fleetCfg(*st)
 		dropped = st.UnsetFleetValue(key)
 		if !dropped {
 			return ErrNoChange
 		}
+		s.reopenForFleetReviewerChange(st, before, s.fleetCfg(*st), open)
 		return nil
 	})
 	return dropped, err
@@ -95,7 +129,30 @@ func (s *Service) UnsetFleetConfig(ctx context.Context, key string) (bool, error
 func (s *Service) SeedFleetConfig(ctx context.Context) ([]string, error) {
 	settings := fleetSettings()
 	var seeded []string
-	_, err := s.store.Update(ctx, func(st *State) error {
+	initial, _, err := s.store.Load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if s.cfg.DryRun {
+		for _, key := range FleetKeys() {
+			if _, ok := initial.FleetValue(key); !ok {
+				seeded = append(seeded, key)
+			}
+		}
+		return seeded, nil
+	}
+	var open map[string]map[int]bool
+	if _, ok := initial.FleetValue("required-bots"); !ok {
+		open, err = s.openFleetPRs(ctx, initial)
+		if err != nil {
+			return nil, err
+		}
+	}
+	_, err = s.store.Update(ctx, func(st *State) error {
+		if err := s.requireFleetCapableDrivers(st); err != nil {
+			return err
+		}
+		before := s.fleetCfg(*st)
 		seeded = seeded[:0]
 		for _, key := range FleetKeys() {
 			if _, ok := st.FleetValue(key); ok {
@@ -107,6 +164,7 @@ func (s *Service) SeedFleetConfig(ctx context.Context) ([]string, error) {
 		if len(seeded) == 0 {
 			return ErrNoChange
 		}
+		s.reopenForFleetReviewerChange(st, before, s.fleetCfg(*st), open)
 		return nil
 	})
 	return seeded, err
@@ -130,10 +188,58 @@ func (s *Service) FleetDivergence(ctx context.Context) ([]string, error) {
 		case item.Error != "":
 			out = append(out, fmt.Sprintf("%s: the fleet's value is one this crq cannot read (%s); using this host's %q",
 				item.Key, item.Error, item.Value))
-		case item.HostValue != "" && os.Getenv(item.Env) != "":
+		case item.HostValue != "" && s.cfg.ExplicitFleetEnv[item.Env]:
 			out = append(out, fmt.Sprintf("%s is %q for the fleet, but %s is set to %q on this host; remove it or run crq config set %s",
 				item.Key, item.Value, item.Env, item.HostValue, item.Key))
 		}
 	}
 	return out, nil
+}
+
+func (s *Service) requireFleetCapableDrivers(st *State) error {
+	if lagging := st.LaggingWriters(CapsFleetPolicy, s.clock()); len(lagging) > 0 {
+		return fmt.Errorf("cannot activate fleet policy while queue drivers lack fleet-policy support: %v", lagging)
+	}
+	return nil
+}
+
+func (s *Service) prepareFleetReviewerChange(ctx context.Context, key string) (map[string]map[int]bool, error) {
+	if key != "required-bots" {
+		return nil, nil
+	}
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s.openFleetPRs(ctx, st)
+}
+
+func (s *Service) openFleetPRs(ctx context.Context, st State) (map[string]map[int]bool, error) {
+	repos := map[string]bool{}
+	for _, round := range st.Rounds {
+		repos[NormalizeRepo(round.Repo)] = true
+	}
+	open := make(map[string]map[int]bool, len(repos))
+	for repo := range repos {
+		pulls, err := s.openPRs(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		open[repo] = pulls
+	}
+	return open, nil
+}
+
+func (s *Service) reopenForFleetReviewerChange(st *State, before, after Config, open map[string]map[int]bool) {
+	if sameLogins(before.RequiredBots, after.RequiredBots) {
+		return
+	}
+	repos := map[string]bool{}
+	for _, round := range st.Rounds {
+		repos[NormalizeRepo(round.Repo)] = true
+	}
+	for repo := range repos {
+		ov, _ := st.RepoOverride(repo)
+		s.reopenForChangedReviewers(st, repo, before.ForRepo(ov), after.ForRepo(ov), open[repo])
+	}
 }

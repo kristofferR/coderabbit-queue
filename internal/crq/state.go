@@ -50,6 +50,8 @@ const (
 	DrainUnhealthyAfter = crqstate.DrainUnhealthyAfter
 	// CapsRepoOverrides is the binary capability per-repo reviewer overrides need.
 	CapsRepoOverrides = crqstate.CapsRepoOverrides
+	// CapsFleetPolicy is the binary capability state-backed fleet policy needs.
+	CapsFleetPolicy = crqstate.CapsFleetPolicy
 )
 
 var (

@@ -257,6 +257,7 @@ func hostName(writer string) string {
 // RenderDashboard renders the human-facing dashboard for the current state:
 // rounds by phase instead of v2's queue/fired/awaiting maps.
 func RenderDashboard(st State, cfg StoreConfig) string {
+	cfg = cfg.withFleet(st)
 	loc := dashboardLoc(cfg)
 	now := time.Now().UTC()
 	queue := st.Queue(now, cfg.MinInterval)
@@ -411,6 +412,7 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 // count is the WHOLE queue, cooling-down rounds included: a state whose only
 // work is not yet fire-eligible is queued, never idle.
 func RenderTitle(st State, cfg StoreConfig) string {
+	cfg = cfg.withFleet(st)
 	now := time.Now().UTC()
 	queue := len(st.Queue(now, cfg.MinInterval))
 	held := len(heldRounds(st))

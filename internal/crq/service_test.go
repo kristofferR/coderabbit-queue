@@ -632,11 +632,11 @@ func TestAutoReviewScanSkipsMarkedPRs(t *testing.T) {
 		ReviewCommand:     "@coderabbitai review",
 		LeaderTTL:         time.Minute,
 		AutoReviewMaxScan: 10,
-		SkipMarker:        "<!-- crq:skip-autoreview -->",
+		SkipMarker:        "<!-- host-marker -->",
 	}
 	gh := newFakeGitHub()
 	gh.searchPRs = []ghapi.SearchPR{
-		{Repo: "o/app", Number: 1, Author: "alice", Body: "Tiny maintenance change.\n\n<!-- crq:skip-autoreview -->"},
+		{Repo: "o/app", Number: 1, Author: "alice", Body: "Tiny maintenance change.\n\n<!-- fleet-marker -->"},
 		{Repo: "o/app", Number: 2, Author: "alice", Body: "Review this change."},
 	}
 	for pr := 1; pr <= 2; pr++ {
@@ -646,6 +646,12 @@ func TestAutoReviewScanSkipsMarkedPRs(t *testing.T) {
 		gh.pulls[fakeKey("o/app", pr)] = pull
 	}
 	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("skip-marker", "<!-- fleet-marker -->")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	svc := NewService(cfg, gh, store, nil)
 
 	if err := svc.AutoReview(ctx, AutoOptions{Once: true, Incremental: true}); err != nil {

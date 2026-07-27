@@ -1,6 +1,9 @@
 package state
 
-import "sort"
+import (
+	"sort"
+	"time"
+)
 
 // Fleet is the policy every host in the fleet shares, keyed by setting name.
 //
@@ -53,4 +56,16 @@ func (s *State) FleetKeys() []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// withFleet applies the state-backed settings the state package itself renders.
+// The full policy is interpreted by crq; MinInterval also shapes queue
+// readiness in dashboards/status, including GitStateStore's background sync.
+func (c StoreConfig) withFleet(s State) StoreConfig {
+	if value, ok := s.FleetValue("min-interval"); ok {
+		if interval, err := time.ParseDuration(value); err == nil && interval >= 0 {
+			c.MinInterval = interval
+		}
+	}
+	return c
 }

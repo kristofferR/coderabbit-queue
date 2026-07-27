@@ -702,7 +702,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			if settledAt.IsZero() {
 				settledAt = s.clock()
 			}
-			if s.cfg.SettleWindow <= 0 || s.clock().Sub(settledAt) >= s.cfg.SettleWindow {
+			if report.config.SettleWindow <= 0 || s.clock().Sub(settledAt) >= report.config.SettleWindow {
 				if report.Converged {
 					s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending, &report.config)
 				}

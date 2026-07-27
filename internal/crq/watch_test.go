@@ -1066,14 +1066,20 @@ func dispatchOn() *bool {
 func TestWatchHonoursTheExcludedRepositories(t *testing.T) {
 	cfg := firingConfig()
 	cfg.AllowRepos = map[string]bool{"owner/kept": true, "owner/gone": true}
-	cfg.ExcludeRepos = map[string]bool{"owner/gone": true}
 	gh := newFakeGitHub()
 	for _, repo := range []string{"owner/kept", "owner/gone"} {
 		var pull ghapi.Pull
 		pull.State, pull.Number, pull.Head.SHA = "open", 1, "aaaaaaaa1"
 		gh.pulls[fakeKey(repo, 1)] = pull
 	}
-	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.SetFleetValue("exclude", "owner/gone")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
 
 	var seen []string
 	if err := svc.watchPass(context.Background(), WatchOptions{}, newDispatchPool(0),

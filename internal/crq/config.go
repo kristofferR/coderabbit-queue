@@ -83,7 +83,15 @@ type Config struct {
 	FeedbackBotsExplicit bool
 	// OverrideAt is when the per-repo reviewer override this configuration was
 	// built from was last written, so a fire can tell whether it still holds.
-	OverrideAt        *time.Time
+	OverrideAt *time.Time
+	// FleetRevision identifies the fleet policy snapshot this configuration was
+	// built from. Like OverrideAt, it is revalidated inside the CAS mutation
+	// that commits a decision.
+	FleetRevision string
+	// ExplicitFleetEnv records fleet-owned variables supplied by either the
+	// config file or the process environment. LoadConfig does not export normal
+	// config-file values, so os.Getenv alone cannot detect that divergence.
+	ExplicitFleetEnv  map[string]bool
 	RateLimitCommand  string
 	RateLimitMarker   string
 	CalibrationMarker string
@@ -260,6 +268,12 @@ func LoadConfig() (Config, error) {
 		SettleWindow:        durationEnv(env, "CRQ_SETTLE", 90*time.Second),
 
 		RateLimitCoDegrade: stringEnv(env, "CRQ_RL_CO_DEGRADE", stringEnv(env, "CRQ_RL_CODEX_DEGRADE", "1")) != "0",
+	}
+	cfg.ExplicitFleetEnv = map[string]bool{}
+	for _, setting := range fleetSettings() {
+		if _, ok := env[setting.Env]; ok {
+			cfg.ExplicitFleetEnv[setting.Env] = true
+		}
 	}
 	if len(cfg.Scope) == 0 && cfg.GateRepo != "" {
 		cfg.Scope = []string{ownerOf(cfg.GateRepo)}

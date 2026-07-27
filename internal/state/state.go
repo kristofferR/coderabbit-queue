@@ -485,11 +485,15 @@ const SchemaVersion = 4
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 1
+const WriterCaps = 2
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
 const CapsRepoOverrides = 1
+
+// CapsFleetPolicy is the capability that makes state-backed fleet policy safe
+// to activate while a process is driving the queue.
+const CapsFleetPolicy = 2
 
 // writerTTL is how long a host counts as still active for capability purposes.
 const writerTTL = 30 * time.Minute
