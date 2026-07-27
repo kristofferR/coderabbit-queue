@@ -85,7 +85,12 @@ converse does not hold: convergence alone never releases the slot. A repository
 whose required set omits the primary converges as soon as its co-reviewers
 answer, and completing there would hand the slot to the next PR while the
 metered command is still unanswered — so a round that spent the quota stays
-`fired` until the primary acknowledges or its in-flight timeout expires.
+`fired` until the primary acknowledges or its in-flight timeout expires. Staying
+`fired` holds the slot only while the round exists, and converging is what tells
+the agent to push, so the loop also stamps `FireSlot.HoldUntil`: the hold belongs
+to the command, not to the head it was posted at, and it outlives the supersede
+that the success it reported invites. Every fire gate asks `SlotHeld`, not
+"is there a round holding it".
 
 ## observe → decide → apply
 

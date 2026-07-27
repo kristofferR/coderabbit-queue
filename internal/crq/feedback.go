@@ -807,9 +807,10 @@ func (s *Service) pushWaitDeadline(ctx context.Context, repo string, pr int, hea
 // required set the round converges without it, and completing here would release
 // the slot to the next pull request while this one's metered command is
 // unanswered — the same release Progress now withholds. The round stays fired
-// and any Pump finishes it, on the acknowledgement or on the in-flight timeout.
-// Only the convergence callers pass it; a timed-out or never fired wait must
-// still end.
+// and any Pump finishes it, on the acknowledgement or on the in-flight timeout,
+// and the hold is stamped on the slot so the push this success invites cannot
+// drop it along with the superseded round. Only the convergence callers pass it;
+// a timed-out or never fired wait must still end.
 func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, head string, holdUnacked bool) {
 	repo = NormalizeRepo(repo)
 	changed := false
@@ -823,6 +824,19 @@ func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, he
 			return ErrNoChange
 		}
 		if holdUnacked && st.FireSlot != nil && st.FireSlot.Key == QueueKey(repo, pr) {
+			// Leaving the round fired keeps the slot only while the round exists,
+			// and converging is precisely the loop's signal to push: the head
+			// advance that follows archives this round, and the slot would be
+			// released with the command it was taken for still unanswered. So
+			// record the hold on the slot itself, where it survives the supersede.
+			// Bounded by the in-flight window, the deadline Progress gives up at.
+			if r.FiredAt != nil {
+				until := r.FiredAt.UTC().Add(s.cfg.InflightTimeout)
+				if until.After(s.clock()) && (st.FireSlot.HoldUntil == nil || st.FireSlot.HoldUntil.Before(until)) {
+					st.HoldSlotUntil(until)
+					return nil
+				}
+			}
 			return ErrNoChange
 		}
 		if err := r.Complete(); err != nil {

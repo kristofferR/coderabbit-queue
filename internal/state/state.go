@@ -249,6 +249,12 @@ type FireSlot struct {
 	Key   string    `json:"key"` // repo#pr holding the slot
 	Token string    `json:"token"`
 	Since time.Time `json:"since"`
+	// HoldUntil keeps the slot taken after the round holding it went away with
+	// its metered command still unacknowledged — a head advance archives the
+	// round, and the command it posted does not stop being in flight because of
+	// that. Set to the end of that command's in-flight window, so the hold is
+	// bounded by the same deadline Progress would have applied.
+	HoldUntil *time.Time `json:"hold_until,omitempty"`
 }
 
 // AccountQuota is the CodeRabbit account-wide review quota (NOT the GitHub
@@ -747,6 +753,33 @@ func (s *State) SlotRound() *Round {
 	return &r
 }
 
+// SlotHeld reports whether the fire slot is taken — the question every fire gate
+// actually asks. A live round holds it; so does an orphaned hold, left behind
+// when the round that posted a still-unacknowledged metered command was
+// superseded by a new head. Without the second case the expected push after a
+// round that converged without its primary would free the slot for a second
+// concurrent metered command.
+func (s *State) SlotHeld(now time.Time) bool {
+	if s.FireSlot == nil {
+		return false
+	}
+	if s.SlotRound() != nil {
+		return true
+	}
+	return s.FireSlot.HoldUntil != nil && s.FireSlot.HoldUntil.After(now)
+}
+
+// HoldSlotUntil keeps the current fire slot held past the round that owns it.
+// The caller sets the deadline, since only it knows the in-flight window the
+// command this slot was taken for is bounded by.
+func (s *State) HoldSlotUntil(until time.Time) {
+	if s.FireSlot == nil {
+		return
+	}
+	u := until.UTC()
+	s.FireSlot.HoldUntil = &u
+}
+
 // NextEligible returns the fire-eligible round with the lowest Seq, or nil.
 func (s *State) NextEligible(now time.Time) *Round {
 	var best *Round
@@ -831,7 +864,7 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 	if s.Account.BlockedUntil != nil && s.Account.BlockedUntil.After(now) {
 		blocked = s.Account.BlockedUntil.UTC()
 	}
-	slotBusy := s.SlotRound() != nil
+	slotBusy := s.SlotHeld(now)
 	// The pacing gate applies to whichever round fires next, so it bounds every
 	// entry's earliest possible start.
 	var paced time.Time
@@ -956,7 +989,7 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 
 // Normalize repairs invariants after load: map init, expired retry windows
 // (awaiting_retry with a passed RetryAt is simply fire-eligible; nothing to
-// do), and a FireSlot pointing at a round that no longer holds it.
+// do), and a FireSlot no round holds and no orphaned hold keeps alive.
 func (s *State) Normalize(now time.Time) {
 	if s.Rounds == nil {
 		s.Rounds = map[string]Round{}
@@ -964,7 +997,7 @@ func (s *State) Normalize(now time.Time) {
 	if s.Version == 0 {
 		s.Version = SchemaVersion
 	}
-	if s.FireSlot != nil && s.SlotRound() == nil {
+	if s.FireSlot != nil && !s.SlotHeld(now) {
 		s.FireSlot = nil
 	}
 	for key, r := range s.Rounds {

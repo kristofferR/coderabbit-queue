@@ -2240,3 +2240,40 @@ func TestCompleteWaitRoundHoldsAnUnacknowledgedFireSlot(t *testing.T) {
 		t.Fatalf("completing the round must release the slot, got %+v", st.FireSlot)
 	}
 }
+
+// Converging is the loop's signal to push, and the push supersedes the round the
+// held slot points at. Leaving the round fired is therefore not enough on its
+// own: the replacement round archives its predecessor, Normalize drops a slot no
+// round holds, and the next Pump spends the account allowance on a second review
+// command while the first is still unanswered.
+func TestAHeldFireSlotSurvivesTheHeadAdvanceItInvites(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.InflightTimeout = time.Hour
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	now := time.Now().UTC()
+	repo, pr, head := "o/r", 5, "aaaaaaaa1"
+	seedRound(t, store, cfg, repo, pr, head, PhaseFired, now, 12)
+	svc.completeWaitRound(ctx, repo, pr, head, true)
+
+	// The push: the agent acted on the success the loop just reported.
+	if _, err := store.Update(ctx, func(st *State) error {
+		_, err := st.Supersede(repo, pr, "bbbbbbbb2", now)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.SlotHeld(now) {
+		t.Fatalf("fire slot = %+v, want it still held for the unanswered command", st.FireSlot)
+	}
+	// Bounded by the in-flight window, so an unanswered command cannot wedge the
+	// queue for longer than crq would have waited for it anyway.
+	if st.SlotHeld(now.Add(cfg.InflightTimeout + time.Minute)) {
+		t.Error("the hold must expire with the in-flight window it was taken for")
+	}
+}

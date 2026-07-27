@@ -487,7 +487,7 @@ func quotaFreeVerdict(v engine.FireVerdict) bool {
 
 func (s *Service) global(st State, now time.Time) engine.Global {
 	return engine.Global{
-		SlotFree:     st.SlotRound() == nil,
+		SlotFree:     !st.SlotHeld(now),
 		BlockedUntil: st.Account.BlockedUntil,
 		LastFired:    st.LastFired,
 	}
