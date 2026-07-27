@@ -356,3 +356,59 @@ func TestMirrorMigratesAnOldRefspec(t *testing.T) {
 		t.Errorf("refspec = %q err=%v, want it migrated to %q", got, err, originRefspec)
 	}
 }
+
+// The push a fix session is told to make — `git push origin HEAD:refs/heads/<branch>`
+// from a detached checkout — is the whole point of the worktree. `clone --bare`
+// leaves remote.origin.mirror set, and git then refuses that push outright
+// ("--mirror can't be combined with refspecs"), so a session could commit its
+// fixes and never land them.
+func TestSessionCanPushItsDetachedHead(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	// The remote must not have the branch checked out, or it refuses the push for
+	// its own reasons.
+	if _, err := gitDir(context.Background(), filepath.Join(base, repo), "config", "receive.denyCurrentBranch", "ignore"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	co, err := ws.Checkout(ctx, repo, 5, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := co.Git(ctx, "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+		"commit", "-q", "--allow-empty", "-m", "fix the finding"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := co.Git(ctx, "push", "origin", "HEAD:refs/heads/main"); err != nil {
+		t.Fatalf("a session cannot push its work: %v", err)
+	}
+}
+
+// A mirror cloned by an older crq carries remote.origin.mirror, and every session
+// using it hits the same refusal — so the rule is enforced on each call.
+func TestMirrorMigratesAwayFromMirrorMode(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(ctx, mirror, "config", "--bool", "remote.origin.mirror", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := gitDir(ctx, mirror, "config", "--get", "remote.origin.mirror"); got != "false" {
+		t.Errorf("remote.origin.mirror = %q, want it turned off so sessions can push", got)
+	}
+}

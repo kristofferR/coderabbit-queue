@@ -135,7 +135,7 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 		// created before this rule still fetches +refs/*:refs/*, and one branch
 		// created in a worktree then wedges every future fetch for the whole
 		// repository with "refusing to fetch into branch ... checked out at".
-		if _, cerr := w.git(ctx, path, "config", "remote.origin.fetch", originRefspec); cerr != nil {
+		if cerr := w.configureOrigin(ctx, path); cerr != nil {
 			return "", fmt.Errorf("configuring %s: %w", repo, cerr)
 		}
 		// Two workers fetching one mirror race on git's ref locks, and the loser
@@ -180,7 +180,7 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 	if _, err := w.git(ctx, "", "clone", "--bare", w.remoteURL(repo), pending); err != nil {
 		return "", fmt.Errorf("cloning %s: %w", repo, err)
 	}
-	if _, err := w.git(ctx, pending, "config", "remote.origin.fetch", originRefspec); err != nil {
+	if err := w.configureOrigin(ctx, pending); err != nil {
 		return "", fmt.Errorf("configuring %s: %w", repo, err)
 	}
 	if err := os.Rename(pending, path); err != nil {
@@ -207,6 +207,25 @@ func (w Workspace) remoteURL(repo string) string {
 // worktrees: a session's branch there must survive a fetch, and a branch checked
 // out in a worktree makes any fetch that would update it fail outright.
 const originRefspec = "+refs/heads/*:refs/remotes/origin/*"
+
+// configureOrigin makes the mirror behave like an ordinary remote, on every call
+// rather than only at clone time: a mirror created before either of these rules
+// still carries the old configuration, and both break silently.
+//
+// `clone --bare` sets remote.origin.mirror, which is not what the fetch refspec
+// above says and not what a fix session needs: with it set, git refuses the
+// documented `git push origin HEAD:refs/heads/<branch>` outright ("--mirror
+// can't be combined with refspecs"). A session could then commit its fixes and
+// never land them.
+func (w Workspace) configureOrigin(ctx context.Context, path string) error {
+	if _, err := w.git(ctx, path, "config", "remote.origin.fetch", originRefspec); err != nil {
+		return err
+	}
+	if _, err := w.git(ctx, path, "config", "--bool", "remote.origin.mirror", "false"); err != nil {
+		return err
+	}
+	return nil
+}
 
 // Checkout is a worktree at one commit, and the directory git commands for that
 // PR run in.
