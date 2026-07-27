@@ -161,6 +161,14 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 	}
 	if _, err := os.Stat(filepath.Join(path, "HEAD")); err == nil {
 		dropFetched := w.hasLegacyFetchedHeads(ctx, path)
+		if dropFetched {
+			// Persist the pending state before migrateMirror clears the legacy
+			// configuration that identified these heads. A failed fetch or
+			// deletion must be retried by the next refresh.
+			if err := w.setConfig(ctx, path, fetchedHeadsMigratedKey, "false"); err != nil {
+				return "", fmt.Errorf("recording pending migration of %s: %w", repo, err)
+			}
+		}
 		if cerr := w.migrateMirror(ctx, path); cerr != nil {
 			return "", fmt.Errorf("configuring %s: %w", repo, cerr)
 		}
@@ -254,19 +262,20 @@ const originRefspec = "+refs/heads/*:refs/remotes/origin/*"
 // release tag moved on the remote is refreshed instead of rejected as stale.
 const tagRefspec = "+refs/tags/*:refs/tags/*"
 
-// fetchedHeadsMigratedKey records that refs/heads has already been handed over
-// from an old clone to sessions. Without this marker, every refresh would keep
-// applying migration heuristics to branches sessions created afterwards.
+// fetchedHeadsMigratedKey records whether refs/heads has been handed over from
+// an old clone to sessions. False means cleanup is pending; true means later
+// refreshes must not apply migration heuristics to session-created branches.
 const fetchedHeadsMigratedKey = "crq.fetched-heads-migrated"
 
 // hasLegacyFetchedHeads identifies the one migration allowed to delete local
-// branches. A marker proves it already ran; otherwise only old fetch/push
-// mirror configuration proves refs/heads contains copies made by the clone.
+// branches. A false marker retries interrupted cleanup and a true marker proves
+// it already ran; otherwise only old fetch/push mirror configuration proves
+// refs/heads contains copies made by the clone.
 // An unmarked mirror already using the current configuration may predate the
 // marker, but its local branches belong to sessions and must be preserved.
 func (w Workspace) hasLegacyFetchedHeads(ctx context.Context, path string) bool {
-	if migrated, err := w.git(ctx, path, "config", "--bool", "--get", fetchedHeadsMigratedKey); err == nil && migrated == "true" {
-		return false
+	if migrated, err := w.git(ctx, path, "config", "--bool", "--get", fetchedHeadsMigratedKey); err == nil {
+		return migrated == "false"
 	}
 	if mirror, err := w.git(ctx, path, "config", "--bool", "--get", "remote.origin.mirror"); err == nil && mirror == "true" {
 		return true

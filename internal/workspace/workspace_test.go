@@ -779,6 +779,56 @@ func TestMirrorMigratesAMultiValuedRefspec(t *testing.T) {
 	}
 }
 
+// Normalizing a legacy mirror's configuration removes the evidence that its
+// refs/heads came from clone --mirror. A pending marker must preserve that fact
+// when deletion fails so the next refresh retries instead of abandoning cleanup.
+func TestMirrorRetriesLegacyHeadCleanup(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	origin := filepath.Join(base, repo)
+	originRepo(t, origin)
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+	if _, err := gitDir(ctx, origin, "branch", "feature"); err != nil {
+		t.Fatal(err)
+	}
+
+	mirror, err := ws.mirrorPath(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(mirror), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(ctx, "", "clone", "--mirror", "--quiet", ws.remoteURL(repo), mirror); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(mirror, "refs", "heads", "feature.lock")
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ws.Mirror(ctx, repo); err == nil {
+		t.Fatal("legacy head cleanup unexpectedly succeeded while its ref was locked")
+	}
+	if pending, err := gitDir(ctx, mirror, "config", "--bool", "--get", fetchedHeadsMigratedKey); err != nil || pending != "false" {
+		t.Fatalf("cleanup marker = %q err=%v, want pending", pending, err)
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Fatalf("retrying legacy head cleanup: %v", err)
+	}
+	if heads, err := gitDir(ctx, mirror, "for-each-ref", "--format=%(refname)", "refs/heads"); err != nil || heads != "" {
+		t.Errorf("refs/heads = %q err=%v, want legacy heads removed by retry", heads, err)
+	}
+	if migrated, err := gitDir(ctx, mirror, "config", "--bool", "--get", fetchedHeadsMigratedKey); err != nil || migrated != "true" {
+		t.Errorf("cleanup marker = %q err=%v, want completed", migrated, err)
+	}
+}
+
 // A ref lock left behind by a killed git never clears, and reads exactly like a
 // live race for as long as it sits there. Retrying past it and handing back the
 // mirror anyway presented refs known to be stale as current ones.
