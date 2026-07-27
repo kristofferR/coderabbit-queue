@@ -219,9 +219,10 @@ progresses — the
 human came to read. It removes a comment only when crq wrote it (never one it adopted from a person,
 never a bot's own comment, and never one edited into something else), only from a round that has moved
 on, only after the bot answered it, and only once it is too old to adopt again (older than the head
-commit, or than a later force-push). Automatic tidying is opt-in so older binaries sharing the state
-ref never mis-pair a delayed reply after a newer daemon deletes its command. You can also run a pass
-by hand with `crq tidy <repo> <pr>` (`--dry-run` reports what it would remove).
+commit, or than a later force-push); a command superseded by crq's own retry is spent regardless of
+its timestamp. Automatic tidying is opt-in so older binaries sharing the state ref never mis-pair a
+delayed reply after a newer daemon deletes its command. You can also run a pass by hand with
+`crq tidy <repo> <pr>` (`--dry-run` reports what it would remove).
 
 <details>
 <summary>Run it persistently (macOS launchd / Linux systemd)</summary>

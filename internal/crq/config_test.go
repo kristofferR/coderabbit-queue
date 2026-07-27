@@ -219,7 +219,6 @@ func TestLoadConfigEmptyAutoReviewSkipMarkerDisablesOptOut(t *testing.T) {
 func TestLoadConfigTidyIsOptIn(t *testing.T) {
 	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
 	t.Setenv("CRQ_TIDY", "restore-after-test")
-	os.Unsetenv("CRQ_TIDY")
 
 	cfg, err := LoadConfig()
 	if err != nil {

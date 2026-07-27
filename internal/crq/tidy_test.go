@@ -178,6 +178,16 @@ func TestTidyDryRunWritesNothing(t *testing.T) {
 	if len(gh.comments[fakeKey(repo, pr)]) != 1 {
 		t.Error("a dry run deleted a comment")
 	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.TidiedCommands[QueueKey(repo, pr)]; len(got) != 0 {
+		t.Errorf("a dry run recorded tidied commands: %v", got)
+	}
+	if got := st.TidyReactionCursors[QueueKey(repo, pr)]; got != 0 {
+		t.Errorf("a dry run advanced the reaction cursor to %d", got)
+	}
 }
 
 // A command may disappear before crq sees it. It must not be deleted again, but
@@ -826,12 +836,16 @@ func TestTidyAfterPumpSkipsAPumpThatChangedNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc.tidyAfterPump(ctx, PumpResult{Action: "waiting", Repo: repo, PR: pr, Reason: "review in progress"})
+	if err := svc.tidyAfterPump(ctx, PumpResult{Action: "waiting", Repo: repo, PR: pr, Reason: "review in progress"}); err != nil {
+		t.Fatal(err)
+	}
 	if reads := gh.reviewPolls(); reads != 0 {
 		t.Fatalf("a no-progress pump observed the pr %d time(s); the pump had just read it", reads)
 	}
 	// The same PR, once something actually moved.
-	svc.tidyAfterPump(ctx, PumpResult{Action: "cleared", Repo: repo, PR: pr})
+	if err := svc.tidyAfterPump(ctx, PumpResult{Action: "cleared", Repo: repo, PR: pr}); err != nil {
+		t.Fatal(err)
+	}
 	if gh.reviewPolls() == 0 {
 		t.Fatal("a round that progressed was never tidied")
 	}
