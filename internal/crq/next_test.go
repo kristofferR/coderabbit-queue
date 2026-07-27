@@ -444,6 +444,67 @@ func TestDismissEndsTheUnresolvableFindingDeadlock(t *testing.T) {
 	}
 }
 
+// Replaying a dismissal that already succeeded writes nothing, so the guard
+// against queueing a round while work is open has nothing to judge. Judging the
+// call instead of the write refused an interrupted agent on its own earlier
+// success the moment any OTHER finding was still open — with a fire-eligible
+// round for the head, which a dismissal that ended the deadlock is exactly what
+// leaves behind.
+func TestReplayedDismissalIsNotRefusedByOtherOpenFindings(t *testing.T) {
+	f := newReplayFixture(t, time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC))
+	repo, pr := "owner/repo", 506
+	head := "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, f.clk.now().Add(-time.Minute))
+	f.setLocalWork(false, "")
+
+	f.next(repo, pr)
+
+	// The head moves and threadless findings for the NEW head land before
+	// anything enqueues a round for it — the deadlock — so the dismissal that
+	// ends it supersedes the stale round, leaving a queued one behind.
+	f.clk.advance(2 * time.Minute)
+	f.setHead(repo, pr, "bbbbbbbb2")
+	f.setCommitDate("bbbbbbbb2", f.clk.now())
+	f.corpusReview(t, repo, pr, 900, "bbbbbbbb2", "coderabbit/findings-prompt-block.md")
+
+	report := f.next(repo, pr)
+	f.wantAction(report, engine.ActionFix)
+	ids := []string{}
+	for _, finding := range report.Findings {
+		if finding.ThreadID == "" {
+			ids = append(ids, finding.ID)
+		}
+	}
+	if len(ids) < 2 {
+		t.Fatalf("this test needs two threadless findings to dismiss, got %d", len(ids))
+	}
+	if _, err := f.svc.Dismiss(f.ctx, repo, pr, ids, "carried from an earlier commit"); err != nil {
+		t.Fatal(err)
+	}
+	before := f.round(repo, pr)
+	if before == nil || before.Head != "bbbbbbbb2" || !canStillFire(*before) {
+		t.Fatalf("the dismissal must leave a fire-eligible round for the new head, got %+v", before)
+	}
+
+	// A later review reports something new at that same head, so work IS open
+	// when the agent — which does not remember finishing — repeats itself.
+	f.clk.advance(time.Minute)
+	f.corpusReview(t, repo, pr, 901, "bbbbbbbb2", "coderabbit/findings-outside-diff.md")
+	res, err := f.svc.Dismiss(f.ctx, repo, pr, ids[:1], "carried from an earlier commit")
+	if err != nil {
+		t.Fatalf("replaying a completed dismissal must not be refused over another finding: %v", err)
+	}
+	if len(res.Already) != 1 || len(res.Dismissed) != 0 {
+		t.Errorf("result = %+v, want the id reported as already dismissed and nothing recorded", res)
+	}
+	// And it stays a no-op: the new finding is still the caller's to fix.
+	if after := f.round(repo, pr); after == nil || after.Seq != before.Seq || after.Phase != before.Phase {
+		t.Errorf("a replayed dismissal must not touch the round: %+v -> %+v", before, after)
+	}
+	f.wantAction(f.next(repo, pr), engine.ActionFix)
+}
+
 // A partial dismissal must not queue the new head. The round left behind by a
 // push can be past firing — completed, say — which makes it harmless where it
 // stands but not harmless superseded: superseding replaces it with a FRESH
