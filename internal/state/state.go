@@ -79,12 +79,16 @@ type Round struct {
 	// CodeRabbit requests must skip these.
 	CoOnly bool `json:"co_only,omitempty"`
 
-	// SpentCommands are trigger comments this round posted and then moved past.
-	// A retry supersedes its predecessor — the bot answered the old one, usually
-	// with a rate-limit notice, so it can never be adopted again. Without this
-	// record nothing knows those comments exist, which is why a throttled PR
-	// collects a column of identical review requests.
-	SpentCommands []int64 `json:"spent_commands,omitempty"`
+	// PostedCommands are the trigger comments crq itself WROTE for this round,
+	// including the ones a retry replaced. Two things need it. A retry posts a
+	// new command — the bot answered the previous one, usually with a rate-limit
+	// notice, so it can never be adopted again — and without this record nothing
+	// knows the old comment exists, which is why a throttled PR collects a
+	// column of identical review requests. And CommandID alone cannot say who
+	// wrote a comment: a round records an ADOPTED command there just the same,
+	// so treating it as crq's own is how tidying would erase a person's request
+	// to review.
+	PostedCommands []PostedCommand `json:"posted_commands,omitempty"`
 
 	// RetryAt is the earliest time this head may fire again (awaiting_retry).
 	RetryAt *time.Time `json:"retry_at,omitempty"`
@@ -118,6 +122,15 @@ type Round struct {
 	// binary's additions survive being read and rewritten here. Unexported, so
 	// it is never a member itself. See tolerant.go.
 	unknown unknownFields
+}
+
+// PostedCommand is one trigger comment crq posted, with the reviewer it was
+// addressed to and when it landed — the two facts a later cleanup needs to
+// decide whether that reviewer has read it yet.
+type PostedCommand struct {
+	ID  int64     `json:"id"`
+	Bot string    `json:"bot,omitempty"`
+	At  time.Time `json:"at,omitempty"`
 }
 
 // CoBotRound is one co-reviewer's bookkeeping inside a Round: the trigger
@@ -177,11 +190,6 @@ func (r *Round) setCo(login string, c CoBotRound) {
 // round and releases its claim.
 func (r *Round) SetCoCommand(login string, commandID int64, at time.Time) {
 	c := r.Co(login)
-	// Same as the primary: a replaced co-reviewer trigger is spent, and only
-	// this round remembers the comment it left on the PR.
-	if c.CommandID != 0 && c.CommandID != commandID {
-		r.SpentCommands = appendSpent(r.SpentCommands, c.CommandID)
-	}
 	c.CommandID = commandID
 	t := at.UTC()
 	c.CommandedAt = &t
@@ -359,13 +367,6 @@ func (r *Round) Fire(commandID int64, at time.Time) error {
 		return r.illegal(PhaseFired)
 	}
 	r.Phase = PhaseFired
-	// A retry posts a NEW command: the bot answered the previous one (with a
-	// rate-limit notice, typically) so it can never be adopted again. Remember
-	// it, or the comment it left behind is one nothing knows about — which is
-	// why a rate-limited PR collects a column of identical review requests.
-	if r.CommandID != 0 && r.CommandID != commandID {
-		r.SpentCommands = appendSpent(r.SpentCommands, r.CommandID)
-	}
 	r.CommandID = commandID
 	t := at.UTC()
 	r.FiredAt = &t
@@ -624,20 +625,30 @@ func (s *State) QueuedRounds(now time.Time) []Round {
 	return out
 }
 
-// appendSpent records a superseded command, bounded so a PR that retries all day
-// cannot grow its round without limit.
-func appendSpent(spent []int64, id int64) []int64 {
-	const maxSpent = 50
-	for _, have := range spent {
-		if have == id {
-			return spent
+// RecordPosted remembers a trigger comment crq WROTE for this round, addressed
+// to bot. Call it only where crq actually posted: an adopted command is not
+// crq's to record, and later cleanup trusts this list as proof of authorship.
+//
+// Bounded, so a PR that retries all day cannot grow its round without limit.
+func (r *Round) RecordPosted(bot string, id int64, at time.Time) {
+	const maxPosted = 50
+	if id == 0 {
+		return
+	}
+	for _, have := range r.PostedCommands {
+		if have.ID == id {
+			return
 		}
 	}
-	spent = append(spent, id)
-	if len(spent) > maxSpent {
-		spent = spent[len(spent)-maxSpent:]
+	// Copy-on-write, like setCo: Rounds are passed around by value, so appending
+	// in place could write this entry into a sibling copy's backing array.
+	posted := make([]PostedCommand, len(r.PostedCommands), len(r.PostedCommands)+1)
+	copy(posted, r.PostedCommands)
+	posted = append(posted, PostedCommand{ID: id, Bot: bot, At: at.UTC()})
+	if len(posted) > maxPosted {
+		posted = posted[len(posted)-maxPosted:]
 	}
-	return spent
+	r.PostedCommands = posted
 }
 
 // Queue-entry wait reasons. A waiting round is held by exactly one of these

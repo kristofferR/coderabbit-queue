@@ -8,66 +8,97 @@ import (
 // Every guard exists because removing the wrong comment costs a review. The
 // expensive mistake is deleting one crq would otherwise have adopted: the next
 // pump sees no command, posts another, and buys a second review of the same code.
-func TestStaleCommandsKeepsWhatCrqStillReads(t *testing.T) {
+func TestStaleCommands(t *testing.T) {
 	base := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
 	head := base.Add(30 * time.Minute)
 	answered := map[string]time.Time{"coderabbitai": base.Add(40 * time.Minute)}
 
-	in := TidyInput{
-		HeadAt:     head,
-		AnsweredAt: answered,
-		Live:       map[int64]bool{5: true},
-		Commands: []CommandComment{
-			{ID: 1, Bot: "coderabbitai", CreatedAt: base},                       // stale: answered, old, not live
-			{ID: 5, Bot: "coderabbitai", CreatedAt: base.Add(time.Minute)},      // live round depends on it
-			{ID: 6, Bot: "codex", CreatedAt: base.Add(2 * time.Minute)},         // no evidence this bot ever acted
-			{ID: 7, Bot: "coderabbitai", CreatedAt: head.Add(time.Minute)},      // newer than the head: still adoptable
-			{ID: 8, Bot: "coderabbitai", CreatedAt: base.Add(50 * time.Minute)}, // after the answer AND after the head
+	cases := []struct {
+		name string
+		in   TidyInput
+		want []int64
+	}{
+		{
+			name: "answered, old, and no round depends on it",
+			in: TidyInput{
+				HeadAt:     head,
+				AnsweredAt: answered,
+				Commands:   []CommandComment{{ID: 1, Bot: "coderabbitai", CreatedAt: base}},
+			},
+			want: []int64{1},
+		},
+		{
+			name: "a round that has not progressed keeps its command",
+			in: TidyInput{
+				HeadAt:     head,
+				AnsweredAt: answered,
+				Live:       map[int64]bool{1: true, 2: true},
+				Commands: []CommandComment{
+					{ID: 1, Bot: "coderabbitai", CreatedAt: base},
+					{ID: 2, Bot: "codex", CreatedAt: base},
+				},
+			},
+		},
+		{
+			name: "no evidence this bot ever acted",
+			in: TidyInput{
+				HeadAt:     head,
+				AnsweredAt: answered,
+				Commands:   []CommandComment{{ID: 6, Bot: "codex", CreatedAt: base}},
+			},
+		},
+		{
+			name: "newer than the head: still adoptable",
+			in: TidyInput{
+				HeadAt:     head,
+				AnsweredAt: map[string]time.Time{"coderabbitai": head.Add(2 * time.Minute)},
+				Commands:   []CommandComment{{ID: 7, Bot: "coderabbitai", CreatedAt: head.Add(time.Minute)}},
+			},
+		},
+		{
+			// This is the case that leaves a rate-limited PR with a column of
+			// identical review requests: the retry that replaced this command is
+			// newer than the head too, so the adoption guard alone never clears it.
+			name: "a retry the round replaced is spent despite the head",
+			in: TidyInput{
+				HeadAt:     head,
+				AnsweredAt: map[string]time.Time{"coderabbitai": head.Add(2 * time.Minute)},
+				Superseded: map[int64]bool{8: true},
+				Commands:   []CommandComment{{ID: 8, Bot: "coderabbitai", CreatedAt: head.Add(time.Minute)}},
+			},
+			want: []int64{8},
+		},
+		{
+			// An unreadable head commit is not permission to delete: the command
+			// may still be adoptable once the read recovers.
+			name: "no head timestamp keeps what the guard cannot clear",
+			in: TidyInput{
+				AnsweredAt: map[string]time.Time{"coderabbitai": base.Add(time.Hour)},
+				Commands:   []CommandComment{{ID: 1, Bot: "coderabbitai", CreatedAt: base}},
+			},
+		},
+		{
+			name: "no head timestamp still releases a replaced command",
+			in: TidyInput{
+				AnsweredAt: map[string]time.Time{"coderabbitai": base.Add(time.Hour)},
+				Superseded: map[int64]bool{1: true},
+				Commands:   []CommandComment{{ID: 1, Bot: "coderabbitai", CreatedAt: base}},
+			},
+			want: []int64{1},
 		},
 	}
 
-	got := StaleCommands(in)
-	if len(got) != 1 || got[0] != 1 {
-		t.Fatalf("stale = %v, want only the answered, superseded, non-live command", got)
-	}
-
-	// A retry the round explicitly replaced is spent even though it is newer
-	// than the head: crq's own record that it posted a successor is stronger
-	// evidence than the timestamp. This is the case that leaves a rate-limited
-	// PR with a column of identical review requests.
-	in.Superseded = map[int64]bool{8: true}
-	got = StaleCommands(in)
-	if len(got) != 2 || got[1] != 8 {
-		t.Fatalf("stale = %v, want the superseded retry included", got)
-	}
-}
-
-// A round that has not progressed keeps its command, whatever else is true.
-func TestStaleCommandsNeverTouchesALiveRound(t *testing.T) {
-	base := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
-	in := TidyInput{
-		HeadAt:     base.Add(time.Hour),
-		AnsweredAt: map[string]time.Time{"coderabbitai": base.Add(2 * time.Hour)},
-		Live:       map[int64]bool{1: true, 2: true},
-		Commands: []CommandComment{
-			{ID: 1, Bot: "coderabbitai", CreatedAt: base},
-			{ID: 2, Bot: "codex", CreatedAt: base},
-		},
-	}
-	if got := StaleCommands(in); len(got) != 0 {
-		t.Errorf("stale = %v, want nothing while the round is live", got)
-	}
-}
-
-// With no head timestamp, the adoption guard cannot be evaluated, so it must not
-// silently pass: an unreadable head is not permission to delete.
-func TestStaleCommandsWithoutAHeadStillRequiresEvidence(t *testing.T) {
-	base := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
-	in := TidyInput{
-		AnsweredAt: map[string]time.Time{"coderabbitai": base.Add(time.Hour)},
-		Commands:   []CommandComment{{ID: 1, Bot: "coderabbitai", CreatedAt: base}},
-	}
-	if got := StaleCommands(in); len(got) != 1 {
-		t.Errorf("stale = %v, want the answered command", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := StaleCommands(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("stale = %v, want %v", got, tc.want)
+			}
+			for i, id := range tc.want {
+				if got[i] != id {
+					t.Fatalf("stale = %v, want %v", got, tc.want)
+				}
+			}
+		})
 	}
 }

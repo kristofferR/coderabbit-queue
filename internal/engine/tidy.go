@@ -22,7 +22,9 @@ type TidyInput struct {
 	Live map[int64]bool
 	// HeadAt is when the current head was committed. A command at or after it is
 	// still adoptable, so removing it would make crq post a duplicate — unless
-	// the round itself has already replaced it (Superseded).
+	// the round itself has already replaced it (Superseded). Zero when the head
+	// commit could not be read, which is not permission to delete: the guard is
+	// simply unevaluable, and an unevaluable guard keeps the comment.
 	HeadAt time.Time
 	// Superseded are commands the round explicitly moved past by posting a newer
 	// one. They are exempt from the head check: crq's own record that it has
@@ -41,7 +43,12 @@ type TidyInput struct {
 //   - the bot acted after it, so it was actually read rather than merely old;
 //   - it predates the current head, because adoption only ever considers
 //     commands newer than the head commit. Delete one of those and the next
-//     pump sees no command, posts another, and buys a second review.
+//     pump sees no command, posts another, and buys a second review. An
+//     unreadable head means the guard cannot be evaluated, and the command
+//     stays: it may well be adoptable again once the read recovers.
+//
+// Only a command the round itself replaced (Superseded) skips the head check —
+// crq's own record that it posted a successor outranks any timestamp.
 //
 // Anything crq did not post is not here at all: the caller only collects its own
 // comments, so a human's "@coderabbitai review" is never a candidate.
@@ -55,7 +62,7 @@ func StaleCommands(in TidyInput) []int64 {
 		if !ok || answered.Before(cmd.CreatedAt) {
 			continue
 		}
-		if !in.Superseded[cmd.ID] && !in.HeadAt.IsZero() && !cmd.CreatedAt.Before(in.HeadAt) {
+		if !in.Superseded[cmd.ID] && (in.HeadAt.IsZero() || !cmd.CreatedAt.Before(in.HeadAt)) {
 			continue
 		}
 		stale = append(stale, cmd.ID)

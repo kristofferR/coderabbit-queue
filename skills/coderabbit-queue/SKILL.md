@@ -181,9 +181,12 @@ This happens by itself under `crq autoreview` (`CRQ_TIDY=0` turns it off), or on
 crq tidy "$REPO" "$PR" [--dry-run]
 ```
 
-It only ever removes comments **crq posted** — candidates come from the command IDs recorded on its
-own rounds, never from matching text — and never the bots' own comments, because an auto-generated
-reply can be a rate-limit or skipped-review notice that crq reads as evidence.
+It only ever removes comments **crq posted** — candidates come from the comments each round recorded
+writing, never from matching text, and never one the round merely adopted (a person's request to
+review is not crq's to erase). A candidate also has to predate the current head, because a newer
+command is one crq would adopt instead of posting again; a request crq's own retry replaced is spent
+either way, and an unreadable head keeps everything. Never the bots' own comments, because an
+auto-generated reply can be a rate-limit or skipped-review notice that crq reads as evidence.
 
 ## Fleet Auto-Review
 

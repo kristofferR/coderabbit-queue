@@ -652,6 +652,10 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 		return st, err
 	}
 	s.sync(ctx, updated)
+	// A round completed here is invisible to the caller — Pump goes on to report
+	// whatever it fires next, or idle — so this is the only moment that knows the
+	// PR's trigger comments are spent.
+	s.tidyProgressed(ctx, target.Repo, target.PR)
 	return updated, nil
 }
 
@@ -1071,6 +1075,11 @@ func (s *Service) fireCoOnly(ctx context.Context, round Round, logins []string, 
 			st.Warn = ""
 		}
 		for _, p := range posts {
+			// Recorded against the co-reviewer it was addressed to, including the
+			// one anchoring the round: a co-only round's CommandID is that same
+			// comment, and calling it the primary's would let unrelated CodeRabbit
+			// activity pass for the answer this trigger is still waiting on.
+			r.RecordPosted(p.login, p.id, p.at)
 			if r.Co(p.login).CommandID == 0 {
 				r.SetCoCommand(p.login, p.id, p.at)
 			}
@@ -1219,7 +1228,12 @@ func (s *Service) recordFire(ctx context.Context, round Round, token string, com
 			if err := r.Fire(commandID, firedAt); err != nil {
 				return err
 			}
+			// Recorded as crq's own whatever the round then does with it: the
+			// comment is on the PR either way, and the record is the only proof
+			// crq (rather than a person) wrote it.
+			r.RecordPosted(s.cfg.Bot, commandID, firedAt)
 			for _, p := range coPosts {
+				r.RecordPosted(p.login, p.id, p.at)
 				if r.Co(p.login).CommandID == 0 {
 					r.SetCoCommand(p.login, p.id, p.at)
 				}
@@ -1298,6 +1312,7 @@ func (s *Service) fireCoTrigger(ctx context.Context, round Round, login string) 
 		if !sameRound(r, round) {
 			return ErrNoChange
 		}
+		r.RecordPosted(login, id, at)
 		if r.Co(login).CommandID == 0 {
 			r.SetCoCommand(login, id, at)
 		} else {
