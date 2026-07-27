@@ -386,6 +386,10 @@ crq feedback <repo> <pr>  # current normalized findings as JSON, WITHOUT trigger
 crq threads <repo> <pr>                                     # every unresolved thread, outdated included
 crq resolve <thread-id> [<thread-id>...]                    # resolve addressed review threads
 crq decline <thread-id> [...] --reason "<why>" [--resolve]  # record why a finding is declined
+crq reviewers <repo>      # which bots review this project, and what each costs
+crq reviewers set <repo> [--bots <a,b>] [--required <a,b>] # choose them (either flag alone)
+crq reviewers clear <repo>                                 # back to the fleet default
+
 crq dismiss <repo> <pr> <finding-id> [...] --reason "<why>"  # account for a finding with no thread
 crq autoreview            # ⭐ review ALL open PRs automatically, rate-coordinated
                           #    (--no-incremental = first review only; --once = single pass for cron)
@@ -514,7 +518,9 @@ the same fire step as the CodeRabbit one. Bugbot and Macroscope default to `self
 already auto-review every push: crq stays silent unless a bot it has seen working misses the current
 head for longer than `CRQ_COBOT_<NAME>_GRACE`. In every mode crq suppresses the trigger when the bot
 auto-reviews, has already reviewed the head, has a check run in flight, or has a live command on the
-PR — so no bot is ever double-asked.
+PR — so no bot is ever double-asked. A mode you set explicitly wins over requiredness, per-repo
+requiredness included: `crq reviewers set` gives a required bot the trigger its registry default
+would have had, but never overrides a `never` you configured yourself.
 
 A co-reviewer that joins a round on its own (an actionable comment, a review, a check run) gates that
 round dynamically: convergence waits for it even though it isn't required. An exhaustion notice — for

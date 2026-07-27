@@ -182,6 +182,29 @@ thread left open keeps its finding actionable and `crq next` would repeat `fix` 
 disagreement is not lost: if the bot contests the decline, crq re-surfaces that reply as its own
 finding. Pass `--keep-open` to leave it unresolved deliberately.
 
+## Which Bots Review Which Project
+
+```bash
+crq reviewers "$REPO"                                   # who runs here, and what each costs
+crq reviewers set "$REPO" --bots codex --required codex # Codex the only required co-reviewer
+crq reviewers clear "$REPO"                             # back to the fleet default
+```
+
+Each reviewer reports its `budget`: `account` is serialized against the shared CodeRabbit allowance,
+`none` runs immediately, outside that queue. That is the only property the queue cares about — it says
+what a reviewer costs, never whether a round waits for it. `--required` alone decides that, and either
+flag may be given without the other (`--bots` and `--required` update separate halves of the override).
+
+The setting lives in the shared state ref, so the daemon and every agent read the same one.
+
+The primary reviewer is fleet-wide: an override chooses the **co-reviewers**. Leaving the primary out
+of `--required` means the round does not wait for it — not that it is never triggered, so it still
+spends account quota. `--required` cannot be empty (a
+round gating on nobody converges before anything runs); use `clear` to drop the override.
+
+If the output lists `lagging_hosts`, those hosts are driving the queue with a binary that predates
+per-repo overrides — they will keep using the fleet default until upgraded.
+
 ## Findings With No Thread
 
 Review-body findings, review-skipped notices, outside-diff remarks and issue-comment findings have

@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/url"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -128,6 +127,14 @@ func (s *Service) Enqueue(ctx context.Context, repo string, pr int) (EnqueueResu
 		now := s.clock()
 		r := st.Round(repo, pr)
 		if r != nil && r.Head == head {
+			// A PR reopened after its reviewers changed: the completed round is a
+			// marker for requirements that no longer hold, so it goes back in the
+			// queue instead of deduping the enqueue that would have asked.
+			if requeueIfReviewersChanged(st, r) {
+				result.Queued = true
+				result.Seq = r.Seq
+				return nil
+			}
 			switch r.Phase {
 			case PhaseFired, PhaseReviewing, PhaseCompleted:
 				result.Deduped = true
@@ -181,6 +188,9 @@ func (s *Service) enqueueBatch(ctx context.Context, items []queueCandidate) erro
 			repo := NormalizeRepo(it.Repo)
 			if r := st.Round(repo, it.PR); r != nil {
 				if r.Head == it.Head {
+					if requeueIfReviewersChanged(st, r) {
+						added++
+					}
 					continue
 				}
 				if _, err := st.Supersede(repo, it.PR, it.Head, now); err != nil {
@@ -298,21 +308,22 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if next == nil {
 		return PumpResult{Action: "idle"}, nil
 	}
-	obs, err := s.observe(ctx, s.cfg, next.Repo, next.PR, next, now)
+	cfg := s.cfgFor(st, next.Repo)
+	obs, err := s.observe(ctx, cfg, next.Repo, next.PR, next, now)
 	if err != nil {
 		return PumpResult{}, err
 	}
 	global := s.global(st, now)
-	decision := engine.DecideFire(global, *next, obs.eng, now, s.cfg.policy())
-	result, err := s.applyFire(ctx, *next, obs.eng, decision, now)
+	decision := engine.DecideFire(global, *next, obs.eng, now, cfg.policy())
+	result, err := s.applyFire(ctx, cfg, *next, obs.eng, decision, now)
 	if err != nil {
 		return result, err
 	}
-	// A blocked front of the queue must not starve later PRs of resolutions that
-	// spend NO CodeRabbit quota — a co-reviewer defer, or a summary-only round
-	// whose review is never coming from CodeRabbit at all.
+	// A blocked or orphaned-slot-held front of the queue must not starve later
+	// PRs of resolutions that spend NO CodeRabbit quota — a co-reviewer defer,
+	// or a summary-only round whose review is never coming from CodeRabbit at all.
 	accountBlocked := global.BlockedUntil != nil && global.BlockedUntil.After(now)
-	if decision.Verdict == engine.FireNo && accountBlocked {
+	if decision.Verdict == engine.FireNo && (accountBlocked || st.SlotHeld(now)) {
 		if free, handled, err := s.sweepQuotaFree(ctx, st, now, next.Repo, next.PR); err != nil {
 			return PumpResult{}, err
 		} else if handled {
@@ -344,7 +355,6 @@ func (s *Service) sweepQuotaFree(ctx context.Context, st State, now time.Time, s
 	if len(queued) == 0 {
 		return PumpResult{}, false, nil
 	}
-	policy := s.cfg.policy()
 	global := s.global(st, now)
 	scanned := 0
 	defer func() { s.scanOffset = (s.scanOffset + scanned + 1) % len(queued) }()
@@ -363,15 +373,16 @@ func (s *Service) sweepQuotaFree(ctx context.Context, st State, now time.Time, s
 		// left them behind the account block for hours. The budget above bounds
 		// the cost instead.
 		scanned++
-		obs, err := s.observe(ctx, s.cfg, round.Repo, round.PR, &round, now)
+		cfg := s.cfgFor(st, round.Repo)
+		obs, err := s.observe(ctx, cfg, round.Repo, round.PR, &round, now)
 		if err != nil {
 			continue
 		}
-		d := engine.DecideFire(global, round, obs.eng, now, policy)
+		d := engine.DecideFire(global, round, obs.eng, now, cfg.policy())
 		if !quotaFreeVerdict(d.Verdict) {
 			continue
 		}
-		res, err := s.applyFire(ctx, round, obs.eng, d, now)
+		res, err := s.applyFire(ctx, cfg, round, obs.eng, d, now)
 		if err != nil {
 			return PumpResult{}, false, err
 		}
@@ -399,15 +410,16 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 	if round == nil || !round.FireEligible(now) {
 		return PumpResult{}, false, nil
 	}
-	obs, err := s.observe(ctx, s.cfg, repo, pr, round, now)
+	cfg := s.cfgFor(st, repo)
+	obs, err := s.observe(ctx, cfg, repo, pr, round, now)
 	if err != nil {
 		return PumpResult{}, false, err
 	}
-	d := engine.DecideFire(s.global(st, now), *round, obs.eng, now, s.cfg.policy())
+	d := engine.DecideFire(s.global(st, now), *round, obs.eng, now, cfg.policy())
 	if !quotaFreeVerdict(d.Verdict) {
 		return PumpResult{}, false, nil
 	}
-	res, err := s.applyFire(ctx, *round, obs.eng, d, now)
+	res, err := s.applyFire(ctx, cfg, *round, obs.eng, d, now)
 	if err != nil {
 		return PumpResult{}, false, err
 	}
@@ -560,7 +572,7 @@ func quotaFreeVerdict(v engine.FireVerdict) bool {
 
 func (s *Service) global(st State, now time.Time) engine.Global {
 	return engine.Global{
-		SlotFree:     st.SlotRound() == nil,
+		SlotFree:     !st.SlotHeld(now),
 		BlockedUntil: st.Account.BlockedUntil,
 		LastFired:    st.LastFired,
 	}
@@ -573,12 +585,13 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 	if err != nil {
 		return PumpResult{}, err
 	}
-	obs, err := s.observe(ctx, s.cfg, slot.Repo, slot.PR, &slot, now)
+	cfg := s.cfgFor(st, slot.Repo)
+	obs, err := s.observe(ctx, cfg, slot.Repo, slot.PR, &slot, now)
 	if err != nil {
 		return PumpResult{}, err
 	}
-	s.selfHealCoReviewers(ctx, slot, obs.eng, now)
-	tr := engine.Progress(slot, st.Account, obs.eng, now, s.cfg.policy())
+	s.selfHealCoReviewers(ctx, cfg, slot, obs.eng, now)
+	tr := engine.Progress(slot, st.Account, obs.eng, now, cfg.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return PumpResult{Action: "waiting", Repo: slot.Repo, PR: slot.PR, Reason: tr.Reason}, nil
 	}
@@ -590,7 +603,7 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 		if r == nil || st.FireSlot == nil || st.FireSlot.Token != slot.Token {
 			return ErrNoChange
 		}
-		return s.applyTransition(st, r, tr, now)
+		return s.applyTransition(st, r, tr, now, cfg)
 	})
 	if err != nil {
 		return PumpResult{}, err
@@ -608,10 +621,23 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 
 // applyTransition applies a fired/reviewing round's engine Transition to state:
 // the round transition plus any fire-slot release and account-quota block.
-func (s *Service) applyTransition(st *State, r *Round, tr engine.Transition, now time.Time) error {
+//
+// cfg is the configuration Progress decided from, revalidated here for the same
+// reason applyFire revalidates its verdicts — this runs inside the CAS mutation,
+// where the state it reads is the state the write lands on.
+func (s *Service) applyTransition(st *State, r *Round, tr engine.Transition, now time.Time, cfg Config) error {
 	key := QueueKey(r.Repo, r.PR)
 	switch tr.Outcome {
 	case engine.OutComplete:
+		// The completed round is the "this head was reviewed" dedup marker, and
+		// reopenForChangedReviewers deliberately leaves an in-flight round alone —
+		// it is already going to answer. A reviewer change that commits between
+		// the decision and this write would therefore be answered by neither: the
+		// marker dedupes the head under the set that no longer gates it. Drop the
+		// stale transition; the next pump decides again under the new set.
+		if overrideChanged(st, r.Repo, cfg) {
+			return ErrNoChange
+		}
 		if err := r.Complete(); err != nil {
 			return err
 		}
@@ -646,6 +672,7 @@ func (s *Service) applyTransition(st *State, r *Round, tr engine.Transition, now
 func releaseSlot(st *State, key string) {
 	if st.FireSlot != nil && st.FireSlot.Key == key {
 		st.FireSlot = nil
+		st.ClearSlotHold()
 	}
 }
 
@@ -712,15 +739,16 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 	if target == nil {
 		return st, nil
 	}
-	obs, err := s.observe(ctx, s.cfg, target.Repo, target.PR, target, now)
+	cfg := s.cfgFor(st, target.Repo)
+	obs, err := s.observe(ctx, cfg, target.Repo, target.PR, target, now)
 	if err != nil {
 		if s.log != nil {
 			s.log.Printf("warning: reviewing-round sweep for %s#%d failed: %v", target.Repo, target.PR, err)
 		}
 		return st, nil
 	}
-	s.selfHealCoReviewers(ctx, *target, obs.eng, now)
-	tr := engine.Progress(*target, st.Account, obs.eng, now, s.cfg.policy())
+	s.selfHealCoReviewers(ctx, cfg, *target, obs.eng, now)
+	tr := engine.Progress(*target, st.Account, obs.eng, now, cfg.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return st, nil
 	}
@@ -732,7 +760,7 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 		if r == nil || !sameRound(r, *target) || (r.Phase != PhaseFired && r.Phase != PhaseReviewing) {
 			return ErrNoChange
 		}
-		return s.applyTransition(st, r, tr, now)
+		return s.applyTransition(st, r, tr, now, cfg)
 	})
 	if err != nil {
 		return st, err
@@ -749,24 +777,34 @@ func firedOrEnqueuedAt(r Round) time.Time {
 }
 
 // applyFire executes a DecideFire verdict.
-func (s *Service) applyFire(ctx context.Context, round Round, obs engine.Observation, d engine.FireDecision, now time.Time) (PumpResult, error) {
+//
+// The decision was made from a configuration that may have been replaced since.
+// Acting on it would post a trigger for a co-reviewer an operator has just
+// removed, skip one they have just required, or record that a head is reviewed
+// by a set that no longer gates it — so the verdicts the reviewer configuration
+// decides revalidate it (overrideChanged) inside their own commit point, the CAS
+// mutation that claims the trigger, reserves the slot or writes the dedupe
+// marker. Checking it in a separate read here would leave exactly the window it
+// is meant to close: SetReviewers commits in between, and the mutation goes on
+// to apply the decision the new configuration would not have made.
+func (s *Service) applyFire(ctx context.Context, cfg Config, round Round, obs engine.Observation, d engine.FireDecision, now time.Time) (PumpResult, error) {
 	switch d.Verdict {
 	case engine.FireDrop:
 		return s.abandonRound(ctx, round, "pr closed", "skipped")
 	case engine.FireDedupe:
-		return s.dedupeRound(ctx, round, now, d.Reason)
+		return s.dedupeRound(ctx, cfg, round, now, d.Reason)
 	case engine.FireCoOnly:
-		return s.fireCoOnly(ctx, round, d.PostCo, d.Reason, now)
+		return s.fireCoOnly(ctx, cfg, round, d.PostCo, d.Reason, now)
 	case engine.FireCoDeferred:
-		return s.fireCoDeferred(ctx, round, d, now)
+		return s.fireCoDeferred(ctx, cfg, round, d, now)
 	case engine.FireCoReviewWait:
-		return s.fireCoReviewWait(ctx, round, obs, d.Reason, now)
+		return s.fireCoReviewWait(ctx, cfg, round, obs, d.Reason, now)
 	case engine.FireSupersede:
 		return s.supersedeRound(ctx, round, obs.Head, now)
 	case engine.FireAdopt:
-		return s.fireRound(ctx, round, obs, false, d.AdoptCommandID, d.AdoptAt, d.Reason, d.PostCo, now)
+		return s.fireRound(ctx, cfg, round, obs, false, d.AdoptCommandID, d.AdoptAt, d.Reason, d.PostCo, now)
 	case engine.FirePost:
-		return s.fireRound(ctx, round, obs, true, 0, time.Time{}, "", d.PostCo, now)
+		return s.fireRound(ctx, cfg, round, obs, true, 0, time.Time{}, "", d.PostCo, now)
 	default: // FireNo
 		return PumpResult{Action: mapFireNo(d.Reason), Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: d.Reason}, nil
 	}
@@ -817,7 +855,7 @@ func (s *Service) abandonRound(ctx context.Context, round Round, reason, action 
 
 // dedupeRound completes a not-yet-fired round because the bot already reviewed
 // its head, leaving the completed round as the dedupe marker (v2's Fired[key]).
-func (s *Service) dedupeRound(ctx context.Context, round Round, now time.Time, reason string) (PumpResult, error) {
+func (s *Service) dedupeRound(ctx context.Context, cfg Config, round Round, now time.Time, reason string) (PumpResult, error) {
 	result := PumpResult{Action: "deduped", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}
 	if s.cfg.DryRun {
 		return result, nil
@@ -826,7 +864,13 @@ func (s *Service) dedupeRound(ctx context.Context, round Round, now time.Time, r
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		deduped = false
 		r := st.Round(round.Repo, round.PR)
-		if !sameRound(r, round) || !r.FireEligible(now) {
+		// The marker this writes asserts that everyone the repository gates on has
+		// already answered the head, so a reviewer change committed since the
+		// decision voids it — and voids it permanently: dedupe posts nothing, so
+		// SetReviewers cannot see it coming, the round is still queued when the
+		// override lands (requeuing a queued round is a no-op), yet the marker is
+		// exactly what stops the newly required reviewer from ever being asked.
+		if !sameRound(r, round) || !r.FireEligible(now) || overrideChanged(st, round.Repo, cfg) {
 			return ErrNoChange
 		}
 		if err := r.Dedupe(now); err != nil {
@@ -872,7 +916,7 @@ func (s *Service) supersedeRound(ctx context.Context, round Round, head string, 
 // round, reserving the global slot under compare-and-swap. postCo lists the
 // co-reviewer logins whose trigger commands are posted alongside (non-fatal
 // on failure — the self-heal path retries).
-func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observation, post bool, adoptID int64, adoptAt time.Time, reason string, postCo []string, now time.Time) (PumpResult, error) {
+func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs engine.Observation, post bool, adoptID int64, adoptAt time.Time, reason string, postCo []string, now time.Time) (PumpResult, error) {
 	key := QueueKey(round.Repo, round.PR)
 	if s.cfg.DryRun {
 		return PumpResult{Action: "dry_run", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}, nil
@@ -889,14 +933,16 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 		recorded := false
 		updated, err := s.store.Update(ctx, func(st *State) error {
 			recorded = false
-			if st.FireSlot != nil {
+			if st.SlotHeld(now) {
 				return ErrNoChange
 			}
 			r := st.Round(round.Repo, round.PR)
-			if !sameRound(r, round) || !r.FireEligible(now) {
+			// postCo below was chosen by cfg's reviewers; a change since means the
+			// claims written here are for a set the operator has replaced.
+			if !sameRound(r, round) || !r.FireEligible(now) || overrideChanged(st, round.Repo, cfg) {
 				return ErrNoChange
 			}
-			if err := r.Reserve(token, s.cfg.Host, now); err != nil {
+			if err := r.Reserve(token, s.cfg.WriterID(), now); err != nil {
 				return err
 			}
 			if err := r.Fire(adoptID, firedAt); err != nil {
@@ -920,7 +966,7 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 			// posting a duplicate; recording it here keeps the round "asked". Its
 			// timestamp anchors that bot's cutoff too, or a SHA-less answer that
 			// landed before this adopted fire would never bind to the round.
-			for _, cp := range s.cfg.policy().CoReviewerPolicies() {
+			for _, cp := range cfg.policy().CoReviewerPolicies() {
 				if hasLogin(postCo, cp.Login) || r.Co(cp.Login).CommandID != 0 {
 					continue
 				}
@@ -944,21 +990,23 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 			s.log.Printf("fire %s@%s (adopted existing review command)", key, round.Head)
 		}
 		for _, login := range postCo {
-			s.fireCoTrigger(ctx, round, login)
+			s.fireCoTrigger(ctx, cfg, round, login)
 		}
 		return PumpResult{Action: "fired", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}, nil
 	}
 
-	// Reserve the slot, then post the command.
+	// Reserve the slot, then post the command. The reservation is this fire's
+	// commit point — nothing is posted before it — so it is where the reviewer
+	// configuration the decision used is revalidated.
 	reserved, err := s.store.Update(ctx, func(st *State) error {
-		if st.FireSlot != nil {
+		if st.SlotHeld(now) {
 			return ErrNoChange
 		}
 		r := st.Round(round.Repo, round.PR)
-		if !sameRound(r, round) || !r.FireEligible(now) {
+		if !sameRound(r, round) || !r.FireEligible(now) || overrideChanged(st, round.Repo, cfg) {
 			return ErrNoChange
 		}
-		if err := r.Reserve(token, s.cfg.Host, now); err != nil {
+		if err := r.Reserve(token, s.cfg.WriterID(), now); err != nil {
 			return err
 		}
 		st.FireSlot = &FireSlot{Key: key, Token: token, Since: now}
@@ -1005,7 +1053,7 @@ func (s *Service) fireRound(ctx context.Context, round Round, obs engine.Observa
 	// retries.
 	var coPosts []coPost
 	for _, login := range postCo {
-		if id, at := s.postCoTrigger(ctx, round, login); id != 0 {
+		if id, at := s.postCoTrigger(ctx, cfg, round, login); id != 0 {
 			coPosts = append(coPosts, coPost{login: login, id: id, at: at})
 		}
 	}
@@ -1057,7 +1105,7 @@ func (c Config) coCommandFor(login string) string {
 // no CodeRabbit quota is spent, and therefore NO FireSlot is taken: the
 // per-round trigger claims (CoBots[login].ClaimedAt, CAS-set before the
 // network post) are the concurrency guard.
-func (s *Service) fireCoOnly(ctx context.Context, round Round, logins []string, reason string, now time.Time) (PumpResult, error) {
+func (s *Service) fireCoOnly(ctx context.Context, cfg Config, round Round, logins []string, reason string, now time.Time) (PumpResult, error) {
 	key := QueueKey(round.Repo, round.PR)
 	if s.cfg.DryRun {
 		return PumpResult{Action: "dry_run", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}, nil
@@ -1066,7 +1114,9 @@ func (s *Service) fireCoOnly(ctx context.Context, round Round, logins []string, 
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		claimed = claimed[:0]
 		r := st.Round(round.Repo, round.PR)
-		if !sameRound(r, round) || !r.FireEligible(now) {
+		// The claim is what authorizes the posts below, so the reviewer set that
+		// chose them must still be the configured one when it commits.
+		if !sameRound(r, round) || !r.FireEligible(now) || overrideChanged(st, round.Repo, cfg) {
 			return ErrNoChange
 		}
 		for _, login := range logins {
@@ -1096,7 +1146,7 @@ func (s *Service) fireCoOnly(ctx context.Context, round Round, logins []string, 
 
 	var posts []coPost
 	for _, login := range claimed {
-		if id, at := s.postCoTrigger(ctx, round, login); id != 0 {
+		if id, at := s.postCoTrigger(ctx, cfg, round, login); id != 0 {
 			posts = append(posts, coPost{login: login, id: id, at: at})
 		}
 	}
@@ -1113,7 +1163,7 @@ func (s *Service) fireCoOnly(ctx context.Context, round Round, logins []string, 
 			// still-queued round through Reserve (a pure phase transition — no
 			// global FireSlot is registered) so the park is a legal edge.
 			if r.FireEligible(now) {
-				if rerr := r.Reserve(randomToken(), s.cfg.Host, now); rerr != nil {
+				if rerr := r.Reserve(randomToken(), s.cfg.WriterID(), now); rerr != nil {
 					return rerr
 				}
 			}
@@ -1144,7 +1194,7 @@ func (s *Service) fireCoOnly(ctx context.Context, round Round, logins []string, 
 			return ErrNoChange
 		}
 		if r.FireEligible(now) {
-			if err := r.Reserve(randomToken(), s.cfg.Host, now); err != nil {
+			if err := r.Reserve(randomToken(), s.cfg.WriterID(), now); err != nil {
 				return err
 			}
 			if err := r.Fire(posts[0].id, firedAt); err != nil {
@@ -1209,7 +1259,7 @@ func commandCreatedAt(commands []engine.CommandSeen, id int64, fallback time.Tim
 // review` command on the PR is adopted as the round's CodexCommandID so the
 // self-heal path (which anchors on the round's fire time, later than a pre-existing
 // command) does not re-post it.
-func (s *Service) fireCoReviewWait(ctx context.Context, round Round, obs engine.Observation, reason string, now time.Time) (PumpResult, error) {
+func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round, obs engine.Observation, reason string, now time.Time) (PumpResult, error) {
 	result := PumpResult{Action: "waiting", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}
 	if s.cfg.DryRun {
 		return result, nil
@@ -1237,7 +1287,7 @@ func (s *Service) fireCoReviewWait(ctx context.Context, round Round, obs engine.
 		at    time.Time
 	}
 	var adopts []adoptCmd
-	for _, cp := range s.cfg.policy().CoReviewerPolicies() {
+	for _, cp := range cfg.policy().CoReviewerPolicies() {
 		cmds := obs.CoSeenFor(cp.Login).Commands
 		id := newestCommandID(cmds)
 		if id == 0 {
@@ -1340,8 +1390,8 @@ func (s *Service) recordFire(ctx context.Context, round Round, token string, com
 // 0 on failure. A failed post is non-fatal: it logs and leaves the round's
 // command unset so a later pump's self-heal retries. The fresh-fire path
 // folds the returned id into recordFire's write.
-func (s *Service) postCoTrigger(ctx context.Context, round Round, login string) (int64, time.Time) {
-	command := strings.TrimSpace(s.cfg.coCommandFor(login))
+func (s *Service) postCoTrigger(ctx context.Context, cfg Config, round Round, login string) (int64, time.Time) {
+	command := strings.TrimSpace(cfg.coCommandFor(login))
 	if command == "" {
 		return 0, time.Time{}
 	}
@@ -1370,8 +1420,8 @@ func (s *Service) postCoTrigger(ctx context.Context, round Round, login string) 
 // self-heal retry (the fresh-post path records the id inside recordFire
 // instead). The CAS guard (same head, command still unset) makes a concurrent
 // post benign.
-func (s *Service) fireCoTrigger(ctx context.Context, round Round, login string) {
-	id, at := s.postCoTrigger(ctx, round, login)
+func (s *Service) fireCoTrigger(ctx context.Context, cfg Config, round Round, login string) {
+	id, at := s.postCoTrigger(ctx, cfg, round, login)
 	if id == 0 {
 		// Failed post: KEEP the claim — its TTL is the retry backoff. Clearing it
 		// here would let the very next pump repost, bypassing triggerClaimTTL.
@@ -1408,7 +1458,7 @@ func (s *Service) fireCoTrigger(ctx context.Context, round Round, login string) 
 // normally the moment the window opens, at which point the recorded command
 // ids keep the triggers from re-posting. The claim-then-post shape mirrors
 // selfHealCoReviewers — this path is not serialized by the fire slot either.
-func (s *Service) fireCoDeferred(ctx context.Context, round Round, d engine.FireDecision, now time.Time) (PumpResult, error) {
+func (s *Service) fireCoDeferred(ctx context.Context, cfg Config, round Round, d engine.FireDecision, now time.Time) (PumpResult, error) {
 	action := func(base string) string {
 		// Preserve the historical action names for the Codex-only case.
 		if len(d.PostCo) <= 1 && len(d.AdoptCo) <= 1 {
@@ -1434,7 +1484,10 @@ func (s *Service) fireCoDeferred(ctx context.Context, round Round, d engine.Fire
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		adopted, claimed = 0, claimed[:0]
 		r := st.Round(round.Repo, round.PR)
-		if !sameRound(r, round) || (r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry) {
+		// As in fireCoOnly: the claims and adoptions written here name the
+		// co-reviewers cfg chose, so a reviewer change since voids them.
+		if !sameRound(r, round) || (r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry) ||
+			overrideChanged(st, round.Repo, cfg) {
 			return ErrNoChange
 		}
 		changed := false
@@ -1489,7 +1542,7 @@ func (s *Service) fireCoDeferred(ctx context.Context, round Round, d engine.Fire
 	}
 	s.sync(ctx, updated)
 	for _, login := range claimed {
-		s.fireCoTrigger(ctx, round, login)
+		s.fireCoTrigger(ctx, cfg, round, login)
 	}
 	if len(claimed) == 0 {
 		result.Action = action("adopted")
@@ -1504,12 +1557,12 @@ func (s *Service) fireCoDeferred(ctx context.Context, round Round, d engine.Fire
 // idempotence comes from the observation — the bot's evidence, a live trigger
 // command, or an account that reviews on its own all suppress it (see
 // DecideCoPost) — not a retry counter.
-func (s *Service) selfHealCoReviewers(ctx context.Context, round Round, obs engine.Observation, now time.Time) {
+func (s *Service) selfHealCoReviewers(ctx context.Context, cfg Config, round Round, obs engine.Observation, now time.Time) {
 	if s.cfg.DryRun || round.FiredAt == nil || obs.Head != round.Head {
 		return
 	}
 	firedAt := round.FiredAt.UTC()
-	for _, cp := range s.cfg.policy().CoReviewerPolicies() {
+	for _, cp := range cfg.policy().CoReviewerPolicies() {
 		if round.Co(cp.Login).CommandID != 0 || (dialect.IsCodexBot(cp.Login) && round.CodexCommandID != 0) {
 			continue
 		}
@@ -1521,12 +1574,15 @@ func (s *Service) selfHealCoReviewers(ctx context.Context, round Round, obs engi
 		// not serialized by the fire slot, so two concurrent pumps observing an
 		// unset command would otherwise both post. A claim older than
 		// triggerClaimTTL is stale (the poster died mid-flight) and may be
-		// re-claimed.
+		// re-claimed. As in fireCoOnly, the claim is what authorizes the post, so
+		// the reviewer set that chose this bot must still be the configured one
+		// when it commits — otherwise a bot `crq reviewers set` has just removed
+		// is asked for a review anyway.
 		login := cp.Login
 		claimed := false
 		updated, err := s.store.Update(ctx, func(st *State) error {
 			r := st.Round(round.Repo, round.PR)
-			if !sameRound(r, round) || r.Co(login).CommandID != 0 {
+			if !sameRound(r, round) || r.Co(login).CommandID != 0 || overrideChanged(st, round.Repo, cfg) {
 				return ErrNoChange
 			}
 			if c := r.Co(login); c.ClaimedAt != nil && now.Sub(c.ClaimedAt.UTC()) < triggerClaimTTL {
@@ -1541,7 +1597,7 @@ func (s *Service) selfHealCoReviewers(ctx context.Context, round Round, obs engi
 			continue
 		}
 		s.sync(ctx, updated)
-		s.fireCoTrigger(ctx, round, login)
+		s.fireCoTrigger(ctx, cfg, round, login)
 	}
 }
 
@@ -1878,9 +1934,13 @@ func (s *Service) sync(ctx context.Context, state State) {
 func randomToken() string {
 	var buf [16]byte
 	if _, err := io.ReadFull(rand.Reader, buf[:]); err != nil {
-		return strconv.FormatInt(time.Now().UnixNano(), 16)
+		return fallbackToken(time.Now())
 	}
 	return hex.EncodeToString(buf[:])
+}
+
+func fallbackToken(now time.Time) string {
+	return fmt.Sprintf("%016x", uint64(now.UnixNano()))
 }
 
 // isCommentCapError reports whether err is GitHub's hard cap of 2500 comments per

@@ -117,7 +117,23 @@ type Round struct {
 	// the round is retried or surfaced as timed out.
 	WaitDeadline *time.Time `json:"wait_deadline,omitempty"`
 
-	Token  string `json:"token,omitempty"` // reservation token (CAS race detection)
+	// ReviewersChanged marks a completed round whose effective reviewer set
+	// changed while its pull request was closed. Requeueing a closed PR's round
+	// would hand Pump dead work ahead of every live round, so the change is
+	// recorded on the marker instead: if the PR is ever reopened, enqueue reopens
+	// the round rather than treating it as "this head was reviewed". Reopen
+	// clears it — the reopened round answers under the current requirements.
+	ReviewersChanged bool `json:"reviewers_changed,omitempty"`
+	// ForceCoReviewers names newly enabled or required self-heal reviewers that
+	// need one immediate trigger on an existing round. Once their command is
+	// recorded, normal per-bot dedupe makes the force harmless.
+	ForceCoReviewers []string `json:"force_co_reviewers,omitempty"`
+
+	Token string `json:"token,omitempty"` // reservation token (CAS race detection)
+	// ByHost identifies the PROCESS that reserved this round, in the writer form
+	// "host=<name> pid=<n> run=<id>" — the key NoteWriter records capabilities under, so
+	// LaggingWriters can ask whether the process driving a fire understands the
+	// configuration it is firing from. The dashboard shows the machine name.
 	ByHost string `json:"by_host,omitempty"`
 	Note   string `json:"note,omitempty"` // human-readable reason for the last transition
 
@@ -251,6 +267,16 @@ type FireSlot struct {
 	Key   string    `json:"key"` // repo#pr holding the slot
 	Token string    `json:"token"`
 	Since time.Time `json:"since"`
+	// HoldUntil keeps the slot taken after the round holding it went away with
+	// its metered command still unacknowledged — a head advance archives the
+	// round, and the command it posted does not stop being in flight because of
+	// that. Set to the end of that command's in-flight window, so the hold is
+	// bounded by the same deadline Progress would have applied.
+	HoldUntil *time.Time `json:"hold_until,omitempty"`
+
+	// unknown carries JSON members this binary has no field for, so a newer
+	// binary's additions survive being read and rewritten here. See tolerant.go.
+	unknown unknownFields
 }
 
 // AccountQuota is the CodeRabbit account-wide review quota (NOT the GitHub
@@ -288,16 +314,43 @@ type State struct {
 	Rev     int64 `json:"rev"`
 	NextSeq int64 `json:"next_seq"`
 
-	Rounds    map[string]Round `json:"rounds"`
-	FireSlot  *FireSlot        `json:"fire_slot,omitempty"`
-	LastFired *time.Time       `json:"last_fired,omitempty"`
-	Account   AccountQuota     `json:"account"`
-	Leader    *LeaderLease     `json:"leader,omitempty"`
+	Rounds   map[string]Round `json:"rounds"`
+	FireSlot *FireSlot        `json:"fire_slot,omitempty"`
+	// FireSlotHoldUntil is the top-level compatibility mirror of
+	// FireSlot.HoldUntil. Binaries predating nested FireSlot tolerance discard
+	// hold_until and clear an orphaned slot during Normalize, but their State
+	// tolerance carries this unknown top-level member. New binaries can therefore
+	// still recover the hold after an older writer rewrites the shared state.
+	FireSlotHoldUntil *time.Time `json:"fire_slot_hold_until,omitempty"`
+	// FireSlotHoldLastFired is the real pacing anchor replaced while the hold
+	// is dual-written into LastFired for binaries that do not understand the
+	// top-level mirror. Current binaries restore it when the hold ends.
+	FireSlotHoldLastFired *time.Time   `json:"fire_slot_hold_last_fired,omitempty"`
+	LastFired             *time.Time   `json:"last_fired,omitempty"`
+	Account               AccountQuota `json:"account"`
+	Leader                *LeaderLease `json:"leader,omitempty"`
 
 	// CalibrationIssue overrides the configured calibration PR/issue when the
 	// original hit GitHub's hard 2500-comment cap and crq rotated to a fresh
 	// one. Persisted in the shared state so the whole fleet uses the new issue.
 	CalibrationIssue int `json:"calibration_issue,omitempty"`
+
+	// Writers records which hosts have written this state and what they can do,
+	// so a feature that only SOME binaries understand can say so instead of
+	// pretending agreement. Sharing a ref stops an old binary erasing a new
+	// field; it does not make that binary act on it.
+	Writers map[string]WriterSeen `json:"writers,omitempty"`
+
+	// Repos holds per-repository reviewer overrides, keyed by normalized
+	// "owner/name".
+	//
+	// It lives HERE, in the shared state ref, rather than in a .crq.yaml the
+	// repository carries. The daemon has no checkout of any repository it
+	// reviews, so an in-repo file would be invisible to it or cost a REST fetch
+	// per PR — and a daemon and an agent reading different configurations while
+	// writing one shared state ref is a new class of divergence. Both already
+	// read this ref, so both cannot disagree about it.
+	Repos map[string]RepoReviewers `json:"repos,omitempty"`
 
 	// Archive keeps recently finished rounds (superseded, closed, cancelled)
 	// for the dashboard and debugging. Bounded by ArchiveMax.
@@ -310,6 +363,118 @@ type State struct {
 	// unknown carries top-level JSON members this binary has no field for. See
 	// tolerant.go.
 	unknown unknownFields
+}
+
+// WriterCaps is what THIS binary understands. Bump it when a state field starts
+// changing decisions, so a fleet running two versions can tell.
+const WriterCaps = 1
+
+// CapsRepoOverrides is the capability that makes per-repository reviewer
+// overrides safe to act on.
+const CapsRepoOverrides = 1
+
+// writerTTL is how long a host counts as still active for capability purposes.
+const writerTTL = 30 * time.Minute
+
+// WriterSeen is one host's last write.
+type WriterSeen struct {
+	Caps int       `json:"caps"`
+	At   time.Time `json:"at"`
+}
+
+// NoteWriter records that a process wrote this state with the given
+// capabilities. The key identifies the PROCESS, not the machine: a new CLI and
+// an old daemon on one host is the ordinary upgrade, and keying by hostname
+// would let the CLI's write vouch for the daemon that has not been upgraded.
+func (s *State) NoteWriter(host string, caps int, now time.Time) {
+	if host == "" {
+		return
+	}
+	if s.Writers == nil {
+		s.Writers = map[string]WriterSeen{}
+	}
+	s.Writers[host] = WriterSeen{Caps: caps, At: now.UTC()}
+	// Bounded: a host that has not written in a day is not part of the fleet's
+	// current behaviour, and the state ref is not an audit log.
+	for name, seen := range s.Writers {
+		if now.Sub(seen.At) > 24*time.Hour {
+			delete(s.Writers, name)
+		}
+	}
+}
+
+// LaggingWriters names the hosts that are DRIVING this queue — holding the
+// leader lease or the fire slot — without having announced the capability
+// needed for caps.
+//
+// It answers the question a shared config field cannot: "will everyone who acts
+// on this actually honour it?" An old binary loads an unknown field, writes it
+// back untouched, and keeps deciding from its own fleet-wide configuration.
+func (s *State) LaggingWriters(caps int, now time.Time) []string {
+	acting := map[string]bool{}
+	// The leader identifies itself as "host=<name> pid=<n> run=<id>", which is
+	// exactly the process identity capabilities are recorded under — the run
+	// component is what keeps a restart into a reused pid from inheriting them.
+	if s.Leader != nil && s.Leader.ExpiresAt.After(now) && strings.TrimSpace(s.Leader.Owner) != "" {
+		acting[s.Leader.Owner] = true
+	}
+	if slot := s.SlotRound(); slot != nil && slot.ByHost != "" {
+		acting[slot.ByHost] = true
+	}
+	var out []string
+	for host := range acting {
+		if seen, ok := s.Writers[host]; ok && seen.Caps >= caps && now.Sub(seen.At) <= writerTTL {
+			continue
+		}
+		out = append(out, host)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// RepoReviewers overrides which reviewers run on one repository. A nil slice
+// means "no override, use the fleet default"; an empty non-nil slice means
+// "none here" — the difference is why these are pointers to slices in JSON
+// terms and why SetRepoReviewers takes explicit values.
+type RepoReviewers struct {
+	// CoBots are the co-reviewer logins enabled here, replacing the fleet list.
+	CoBots []string `json:"cobots,omitempty"`
+	// Required are the logins that gate convergence here.
+	Required []string `json:"required,omitempty"`
+	// SetCoBots/SetRequired record whether each list was set at all, so
+	// "explicitly none" survives a JSON round trip that drops empty slices.
+	SetCoBots   bool       `json:"set_cobots,omitempty"`
+	SetRequired bool       `json:"set_required,omitempty"`
+	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
+	By          string     `json:"by,omitempty"`
+}
+
+// RepoOverride returns the override for repo, and whether one exists.
+func (s *State) RepoOverride(repo string) (RepoReviewers, bool) {
+	ov, ok := s.Repos[normalizeRepoKey(repo)]
+	return ov, ok
+}
+
+// SetRepoOverride records repo's reviewer override, replacing any earlier one.
+func (s *State) SetRepoOverride(repo string, ov RepoReviewers) {
+	if s.Repos == nil {
+		s.Repos = map[string]RepoReviewers{}
+	}
+	s.Repos[normalizeRepoKey(repo)] = ov
+}
+
+// ClearRepoOverride drops repo's override, returning it to the fleet default.
+func (s *State) ClearRepoOverride(repo string) bool {
+	key := normalizeRepoKey(repo)
+	if _, ok := s.Repos[key]; !ok {
+		return false
+	}
+	delete(s.Repos, key)
+	return true
+}
+
+func normalizeRepoKey(repo string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(repo), ".git"))
 }
 
 const SchemaVersion = 3
@@ -340,14 +505,15 @@ func (e *TransitionError) Error() string {
 func (r *Round) illegal(to Phase) error { return &TransitionError{From: r.Phase, To: to} }
 
 // Reserve takes the fire slot for this round: queued (or retry-eligible
-// awaiting_retry) → reserved.
-func (r *Round) Reserve(token, host string, now time.Time) error {
+// awaiting_retry) → reserved. writer is the reserving process's writer id (see
+// ByHost), not a bare hostname.
+func (r *Round) Reserve(token, writer string, now time.Time) error {
 	if r.Phase != PhaseQueued && !r.retryEligible(now) {
 		return r.illegal(PhaseReserved)
 	}
 	r.Phase = PhaseReserved
 	r.Token = token
-	r.ByHost = host
+	r.ByHost = writer
 	t := now.UTC()
 	r.ReservedAt = &t
 	r.Note = ""
@@ -384,6 +550,47 @@ func (r *Round) ReleaseToQueue(reason string, now time.Time) error {
 	r.LastAttemptAt = &t
 	r.Note = reason
 	return nil
+}
+
+// Reopen puts a completed round back in the queue because its effective
+// reviewer set changed.
+//
+// A completed round is the "this head was reviewed" dedup marker, so a newly
+// required reviewer would otherwise strand the PR: convergence reports it
+// pending while enqueue keeps skipping the head, and no eligible round exists to
+// trigger it. An optional reviewer also needs an active round for its trigger,
+// self-heal and bounded participation wait. This is the one transition that
+// reopens a finished round, and it keeps the head, the attempts and the
+// co-reviewer bookkeeping — what changed is who runs, not what happened.
+//
+// LastAttemptAt is deliberately left alone: it is the adoption floor for a
+// FAILED attempt, and moving it would discard a newly required co-reviewer's own
+// unanswered trigger comment as too old to adopt — so crq would post that bot a
+// second request for the very round the reopen exists to let it answer.
+func (r *Round) Reopen() error {
+	if r.Phase != PhaseCompleted {
+		return r.illegal(PhaseQueued)
+	}
+	r.Phase = PhaseQueued
+	r.Token = ""
+	r.ReservedAt = nil
+	r.WaitDeadline = nil
+	r.RetryAt = nil
+	r.ReviewersChanged = false
+	r.Note = "reviewer configuration changed"
+	return nil
+}
+
+// ForceCoReviewer reports whether a reviewer-change reopen granted login its
+// one immediate trigger. Bot names are normalized like CoBots keys.
+func (r *Round) ForceCoReviewer(login string) bool {
+	key := coBotKey(login)
+	for _, candidate := range r.ForceCoReviewers {
+		if coBotKey(candidate) == key {
+			return true
+		}
+	}
+	return false
 }
 
 // Acknowledge records that the bot has seen the fired command (reaction,
@@ -460,6 +667,7 @@ func (r *Round) Complete() error {
 		return r.illegal(PhaseCompleted)
 	}
 	r.Phase = PhaseCompleted
+	r.ForceCoReviewers = nil
 	r.Note = ""
 	return nil
 }
@@ -476,6 +684,7 @@ func (r *Round) Dedupe(now time.Time) error {
 	r.Phase = PhaseCompleted
 	r.Token = ""
 	r.ReservedAt = nil
+	r.ForceCoReviewers = nil
 	r.Note = "bot already reviewed head"
 	return nil
 }
@@ -591,6 +800,59 @@ func (s *State) SlotRound() *Round {
 	return &r
 }
 
+// SlotHeld reports whether the fire slot is taken — the question every fire gate
+// actually asks. A live round holds it; so does an orphaned hold, left behind
+// when the round that posted a still-unacknowledged metered command was
+// superseded by a new head. Without the second case the expected push after a
+// round that converged without its primary would free the slot for a second
+// concurrent metered command.
+func (s *State) SlotHeld(now time.Time) bool {
+	if s.FireSlot != nil && s.SlotRound() != nil {
+		return true
+	}
+	if s.FireSlotHoldUntil != nil && s.FireSlotHoldUntil.After(now) {
+		return true
+	}
+	return s.FireSlot != nil && s.FireSlot.HoldUntil != nil && s.FireSlot.HoldUntil.After(now)
+}
+
+// HoldSlotUntil keeps the current fire slot held past the round that owns it.
+// The caller sets the deadline, since only it knows the in-flight window the
+// command this slot was taken for is bounded by.
+func (s *State) HoldSlotUntil(until time.Time) {
+	if s.FireSlot == nil {
+		return
+	}
+	u := until.UTC()
+	before := s.LastFired
+	if s.FireSlotHoldUntil != nil && s.LastFired != nil &&
+		s.LastFired.Equal(*s.FireSlotHoldUntil) {
+		before = s.FireSlotHoldLastFired
+	}
+	s.FireSlot.HoldUntil = &u
+	s.FireSlotHoldUntil = &u
+	s.FireSlotHoldLastFired = before
+	// The previous binary preserves the top-level mirror but does not read it.
+	// It does read LastFired, so a future pacing anchor keeps its Pump from
+	// posting another metered review. Its MinInterval may conservatively extend
+	// the wait; a current binary restores the real anchor below.
+	if s.LastFired == nil || s.LastFired.Before(u) {
+		s.LastFired = &u
+	}
+}
+
+// ClearSlotHold removes the compatibility hold and restores the pacing anchor
+// it temporarily replaced. If another writer fired after the deadline,
+// LastFired no longer equals the synthetic value and is left untouched.
+func (s *State) ClearSlotHold() {
+	if s.FireSlotHoldUntil != nil && s.LastFired != nil &&
+		s.LastFired.Equal(*s.FireSlotHoldUntil) {
+		s.LastFired = s.FireSlotHoldLastFired
+	}
+	s.FireSlotHoldUntil = nil
+	s.FireSlotHoldLastFired = nil
+}
+
 // NextEligible returns the fire-eligible round with the lowest Seq, or nil.
 func (s *State) NextEligible(now time.Time) *Round {
 	var best *Round
@@ -694,7 +956,8 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 	if s.Account.BlockedUntil != nil && s.Account.BlockedUntil.After(now) {
 		blocked = s.Account.BlockedUntil.UTC()
 	}
-	slotBusy := s.SlotRound() != nil
+	liveSlotBusy := s.SlotRound() != nil
+	orphanSlotBusy := !liveSlotBusy && s.SlotHeld(now)
 	// The pacing gate applies to whichever round fires next, so it bounds every
 	// entry's earliest possible start.
 	var paced time.Time
@@ -741,7 +1004,7 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 		queued = append(queued, e)
 	}
 
-	// A held slot stops EVERYTHING, free-running rounds included.
+	// A live slot stops EVERYTHING, free-running rounds included.
 	//
 	// Not because they need the slot — they do not — but because Pump returns as
 	// soon as it sees a slot holder, so the quota-free path that would advance
@@ -750,12 +1013,19 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 	// ready here would promise action the daemon cannot take until the holder is
 	// acknowledged. (An agent's own `crq next` can still resolve such a round
 	// directly, which is why this describes the queue rather than forbidding it.)
-	if slotBusy {
+	if liveSlotBusy {
 		for i := range queued {
 			queued[i].ReadyAt, queued[i].Why = time.Time{}, WaitSlotBusy
 		}
 		for i := range freeRunning {
 			freeRunning[i].ReadyAt, freeRunning[i].Why = time.Time{}, WaitSlotBusy
+		}
+	} else if orphanSlotBusy {
+		// An orphaned bounded hold still blocks another metered fire, but Pump
+		// deliberately scans past it for quota-free work. Reflect that split:
+		// ordinary rounds wait on the slot while co-only rounds remain ready.
+		for i := range queued {
+			queued[i].ReadyAt, queued[i].Why = time.Time{}, WaitSlotBusy
 		}
 	}
 
@@ -819,7 +1089,7 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 
 // Normalize repairs invariants after load: map init, expired retry windows
 // (awaiting_retry with a passed RetryAt is simply fire-eligible; nothing to
-// do), and a FireSlot pointing at a round that no longer holds it.
+// do), and a FireSlot no round holds and no orphaned hold keeps alive.
 func (s *State) Normalize(now time.Time) {
 	if s.Rounds == nil {
 		s.Rounds = map[string]Round{}
@@ -827,8 +1097,22 @@ func (s *State) Normalize(now time.Time) {
 	if s.Version == 0 {
 		s.Version = SchemaVersion
 	}
-	if s.FireSlot != nil && s.SlotRound() == nil {
+	// Fold both hold representations before repairing the slot. The top-level
+	// mirror may be the only copy left after a pre-FireSlot-tolerance binary
+	// normalized and rewrote an orphaned hold.
+	if s.FireSlot != nil && s.FireSlot.HoldUntil != nil &&
+		(s.FireSlotHoldUntil == nil || s.FireSlotHoldUntil.Before(*s.FireSlot.HoldUntil)) {
+		u := s.FireSlot.HoldUntil.UTC()
+		s.FireSlotHoldUntil = &u
+	}
+	if s.FireSlotHoldUntil != nil && s.FireSlot != nil &&
+		(s.FireSlot.HoldUntil == nil || s.FireSlot.HoldUntil.Before(*s.FireSlotHoldUntil)) {
+		u := s.FireSlotHoldUntil.UTC()
+		s.FireSlot.HoldUntil = &u
+	}
+	if !s.SlotHeld(now) {
 		s.FireSlot = nil
+		s.ClearSlotHold()
 	}
 	for key, r := range s.Rounds {
 		r.foldLegacyCodex()

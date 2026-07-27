@@ -71,6 +71,16 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 	if err != nil {
 		return report, err
 	}
+	// Convergence can release the head before the optional primary acknowledges
+	// the metered command. Preserve that slot before telling the caller to push:
+	// the push supersedes this round, so leaving the hold attached only to the
+	// live round would let Normalize release it while the review is still in
+	// flight.
+	if action.Kind == engine.ActionPush && feedback.PrimaryAckPending {
+		if err := s.completeWaitRound(ctx, repo, pr, report.Head, true, &feedback.config); err != nil {
+			return report, err
+		}
+	}
 
 	// Undrained feedback for THIS head: publish nothing. Another review of the
 	// same head would spend account quota to be told what the caller is already

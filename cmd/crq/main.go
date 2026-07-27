@@ -211,6 +211,12 @@ func run(ctx context.Context, args []string) int {
 		}
 		printJSON(result)
 		return 0
+	case "reviewers":
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		return runReviewers(ctx, service, args[1:])
 	case "threads":
 		repo, pr, ok := repoPR(args[1:])
 		if !ok {
@@ -402,6 +408,10 @@ USAGE
   crq decline <thread-id> [...] --reason "<why>" [--keep-open]
                                    reply on a thread to record why a finding is declined
                                    (resolves it; --keep-open leaves it open)
+  crq reviewers <repo>             which bots review this project (and what each costs)
+  crq reviewers set <repo> [--bots <a,b>] [--required <a,b>]
+                                   choose this project's reviewers (either flag alone)
+  crq reviewers clear <repo>       go back to the fleet default
   crq threads <repo> <pr>          list every unresolved review thread, outdated ones included
   crq dismiss <repo> <pr> <finding-id> [...] --reason "<why>"
                                    account for a finding GitHub gives you no thread to close
@@ -558,6 +568,35 @@ replies contesting the decline, crq re-surfaces that reply as its own finding.
 
 Pass --keep-open to leave it unresolved anyway (an on-the-record disagreement you
 intend to keep working). Thread IDs come from .findings[].thread_id.
+`)
+	case "reviewers":
+		fmt.Print(`crq reviewers <repo>
+crq reviewers set <repo> [--bots <login,...>] [--required <login,...>]
+crq reviewers clear <repo>
+
+Which bots review one project, and what each of them costs.
+
+Without a subcommand it reports the reviewers that will actually run there — the
+fleet default, or this repository's own choice if it has one. Each entry carries
+its budget: "account" is serialized against the shared CodeRabbit allowance,
+"none" runs immediately, outside that queue. Budget is not requiredness: whether
+a round WAITS for a reviewer is --required, whatever the reviewer costs.
+
+  set     --bots chooses the co-reviewers; --required chooses which reviewers
+          gate convergence. Either flag alone updates only its own half. An
+          empty --bots means none here, which is a different answer from not
+          setting it at all; an empty --required is refused, because a round
+          that gates on nobody converges before any reviewer runs.
+  clear   drops the override so the repository follows the fleet again.
+
+The configuration lives in the shared state ref, not in a file the repository
+carries: the daemon has no checkout of the repos it reviews, and a daemon and an
+agent reading different configurations while writing one state ref is a class of
+bug worth not having.
+
+The primary reviewer is fleet-wide. Its markers and command are compiled into the
+classifiers when crq starts, so a per-repo primary would mean per-repo
+classifiers — a much larger change than choosing who else runs.
 `)
 	case "threads":
 		fmt.Print(`crq threads <repo> <pr>
@@ -776,6 +815,100 @@ func codeRabbitOrg(ctx context.Context, binary string) string {
 		tools["coderabbit"] = checkTool(ctx, "coderabbit", "--version")
 	}
 	return checkCodeRabbitAuth(ctx, tools).CurrentOrg
+}
+
+// runReviewers handles `crq reviewers [set|clear] <repo> [flags]`.
+func runReviewers(ctx context.Context, service *crq.Service, args []string) int {
+	action, rest := "show", args
+	if len(args) > 0 && (args[0] == "set" || args[0] == "clear") {
+		action, rest = args[0], args[1:]
+	}
+	var repo string
+	var bots, required *string
+	for i := 0; i < len(rest); i++ {
+		arg := rest[i]
+		switch {
+		case arg == "--bots", arg == "--required":
+			if i+1 >= len(rest) {
+				fatal(fmt.Errorf("%s needs a value", arg))
+				return 1
+			}
+			value := rest[i+1]
+			i++
+			if arg == "--bots" {
+				bots = &value
+			} else {
+				required = &value
+			}
+		case strings.HasPrefix(arg, "--bots="):
+			value := strings.TrimPrefix(arg, "--bots=")
+			bots = &value
+		case strings.HasPrefix(arg, "--required="):
+			value := strings.TrimPrefix(arg, "--required=")
+			required = &value
+		case strings.HasPrefix(arg, "-"):
+			fatal(fmt.Errorf("unknown flag %s (usage: crq reviewers set <repo> --bots <a,b>)", arg))
+			return 1
+		case repo == "":
+			repo = arg
+		default:
+			fatal(fmt.Errorf("unexpected argument %q", arg))
+			return 1
+		}
+	}
+	if repo == "" {
+		fatal(errors.New("usage: crq reviewers [set|clear] <repo> [--bots <a,b>] [--required <a,b>]"))
+		return 1
+	}
+
+	var view crq.ReviewerView
+	var err error
+	switch action {
+	case "clear":
+		// Ignoring a mutation flag here would turn a malformed automation call
+		// like `reviewers clear repo --bots codex` into a silent wipe.
+		if bots != nil || required != nil {
+			fatal(errors.New("clear takes no --bots/--required (it drops the whole override)"))
+			return 1
+		}
+		view, err = service.ClearReviewers(ctx, repo)
+	case "set":
+		if bots == nil && required == nil {
+			fatal(errors.New("set needs --bots or --required (crq reviewers clear <repo> drops the override)"))
+			return 1
+		}
+		view, err = service.SetReviewers(ctx, repo, splitList(bots), splitList(required))
+	default:
+		// `crq reviewers owner/repo --bots codex` is a set command missing its
+		// verb. Showing the configuration and exiting 0 tells automation the
+		// mutation worked when nothing changed.
+		if bots != nil || required != nil {
+			fatal(errors.New("did you mean `crq reviewers set`? --bots/--required only apply to set"))
+			return 1
+		}
+		view, err = service.Reviewers(ctx, repo)
+	}
+	if err != nil {
+		fatal(err)
+		return 1
+	}
+	printJSON(view)
+	return 0
+}
+
+// splitList turns an unset flag into nil and an empty one into an empty
+// non-nil slice: "not chosen" and "chosen to be none" are different answers.
+func splitList(value *string) []string {
+	if value == nil {
+		return nil
+	}
+	out := []string{}
+	for _, part := range strings.Split(*value, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func repoPR(args []string) (string, int, bool) {

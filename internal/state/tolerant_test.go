@@ -68,6 +68,100 @@ func TestUnknownRoundFieldsSurviveARewrite(t *testing.T) {
 	}
 }
 
+// FireSlot is nested beneath a known State field, so top-level tolerance cannot
+// carry additions made to the slot itself.
+func TestUnknownFireSlotFieldsSurviveARewrite(t *testing.T) {
+	foreign := `{
+	  "v": 3, "rev": 7, "next_seq": 9,
+	  "rounds": {
+	    "owner/repo#1": {
+	      "repo": "owner/repo", "pr": 1, "head": "abcdef123", "seq": 1,
+	      "phase": "reserved", "enqueued_at": "2026-07-26T12:00:00Z",
+	      "token": "slot-token"
+	    }
+	  },
+	  "fire_slot": {
+	    "key": "owner/repo#1", "token": "slot-token",
+	    "since": "2026-07-26T12:01:00Z",
+	    "future_hold": {"until": "2026-07-26T12:05:00Z"}
+	  },
+	  "account": {"scope": "owner"}
+	}`
+
+	var st State
+	if err := json.Unmarshal([]byte(foreign), &st); err != nil {
+		t.Fatal(err)
+	}
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	slot, _ := back["fire_slot"].(map[string]any)
+	if slot == nil {
+		t.Fatalf("the fire slot vanished:\n%s", out)
+	}
+	hold, _ := slot["future_hold"].(map[string]any)
+	if hold == nil || hold["until"] != "2026-07-26T12:05:00Z" {
+		t.Errorf("carried fire-slot member lost its content: %#v", slot["future_hold"])
+	}
+}
+
+// A binary from before FireSlot had its own tolerant marshal drops nested
+// hold_until and then clears the orphaned slot in Normalize. The top-level
+// mirror is unknown to that binary, so State's existing tolerance carries it
+// and a current reader must still honor the in-flight command window.
+func TestOrphanedHoldSurvivesALegacyRewrite(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	until := now.Add(15 * time.Minute)
+	st := State{
+		Version: SchemaVersion,
+		Rounds:  map[string]Round{},
+		FireSlot: &FireSlot{
+			Key: "owner/repo#1", Token: "slot-token", Since: now,
+		},
+	}
+	st.HoldSlotUntil(until)
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Model the legacy rewrite: its Normalize removes fire_slot because no live
+	// round owns it, while its top-level unknown-field carrier leaves the mirror.
+	var legacy map[string]any
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy["last_fired"] != until.Format(time.RFC3339) {
+		t.Fatalf("legacy pacing anchor = %v, want hold deadline %s", legacy["last_fired"], until)
+	}
+	delete(legacy, "fire_slot")
+	rewritten, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var back State
+	if err := json.Unmarshal(rewritten, &back); err != nil {
+		t.Fatal(err)
+	}
+	back.Normalize(now)
+	if !back.SlotHeld(now) {
+		t.Fatalf("legacy rewrite lost the orphaned hold: %+v", back)
+	}
+	back.Normalize(until.Add(time.Second))
+	if back.SlotHeld(until.Add(time.Second)) || back.FireSlotHoldUntil != nil {
+		t.Fatalf("the recovered compatibility hold did not expire: %+v", back)
+	}
+	if back.LastFired != nil {
+		t.Fatalf("current writer did not restore the pre-hold pacing anchor: %s", back.LastFired)
+	}
+}
+
 // A carried member must never win over a field this binary owns: what this build
 // computes now is the current truth, and a stale copy from a foreign write would
 // silently override it.
