@@ -236,7 +236,12 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 		return err
 	}
 	cfg := s.fleetCfg(state)
-	targets := cfg.Scope
+	// Copied, never sorted in place. Without a fleet `scope` the configuration is
+	// this host's own, so the slice shares its backing array with s.cfg.Scope and
+	// the sort below would silently reorder the operator's configured scan order
+	// — and race any concurrent reader of it. The allow-repository branch already
+	// builds its own.
+	targets := append([]string(nil), cfg.Scope...)
 	byRepo := false
 	if len(cfg.AllowRepos) > 0 {
 		targets = make([]string, 0, len(cfg.AllowRepos))

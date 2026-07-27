@@ -682,6 +682,32 @@ func TestAutoReviewScanSkipsTheFleetsAuthors(t *testing.T) {
 	}
 }
 
+// Without a fleet `scope` the pass's configuration is this host's own, so its
+// target list shares the backing array of CRQ_SCOPE. Sorting it in place
+// rewrote the operator's configured scan order under every later reader of it,
+// including a concurrent one.
+func TestAutoReviewScanLeavesTheConfiguredScopeAlone(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:          "o/gate",
+		Scope:             []string{"zeta-org", "alpha-org"},
+		Host:              "h",
+		Bot:               "coderabbitai[bot]",
+		ReviewCommand:     "@coderabbitai review",
+		LeaderTTL:         time.Minute,
+		AutoReviewMaxScan: 10,
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if err := svc.AutoReview(ctx, AutoOptions{Once: true, Incremental: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(svc.cfg.Scope, ","); got != "zeta-org,alpha-org" {
+		t.Fatalf("Scope = %q, want the configured order untouched", got)
+	}
+}
+
 func TestAutoReviewScanSkipsMarkedPRs(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{

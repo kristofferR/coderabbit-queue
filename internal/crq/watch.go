@@ -281,7 +281,30 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			// the shared quota. Next is a MUTATING oracle — it enqueues and can
 			// fire — so the marker has to be honoured before calling it, not
 			// after.
-			if cfg.SkipsReview(pull.Body) {
+			//
+			// The policy is re-read here rather than reused from the top of the
+			// pass. A fleet-wide scan is long, and Next does not enforce the body
+			// marker itself (it is the manual path), so a marker the fleet adopted
+			// mid-pass would otherwise spend a metered review on every candidate
+			// still to come in it. Rereading costs a conditional GET on the ETag'd
+			// state ref, against a call that already re-observes the PR.
+			live, _, lerr := s.store.Load(ctx)
+			if lerr != nil {
+				if _, throttled := ghapi.ThrottleWait(lerr); throttled {
+					return lerr
+				}
+				// Next reads the same ref and would fail the same way; treat it
+				// like any other unreadable candidate rather than firing under a
+				// policy crq could not confirm.
+				if s.log != nil {
+					s.log.Printf("watch: %s#%d: %v", repo, pull.Number, lerr)
+				}
+				if opts.Once {
+					failures = append(failures, fmt.Sprintf("%s#%d: %v", repo, pull.Number, lerr))
+				}
+				continue
+			}
+			if s.fleetCfg(live).SkipsReview(pull.Body) {
 				event := WatchEvent{
 					Repo: repo, PR: pull.Number,
 					Action: "skipped", Reason: "fleet auto-review skip marker present",

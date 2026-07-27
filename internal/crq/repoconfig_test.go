@@ -1028,3 +1028,42 @@ func TestSelfHealDoesNotTriggerForFleetExcludedRepository(t *testing.T) {
 		t.Fatalf("excluded repository retained a co-review claim: %+v", c)
 	}
 }
+
+// The co-review wait is the one fire verdict with no later reconciliation to
+// undo it: the round is still queued when a reviewer change lands, requeuing a
+// queued round is a no-op, and the stale decision then parks it in reviewing
+// with commands adopted for the reviewer set that no longer gates it.
+func TestCoReviewWaitIsRevalidatedInsideItsWrite(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = codexCoBots(nil)
+	store := NewMemoryStore(cfg)
+	hooked := &hookedStore{StateStore: store}
+	svc := NewService(cfg, newFakeGitHub(), hooked, nil)
+	now := time.Now().UTC()
+	repo, pr, head := "o/r", 12, "aaaaaaaa2"
+	seedRound(t, store, cfg, repo, pr, head, PhaseQueued, now, 0)
+
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := *st.Round(repo, pr)
+	hooked.hook = func() {
+		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+			t.Error(err)
+		}
+	}
+	wait := engine.FireDecision{Verdict: engine.FireCoReviewWait, Reason: "awaiting co-review"}
+	obs := engine.Observation{Open: true, Head: head, HeadAt: now.Add(-time.Minute)}
+	result, err := svc.applyFire(ctx, svc.cfgFor(st, repo), round, obs, wait, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != "lost_race" {
+		t.Errorf("action = %q, want the wait voided by the override that beat its write", result.Action)
+	}
+	if got := roundPhase(t, store, repo, pr); got != PhaseQueued {
+		t.Fatalf("phase = %s, want the round left queued so the new reviewer set decides it", got)
+	}
+}

@@ -1576,7 +1576,12 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		changed = false
 		r := st.Round(round.Repo, round.PR)
-		if !sameRound(r, round) || !firable(st, r, now) {
+		// This is the wait's commit point, so the reviewer set that chose it must
+		// still be the configured one. A change committed since the decision has
+		// already reconciled the round while it was queued, and nothing later
+		// undoes this transition: moving it to reviewing with adopted commands
+		// would leave the round waiting on — and crediting — the former set.
+		if !sameRound(r, round) || !firable(st, r, now) || overrideChanged(st, round.Repo, cfg) {
 			return ErrNoChange
 		}
 		deadline := now.Add(s.cfg.FeedbackWaitTimeout)
