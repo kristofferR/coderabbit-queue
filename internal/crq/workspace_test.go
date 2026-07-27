@@ -3,6 +3,7 @@ package crq
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -560,4 +561,84 @@ func TestMirrorMigratesAnOldRefspec(t *testing.T) {
 	if err != nil || got != originRefspec {
 		t.Errorf("refspec = %q err=%v, want it migrated to %q", got, err, originRefspec)
 	}
+}
+
+// git serializes config writes through config.lock, so an unconditional write on
+// every Mirror call made two dispatches of one repository collide with "could
+// not lock config file" — before the fetch, which is the part written to survive
+// concurrency. A mirror already holding the right value must not write at all.
+func TestMirrorDoesNotWriteConfigThatIsAlreadyCurrent(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Somebody else is holding the lock, exactly as a concurrent dispatch would.
+	if err := os.WriteFile(filepath.Join(mirror, "config.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(filepath.Join(mirror, "config.lock"))
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Errorf("a held config.lock failed a dispatch that had nothing to write: %v", err)
+	}
+}
+
+// A git command can be led to a URL that repository content chose — a submodule,
+// an LFS endpoint — so a helper that answered every request would hand a pull
+// request the account's token.
+func TestCredentialHelperAnswersOnlyForGitHub(t *testing.T) {
+	ask := func(t *testing.T, request string) string {
+		t.Helper()
+		cmd := exec.Command("sh", "-c", strings.TrimPrefix(credentialHelper, "!")+" get")
+		cmd.Stdin = strings.NewReader(request)
+		cmd.Env = append(os.Environ(), "CRQ_GIT_TOKEN=ghp_secret_value")
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("credential helper failed on %q: %v", request, err)
+		}
+		return string(out)
+	}
+	if got := ask(t, "protocol=https\nhost=github.com\n\n"); !strings.Contains(got, "password=ghp_secret_value") {
+		t.Errorf("helper answered github.com with %q, want the token", got)
+	}
+	for _, request := range []string{
+		"protocol=https\nhost=evil.example\n\n",
+		"protocol=https\nhost=github.com.evil.example\n\n",
+		"protocol=http\nhost=github.com\n\n",
+	} {
+		if got := ask(t, request); strings.Contains(got, "ghp_secret_value") {
+			t.Errorf("helper leaked the token to %q: %q", request, got)
+		}
+	}
+}
+
+// A session sitting idle — holding uncommitted fixes while it waits on a
+// reviewer — touches no file for hours, and pruning by age alone would delete
+// the checkout out from under it. A live handle keeps its own timestamp fresh.
+func TestALiveCheckoutKeepsItselfFromBeingPruned(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Now().Add(-2 * staleWorkAge)
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if since := time.Since(newestModTime(dir)); since < staleWorkAge {
+		t.Fatalf("the checkout reads as %s old, wanted it stale to begin with", since)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go keepAlive(ctx, dir, time.Millisecond)
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		if time.Since(newestModTime(dir)) < time.Minute {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Error("an idle checkout still read as abandoned while its process was alive")
 }
