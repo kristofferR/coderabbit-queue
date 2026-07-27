@@ -254,6 +254,21 @@ func hostName(writer string) string {
 	return name
 }
 
+// hostCell renders the host column, including the case where there is no host
+// to name.
+//
+// ByHost is written by Reserve, so a round that has never taken the fire slot
+// has none — which is every row of the queue table until a round is retried.
+// Formatting that as code produced an empty pair of backticks in the rendered
+// issue, which reads as a bug in crq rather than as "no host has had this yet".
+func hostCell(writer string) string {
+	name := hostName(writer)
+	if strings.TrimSpace(name) == "" {
+		return dash("")
+	}
+	return "`" + name + "`"
+}
+
 // RenderDashboard renders the human-facing dashboard for the current state:
 // rounds by phase instead of v2's queue/fired/awaiting maps.
 func RenderDashboard(st State, cfg StoreConfig) string {
@@ -334,9 +349,9 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	} else {
 		fmt.Fprintf(&b, "| PR | commit | phase | fired | deadline | triggers | host |\n|---|---|---|---|---|---|---|\n")
 		for _, r := range inFlight {
-			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %s | %s | `%s` |\n",
+			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %s | %s | %s |\n",
 				r.Repo, r.PR, r.Repo, r.PR, r.Head, r.Phase,
-				fmtStamp(firedTimeOf(r), loc), fmtStamp(r.WaitDeadline, loc), dash(coBotMarks(r)), hostName(r.ByHost))
+				fmtStamp(firedTimeOf(r), loc), fmtStamp(r.WaitDeadline, loc), dash(coBotMarks(r)), hostCell(r.ByHost))
 		}
 	}
 
@@ -371,9 +386,9 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 			if i == 0 && e.ReadyAt.IsZero() && e.Why == "" {
 				position = strconv.Itoa(1)
 			}
-			fmt.Fprintf(&b, "| %s | [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %d | %s | `%s` |\n",
+			fmt.Fprintf(&b, "| %s | [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %d | %s | %s |\n",
 				position, e.Repo, e.PR, e.Repo, e.PR, e.Head, ready, dash(e.Why),
-				e.Attempts, fmtStamp(&e.EnqueuedAt, loc), hostName(e.ByHost))
+				e.Attempts, fmtStamp(&e.EnqueuedAt, loc), hostCell(e.ByHost))
 		}
 	}
 
@@ -396,8 +411,8 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	} else {
 		fmt.Fprintf(&b, "| PR | commit | requested | host |\n|---|---|---|---|\n")
 		for _, r := range requested {
-			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | `%s` |\n",
-				r.Repo, r.PR, r.Repo, r.PR, r.Head, fmtStamp(r.FiredAt, loc), hostName(r.ByHost))
+			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s |\n",
+				r.Repo, r.PR, r.Repo, r.PR, r.Head, fmtStamp(r.FiredAt, loc), hostCell(r.ByHost))
 		}
 	}
 

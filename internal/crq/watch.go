@@ -260,8 +260,19 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			}
 			continue
 		}
+		open := make(map[int]bool, len(pulls))
 		for _, pull := range pulls {
 			candidates = append(candidates, candidate{repo, pull})
+			open[pull.Number] = true
+		}
+		// This list is the authoritative set of open pull requests for the
+		// repository, and it has already been paid for. Any round still waiting
+		// for one that is not in it belongs to a closed or merged PR, so retire
+		// them all here rather than leaving them to a sweep that inspects one
+		// candidate per pass — a merged PR sat in the rendered queue for an
+		// afternoon that way, behind rounds the sweep reached first.
+		if err := s.retireClosedRounds(ctx, repo, open); err != nil && s.log != nil {
+			s.log.Printf("watch: %s: retiring closed rounds: %v", repo, err)
 		}
 	}
 	if len(candidates) > 0 {
@@ -1120,4 +1131,40 @@ func sessionLogTimestamp(name string) string {
 		return name[at+1:]
 	}
 	return ""
+}
+
+// retireClosedRounds abandons every waiting round of repo whose pull request is
+// not in the open set the pass just listed.
+//
+// It costs nothing extra: the list is the one watchPass already fetched, and it
+// is the same evidence a per-round `pullHead` would gather one PR at a time.
+// Rounds that are fired or reviewing are left alone — those are answered by
+// Progress, which has the round's own observation to reason from.
+func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[int]bool) error {
+	key := NormalizeRepo(repo)
+	var stale []Round
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return err
+	}
+	for _, r := range st.Rounds {
+		if NormalizeRepo(r.Repo) != key || open[r.PR] {
+			continue
+		}
+		if r.Phase == PhaseQueued || r.Phase == PhaseAwaitingRetry {
+			stale = append(stale, r)
+		}
+	}
+	// Ordered, so a pass that is interrupted has done a prefix of the work
+	// rather than an arbitrary subset.
+	sort.Slice(stale, func(i, j int) bool { return stale[i].PR < stale[j].PR })
+	for _, r := range stale {
+		if _, err := s.abandonRound(ctx, r, "pr closed", "skipped"); err != nil {
+			return err
+		}
+		if s.log != nil {
+			s.log.Printf("watch: %s#%d left the queue: pr closed", r.Repo, r.PR)
+		}
+	}
+	return nil
 }

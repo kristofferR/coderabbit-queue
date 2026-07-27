@@ -59,3 +59,44 @@ func TestClosedRoundsLeaveTheQueueBehindABlockedOne(t *testing.T) {
 		t.Errorf("the blocked round was dropped too: %+v", r)
 	}
 }
+
+// The pass already knows which pull requests are open — it just listed them —
+// so every round waiting for one that is not in that list can go at once.
+//
+// The per-pump sweep inspects ONE candidate, and its rotation cursor lives in
+// memory, so a fresh process always re-inspects the same one. A merged PR
+// therefore sat in the rendered queue behind rounds that kept winning the draw.
+func TestWatchRetiresEveryClosedRoundItCanSee(t *testing.T) {
+	ctx := context.Background()
+	repo := "owner/thing"
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{repo: true}
+	gh := newFakeGitHub()
+	var live ghapi.Pull
+	live.State, live.Number, live.Head.SHA = "open", 1, "aaaaaaaa1"
+	gh.pulls[fakeKey(repo, 1)] = live
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	seedRound(t, store, cfg, repo, 1, "aaaaaaaa1", PhaseQueued, now, 0)
+	// Two merged PRs, neither of which ListPulls will return.
+	seedRound(t, store, cfg, repo, 2, "bbbbbbbb1", PhaseQueued, now, 0)
+	seedRound(t, store, cfg, repo, 3, "cccccccc1", PhaseQueued, now, 0)
+
+	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0), nil); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pr := range []int{2, 3} {
+		if r := st.Round(repo, pr); r != nil && r.Active() {
+			t.Errorf("#%d is still in the queue after its PR closed: %+v", pr, r)
+		}
+	}
+	if r := st.Round(repo, 1); r == nil || !r.Active() {
+		t.Errorf("the open PR's round was retired too: %+v", r)
+	}
+}

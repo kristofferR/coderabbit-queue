@@ -57,3 +57,33 @@ func TestHoldReasonCannotRewriteTheTable(t *testing.T) {
 		t.Errorf("the reason was truncated instead of flattened: %s", row)
 	}
 }
+
+// A queued round has never reserved the fire slot, so it has no host — which is
+// every row of the queue table. Rendering that as code produced an empty pair of
+// backticks in the issue, which reads as a bug in crq rather than as "nobody has
+// taken this yet".
+func TestTheHostColumnSaysNobodyRatherThanNothing(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	st := New()
+	if _, err := st.NewRound("owner/repo", 7, "aaaaaaaa1", now); err != nil {
+		t.Fatal(err)
+	}
+
+	body := RenderDashboard(st, StoreConfig{})
+	var row string
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, "owner/repo#7") {
+			row = line
+			break
+		}
+	}
+	if row == "" {
+		t.Fatal("the queued round is missing from the dashboard")
+	}
+	if strings.Contains(row, "``") {
+		t.Errorf("the host column rendered as empty backticks: %s", row)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(row), "— |") {
+		t.Errorf("the host column does not say there is no host: %s", row)
+	}
+}
