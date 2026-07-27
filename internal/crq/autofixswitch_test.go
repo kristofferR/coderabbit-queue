@@ -8,16 +8,16 @@ import (
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
-// Draining is on by default and off only where somebody said so. A repository
+// Autofix is on by default and off only where somebody said so. A repository
 // nobody has ruled on gets fixed, because that is what the watcher is for.
-func TestDrainIsOnUnlessARepositorySaysOtherwise(t *testing.T) {
+func TestAutofixIsOnUnlessARepositorySaysOtherwise(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	cfg.AllowRepos = map[string]bool{"owner/one": true, "owner/two": true}
 	store := NewMemoryStore(cfg)
 	svc := NewService(cfg, newFakeGitHub(), store, nil)
 
-	settings, err := svc.DrainSettings(ctx)
+	settings, err := svc.AutofixSettings(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestDrainIsOnUnlessARepositorySaysOtherwise(t *testing.T) {
 		}
 	}
 
-	if _, err := svc.SetDrainEnabled(ctx, "Owner/One", false, "hand-tuned branch"); err != nil {
+	if _, err := svc.SetAutofixEnabled(ctx, "Owner/One", false, "hand-tuned branch"); err != nil {
 		t.Fatal(err)
 	}
 	st, _, err := store.Load(ctx)
@@ -38,42 +38,42 @@ func TestDrainIsOnUnlessARepositorySaysOtherwise(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Case-insensitive, like every other repository key.
-	if st.DrainEnabled("owner/one") {
+	if st.AutofixEnabled("owner/one") {
 		t.Error("an explicit off did not take")
 	}
-	if !st.DrainEnabled("owner/two") {
+	if !st.AutofixEnabled("owner/two") {
 		t.Error("turning one repository off turned another off too")
 	}
 
 	// Back to the default is distinguishable from an explicit on.
-	if cleared, err := svc.ClearDrainEnabled(ctx, "owner/one"); err != nil || !cleared {
+	if cleared, err := svc.ClearAutofixEnabled(ctx, "owner/one"); err != nil || !cleared {
 		t.Fatalf("clear = %v %v, want it to report the setting it removed", cleared, err)
 	}
 	st, _, _ = store.Load(ctx)
-	if !st.DrainEnabled("owner/one") {
+	if !st.AutofixEnabled("owner/one") {
 		t.Error("clearing the setting did not return the repository to the default")
 	}
 }
 
-func TestDrainSwitchRejectsMalformedRepositoryNames(t *testing.T) {
+func TestAutofixSwitchRejectsMalformedRepositoryNames(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	store := NewMemoryStore(cfg)
 	svc := NewService(cfg, newFakeGitHub(), store, nil)
 
 	for _, repo := range []string{"owner", "owner/repo/", "/repo", "owner/repo/extra", "../repo"} {
-		if _, err := svc.SetDrainEnabled(ctx, repo, false, "operator stop"); err == nil {
-			t.Errorf("SetDrainEnabled(%q) succeeded", repo)
+		if _, err := svc.SetAutofixEnabled(ctx, repo, false, "operator stop"); err == nil {
+			t.Errorf("SetAutofixEnabled(%q) succeeded", repo)
 		}
-		if _, err := svc.ClearDrainEnabled(ctx, repo); err == nil {
-			t.Errorf("ClearDrainEnabled(%q) succeeded", repo)
+		if _, err := svc.ClearAutofixEnabled(ctx, repo); err == nil {
+			t.Errorf("ClearAutofixEnabled(%q) succeeded", repo)
 		}
 	}
 }
 
 // Off stops FIXING, not watching: the pull request is still observed and still
 // reviewed, so its feedback arrives for a person to act on.
-func TestDrainOffStillWatchesAndSaysWhy(t *testing.T) {
+func TestAutofixOffStillWatchesAndSaysWhy(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	cfg.AllowRepos = map[string]bool{"owner/quiet": true}
@@ -84,7 +84,7 @@ func TestDrainOffStillWatchesAndSaysWhy(t *testing.T) {
 	store := NewMemoryStore(cfg)
 	svc := NewService(cfg, gh, store, nil)
 	seedRound(t, store, cfg, "owner/quiet", 5, "aaaaaaaa1", PhaseQueued, time.Now().UTC(), 0)
-	if _, err := svc.SetDrainEnabled(ctx, "owner/quiet", false, "release branch"); err != nil {
+	if _, err := svc.SetAutofixEnabled(ctx, "owner/quiet", false, "release branch"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -95,11 +95,11 @@ func TestDrainOffStillWatchesAndSaysWhy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(events) == 0 {
-		t.Fatal("a repository with draining off stopped being watched")
+		t.Fatal("a repository with autofix off stopped being watched")
 	}
 	for _, e := range events {
 		if e.Dispatched {
-			t.Errorf("a session ran for a repository with draining off: %+v", e)
+			t.Errorf("a session ran for a repository with autofix off: %+v", e)
 		}
 	}
 }
@@ -121,7 +121,7 @@ func TestSkippedDispatchStillAdvancesHeadWithCarriedFinding(t *testing.T) {
 	f.botReview(repo, pr, 900, old, base.Add(-time.Minute))
 	f.botReviewComment(repo, pr, 901, old, "internal/state/state.go", 42,
 		"_⚠️ Potential issue_\n\nThis dereferences a nil round.")
-	if _, err := f.svc.SetDrainEnabled(f.ctx, repo, false, "operator stop"); err != nil {
+	if _, err := f.svc.SetAutofixEnabled(f.ctx, repo, false, "operator stop"); err != nil {
 		t.Fatal(err)
 	}
 

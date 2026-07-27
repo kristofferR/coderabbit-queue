@@ -5,7 +5,7 @@ import "testing"
 // The pull request that DOCUMENTS the skip marker excluded itself from review,
 // because the paragraph explaining the marker contains the marker. Nothing said
 // so — the skip is a `continue`, so there was no round, no event and no log
-// line — and it sat unreviewed for a day with feedback nobody was draining.
+// line — and it sat unreviewed for a day with feedback nobody was clearing.
 func TestSkipMarkerHasToBeUsedNotMentioned(t *testing.T) {
 	cfg := Config{SkipMarker: "<!-- crq:skip-autoreview -->"}
 	for _, tc := range []struct {

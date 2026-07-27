@@ -335,9 +335,9 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 		fmt.Fprintf(&b, "| **Co-reviewers** | %s |\n", coReviewerCell(st, cfg.CoReviewers))
 	}
 	fmt.Fprintf(&b, "| **Last review fired** | %s |\n", fmtStamp(st.LastFired, loc))
-	if st.Drain.Unhealthy() {
+	if st.Autofix.Unhealthy() {
 		fmt.Fprintf(&b, "\n> 🚨 fix sessions are not starting on %s — %d attempts in a row: %s\n",
-			dash(st.Drain.Host), st.Drain.ConsecutiveFailures, st.Drain.LastError)
+			dash(st.Autofix.Host), st.Autofix.ConsecutiveFailures, st.Autofix.LastError)
 	}
 	if st.Warn != "" {
 		fmt.Fprintf(&b, "\n> ⚠️ %s\n", st.Warn)

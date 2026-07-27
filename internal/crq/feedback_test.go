@@ -1764,10 +1764,10 @@ func TestLoopReturnsExistingCodexFeedbackBeforeWaitingForReviewSlot(t *testing.T
 		t.Fatal(err)
 	}
 	if code != 10 || report.Status != "feedback" || len(report.Findings) != 1 {
-		t.Fatalf("existing actionable feedback must be drained before a new review round, code=%d report=%#v", code, report)
+		t.Fatalf("existing actionable feedback must be cleared before a new review round, code=%d report=%#v", code, report)
 	}
 	if report.Reason != "unresolved findings must be addressed before a new review round" {
-		t.Fatalf("expected an explicit drain-first reason, got %#v", report)
+		t.Fatalf("expected an explicit fix-first reason, got %#v", report)
 	}
 	if len(gh.posted) != 0 {
 		t.Fatalf("existing feedback must not fire or enqueue a replacement review, posted=%d", len(gh.posted))
@@ -2299,7 +2299,7 @@ func TestBugbotStableIDSettledInAnySiblingThread(t *testing.T) {
 	}
 }
 
-// TestExcludeSkipNoticeIsTargeted: the pre-review drain exempts exactly the
+// TestExcludeSkipNoticeIsTargeted: the pre-review fix-first gate exempts exactly the
 // thread-less skip notice, which cannot be resolved and would otherwise stop
 // the co-review round it is meant to inform. Real unresolved findings on the
 // same head must still hold it, as on any other PR — an earlier version

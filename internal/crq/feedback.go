@@ -1412,7 +1412,7 @@ func dedupeFindings(in []dialect.Finding, suppressPromptAt, settledStableIDs map
 // skipNoticeSource marks the synthetic finding Feedback builds from a "Review
 // skipped" notice. It is the only finding with no thread to resolve and no way
 // to be addressed except by changing the PR itself, so it is the one finding
-// the pre-enqueue drain exempts — identified by this source rather than by its
+// the pre-enqueue fix-first gate exempts — identified by this source rather than by its
 // own display text, which names whichever bot posted it.
 const skipNoticeSource = "review_skipped"
 

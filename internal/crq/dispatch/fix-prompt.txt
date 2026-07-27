@@ -1,4 +1,4 @@
-You are draining review feedback on ONE pull request, unattended. crq has checked
+You are clearing review feedback on ONE pull request, unattended. crq has checked
 out the PR head into this worktree and put the findings on disk.
 
   repo:     $CRQ_DISPATCH_REPO

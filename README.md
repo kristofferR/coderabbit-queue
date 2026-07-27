@@ -302,7 +302,7 @@ Read `.action`, do exactly that, call it again.
 | `done` | converged |
 | `blocked` | needs a human; `.reason` says why |
 
-Every rule this used to spell out is now a value crq computes. Drain-before-review is `fix` coming
+Every rule this used to spell out is now a value crq computes. Fix-before-review is `fix` coming
 before everything else. Hold-the-head is the `hold` action, including the exception where a
 CodeRabbit rate-limit degrade releases the head because the queued review will fire on whatever head
 exists when the window opens. The wait is `.recheck_after`, derived from the account-quota window,
@@ -397,12 +397,12 @@ crq feedback <repo> <pr>  # current normalized findings as JSON, WITHOUT trigger
 crq threads <repo> <pr>                                     # every unresolved thread, outdated included
 crq resolve <thread-id> [<thread-id>...]                    # resolve addressed review threads
 crq decline <thread-id> [...] --reason "<why>" [--resolve]  # record why a finding is declined
-crq drain install         # ⭐ unattended: watch every PR and fix what needs fixing
-crq watch                 #    what the drain runs: drive open PRs through crq next, one JSON
+crq autofix install       # ⭐ unattended: watch every PR and fix what needs fixing
+crq watch                 #    what autofix runs: drive open PRs through crq next, one JSON
                           #    line each. Fixing is ON by default (--no-dispatch observes only)
-crq drain                 # which repositories crq may fix
-crq drain off <repo> --reason "<why>"   # stop fixing there; watching and reviewing continue
-crq drain on <repo> | crq drain default <repo>
+crq autofix               # which repositories crq may fix
+crq autofix off <repo> --reason "<why>"   # stop fixing there; watching and reviewing continue
+crq autofix on <repo> | crq autofix default <repo>
 crq hold <repo> <pr> --reason "<why>"                       # persistently stop reviews for a PR
 crq unhold <repo> <pr>                                      # resume reviews for a held PR
 crq hold                                                    # list held PRs
