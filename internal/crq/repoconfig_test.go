@@ -244,6 +244,32 @@ func TestChangingRequirementsReopensACompletedRound(t *testing.T) {
 	}
 }
 
+// Optional co-reviewers can become convergence gates after participation
+// evidence appears. Enabling one therefore needs the same active round as
+// changing the statically required set, so its trigger and bounded wait run.
+func TestChangingEnabledCoReviewersReopensACompletedRound(t *testing.T) {
+	ctx := context.Background()
+	cfg := isolatedConfig(t, map[string]string{"CRQ_COBOTS": ""})
+	store := NewMemoryStore(cfg)
+	gh := newFakeGitHub()
+	repo, pr, head := "o/r", 4, "aaaaaaaa1"
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	svc := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 11)
+
+	if _, err := svc.SetReviewers(ctx, repo, []string{"bugbot"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(repo, pr)
+	if round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("round = %#v, want it requeued so the newly enabled co-reviewer can run", round)
+	}
+}
+
 // Dedupe writes the "every required reviewer answered this head" marker, so a
 // required reviewer added between the decision and the write must void it. The
 // round is still queued when the operator's write lands — nothing to requeue —

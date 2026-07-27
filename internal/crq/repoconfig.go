@@ -252,7 +252,7 @@ func mustOverride(st *State, repo string) RepoReviewers {
 }
 
 // reopenForChangedReviewers requeues this repository's completed rounds when the
-// set of reviewers that gates them changed.
+// effective reviewer set changed.
 //
 // A completed round is the "this head was reviewed" dedup marker, so adding a
 // required reviewer would otherwise strand the PR: Feedback reports the new bot
@@ -260,12 +260,14 @@ func mustOverride(st *State, repo string) RepoReviewers {
 // still there. No eligible round exists to trigger it, and `crq next` waits for
 // a push that has no reason to come.
 //
-// Only rounds whose required set actually changed are touched, only completed
-// ones — an in-flight round is already going to answer — and only those whose
-// pull request is still open. Rounds are never deleted, so a repository's merged
-// and closed PRs stay behind as completed dedup markers: requeueing those would
-// hand Pump hundreds of dead rounds to observe and drop one per tick, ahead of
-// every real one, and a stranded PR is by definition an open one.
+// Optional co-reviewers count too: once one has participation evidence,
+// Completion waits for it, and its trigger/self-heal needs an active round to
+// run. Only completed rounds are touched — an in-flight round is already going
+// to answer — and only those whose pull request is still open. Rounds are never
+// deleted, so a repository's merged and closed PRs stay behind as completed
+// dedup markers: requeueing those would hand Pump hundreds of dead rounds to
+// observe and drop one per tick, ahead of every real one, and a stranded PR is
+// by definition an open one.
 //
 // A closed PR's round is marked instead of requeued, because closed is not
 // final: reopened at the same head, its completed round would be the dedup
@@ -277,7 +279,9 @@ func mustOverride(st *State, repo string) RepoReviewers {
 // object, so a reopened round that the primary already answered dedupes instead
 // of buying a second review.
 func (s *Service) reopenForChangedReviewers(st *State, repo string, before, after Config, open map[int]bool) {
-	if sameLogins(before.RequiredBots, after.RequiredBots) {
+	beforeCo := before.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
+	afterCo := after.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
+	if sameLogins(before.RequiredBots, after.RequiredBots) && sameLogins(beforeCo, afterCo) {
 		return
 	}
 	for _, round := range st.Rounds {
@@ -298,7 +302,7 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 		}
 		st.PutRound(reopened)
 		if s.log != nil {
-			s.log.Printf("reviewers: requeued %s#%d@%s — the required set changed", round.Repo, round.PR, round.Head)
+			s.log.Printf("reviewers: requeued %s#%d@%s — the reviewer set changed", round.Repo, round.PR, round.Head)
 		}
 	}
 }

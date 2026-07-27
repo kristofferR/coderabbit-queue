@@ -68,6 +68,48 @@ func TestUnknownRoundFieldsSurviveARewrite(t *testing.T) {
 	}
 }
 
+// FireSlot is nested beneath a known State field, so top-level tolerance cannot
+// carry additions made to the slot itself.
+func TestUnknownFireSlotFieldsSurviveARewrite(t *testing.T) {
+	foreign := `{
+	  "v": 3, "rev": 7, "next_seq": 9,
+	  "rounds": {
+	    "owner/repo#1": {
+	      "repo": "owner/repo", "pr": 1, "head": "abcdef123", "seq": 1,
+	      "phase": "reserved", "enqueued_at": "2026-07-26T12:00:00Z",
+	      "token": "slot-token"
+	    }
+	  },
+	  "fire_slot": {
+	    "key": "owner/repo#1", "token": "slot-token",
+	    "since": "2026-07-26T12:01:00Z",
+	    "future_hold": {"until": "2026-07-26T12:05:00Z"}
+	  },
+	  "account": {"scope": "owner"}
+	}`
+
+	var st State
+	if err := json.Unmarshal([]byte(foreign), &st); err != nil {
+		t.Fatal(err)
+	}
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	slot, _ := back["fire_slot"].(map[string]any)
+	if slot == nil {
+		t.Fatalf("the fire slot vanished:\n%s", out)
+	}
+	hold, _ := slot["future_hold"].(map[string]any)
+	if hold == nil || hold["until"] != "2026-07-26T12:05:00Z" {
+		t.Errorf("carried fire-slot member lost its content: %#v", slot["future_hold"])
+	}
+}
+
 // A carried member must never win over a field this binary owns: what this build
 // computes now is the current truth, and a stale copy from a foreign write would
 // silently override it.

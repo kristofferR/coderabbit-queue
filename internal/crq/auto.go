@@ -308,7 +308,7 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 		if !r.ReviewersChanged {
 			return false, head, nil
 		}
-		s.logEnqueue(repo, pr, head, "reviewer requirements changed while the pr was closed")
+		s.logEnqueue(repo, pr, head, "reviewer configuration changed while the pr was closed")
 		return true, head, nil
 	}
 	reviews, err := s.gh.ListReviews(ctx, repo, pr)

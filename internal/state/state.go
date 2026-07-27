@@ -103,7 +103,7 @@ type Round struct {
 	// the round is retried or surfaced as timed out.
 	WaitDeadline *time.Time `json:"wait_deadline,omitempty"`
 
-	// ReviewersChanged marks a completed round whose required reviewer set
+	// ReviewersChanged marks a completed round whose effective reviewer set
 	// changed while its pull request was closed. Requeueing a closed PR's round
 	// would hand Pump dead work ahead of every live round, so the change is
 	// recorded on the marker instead: if the PR is ever reopened, enqueue reopens
@@ -255,6 +255,10 @@ type FireSlot struct {
 	// that. Set to the end of that command's in-flight window, so the hold is
 	// bounded by the same deadline Progress would have applied.
 	HoldUntil *time.Time `json:"hold_until,omitempty"`
+
+	// unknown carries JSON members this binary has no field for, so a newer
+	// binary's additions survive being read and rewritten here. See tolerant.go.
+	unknown unknownFields
 }
 
 // AccountQuota is the CodeRabbit account-wide review quota (NOT the GitHub
@@ -520,15 +524,16 @@ func (r *Round) ReleaseToQueue(reason string, now time.Time) error {
 	return nil
 }
 
-// Reopen puts a completed round back in the queue because the set of reviewers
-// that has to answer for its head changed.
+// Reopen puts a completed round back in the queue because its effective
+// reviewer set changed.
 //
 // A completed round is the "this head was reviewed" dedup marker, so a newly
 // required reviewer would otherwise strand the PR: convergence reports it
 // pending while enqueue keeps skipping the head, and no eligible round exists to
-// trigger it. This is the one transition that reopens a finished round, and it
-// keeps the head, the attempts and the co-reviewer bookkeeping — what changed is
-// who still has to answer, not what happened.
+// trigger it. An optional reviewer also needs an active round for its trigger,
+// self-heal and bounded participation wait. This is the one transition that
+// reopens a finished round, and it keeps the head, the attempts and the
+// co-reviewer bookkeeping — what changed is who runs, not what happened.
 //
 // LastAttemptAt is deliberately left alone: it is the adoption floor for a
 // FAILED attempt, and moving it would discard a newly required co-reviewer's own
@@ -544,7 +549,7 @@ func (r *Round) Reopen() error {
 	r.WaitDeadline = nil
 	r.RetryAt = nil
 	r.ReviewersChanged = false
-	r.Note = "reviewer requirements changed"
+	r.Note = "reviewer configuration changed"
 	return nil
 }
 
