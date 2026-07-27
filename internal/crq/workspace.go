@@ -271,10 +271,13 @@ func (w Workspace) fetchMirror(ctx context.Context, path string) error {
 // frozen at whatever commit that clone saw. The fetch has just written the
 // current value of each under refs/remotes/origin, so the copy is redundant.
 //
-// Two guards, because a session's own branch lives in refs/heads too: only names
-// origin actually has are dropped, and never one a worktree has checked out.
-// `git update-ref -d` deletes a checked-out branch without a word of complaint,
-// and that branch is where a fix session's work lives before it is pushed.
+// Three guards, because a session's own branch lives in refs/heads too, and
+// deleting that one loses the commits it is the only ref for: never a name a
+// worktree has checked out (`git update-ref -d` deletes a checked-out branch
+// without a word of complaint), only names origin actually has, and only when
+// origin already has the commits. The last is what makes a deletion lossless
+// rather than merely likely to be: checkout status alone would drop a session's
+// branch the moment it detached HEAD to look at another commit.
 func (w Workspace) dropFetchedHeads(ctx context.Context, path string) error {
 	heads, err := gitDir(ctx, path, "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads")
 	if err != nil {
@@ -293,6 +296,15 @@ func (w Workspace) dropFetchedHeads(ctx context.Context, path string) error {
 		}
 		if _, err := gitDir(ctx, path, "show-ref", "--verify", "--quiet", "refs/remotes/origin/"+name); err != nil {
 			continue // origin has no such branch, so this one belongs to a session
+		}
+		// A clone's copy is at or behind what the fetch just wrote under
+		// refs/remotes/origin, so every commit it names survives its deletion. A
+		// branch holding commits origin has never seen is somebody's unpushed work
+		// — or a leftover of a force-push — and its ref is the only thing keeping
+		// those commits reachable. Keeping it costs one occupied name; dropping it
+		// costs the commits.
+		if _, err := gitDir(ctx, path, "merge-base", "--is-ancestor", "refs/heads/"+name, "refs/remotes/origin/"+name); err != nil {
+			continue
 		}
 		if _, err := gitDir(ctx, path, "update-ref", "-d", "refs/heads/"+name); err != nil {
 			return err
@@ -579,14 +591,32 @@ func pruneStaleWork(ctx context.Context, mirror, repoDir string) error {
 	return nil
 }
 
-// newestModTime is the most recent modification anywhere under dir.
+// newestModTime is the most recent modification anywhere under dir that is not
+// in the future.
+//
+// A file can carry a timestamp later than now — an extracted archive that kept
+// the packer's clock, a build stamping ahead, a host whose clock was corrected
+// backwards. `time.Since` of such a stamp is negative, which reads as "touched
+// moments ago" for as long as the future lasts, so one bad timestamp would make
+// an abandoned checkout immortal and every dispatch would rescan it.
+//
+// Ignored rather than clamped to now: clamping produces exactly the same
+// "touched moments ago" answer on every later scan. A stamp in the future says
+// nothing about when anybody last worked here, so the newest real modification
+// is the honest answer — and a live session's own beat (keepAlive) is always one
+// of those.
 func newestModTime(dir string) time.Time {
+	now := time.Now()
 	newest := time.Time{}
 	_ = filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		if info, ierr := d.Info(); ierr == nil && info.ModTime().After(newest) {
+		info, ierr := d.Info()
+		if ierr != nil || info.ModTime().After(now) {
+			return nil
+		}
+		if info.ModTime().After(newest) {
 			newest = info.ModTime()
 		}
 		return nil

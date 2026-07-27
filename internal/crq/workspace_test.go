@@ -336,6 +336,28 @@ func TestPruningMeasuresTheNewestFileNotTheDirectory(t *testing.T) {
 	}
 }
 
+// One file stamped in the future — an extracted artifact, a corrected clock —
+// made time.Since negative and so always under staleWorkAge, and the abandoned
+// checkout holding it would never be collected.
+func TestPruningIgnoresATimestampInTheFuture(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Now().Add(-2 * staleWorkAge)
+	future := filepath.Join(dir, "artifact.tar")
+	if err := os.WriteFile(future, []byte("packed elsewhere"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ahead := time.Now().Add(90 * 24 * time.Hour)
+	if err := os.Chtimes(future, ahead, ahead); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if since := time.Since(newestModTime(dir)); since < staleWorkAge {
+		t.Errorf("the checkout reads as %s old, want the future stamp ignored and the checkout collectable", since)
+	}
+}
+
 // `clone --bare` copies the remote's branch heads straight into refs/heads, and
 // a refspec set afterwards only governs later fetches. A session could then not
 // create its branch — the name is taken — or would land on the commit the clone
@@ -627,6 +649,56 @@ func TestMirrorDropsHeadsAnOldCloneLeftInPlace(t *testing.T) {
 	}
 	if branch, err := co.Git(ctx, "rev-parse", "--abbrev-ref", "HEAD"); err != nil || branch != "feature" {
 		t.Errorf("branch = %q err=%v, want the session's checked-out branch to survive", branch, err)
+	}
+}
+
+// Checked-out status alone is not what tells a clone's leftover from a session's
+// branch: a session that detaches HEAD to look at another commit still owns the
+// branch it committed to, and deleting that ref is the only thing keeping its
+// commits reachable.
+func TestMirrorKeepsASessionBranchThatIsNotCheckedOut(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	origin := filepath.Join(base, repo)
+	sha := originRepo(t, origin)
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+	// Origin has the name too, which is what made the mirror read the session's
+	// branch as a copy of it.
+	if _, err := gitDir(ctx, origin, "branch", "feature"); err != nil {
+		t.Fatal(err)
+	}
+
+	co, err := ws.Checkout(ctx, repo, 7, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"config", "user.email", "test@example.invalid"},
+		{"config", "user.name", "crq test"},
+		{"checkout", "-b", "feature"},
+		{"commit", "--allow-empty", "-m", "unpushed work"},
+		{"checkout", "--detach"},
+	} {
+		if _, err := co.Git(ctx, args...); err != nil {
+			t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+		}
+	}
+	work, err := co.Git(ctx, "rev-parse", "refs/heads/feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	mirror, err := ws.mirrorPath(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := gitDir(ctx, mirror, "rev-parse", "refs/heads/feature"); err != nil || got != work {
+		t.Errorf("refs/heads/feature = %q err=%v, want the session's unpushed commit %s", got, err, work)
 	}
 }
 
