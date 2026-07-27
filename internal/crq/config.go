@@ -34,6 +34,7 @@ type Config struct {
 	SkipAuthors map[string]bool
 	// SkipMarker suppresses fleet auto-review when present in a PR body.
 	// Manual `crq loop` remains unaffected so an explicit review can override it.
+	// Read it through SkipsReview, never with a plain substring test.
 	SkipMarker    string
 	StateRef      string
 	Bot           string

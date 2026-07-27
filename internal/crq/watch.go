@@ -214,7 +214,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			// the shared quota. Next is a MUTATING oracle — it enqueues and can
 			// fire — so the marker has to be honoured before calling it, not
 			// after.
-			if marker := strings.TrimSpace(s.cfg.SkipMarker); marker != "" && strings.Contains(pull.Body, marker) {
+			if s.cfg.SkipsReview(pull.Body) {
 				continue
 			}
 			var report NextReport
