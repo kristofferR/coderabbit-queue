@@ -167,6 +167,11 @@ func (g *GitHub) cacheGET(url string, resp *http.Response) (*http.Response, erro
 	return resp, nil
 }
 
+// LookupToken resolves a GitHub token from the environment or the gh CLI, for
+// callers outside this package that need the same credential — git, which does
+// not read GITHUB_TOKEN or gh's store by itself.
+func LookupToken(ctx context.Context) string { return lookupToken(ctx) }
+
 // lookupToken resolves a GitHub token from the environment or the gh CLI. gh can
 // hand back a freshly-rotated OAuth token, which is why send re-runs this on a 401.
 func lookupToken(ctx context.Context) string {

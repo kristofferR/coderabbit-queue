@@ -53,6 +53,15 @@ type Config struct {
 	// Bot / RequiredBots / FeedbackBots / CoBots above are DERIVED from it and
 	// kept only so existing consumers keep compiling; new code should read this.
 	Reviewers []Reviewer
+	// WorkspaceRoot holds crq's own mirrors and worktrees. Read here rather than
+	// from the process environment, so a value in ~/.config/crq/env — the
+	// documented place for crq settings — is actually used.
+	WorkspaceRoot string
+	// WorkDir is the checkout the local-work probe inspects. Empty means the
+	// process's own directory, which is what an agent running crq from its
+	// working copy means. Set programmatically by a caller working in a
+	// worktree it made, since that caller is not standing in one.
+	WorkDir string
 	// FeedbackBotsExplicit records that CRQ_FEEDBACK_BOTS was set. It is the one
 	// list an operator may widen beyond who reviews, so neither LoadConfig's
 	// derivation nor a per-repo override may quietly replace it.
@@ -189,6 +198,7 @@ func LoadConfig() (Config, error) {
 		AutoReviewMaxScan:   intEnv(env, "CRQ_AUTOREVIEW_MAX_SCAN", 400),
 		LeaderTTL:           durationEnv(env, "CRQ_LEADER_TTL", 3*time.Minute),
 		FiredMax:            intEnv(env, "CRQ_FIRED_MAX", 500),
+		WorkspaceRoot:       env["CRQ_WORKSPACE"],
 		Tidy:                stringEnv(env, "CRQ_TIDY", "0") == "1",
 		NoOpen:              env["CRQ_NO_OPEN"] != "",
 		DryRun:              env["CRQ_DRY_RUN"] == "1",
