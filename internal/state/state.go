@@ -103,6 +103,14 @@ type Round struct {
 	// the round is retried or surfaced as timed out.
 	WaitDeadline *time.Time `json:"wait_deadline,omitempty"`
 
+	// ReviewersChanged marks a completed round whose required reviewer set
+	// changed while its pull request was closed. Requeueing a closed PR's round
+	// would hand Pump dead work ahead of every live round, so the change is
+	// recorded on the marker instead: if the PR is ever reopened, enqueue reopens
+	// the round rather than treating it as "this head was reviewed". Reopen
+	// clears it — the reopened round answers under the current requirements.
+	ReviewersChanged bool `json:"reviewers_changed,omitempty"`
+
 	Token string `json:"token,omitempty"` // reservation token (CAS race detection)
 	// ByHost identifies the PROCESS that reserved this round, in the writer form
 	// "host=<name> pid=<n>" — the key NoteWriter records capabilities under, so
@@ -528,6 +536,7 @@ func (r *Round) Reopen() error {
 	r.ReservedAt = nil
 	r.WaitDeadline = nil
 	r.RetryAt = nil
+	r.ReviewersChanged = false
 	r.Note = "reviewer requirements changed"
 	return nil
 }

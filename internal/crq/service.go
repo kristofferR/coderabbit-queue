@@ -128,6 +128,14 @@ func (s *Service) Enqueue(ctx context.Context, repo string, pr int) (EnqueueResu
 		now := s.clock()
 		r := st.Round(repo, pr)
 		if r != nil && r.Head == head {
+			// A PR reopened after its reviewers changed: the completed round is a
+			// marker for requirements that no longer hold, so it goes back in the
+			// queue instead of deduping the enqueue that would have asked.
+			if requeueIfReviewersChanged(st, r) {
+				result.Queued = true
+				result.Seq = r.Seq
+				return nil
+			}
 			switch r.Phase {
 			case PhaseFired, PhaseReviewing, PhaseCompleted:
 				result.Deduped = true
@@ -181,6 +189,9 @@ func (s *Service) enqueueBatch(ctx context.Context, items []queueCandidate) erro
 			repo := NormalizeRepo(it.Repo)
 			if r := st.Round(repo, it.PR); r != nil {
 				if r.Head == it.Head {
+					if requeueIfReviewersChanged(st, r) {
+						added++
+					}
 					continue
 				}
 				if _, err := st.Supersede(repo, it.PR, it.Head, now); err != nil {
@@ -670,12 +681,14 @@ func firedOrEnqueuedAt(r Round) time.Time {
 func (s *Service) applyFire(ctx context.Context, cfg Config, round Round, obs engine.Observation, d engine.FireDecision, now time.Time) (PumpResult, error) {
 	// The decision was made from a configuration that may have been replaced
 	// since. Acting on it would post a trigger for a co-reviewer an operator has
-	// just removed, or skip one they have just required — so only the verdicts
-	// that POST pay for the re-read. FireNo is by far the most common outcome of
-	// a pump, and a Load is four API calls against the git-backed store.
-	if firePosts(d.Verdict) {
+	// just removed, skip one they have just required, or record that a head is
+	// reviewed by a set that no longer gates it — so only the verdicts the
+	// reviewer configuration decides pay for the re-read. FireNo is by far the
+	// most common outcome of a pump, and a Load is four API calls against the
+	// git-backed store.
+	if fireFollowsReviewers(d.Verdict) {
 		if st, _, err := s.store.Load(ctx); err == nil && overrideChanged(&st, round.Repo, cfg) {
-			return PumpResult{Action: "deduped", Repo: round.Repo, PR: round.PR, Head: round.Head,
+			return PumpResult{Action: "lost_race", Repo: round.Repo, PR: round.PR, Head: round.Head,
 				Reason: "reviewer configuration changed while deciding"}, nil
 		}
 	}
@@ -701,13 +714,19 @@ func (s *Service) applyFire(ctx context.Context, cfg Config, round Round, obs en
 	}
 }
 
-// firePosts reports whether a verdict posts a command chosen by the repository's
-// reviewer configuration. The rest either write nothing to GitHub or write a
-// round transition the override has no say in, and their round-identity CAS
-// already guards them.
-func firePosts(v engine.FireVerdict) bool {
+// fireFollowsReviewers reports whether a verdict was decided by the repository's
+// reviewer configuration: the four that post a command it chose, and FireDedupe,
+// whose completed round asserts that everyone this repository gates on has
+// already answered the head. Dedupe posts nothing, so SetReviewers cannot see it
+// coming — the round is still queued when the override lands, and a requeue of a
+// queued round is a no-op — yet the marker it writes is exactly what stops the
+// newly required reviewer from ever being asked.
+//
+// The rest either write nothing to GitHub or write a round transition the
+// override has no say in, and their round-identity CAS already guards them.
+func fireFollowsReviewers(v engine.FireVerdict) bool {
 	switch v {
-	case engine.FireCoOnly, engine.FireCoDeferred, engine.FireAdopt, engine.FirePost:
+	case engine.FireCoOnly, engine.FireCoDeferred, engine.FireAdopt, engine.FirePost, engine.FireDedupe:
 		return true
 	}
 	return false

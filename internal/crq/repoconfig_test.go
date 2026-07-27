@@ -243,6 +243,157 @@ func TestChangingRequirementsReopensACompletedRound(t *testing.T) {
 	}
 }
 
+// Dedupe writes the "every required reviewer answered this head" marker, so a
+// required reviewer added between the decision and the write must void it. The
+// round is still queued when the operator's write lands — nothing to requeue —
+// and dedupe posts nothing, so only this revalidation catches the race.
+func TestDedupeIsRevalidatedAgainstAReviewerChange(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = codexCoBots(nil)
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	now := time.Now().UTC()
+	repo, settled, raced, head := "o/r", 9, 10, "aaaaaaaa1"
+	seedRound(t, store, cfg, repo, settled, head, PhaseQueued, now, 0)
+	seedRound(t, store, cfg, repo, raced, head, PhaseQueued, now, 0)
+	dedupe := engine.FireDecision{Verdict: engine.FireDedupe, Reason: "bot already reviewed head"}
+
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := *st.Round(repo, settled)
+	if _, err := svc.applyFire(ctx, svc.cfgFor(st, repo), round, engine.Observation{}, dedupe, now); err != nil {
+		t.Fatal(err)
+	}
+	if got := roundPhase(t, store, repo, settled); got != PhaseCompleted {
+		t.Fatalf("phase = %s, want an unraced dedupe to still complete the round", got)
+	}
+
+	// Now the override lands after the decision was made from svc.cfg.
+	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round = *st.Round(repo, raced)
+	result, err := svc.applyFire(ctx, svc.cfg, round, engine.Observation{}, dedupe, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != "lost_race" {
+		t.Errorf("action = %q, want the stale dedupe reported as a lost race", result.Action)
+	}
+	if got := roundPhase(t, store, repo, raced); got != PhaseQueued {
+		t.Fatalf("phase = %s, want the round left queued so the new reviewer is asked", got)
+	}
+}
+
+// Every reviewers path rejects a target that is not exactly owner/name. The read
+// path never contacts GitHub, so a typo would otherwise report the fleet default
+// and exit 0 — a plausible answer about a project that does not exist.
+func TestReviewersRejectAnIncompleteRepository(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	for _, repo := range []string{"", "owner", "owner/", "/name", "owner/name/extra"} {
+		if _, err := svc.Reviewers(ctx, repo); err == nil {
+			t.Errorf("Reviewers(%q) = nil error, want the malformed target refused", repo)
+		}
+		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, nil); err == nil {
+			t.Errorf("SetReviewers(%q) = nil error, want the malformed target refused", repo)
+		}
+		if _, err := svc.ClearReviewers(ctx, repo); err == nil {
+			t.Errorf("ClearReviewers(%q) = nil error, want the malformed target refused", repo)
+		}
+	}
+	if _, err := svc.Reviewers(ctx, "owner/name"); err != nil {
+		t.Errorf("Reviewers(owner/name) = %v, want a well-formed target accepted", err)
+	}
+}
+
+// A closed PR is not a dead PR. Requirements that change while it is shut must
+// still reach it if it is reopened at the same head, or its completed round is
+// the dedup marker that hides the reviewer the operator added.
+func TestAReopenedPRPicksUpRequirementsChangedWhileItWasClosed(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = codexCoBots(nil)
+	store := NewMemoryStore(cfg)
+	gh := newFakeGitHub()
+	repo, manual, auto, head := "o/r", 7, 8, "aaaaaaaa1"
+	svc := NewService(cfg, gh, store, nil)
+	for _, pr := range []int{manual, auto} {
+		seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 11)
+	}
+
+	// Both PRs are closed while the required set changes: no round is requeued.
+	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pr := range []int{manual, auto} {
+		round := st.Round(repo, pr)
+		if round == nil || round.Phase != PhaseCompleted {
+			t.Fatalf("round = %#v, want a closed PR left alone", round)
+		}
+		if !round.ReviewersChanged {
+			t.Fatalf("round = %#v, want the change recorded for a reopen", round)
+		}
+	}
+
+	// Both come back at the same head — the manual path first.
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = head + "bcdef1234"
+	gh.pulls[fakeKey(repo, manual)] = pull
+	gh.pulls[fakeKey(repo, auto)] = pull
+	result, err := svc.Enqueue(ctx, repo, manual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Queued || result.Deduped {
+		t.Fatalf("enqueue = %#v, want the reopened round queued rather than deduped", result)
+	}
+
+	// And the autoreview path, which never calls Enqueue.
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	need, gotHead, err := svc.needsReview(ctx, st, repo, auto, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !need || gotHead != head {
+		t.Fatalf("needsReview = %v %q, want the reopened PR enqueued at %q", need, gotHead, head)
+	}
+	if err := svc.enqueueBatch(ctx, []queueCandidate{{Repo: repo, PR: auto, Head: gotHead}}); err != nil {
+		t.Fatal(err)
+	}
+
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pr := range []int{manual, auto} {
+		round := st.Round(repo, pr)
+		if round == nil || round.Phase != PhaseQueued || round.Head != head {
+			t.Fatalf("round = %#v, want it queued at the same head so the new reviewer is asked", round)
+		}
+		if round.ReviewersChanged {
+			t.Errorf("round = %#v, want the mark cleared — it answers under the current requirements now", round)
+		}
+	}
+}
+
 // Rounds are never deleted, so a repository's merged and closed PRs stay behind
 // as completed dedup markers. Requeueing those on a reviewer change would put
 // every dead round ahead of real work — Pump observes and drops them one per

@@ -72,6 +72,12 @@ r.Head == head → skip`. A completed round stays as the "this head was reviewed
 dedup marker. A rate-limited requeue parks the round in `awaiting_retry` (keeping
 its head/attempts/history), it does not delete a fired marker.
 
+The one exception to that skip is `Round.ReviewersChanged`: a reviewer change
+requeues the repository's completed rounds, but only for PRs that are open —
+marking the closed ones instead of handing Pump dead work. A marked round is
+reopened by whichever enqueue path next sees the PR alive, so reopening a PR
+picks up the requirements it missed while it was shut.
+
 The global `FireSlot` allows ≤1 concurrent fire fleet-wide (CAS). A bot ack
 releases the slot while the review keeps running (the round moves to
 `reviewing`); the round itself stays open until `Completion` is done.

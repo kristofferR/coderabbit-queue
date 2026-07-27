@@ -214,8 +214,14 @@ func (s *Service) ClearReviewers(ctx context.Context, repo string) (ReviewerView
 
 // checkRepoShape is the one repository-shape check every reviewers path applies,
 // so reading a target can never succeed where setting it would fail.
+//
+// Exactly two nonempty components: "owner/", "/name" and "owner/name/extra" name
+// no repository, and the read path never contacts GitHub — so a typo would
+// otherwise print the fleet default and exit 0, reading as a report about a
+// project crq follows.
 func checkRepoShape(repo string) error {
-	if repo == "" || !strings.Contains(repo, "/") {
+	owner, name, ok := strings.Cut(repo, "/")
+	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
 		return fmt.Errorf("repo must be owner/name, got %q", repo)
 	}
 	return nil
@@ -261,6 +267,11 @@ func mustOverride(st *State, repo string) RepoReviewers {
 // hand Pump hundreds of dead rounds to observe and drop one per tick, ahead of
 // every real one, and a stranded PR is by definition an open one.
 //
+// A closed PR's round is marked instead of requeued, because closed is not
+// final: reopened at the same head, its completed round would be the dedup
+// marker that hides the requirement the operator added while it was shut. The
+// mark costs nothing until an enqueue finds the PR alive again.
+//
 // The primary is not re-asked: DecideFire's already-reviewed gate now counts a
 // completion reply paired to the round's command, not only a submitted Review
 // object, so a reopened round that the primary already answered dedupes instead
@@ -274,6 +285,11 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 			continue
 		}
 		if !open[round.PR] {
+			if !round.ReviewersChanged {
+				marked := round
+				marked.ReviewersChanged = true
+				st.PutRound(marked)
+			}
 			continue
 		}
 		reopened := round
@@ -285,6 +301,22 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 			s.log.Printf("reviewers: requeued %s#%d@%s — the required set changed", round.Repo, round.PR, round.Head)
 		}
 	}
+}
+
+// requeueIfReviewersChanged reopens a completed round that a reviewer change
+// marked while its pull request was closed, and reports whether it did. This is
+// the other half of reopenForChangedReviewers: the enqueue paths call it when
+// the PR turns out to be alive after all, which is the moment the round stops
+// being a harmless dead marker and starts being the thing that strands the PR.
+func requeueIfReviewersChanged(st *State, r *Round) bool {
+	if r == nil || r.Phase != PhaseCompleted || !r.ReviewersChanged {
+		return false
+	}
+	if err := r.Reopen(); err != nil {
+		return false
+	}
+	st.PutRound(*r)
+	return true
 }
 
 // openPRs is the set of repo's currently open pull request numbers — the only

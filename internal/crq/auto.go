@@ -299,7 +299,16 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 		return false, "", err
 	}
 	if r := state.Round(repo, pr); r != nil && r.Head == head {
-		return false, head, nil
+		// Unless the round is a marker for reviewers that changed while this PR
+		// was closed: it answered for a set that no longer gates the head, and
+		// enqueueBatch reopens it. Deciding here rather than falling through to
+		// the live checks is also the only correct answer — those read Review
+		// objects, which a co-reviewer answering by comment never submits.
+		if !r.ReviewersChanged {
+			return false, head, nil
+		}
+		s.logEnqueue(repo, pr, head, "reviewer requirements changed while the pr was closed")
+		return true, head, nil
 	}
 	reviews, err := s.gh.ListReviews(ctx, repo, pr)
 	if err != nil {
