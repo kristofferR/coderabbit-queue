@@ -136,6 +136,25 @@ func TestDispatchHoldRestoresTheOriginalQueueState(t *testing.T) {
 	}
 }
 
+func TestExpiredDispatchStillHonorsTheOriginalCooldown(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	cooldown := now.Add(30 * time.Minute)
+	r := Round{Repo: "o/r", PR: 1, Head: "aaaaaaaa1", Phase: PhaseAwaitingRetry, RetryAt: &cooldown}
+
+	if ok, why := r.ClaimDispatch("host", "tok", now, 3); !ok {
+		t.Fatal(why)
+	}
+	if r.DispatchHeld(now.Add(2 * DispatchTTL)) {
+		t.Fatal("setup: the dead dispatch claim should have expired")
+	}
+	if r.FireEligible(now.Add(2 * DispatchTTL)) {
+		t.Fatal("the expired dispatch exposed the round before its original cooldown")
+	}
+	if !r.FireEligible(cooldown) {
+		t.Fatal("the original cooldown elapsed but the dead dispatch still holds the round")
+	}
+}
+
 func TestArchivedDispatchCanBeHeartbeatedWithoutRevivingItsRound(t *testing.T) {
 	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
 	r := Round{Repo: "o/r", PR: 1, Head: "aaaaaaaa1", Phase: PhaseQueued}

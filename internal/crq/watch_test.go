@@ -552,8 +552,10 @@ func TestDispatchRefundsTheAttemptWhenTheCommandCannotStart(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "no-such-agent")
 	if ok, why := svc.startDispatch(context.Background(),
 		WatchOptions{Dispatch: true, Command: []string{missing}, MaxAttempts: 3},
-		pool, NextReport{Repo: repo, PR: 6, Head: sha, Action: "fix"}); !ok {
-		t.Fatalf("the round was not claimed: %s", why)
+		pool, NextReport{Repo: repo, PR: 6, Head: sha, Action: "fix"}); ok {
+		t.Fatal("a command that never started was reported as dispatched")
+	} else if !strings.Contains(why, "could not start") {
+		t.Fatalf("dispatch refusal = %q, want the startup failure", why)
 	}
 	pool.wait()
 

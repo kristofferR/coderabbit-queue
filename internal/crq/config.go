@@ -232,7 +232,7 @@ func LoadConfig() (Config, error) {
 		FiredMax:            intEnv(env, "CRQ_FIRED_MAX", 500),
 		WatchInterval:       durationEnv(env, "CRQ_WATCH_INTERVAL", 2*time.Minute),
 		DispatchCommand:     SplitArgv(env["CRQ_DISPATCH_CMD"]),
-		DispatchMaxAttempts: intEnv(env, "CRQ_DISPATCH_MAX_ATTEMPTS", 3),
+		DispatchMaxAttempts: positiveIntEnv(env, "CRQ_DISPATCH_MAX_ATTEMPTS", 3),
 		DispatchForks:       boolEnv(env, "CRQ_DISPATCH_FORKS", false),
 		DispatchConcurrency: intEnv(env, "CRQ_DISPATCH_CONCURRENCY", 0),
 		WorkspaceRoot:       env["CRQ_WORKSPACE"],
@@ -334,6 +334,14 @@ func intEnv(env map[string]string, key string, fallback int) int {
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func positiveIntEnv(env map[string]string, key string, fallback int) int {
+	n := intEnv(env, key, fallback)
+	if n <= 0 {
 		return fallback
 	}
 	return n

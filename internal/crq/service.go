@@ -1613,11 +1613,13 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 		reviewsLeft := st.Account.Remaining != nil && *st.Account.Remaining > 0 &&
 			st.Account.BlockedUntil == nil && st.Account.CalibAskedAt == nil
 		if reviewsLeft {
-			// A conclusive available reading ends the old comment's identity as
-			// well as its window. CodeRabbit can reuse that ID after the next
-			// fire; keeping it marked spent would hide the new block.
-			st.Account.RLCommentID = 0
-			st.Account.RLCommentUpdated = nil
+			// The reading ends the old window, but the notice watermark must
+			// survive. Otherwise an unchanged, windowless historical notice looks
+			// new on the next observation and recreates a fallback block forever.
+			// Reuse is still visible because CodeRabbit advances UpdatedAt when it
+			// edits the comment for a later fire.
+			st.Account.RLCommentID = rlID
+			st.Account.RLCommentUpdated = rlUpdated
 		}
 		if !reviewsLeft && prevBlock != nil && prevBlock.After(now) &&
 			(st.Account.BlockedUntil == nil || prevBlock.After(*st.Account.BlockedUntil)) {

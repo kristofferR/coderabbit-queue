@@ -502,7 +502,14 @@ func (r *Round) Abandon(reason string) {
 }
 
 func (r *Round) retryEligible(now time.Time) bool {
-	return r.Phase == PhaseAwaitingRetry && r.RetryAt != nil && !now.Before(*r.RetryAt)
+	if r.Phase != PhaseAwaitingRetry || r.RetryAt == nil || now.Before(*r.RetryAt) {
+		return false
+	}
+	// A dead dispatch loses its live claim after DispatchTTL, but it must not
+	// erase a longer cooldown the round was already serving. ReleaseDispatch
+	// restores this value for an orderly exit; this check preserves it when the
+	// watcher dies before releasing.
+	return r.DispatchHoldRetryAt == nil || !now.Before(*r.DispatchHoldRetryAt)
 }
 
 // FireEligible reports whether Pump may consider this round for firing now.

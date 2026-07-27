@@ -380,9 +380,10 @@ func (s *Service) startDispatch(ctx context.Context, opts WatchOptions, pool *di
 	return ok, why
 }
 
-// startDispatchResult is startDispatch plus the eventual session result. The
-// buffered channel lets ordinary continuous watches fire and forget, while a
-// one-shot watch can wait for an honest exit status and event.
+// startDispatchResult waits through checkout and cmd.Start so its boolean means
+// a process actually started, then returns the eventual session result. The
+// buffered result lets an ordinary continuous watch forget the exit while a
+// one-shot watch waits for an honest final event.
 func (s *Service) startDispatchResult(
 	ctx context.Context,
 	opts WatchOptions,
@@ -423,11 +424,13 @@ func (s *Service) startDispatchResult(
 		return false, why, nil
 	}
 	result := make(chan dispatchResult, 1)
+	started := make(chan dispatchResult, 1)
 	pool.run(func() {
-		result <- s.runDispatch(ctx, opts, report, token)
+		result <- s.runDispatch(ctx, opts, report, token, started)
 		close(result)
 	})
-	return true, "", result
+	start := <-started
+	return start.ok, start.reason, result
 }
 
 type dispatchResult struct {
@@ -437,8 +440,14 @@ type dispatchResult struct {
 
 // runDispatch runs one claimed dispatch and records whether a session started. It
 // runs in the pool, off the pass, so a long session delays nothing else.
-func (s *Service) runDispatch(ctx context.Context, opts WatchOptions, report NextReport, token string) dispatchResult {
-	ok, why := s.dispatch(ctx, opts, report, token)
+func (s *Service) runDispatch(
+	ctx context.Context,
+	opts WatchOptions,
+	report NextReport,
+	token string,
+	started chan<- dispatchResult,
+) dispatchResult {
+	ok, why := s.dispatchWithStart(ctx, opts, report, token, started)
 	if !ok && s.log != nil {
 		s.log.Printf("watch: %s#%d not fixed: %s", report.Repo, report.PR, why)
 	}
@@ -446,15 +455,28 @@ func (s *Service) runDispatch(ctx context.Context, opts WatchOptions, report Nex
 }
 
 // dispatch checks the claimed round's head out and runs the fix session.
-func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextReport, token string) (ok bool, reason string) {
+func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextReport, token string) (bool, string) {
+	return s.dispatchWithStart(ctx, opts, report, token, nil)
+}
+
+func (s *Service) dispatchWithStart(
+	ctx context.Context,
+	opts WatchOptions,
+	report NextReport,
+	token string,
+	started chan<- dispatchResult,
+) (ok bool, reason string) {
 	// Health means "can this drain START a session", not whether the agent later
 	// succeeds at the work it was given. Record pre-start failures on return;
 	// cmd.Start records recovery immediately, while a healthy long-running
 	// session is still running.
-	started := false
+	processStarted := false
 	defer func() {
-		if !started {
+		if !processStarted {
 			s.noteDispatchHealth(context.WithoutCancel(ctx), false, reason)
+			if started != nil {
+				started <- dispatchResult{reason: reason}
+			}
 		}
 	}()
 
@@ -529,7 +551,10 @@ func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextRe
 		s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
 		return false, "fix session could not start: " + err.Error()
 	}
-	started = true
+	processStarted = true
+	if started != nil {
+		started <- dispatchResult{ok: true}
+	}
 	s.noteDispatchHealth(context.WithoutCancel(ctx), true, "")
 	runErr := cmd.Wait()
 	s.releaseDispatch(context.WithoutCancel(ctx), report, token, true)

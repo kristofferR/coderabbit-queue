@@ -98,8 +98,11 @@ func TestCalibrationClearsABlockTheReplyContradicts(t *testing.T) {
 	gh.comments[fakeKey(cfg.GateRepo, 77)] = []ghapi.IssueComment{reply}
 
 	until := now.Add(40 * time.Minute)
+	noticeUpdated := now.Add(-time.Minute)
 	if _, err := store.Update(ctx, func(st *State) error {
 		st.Account.BlockedUntil = &until
+		st.Account.RLCommentID = 900
+		st.Account.RLCommentUpdated = &noticeUpdated
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -112,5 +115,10 @@ func TestCalibrationClearsABlockTheReplyContradicts(t *testing.T) {
 	if got.Account.BlockedUntil != nil {
 		t.Errorf("blocked until %s, want the stale window dropped: the probe read 3 reviews remaining",
 			got.Account.BlockedUntil)
+	}
+	if got.Account.RLCommentID != 900 || got.Account.RLCommentUpdated == nil ||
+		!got.Account.RLCommentUpdated.Equal(noticeUpdated) {
+		t.Errorf("conclusive calibration lost the spent-notice watermark: id=%d updated=%v",
+			got.Account.RLCommentID, got.Account.RLCommentUpdated)
 	}
 }

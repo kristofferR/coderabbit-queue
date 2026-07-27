@@ -239,6 +239,23 @@ func TestLoadConfigEmptyAutoReviewSkipMarkerDisablesOptOut(t *testing.T) {
 	}
 }
 
+func TestLoadConfigDispatchMaxAttemptsStaysBounded(t *testing.T) {
+	for _, value := range []string{"0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+			t.Setenv("CRQ_DISPATCH_MAX_ATTEMPTS", value)
+
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.DispatchMaxAttempts != 3 {
+				t.Errorf("DispatchMaxAttempts = %d, want the bounded default 3", cfg.DispatchMaxAttempts)
+			}
+		})
+	}
+}
+
 func TestAuthorSetNormalizesCaseAndBotSuffix(t *testing.T) {
 	set := authorSet("Dependabot[bot], renovate ,")
 	if len(set) != 2 || !set["dependabot"] || !set["renovate"] {

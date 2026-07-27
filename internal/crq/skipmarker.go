@@ -23,15 +23,17 @@ func (c Config) SkipsReview(body string) bool {
 	return strings.Contains(stripCode(body), marker)
 }
 
-// stripCode removes fenced blocks and inline code spans from Markdown.
+// stripCode removes indented and fenced blocks and inline code spans from
+// Markdown.
 //
-// Fences first: a fence may contain unbalanced backticks that would otherwise
-// make the span pass read the rest of the document as code. Neither pass tries
-// to be a Markdown parser — anything it gets wrong only means a marker is read
-// where GitHub renders one, which is the reading that was already happening.
+// Block constructs first: a block may contain unbalanced backticks that would
+// otherwise make the span pass read the rest of the document as code. Neither
+// pass tries to be a Markdown parser — anything it gets wrong only means a
+// marker is read where GitHub renders one, which is the reading that was already
+// happening.
 func stripCode(body string) string {
 	var out strings.Builder
-	rest := body
+	rest := stripIndentedCode(body)
 	for {
 		start, fence := nextFence(rest)
 		if start < 0 {
@@ -69,6 +71,35 @@ func stripCode(body string) string {
 	}
 	spanned.WriteString(text)
 	return spanned.String()
+}
+
+func stripIndentedCode(body string) string {
+	lines := strings.SplitAfter(body, "\n")
+	var out strings.Builder
+	blankBefore := true
+	inCode := false
+	for _, line := range lines {
+		content := strings.TrimSuffix(line, "\n")
+		content = strings.TrimSuffix(content, "\r")
+		blank := strings.TrimSpace(content) == ""
+		indented := strings.HasPrefix(content, "    ") || strings.HasPrefix(content, "\t")
+
+		if inCode {
+			if blank || indented {
+				out.WriteByte('\n')
+				continue
+			}
+			inCode = false
+		}
+		if blankBefore && indented {
+			inCode = true
+			out.WriteByte('\n')
+			continue
+		}
+		out.WriteString(line)
+		blankBefore = blank
+	}
+	return out.String()
 }
 
 func nextFence(text string) (int, string) {
