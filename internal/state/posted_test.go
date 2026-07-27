@@ -71,3 +71,25 @@ func TestFireAloneClaimsNoAuthorship(t *testing.T) {
 		t.Fatalf("posted = %v, want nothing: crq wrote neither comment", r.PostedCommands)
 	}
 }
+
+func TestTidiedCommandsSurviveArchiveEviction(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	st := New()
+	command := PostedCommand{ID: 77, Bot: "coderabbitai", At: now}
+	st.RecordTidied("O/R", 1, command)
+	st.RecordTidied("o/r", 1, command)
+
+	for i := 0; i < ArchiveMax+1; i++ {
+		st.Archive = append(st.Archive, Round{Repo: "o/other", PR: i + 1, Phase: PhaseCompleted})
+	}
+	st.Normalize(now)
+
+	key := Key("o/r", 1)
+	if got := st.TidiedCommands[key]; len(got) != 1 || got[0].ID != command.ID {
+		t.Fatalf("tidied commands = %v, want the durable tombstone", got)
+	}
+	st.ForgetTidied("o/r", 1, command.ID)
+	if _, ok := st.TidiedCommands[key]; ok {
+		t.Fatalf("forgotten tombstone still present: %v", st.TidiedCommands[key])
+	}
+}

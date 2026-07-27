@@ -411,6 +411,16 @@ func TestFeedbackPairsRepliesWithTidiedCommandHistory(t *testing.T) {
 			return err
 		}
 		st.PutRound(*current)
+		// Tidy persisted the old command outside Archive before removing it.
+		// Enough unrelated rounds then finish to evict this PR's old round from
+		// the fleet-wide ring before its delayed completion arrives.
+		st.RecordTidied("o/repo", 3, PostedCommand{ID: 1, Bot: cfg.Bot, At: oldCommandAt})
+		for i := 0; i < ArchiveMax; i++ {
+			st.Archive = append(st.Archive, Round{
+				Repo: "o/other", PR: 100 + i, Head: "999999999",
+				Phase: PhaseCompleted, EnqueuedAt: oldCommandAt,
+			})
+		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)

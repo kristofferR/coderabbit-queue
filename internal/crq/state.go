@@ -14,18 +14,20 @@ import (
 // the package qualifier, and without colliding with the many `state`/`st`
 // variable names in this package.
 type (
-	State        = crqstate.State
-	Round        = crqstate.Round
-	Phase        = crqstate.Phase
-	FireSlot     = crqstate.FireSlot
-	AccountQuota = crqstate.AccountQuota
-	LeaderLease  = crqstate.LeaderLease
-	Revision     = crqstate.Revision
-	StateStore   = crqstate.StateStore
-	StoreConfig  = crqstate.StoreConfig
+	State         = crqstate.State
+	Round         = crqstate.Round
+	Phase         = crqstate.Phase
+	FireSlot      = crqstate.FireSlot
+	AccountQuota  = crqstate.AccountQuota
+	LeaderLease   = crqstate.LeaderLease
+	PostedCommand = crqstate.PostedCommand
+	Revision      = crqstate.Revision
+	StateStore    = crqstate.StateStore
+	StoreConfig   = crqstate.StoreConfig
 )
 
 const (
+	ArchiveMax         = crqstate.ArchiveMax
 	PhaseQueued        = crqstate.PhaseQueued
 	PhaseReserved      = crqstate.PhaseReserved
 	PhaseFired         = crqstate.PhaseFired

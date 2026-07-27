@@ -3,6 +3,7 @@ package crq
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -98,19 +99,19 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 
 	// A deleted comment stays on its round for ever, so without this every later
 	// pass would DELETE it again and read the 404 as a fresh removal.
-	present := map[int64]string{}
+	present := map[int64]ghapi.IssueComment{}
 	for _, comment := range obs.comments {
-		present[comment.ID] = comment.Body
+		present[comment.ID] = comment
 	}
 	triggers := cfg.triggerBodies()
 	var commands []engine.CommandComment
 	edited := 0
 	for _, cmd := range posted.commands {
-		body, onPR := present[cmd.ID]
+		comment, onPR := present[cmd.ID]
 		if !onPR {
 			continue
 		}
-		if !isTriggerBody(triggers, cmd.Bot, body) {
+		if !isTriggerBody(triggers, cmd.Bot, comment.Body) {
 			edited++
 			continue
 		}
@@ -129,10 +130,16 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 		Live:          posted.live,
 		Superseded:    posted.superseded,
 		AdoptableFrom: s.adoptableFrom(ctx, repo, pr, obs.eng.HeadAt),
-		AnsweredAt:    s.answered(ctx, repo, pr, obs, commands, posted),
 	}
+	cursor := st.TidyReactionCursors[QueueKey(repo, pr)]
+	in.AnsweredAt, cursor = s.answered(ctx, repo, pr, obs, commands, posted, cursor)
 	stale := engine.StaleCommands(in)
 	if len(stale) == 0 {
+		if !dryRun && !s.cfg.DryRun {
+			if err := s.recordTidyState(ctx, repo, pr, cursor, nil); err != nil {
+				return result, err
+			}
+		}
 		result.Kept = append(result.Kept, "every trigger comment is still live, unanswered, or still adoptable")
 		return result, nil
 	}
@@ -141,8 +148,47 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 		result.Deleted = stale
 		return result, nil
 	}
+
+	byID := make(map[int64]PostedCommand, len(commands))
+	for _, command := range commands {
+		byID[command.ID] = PostedCommand{ID: command.ID, Bot: command.Bot, At: command.CreatedAt}
+	}
+	tombstones := make([]PostedCommand, 0, len(stale))
 	for _, id := range stale {
-		err := s.gh.DeleteIssueComment(ctx, repo, id)
+		tombstones = append(tombstones, byID[id])
+	}
+	// Persist the deleted command's FIFO position before the destructive write.
+	// If this process dies after the state write, the still-present GitHub
+	// comment suppresses the synthetic event; if it dies after the delete, the
+	// tombstone already exists.
+	if err := s.recordTidyState(ctx, repo, pr, cursor, tombstones); err != nil {
+		return result, err
+	}
+
+	var forget []int64
+	for _, id := range stale {
+		snapshot := present[id]
+		latest, err := s.gh.GetIssueComment(ctx, repo, id)
+		switch {
+		case errors.Is(err, ghapi.ErrNotFound):
+			// It disappeared after the observation. Keep its tombstone: a
+			// delayed reply still needs the command's FIFO position.
+			result.Deleted = append(result.Deleted, id)
+			continue
+		case err != nil:
+			forget = append(forget, id)
+			result.Failed = append(result.Failed, TidyFailure{ID: id, Error: err.Error()})
+			continue
+		case latest.Body != snapshot.Body || !latest.UpdatedAt.Equal(snapshot.UpdatedAt):
+			// Revalidate immediately before DELETE. An operator may have turned
+			// the one-line trigger into a note while the observation, force-push
+			// lookup, and reaction reads were in flight.
+			forget = append(forget, id)
+			result.Kept = append(result.Kept, "a trigger comment changed while tidy was running; its edited words were preserved")
+			continue
+		}
+
+		err = s.gh.DeleteIssueComment(ctx, repo, id)
 		switch {
 		case err == nil, errors.Is(err, ghapi.ErrNotFound):
 			// Already gone is the outcome we wanted. A recorded command can
@@ -150,6 +196,7 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 			// comments, and a person may tidy by hand.
 			result.Deleted = append(result.Deleted, id)
 		default:
+			forget = append(forget, id)
 			// One write failing must not abandon the rest — but it is reported,
 			// not just logged: a caller reading the result is the only one who can
 			// act on "the token cannot delete these".
@@ -157,6 +204,14 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 			if s.log != nil {
 				s.log.Printf("tidy: %s#%d comment %d: %v", repo, pr, id, err)
 			}
+		}
+	}
+	if len(forget) > 0 {
+		if _, err := s.store.Update(ctx, func(st *State) error {
+			st.ForgetTidied(repo, pr, forget...)
+			return nil
+		}); err != nil {
+			return result, err
 		}
 	}
 	if s.log != nil && len(result.Deleted) > 0 {
@@ -189,6 +244,14 @@ type postedCommands struct {
 // open round and from every archived round of the same PR.
 func collectPosted(st State, repo string, pr int) postedCommands {
 	out := postedCommands{live: map[int64]bool{}, superseded: map[int64]bool{}, firedOn: map[int64]int64{}}
+	seen := map[int64]bool{}
+	appendCommand := func(command engine.CommandComment) {
+		if command.ID == 0 || seen[command.ID] {
+			return
+		}
+		seen[command.ID] = true
+		out.commands = append(out.commands, command)
+	}
 	collect := func(r Round, progressed bool) {
 		current := map[int64]bool{}
 		if r.CommandID != 0 {
@@ -211,7 +274,7 @@ func collectPosted(st State, repo string, pr int) postedCommands {
 			if r.CommandID != 0 && r.CommandID != p.ID {
 				out.firedOn[p.ID] = r.CommandID
 			}
-			out.commands = append(out.commands, engine.CommandComment{
+			appendCommand(engine.CommandComment{
 				ID: p.ID, Bot: dialect.NormalizeBotName(p.Bot), CreatedAt: p.At.UTC(),
 			})
 		}
@@ -224,6 +287,17 @@ func collectPosted(st State, repo string, pr int) postedCommands {
 			collect(archived, true)
 		}
 	}
+	for _, command := range st.TidiedCommands[QueueKey(repo, pr)] {
+		appendCommand(engine.CommandComment{
+			ID: command.ID, Bot: dialect.NormalizeBotName(command.Bot), CreatedAt: command.At.UTC(),
+		})
+	}
+	sort.Slice(out.commands, func(i, j int) bool {
+		if !out.commands[i].CreatedAt.Equal(out.commands[j].CreatedAt) {
+			return out.commands[i].CreatedAt.Before(out.commands[j].CreatedAt)
+		}
+		return out.commands[i].ID < out.commands[j].ID
+	})
 	return out
 }
 
@@ -300,14 +374,51 @@ func (s *Service) adoptableFrom(ctx context.Context, repo string, pr int, headAt
 // once per pass; and the primary command the candidate's own round fired on,
 // which is where observe() looks first. Each is read only while a candidate is
 // still unanswered, so the ordinary pass pays for none of them.
-func (s *Service) answered(ctx context.Context, repo string, pr int, obs observation, commands []engine.CommandComment, posted postedCommands) map[string]time.Time {
+const maxTidyReactionCandidates = 4
+
+func (s *Service) answered(ctx context.Context, repo string, pr int, obs observation, commands []engine.CommandComment, posted postedCommands, cursor int64) (map[string]time.Time, int64) {
 	out := answeredAt(obs)
-	var onPR []ghapi.Reaction
-	readPR := false
+	var candidates []engine.CommandComment
 	for _, cmd := range commands {
 		if posted.live[cmd.ID] || !dialect.IsCodexBot(cmd.Bot) || answeredSince(out, cmd) {
 			continue
 		}
+		candidates = append(candidates, cmd)
+	}
+	if len(candidates) == 0 {
+		return out, cursor
+	}
+	start := 0
+	foundCursor := false
+	for i, cmd := range candidates {
+		if cmd.ID == cursor {
+			start = (i + 1) % len(candidates)
+			foundCursor = true
+			break
+		}
+	}
+	// A successful prior pass may already have deleted the cursor's comment.
+	// GitHub comment IDs increase chronologically, so resume at the first later
+	// candidate instead of falling back to the oldest and rescanning it.
+	if cursor != 0 && !foundCursor {
+		for i, cmd := range candidates {
+			if cmd.ID > cursor {
+				start = i
+				break
+			}
+		}
+	}
+
+	var onPR []ghapi.Reaction
+	readPR := false
+	scanned := 0
+	for offset := 0; offset < len(candidates) && scanned < maxTidyReactionCandidates; offset++ {
+		cmd := candidates[(start+offset)%len(candidates)]
+		if answeredSince(out, cmd) {
+			continue
+		}
+		scanned++
+		cursor = cmd.ID
 		reactions, err := s.gh.ListCommentReactions(ctx, repo, cmd.ID)
 		if err != nil {
 			// Housekeeping: an unreadable reaction keeps the comment, and the
@@ -348,7 +459,33 @@ func (s *Service) answered(ctx context.Context, repo string, pr int, obs observa
 			noteThumbsUp(out, cmd, reactions)
 		}
 	}
-	return out
+	return out, cursor
+}
+
+// recordTidyState advances the bounded reaction scan and writes command
+// tombstones in one CAS update. It avoids a state commit when neither changed.
+func (s *Service) recordTidyState(ctx context.Context, repo string, pr int, cursor int64, commands []PostedCommand) error {
+	key := QueueKey(repo, pr)
+	_, err := s.store.Update(ctx, func(st *State) error {
+		changed := false
+		if cursor != 0 && st.TidyReactionCursors[key] != cursor {
+			if st.TidyReactionCursors == nil {
+				st.TidyReactionCursors = map[string]int64{}
+			}
+			st.TidyReactionCursors[key] = cursor
+			changed = true
+		}
+		before := len(st.TidiedCommands[key])
+		st.RecordTidied(repo, pr, commands...)
+		if len(st.TidiedCommands[key]) != before {
+			changed = true
+		}
+		if !changed {
+			return ErrNoChange
+		}
+		return nil
+	})
+	return err
 }
 
 // answeredSince reports whether cmd's bot has demonstrably acted since cmd was

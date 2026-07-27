@@ -101,6 +101,13 @@ func TestTidyRemovesOnlySpentCommandsCrqPosted(t *testing.T) {
 	if len(result.Deleted) != 1 || result.Deleted[0] != 100 {
 		t.Fatalf("deleted = %v, want only the spent command from the superseded round", result.Deleted)
 	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.TidiedCommands[QueueKey(repo, pr)]; len(got) != 1 || got[0].ID != 100 {
+		t.Fatalf("tidied commands = %v, want a durable tombstone for comment 100", got)
+	}
 
 	left := map[int64]bool{}
 	for _, c := range gh.comments[fakeKey(repo, pr)] {
@@ -278,6 +285,71 @@ func TestTidyKeepsATriggerCommentEditedIntoSomethingElse(t *testing.T) {
 	}
 }
 
+// The initial issue-comment page is only a snapshot. Recheck the exact comment
+// after the slower force-push and reaction reads, immediately before DELETE.
+func TestTidyKeepsATriggerEditedDuringThePass(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+	repo, pr := "o/r", 24
+
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "bbbbbbbb2"
+	gh.pulls[fakeKey(repo, pr)] = pull
+	gh.commits["bbbbbbbb2"] = commitAt(now.Add(-10 * time.Minute))
+
+	original := ghapi.IssueComment{
+		ID: 100, Body: cfg.ReviewCommand,
+		CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now.Add(-2 * time.Hour),
+	}
+	original.User.Login = "kristofferR"
+	gh.comments[fakeKey(repo, pr)] = []ghapi.IssueComment{original}
+	edited := original
+	edited.Body = cfg.ReviewCommand + "\n\nKeep this context."
+	edited.UpdatedAt = now.Add(-time.Minute)
+	gh.getComment = func(_ string, _ int64) (ghapi.IssueComment, error) {
+		return edited, nil
+	}
+	review := ghapi.Review{
+		ID: 900, CommitID: "bbbbbbbb2", State: "COMMENTED", Body: "looks fine",
+		SubmittedAt: now.Add(-90 * time.Minute),
+	}
+	review.User.Login = cfg.Bot
+	gh.reviews[fakeKey(repo, pr)] = []ghapi.Review{review}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		return completedRound(st, repo, pr, now, func(r *Round) error {
+			if err := r.Fire(original.ID, original.CreatedAt); err != nil {
+				return err
+			}
+			r.RecordPosted(cfg.Bot, original.ID, original.CreatedAt)
+			return nil
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.Tidy(ctx, repo, pr, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Deleted) != 0 || len(gh.deleted) != 0 {
+		t.Fatalf("edited comment was deleted: result=%#v deleted=%v", result, gh.deleted)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.TidiedCommands[QueueKey(repo, pr)]; len(got) != 0 {
+		t.Fatalf("kept comment retained a deletion tombstone: %v", got)
+	}
+}
+
 // A delete GitHub refuses must reach the caller. An empty Deleted otherwise
 // reads as "nothing was spent" when it means "the token may not delete".
 func TestTidyReportsDeletionFailures(t *testing.T) {
@@ -325,6 +397,75 @@ func TestTidyReportsDeletionFailures(t *testing.T) {
 	}
 	if len(result.Failed) != 1 || result.Failed[0].ID != 100 || result.Failed[0].Error == "" {
 		t.Fatalf("failed = %+v, want the refused comment and why", result.Failed)
+	}
+}
+
+func TestTidyBoundsAndRotatesUnansweredCodexReactionReads(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = []CoBotConfig{{Login: dialect.CodexBotLogin, Name: "codex", Command: "@codex review"}}
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+	repo, pr := "o/r", 25
+
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "bbbbbbbb2"
+	gh.pulls[fakeKey(repo, pr)] = pull
+	gh.commits["bbbbbbbb2"] = commitAt(now.Add(-10 * time.Minute))
+
+	round := Round{
+		Repo: repo, PR: pr, Head: "aaaaaaaa1", Phase: PhaseCompleted,
+		EnqueuedAt: now.Add(-3 * time.Hour),
+	}
+	for i := int64(1); i <= 10; i++ {
+		at := now.Add(time.Duration(-130+i) * time.Minute)
+		comment := ghapi.IssueComment{ID: i, Body: "@codex review", CreatedAt: at, UpdatedAt: at}
+		comment.User.Login = "kristofferR"
+		gh.comments[fakeKey(repo, pr)] = append(gh.comments[fakeKey(repo, pr)], comment)
+		round.RecordPosted(dialect.CodexBotLogin, i, at)
+	}
+
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Archive = append(st.Archive, round)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	if _, err := svc.Tidy(ctx, repo, pr, false); err != nil {
+		t.Fatal(err)
+	}
+	first := append([]int64(nil), gh.reactionReads...)
+	if len(first) != maxTidyReactionCandidates {
+		t.Fatalf("first pass read reactions for %v, want %d candidates", first, maxTidyReactionCandidates)
+	}
+	for i, id := range first {
+		if want := int64(i + 1); id != want {
+			t.Fatalf("first pass = %v, want commands 1 through %d", first, maxTidyReactionCandidates)
+		}
+	}
+	if _, err := svc.Tidy(ctx, repo, pr, false); err != nil {
+		t.Fatal(err)
+	}
+	second := gh.reactionReads[len(first):]
+	if len(second) != maxTidyReactionCandidates {
+		t.Fatalf("second pass read reactions for %v, want %d candidates", second, maxTidyReactionCandidates)
+	}
+	for i, id := range second {
+		if want := int64(maxTidyReactionCandidates + i + 1); id != want {
+			t.Fatalf("persisted cursor did not rotate the scan: first=%v second=%v", first, second)
+		}
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.TidyReactionCursors[QueueKey(repo, pr)]; got != second[len(second)-1] {
+		t.Fatalf("cursor = %d, want last inspected command %d", got, second[len(second)-1])
 	}
 }
 

@@ -27,6 +27,7 @@ type GitHubAPI interface {
 	GetCommit(context.Context, string, string) (ghapi.Commit, error)
 	ListReviews(context.Context, string, int) ([]ghapi.Review, error)
 	ListIssueComments(context.Context, string, int) ([]ghapi.IssueComment, error)
+	GetIssueComment(context.Context, string, int64) (ghapi.IssueComment, error)
 	ListIssueCommentsPage(context.Context, string, int, int, int) ([]ghapi.IssueComment, error)
 	ListReviewComments(context.Context, string, int) ([]ghapi.ReviewComment, error)
 	ListIssueReactions(context.Context, string, int) ([]ghapi.Reaction, error)

@@ -309,6 +309,16 @@ type State struct {
 	// for the dashboard and debugging. Bounded by ArchiveMax.
 	Archive []Round `json:"archive,omitempty"`
 
+	// TidiedCommands are durable tombstones for trigger comments Tidy removed.
+	// Unlike Archive, they are not bounded: GitHub can deliver a delayed reply
+	// for as long as the PR conversation exists, and command/reply FIFO pairing
+	// still needs the deleted command's chronological position.
+	TidiedCommands map[string][]PostedCommand `json:"tidied_commands,omitempty"`
+	// TidyReactionCursors rotate the bounded scan of unanswered Codex commands
+	// so old candidates are not reread on every housekeeping pass and newer
+	// candidates are not starved.
+	TidyReactionCursors map[string]int64 `json:"tidy_reaction_cursors,omitempty"`
+
 	Warn         string     `json:"warn,omitempty"`
 	UpdatedAt    *time.Time `json:"wrote_at,omitempty"`
 	DashboardSHA string     `json:"dashboard_sha,omitempty"`
@@ -649,6 +659,57 @@ func (r *Round) RecordPosted(bot string, id int64, at time.Time) {
 		posted = posted[len(posted)-maxPosted:]
 	}
 	r.PostedCommands = posted
+}
+
+// RecordTidied remembers a trigger before Tidy removes it from GitHub. It is
+// idempotent because a CAS retry may apply the same mutation more than once.
+func (s *State) RecordTidied(repo string, pr int, commands ...PostedCommand) {
+	if len(commands) == 0 {
+		return
+	}
+	if s.TidiedCommands == nil {
+		s.TidiedCommands = map[string][]PostedCommand{}
+	}
+	key := Key(repo, pr)
+	have := make(map[int64]bool, len(s.TidiedCommands[key])+len(commands))
+	for _, command := range s.TidiedCommands[key] {
+		have[command.ID] = true
+	}
+	for _, command := range commands {
+		if command.ID == 0 || have[command.ID] {
+			continue
+		}
+		command.At = command.At.UTC()
+		s.TidiedCommands[key] = append(s.TidiedCommands[key], command)
+		have[command.ID] = true
+	}
+}
+
+// ForgetTidied removes tombstones for comments Tidy ultimately kept or failed
+// to delete. A present GitHub comment remains the source of truth for those.
+func (s *State) ForgetTidied(repo string, pr int, ids ...int64) {
+	key := Key(repo, pr)
+	if len(ids) == 0 || len(s.TidiedCommands[key]) == 0 {
+		return
+	}
+	remove := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		remove[id] = true
+	}
+	kept := s.TidiedCommands[key][:0]
+	for _, command := range s.TidiedCommands[key] {
+		if !remove[command.ID] {
+			kept = append(kept, command)
+		}
+	}
+	if len(kept) == 0 {
+		delete(s.TidiedCommands, key)
+		if len(s.TidiedCommands) == 0 {
+			s.TidiedCommands = nil
+		}
+		return
+	}
+	s.TidiedCommands[key] = kept
 }
 
 // Queue-entry wait reasons. A waiting round is held by exactly one of these

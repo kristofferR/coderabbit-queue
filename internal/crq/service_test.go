@@ -28,6 +28,7 @@ type fakeGitHub struct {
 	issueReactions  map[string][]ghapi.Reaction
 	reactions       map[int64][]ghapi.Reaction
 	reactionErrs    map[int64]error
+	reactionReads   []int64
 	checkRuns       map[string][]ghapi.CheckRun // key: ref (short or full sha)
 	checkRunErrs    map[string]error
 	postBodyErrs    map[string]error // body → error (selective trigger-post failures)
@@ -45,6 +46,7 @@ type fakeGitHub struct {
 	refReads    int
 	reviewReads int
 	searchPRs   []ghapi.SearchPR
+	getComment  func(repo string, id int64) (ghapi.IssueComment, error)
 	// now, when set, timestamps posted comments off the same injected clock the
 	// service uses, so a fire's recorded FiredAt tracks the fake wall clock the
 	// replay suite advances. nil falls back to real time (all existing tests).
@@ -156,6 +158,22 @@ func (f *fakeGitHub) ListIssueComments(_ context.Context, repo string, pr int) (
 	return append([]ghapi.IssueComment(nil), f.comments[fakeKey(repo, pr)]...), nil
 }
 
+func (f *fakeGitHub) GetIssueComment(_ context.Context, repo string, id int64) (ghapi.IssueComment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.getComment != nil {
+		return f.getComment(repo, id)
+	}
+	for _, comments := range f.comments {
+		for _, comment := range comments {
+			if comment.ID == id {
+				return comment, nil
+			}
+		}
+	}
+	return ghapi.IssueComment{}, ghapi.ErrNotFound
+}
+
 func (f *fakeGitHub) ListReviewComments(_ context.Context, repo string, pr int) ([]ghapi.ReviewComment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -171,6 +189,7 @@ func (f *fakeGitHub) ListIssueReactions(_ context.Context, repo string, pr int) 
 func (f *fakeGitHub) ListCommentReactions(_ context.Context, _ string, id int64) ([]ghapi.Reaction, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.reactionReads = append(f.reactionReads, id)
 	if err := f.reactionErrs[id]; err != nil {
 		return nil, err
 	}
