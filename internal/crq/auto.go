@@ -3,8 +3,6 @@ package crq
 import (
 	"context"
 	"errors"
-	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -21,7 +19,10 @@ type AutoOptions struct {
 var errLostLeadership = errors.New("lost autoreview leadership mid-pass")
 
 func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
-	owner := fmt.Sprintf("host=%s pid=%d", s.cfg.Host, os.Getpid())
+	// The same identity capabilities are recorded under, so LaggingWriters can
+	// ask whether the process holding the lease understands what it is deciding
+	// from. Spelling it out here again would let the two drift apart.
+	owner := s.cfg.WriterID()
 	token := randomToken()
 	for {
 		held, err := s.acquireLeader(ctx, owner, token)
@@ -68,7 +69,14 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 				s.log.Printf("warning: autoreview pass failed: %v", passErr)
 			}
 			passFailure = passErr
-			if _, err := s.Pump(ctx); err != nil {
+			pumped, err := s.Pump(ctx)
+			// A round that just progressed is the moment its trigger comments
+			// stop being needed, so tidying here costs one observation on a PR
+			// crq was already looking at rather than a sweep of the fleet.
+			if err == nil {
+				err = s.tidyAfterPump(ctx, pumped)
+			}
+			if err != nil {
 				if _, ok := ghapi.ThrottleWait(err); ok {
 					if cont, serr := s.sleepThrottle(ctx, opts, "pump", err); serr != nil || !cont {
 						if opts.Once {
@@ -167,6 +175,7 @@ func (s *Service) releaseLeader(ctx context.Context, token string) error {
 			return ErrNoChange
 		}
 		st.Leader = nil
+		st.LeaderCapabilities = nil
 		released = true
 		return nil
 	})
@@ -191,7 +200,17 @@ func (s *Service) renewLeader(ctx context.Context, owner, token string) (State, 
 			held = false
 			return ErrNoChange
 		}
-		st.Leader = &LeaderLease{Owner: owner, Token: token, ExpiresAt: expires, UpdatedAt: now}
+		st.Leader = &LeaderLease{
+			Owner:        owner,
+			Token:        token,
+			ExpiresAt:    expires,
+			UpdatedAt:    now,
+			Capabilities: []string{leaderCapabilityHolds},
+		}
+		st.LeaderCapabilities = &LeaderCapabilityLease{
+			Token:        token,
+			Capabilities: []string{leaderCapabilityHolds},
+		}
 		held = true
 		return nil
 	})
@@ -243,7 +262,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			if s.cfg.SkipAuthors[dialect.NormalizeBotName(strings.ToLower(pr.Author))] {
 				return false, nil
 			}
-			if s.cfg.SkipMarker != "" && strings.Contains(pr.Body, s.cfg.SkipMarker) {
+			if s.cfg.SkipsReview(pr.Body) {
 				return false, nil
 			}
 			scanned++
@@ -299,23 +318,51 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 		return false, "", err
 	}
 	if r := state.Round(repo, pr); r != nil && r.Head == head {
-		return false, head, nil
+		// Unless the round is a marker for reviewers that changed while this PR
+		// was closed: it answered for a set that no longer gates the head, and
+		// enqueueBatch reopens it. Deciding here rather than falling through to
+		// the live checks is also the only correct answer — those read Review
+		// objects, which a co-reviewer answering by comment never submits.
+		if !r.ReviewersChanged {
+			return false, head, nil
+		}
+		s.logEnqueue(repo, pr, head, "reviewer configuration changed while the pr was closed")
+		return true, head, nil
 	}
 	reviews, err := s.gh.ListReviews(ctx, repo, pr)
 	if err != nil {
 		return false, "", err
 	}
-	bot := dialect.NormalizeBotName(s.cfg.Bot)
+	cfg := s.cfgFor(state, repo)
+	bot := dialect.NormalizeBotName(cfg.Bot)
 	lastBotReview := ""
+	// Every reviewer this repository gates on, not just the primary. A repo that
+	// requires Codex or Bugbot and already has a CodeRabbit review at the head
+	// would otherwise never be enqueued, so the reviewer it chose is never asked.
+	reviewedHere := map[string]string{}
 	for _, review := range reviews {
-		if dialect.NormalizeBotName(review.User.Login) == bot && review.CommitID != "" {
+		login := dialect.NormalizeBotName(review.User.Login)
+		if review.CommitID == "" {
+			continue
+		}
+		if login == bot {
 			lastBotReview = dialect.ShortOID(review.CommitID)
 		}
+		reviewedHere[login] = dialect.ShortOID(review.CommitID)
 	}
 	if incremental {
 		need := lastBotReview != head
+		missing := cfg.Bot
+		if !need {
+			for _, login := range cfg.RequiredBots {
+				if reviewedHere[dialect.NormalizeBotName(login)] != head {
+					need, missing = true, login
+					break
+				}
+			}
+		}
 		if need {
-			s.logEnqueue(repo, pr, head, "no bot review at head")
+			s.logEnqueue(repo, pr, head, "no "+dialect.NormalizeBotName(missing)+" review at head")
 		}
 		return need, head, nil
 	}

@@ -15,22 +15,42 @@ import (
 // legacy fields, and why adding anything to a Round was a rollout problem rather
 // than a change.
 //
-// Bumping the schema version is not the answer and was rejected: an unknown
-// version is auto-reinitialised, so an old binary meeting a new one would erase
-// every round in the fleet — a bounded loss traded for an unbounded one, during
-// exactly the rolling deploy at issue.
-//
-// So unknown members are carried instead. A load keeps whatever it did not
-// recognise, a save puts it back, and a field this binary has never heard of
-// survives a foreign write untouched.
+// Unknown members are therefore carried by default. A load keeps whatever it
+// did not recognise, a save puts it back, and a field this binary has never
+// heard of survives a foreign write untouched. A schema bump is reserved for a
+// compatibility fence: newer state is refused by older binaries, as v4 requires
+// so v3 pumping clients cannot ignore administrative holds.
 
 // unknownFields holds JSON members this binary has no field for, verbatim.
 type unknownFields map[string]json.RawMessage
 
 var (
-	roundFields = jsonFieldNames(reflect.TypeOf(Round{}))
-	stateFields = jsonFieldNames(reflect.TypeOf(State{}))
+	fireSlotFields = jsonFieldNames(reflect.TypeOf(FireSlot{}))
+	roundFields    = jsonFieldNames(reflect.TypeOf(Round{}))
+	stateFields    = jsonFieldNames(reflect.TypeOf(State{}))
 )
+
+// UnmarshalJSON decodes a fire slot and remembers anything it did not recognise.
+func (s *FireSlot) UnmarshalJSON(raw []byte) error {
+	type plain FireSlot
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknown(raw, fireSlotFields)
+	if err != nil {
+		return err
+	}
+	*s = FireSlot(decoded)
+	s.unknown = unknown
+	return nil
+}
+
+// MarshalJSON writes a fire slot back with the members it did not recognise intact.
+func (s FireSlot) MarshalJSON() ([]byte, error) {
+	type plain FireSlot
+	return mergeUnknown(plain(s), s.unknown)
+}
 
 // UnmarshalJSON decodes a round and remembers anything it did not recognise.
 func (r *Round) UnmarshalJSON(raw []byte) error {

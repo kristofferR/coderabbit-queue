@@ -188,6 +188,13 @@ reappearing until its thread is resolved there):
 crq resolve THREAD_ID [THREAD_ID...]
 ```
 
+After a push, threads from the previous head become outdated and drop out of `findings`, so their
+IDs are no longer available there. List every unresolved thread, outdated included:
+
+```bash
+crq threads REPO PR
+```
+
 Decline a finding you are not addressing. This posts the reason AND resolves the thread — crq reads
 GitHub resolution state, so one left open keeps returning `fix`. A contested bot reply is
 re-surfaced as its own finding, so nothing is buried. Use `--keep-open` to leave it open on purpose:
@@ -248,6 +255,45 @@ A PR whose head branch lives in a FORK is reviewed like any other but not dispat
 would run an agent over a stranger's code with approvals bypassed and a write token in reach. Set
 `CRQ_DISPATCH_FORKS=1` to fix contributor pull requests anyway. That is a trust decision, not a
 sandbox — crq has none to offer.
+Stop crq reviewing a PR (one write, no window for a daemon to fire in):
+
+```bash
+crq hold REPO PR --reason "why"
+crq unhold REPO PR
+crq hold                      # list
+```
+
+A live autoreview daemon that advertises hold support is required when creating a hold.
+
+With `CRQ_TIDY=1`, crq removes its own spent `@coderabbitai review` / `@codex review` comments as
+rounds progress. Automatic tidying is opt-in while older binaries may share the state ref. On demand:
+
+```bash
+crq tidy REPO PR [--dry-run]
+```
+
+Only comments crq posted (never one it adopted — that comment is someone else's), only while the
+comment still reads as that one-line command (an edited one is someone's words), only from rounds
+that have progressed, only after the bot answered, only once the comment is too old for crq to adopt
+again — older than the head commit, or than a later force-push (a command crq's own retry replaced is
+spent regardless, and an unreadable head keeps everything),
+and never the bots' own comments. Deletions GitHub refuses are reported in `.failed[]`.
+
+Choose which bots review one project:
+
+```bash
+crq reviewers REPO                                    # effective reviewers + budgets
+crq reviewers set REPO --bots codex --required codex  # Codex is the only required co-reviewer
+crq reviewers clear REPO                              # fleet default again
+```
+
+The primary is fleet-wide: an override chooses the CO-reviewers, so CodeRabbit is still triggered
+and still spends account quota even when it is left out of `--required`. Leaving it out means the
+round does not WAIT for it, not that it is never asked.
+
+`budget: account` means the reviewer is serialized against the shared CodeRabbit allowance;
+`budget: none` means it runs immediately. Stored in the shared state ref, so the daemon and agents
+cannot disagree. The primary reviewer is fleet-wide.
 
 A finding with no `thread_id` — a review body finding, a review-skipped notice, an outside-diff
 remark, an issue-comment finding — has nothing for `resolve` or `decline` to act on, and would otherwise block every future

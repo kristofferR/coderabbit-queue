@@ -247,6 +247,44 @@ func CommandHasCompletionReply(obs Observation, p Policy, commandID int64) bool 
 	return false
 }
 
+// PrimaryCompletedRound reports whether the primary completed THIS round with
+// evidence that counts as its review of the head: either the clean-summary
+// verdict Completion accepts, or a completion reply to the round's own command.
+//
+// It is the gate that lets a reopened round skip re-asking a primary that
+// already answered, so it holds to Completion's evidence rules rather than to
+// the weaker adoption question: CommandHasCompletionReply deliberately omits
+// the prior-review requirement and the failed-summary guard, and a reply failing
+// either is not a review of this head. Deduping on it writes a completed marker
+// that every later same-head check skips, so a wrong yes here is one nothing
+// recovers from.
+func PrimaryCompletedRound(r state.Round, obs Observation, p Policy) bool {
+	if r.FiredAt == nil {
+		return false
+	}
+	cutoff := r.FiredAt.UTC()
+	for _, ev := range obs.Events {
+		if ev.Kind == dialect.EvNoAction && sameBot(ev.Bot, p.Bot) &&
+			notBefore(ev.ObservedTime(), cutoff) {
+			return true
+		}
+	}
+	if r.CommandID == 0 {
+		return false
+	}
+	if !botHasAnyReview(obs.Reviews, p.Bot) {
+		return false
+	}
+	for _, reply := range commandReplies(obs, p) {
+		if reply.commandID == r.CommandID && reply.completion &&
+			notBefore(reply.commandAt, cutoff) &&
+			!stateSince(obs, p, reply.commandAt, dialect.EvInProgress, dialect.EvRateLimited, dialect.EvPaused, dialect.EvFailed) {
+			return true
+		}
+	}
+	return false
+}
+
 func botHasAnyReview(reviews []ReviewSeen, bot string) bool {
 	for _, review := range reviews {
 		if sameBot(review.Bot, bot) {

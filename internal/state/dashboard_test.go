@@ -270,6 +270,46 @@ func TestRenderDashboardPartitionsActiveRounds(t *testing.T) {
 	}
 }
 
+func TestRenderDashboardShowsHeldRound(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(
+		queuedRound("kristofferr/held", 7, 1, now),
+		queuedRound("kristofferr/ready", 8, 2, now),
+	)
+	st.Hold("kristofferr/held", 7, "waiting on a decision", "operator", now)
+
+	out := RenderDashboard(st, StoreConfig{})
+	if strings.Contains(out, "### 🟢 Idle") {
+		t.Errorf("held work rendered as idle:\n%s", out)
+	}
+	if !strings.Contains(out, "## ⏸ Held — 1") ||
+		!strings.Contains(out, "kristofferr/held#7") ||
+		!strings.Contains(out, "waiting on a decision") {
+		t.Errorf("held round or reason missing from dashboard:\n%s", out)
+	}
+	line := StatusLine(st, StoreConfig{})
+	if !strings.Contains(line, "next #8") || !strings.Contains(line, "1 held") {
+		t.Errorf("mixed ready and held work missing from status line: %q", line)
+	}
+	heldOnly := stateWith(queuedRound("kristofferr/held", 7, 1, now))
+	heldOnly.Hold("kristofferr/held", 7, "waiting on a decision", "operator", now)
+	if title := RenderTitle(heldOnly, StoreConfig{}); !strings.Contains(title, "1 held") {
+		t.Errorf("held-only work missing from dashboard title: %q", title)
+	}
+	if line := StatusLine(heldOnly, StoreConfig{}); !strings.Contains(line, "1 held") {
+		t.Errorf("held-only work missing from status line: %q", line)
+	}
+
+	retrying := stateWith(coolingRound("kristofferr/retrying", 9, 1, now, time.Hour))
+	retrying.Hold("kristofferr/retrying", 9, "paused retry", "operator", now)
+	retryingDashboard := RenderDashboard(retrying, StoreConfig{})
+	if strings.Contains(retryingDashboard, "### 🟢 Idle") ||
+		!strings.Contains(retryingDashboard, "## ⏸ Held — 1") ||
+		!strings.Contains(retryingDashboard, "awaiting_retry") {
+		t.Errorf("held awaiting-retry round missing from dashboard:\n%s", retryingDashboard)
+	}
+}
+
 func btoi(b bool) int {
 	if b {
 		return 1
@@ -846,6 +886,36 @@ func TestHeldSlotStopsFreeRunningRoundsToo(t *testing.T) {
 	}
 	if strings.Contains(RenderDashboard(st, StoreConfig{}), "| 1 | [kristofferr/free") {
 		t.Error("nothing may be numbered while the slot is held")
+	}
+}
+
+func TestOrphanedSlotHoldLeavesFreeRunningRoundsReady(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(
+		queuedRound("kristofferr/metered", 1, 1, now),
+		queuedRound("kristofferr/free", 2, 2, now),
+	)
+	st.Rounds["kristofferr/free#2"] = func() Round {
+		r := st.Rounds["kristofferr/free#2"]
+		r.CoOnly = true
+		return r
+	}()
+	until := now.Add(time.Hour)
+	st.FireSlot = &FireSlot{
+		Key: "kristofferr/gone#9", Token: "old", Since: now.Add(-time.Minute),
+		HoldUntil: &until,
+	}
+	st.FireSlotHoldUntil = &until
+
+	q := st.Queue(now, 0)
+	if len(q) != 2 {
+		t.Fatalf("Queue = %d entries, want 2", len(q))
+	}
+	if q[0].PR != 2 || q[0].Why != "" || !q[0].ReadyAt.IsZero() {
+		t.Fatalf("quota-free round = %+v, want it ready ahead of the orphaned hold", q[0])
+	}
+	if q[1].PR != 1 || q[1].Why != WaitSlotBusy {
+		t.Fatalf("metered round = %+v, want it blocked by the orphaned hold", q[1])
 	}
 }
 

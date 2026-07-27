@@ -71,11 +71,12 @@ func minutesUntil(t time.Time, now time.Time) int {
 // carrying: reserved (slot held, command not yet posted), fired, or reviewing —
 // ordered by fire time.
 //
-// Together with State.Queue (queued + awaiting_retry) this PARTITIONS Active()
-// by phase, which is what makes "every active round is on the dashboard" true
-// by construction. The previous single "Feedback wait" row showed reviewing[0]
-// and silently dropped every round behind it, along with any reserved round
-// whose fire slot Normalize had cleared.
+// Together with State.Queue (queued + awaiting_retry) and heldRounds this
+// PARTITIONS Active() by phase and administrative state, which is what makes
+// "every active round is on the dashboard" true by construction. The previous
+// single "Feedback wait" row showed reviewing[0] and silently dropped every
+// round behind it, along with any reserved round whose fire slot Normalize had
+// cleared.
 func inFlightRounds(st State) []Round {
 	var out []Round
 	for _, r := range st.Rounds {
@@ -87,6 +88,28 @@ func inFlightRounds(st State) []Round {
 	sort.Slice(out, func(i, j int) bool {
 		return firedAtOf(out[i]).Before(firedAtOf(out[j]))
 	})
+	return out
+}
+
+type heldRound struct {
+	Round
+	Hold Hold
+}
+
+// heldRounds returns queued work intentionally excluded from firing. Held work
+// is not part of Queue because it is not waiting its turn, but it remains active
+// and must stay visible to operators.
+func heldRounds(st State) []heldRound {
+	var out []heldRound
+	for _, r := range st.Rounds {
+		if r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry {
+			continue
+		}
+		if hold, ok := st.HeldPR(r.Repo, r.PR); ok {
+			out = append(out, heldRound{Round: r, Hold: hold})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
 	return out
 }
 
@@ -191,13 +214,27 @@ func dash(s string) string {
 	return s
 }
 
-// RenderDashboard renders the human-facing dashboard for v3 state: rounds by
-// phase instead of v2's queue/fired/awaiting maps.
+// hostName renders a round's writer id ("host=blue pid=4711 run=1a2b3c4d") as
+// the machine name the host column has always shown. The round stores the writer
+// id because that is what capabilities are keyed by; the pid and run id are
+// bookkeeping for LaggingWriters, not something a reader of the table needs.
+func hostName(writer string) string {
+	rest, ok := strings.CutPrefix(writer, "host=")
+	if !ok {
+		return writer
+	}
+	name, _, _ := strings.Cut(rest, " ")
+	return name
+}
+
+// RenderDashboard renders the human-facing dashboard for the current state:
+// rounds by phase instead of v2's queue/fired/awaiting maps.
 func RenderDashboard(st State, cfg StoreConfig) string {
 	loc := dashboardLoc(cfg)
 	now := time.Now().UTC()
 	queue := st.Queue(now, cfg.MinInterval)
 	inFlight := inFlightRounds(st)
+	held := heldRounds(st)
 	slot := st.SlotRound()
 	blocked := st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now)
 
@@ -226,6 +263,8 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 		} else {
 			fmt.Fprintf(&b, "### 🟠 %d queued\n\n", len(queue))
 		}
+	case len(held) > 0:
+		fmt.Fprintf(&b, "### ⏸ %d held\n\n", len(held))
 	default:
 		fmt.Fprintf(&b, "### 🟢 Idle\n\n")
 	}
@@ -270,7 +309,7 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 		for _, r := range inFlight {
 			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %s | %s | `%s` |\n",
 				r.Repo, r.PR, r.Repo, r.PR, r.Head, r.Phase,
-				fmtStamp(firedTimeOf(r), loc), fmtStamp(r.WaitDeadline, loc), dash(coBotMarks(r)), r.ByHost)
+				fmtStamp(firedTimeOf(r), loc), fmtStamp(r.WaitDeadline, loc), dash(coBotMarks(r)), hostName(r.ByHost))
 		}
 	}
 
@@ -307,7 +346,19 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 			}
 			fmt.Fprintf(&b, "| %s | [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %d | %s | `%s` |\n",
 				position, e.Repo, e.PR, e.Repo, e.PR, e.Head, ready, dash(e.Why),
-				e.Attempts, fmtStamp(&e.EnqueuedAt, loc), e.ByHost)
+				e.Attempts, fmtStamp(&e.EnqueuedAt, loc), hostName(e.ByHost))
+		}
+	}
+
+	fmt.Fprintf(&b, "\n## ⏸ Held — %d\n\n", len(held))
+	if len(held) == 0 {
+		fmt.Fprintf(&b, "_None._\n")
+	} else {
+		fmt.Fprintf(&b, "| PR | commit | phase | reason | held by | since |\n|---|---|---|---|---|---|\n")
+		for _, e := range held {
+			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | `%s` | %s |\n",
+				e.Repo, e.PR, e.Repo, e.PR, e.Head, e.Phase, dash(e.Hold.Reason),
+				e.Hold.By, fmtStamp(&e.Hold.At, loc))
 		}
 	}
 
@@ -319,7 +370,7 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 		fmt.Fprintf(&b, "| PR | commit | requested | host |\n|---|---|---|---|\n")
 		for _, r := range requested {
 			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | `%s` |\n",
-				r.Repo, r.PR, r.Repo, r.PR, r.Head, fmtStamp(r.FiredAt, loc), r.ByHost)
+				r.Repo, r.PR, r.Repo, r.PR, r.Head, fmtStamp(r.FiredAt, loc), hostName(r.ByHost))
 		}
 	}
 
@@ -335,6 +386,7 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 func RenderTitle(st State, cfg StoreConfig) string {
 	now := time.Now().UTC()
 	queue := len(st.Queue(now, cfg.MinInterval))
+	held := len(heldRounds(st))
 	switch {
 	case firstStranded(st, inFlightRounds(st)) != nil:
 		// Same precedence as the body: permanently stuck work outranks states that
@@ -348,6 +400,8 @@ func RenderTitle(st State, cfg StoreConfig) string {
 		return fmt.Sprintf("🐰 crq — awaiting feedback · queue %d", queue)
 	case queue > 0:
 		return fmt.Sprintf("🐰 crq — %d queued", queue)
+	case held > 0:
+		return fmt.Sprintf("🐰 crq — %d held", held)
 	default:
 		return "🐰 crq — idle"
 	}

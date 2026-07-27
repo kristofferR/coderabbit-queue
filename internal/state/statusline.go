@@ -19,6 +19,7 @@ func StatusLine(st State, cfg StoreConfig) string {
 	now := time.Now().UTC()
 	queue := st.Queue(now, cfg.MinInterval)
 	inFlight := inFlightRounds(st)
+	held := heldRounds(st)
 
 	// Something is ready to go right now: the queue put it at the front with no
 	// reason to wait. That outranks the account block, because a quota-free round
@@ -27,6 +28,7 @@ func StatusLine(st State, cfg StoreConfig) string {
 	ready := len(queue) > 0 && queue[0].ReadyAt.IsZero() && queue[0].Why == ""
 
 	var parts []string
+	heldPrimary := false
 	stranded := firstStranded(st, inFlight)
 	switch {
 	case st.Drain.Unhealthy():
@@ -39,6 +41,9 @@ func StatusLine(st State, cfg StoreConfig) string {
 		parts = append(parts, fmt.Sprintf("⏳ blocked %dm", minutesUntil(*st.Account.BlockedUntil, now)))
 	case len(inFlight) > 0:
 		parts = append(parts, fmt.Sprintf("🔬 #%d reviewing", inFlight[0].PR))
+	case len(queue) == 0 && len(held) > 0:
+		parts = append(parts, fmt.Sprintf("⏸ %d held", len(held)))
+		heldPrimary = true
 	case len(queue) == 0:
 		return "✅ crq idle"
 	default:
@@ -57,6 +62,9 @@ func StatusLine(st State, cfg StoreConfig) string {
 	}
 	if len(inFlight) > 1 {
 		parts = append(parts, fmt.Sprintf("%d in flight", len(inFlight)))
+	}
+	if len(held) > 0 && !heldPrimary {
+		parts = append(parts, fmt.Sprintf("%d held", len(held)))
 	}
 	return "crq " + strings.Join(parts, " · ")
 }

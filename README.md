@@ -213,6 +213,17 @@ reviewed. The two flags mirror CodeRabbit's own toggles: default = *Automatic + 
 commit it requested a review for, so the same commit is never reviewed twice. One process is the
 leader at a time (a lease in the shared state), so running the daemon on several machines is safe.
 
+With `CRQ_TIDY=1`, the daemon also **deletes crq's own spent trigger comments** as each round
+progresses — the
+`@coderabbitai review` / `@codex review` one-liners it posted, which otherwise bury the conversation a
+human came to read. It removes a comment only when crq wrote it (never one it adopted from a person,
+never a bot's own comment, and never one edited into something else), only from a round that has moved
+on, only after the bot answered it, and only once it is too old to adopt again (older than the head
+commit, or than a later force-push); a command superseded by crq's own retry is spent regardless of
+its timestamp. Automatic tidying is opt-in so older binaries sharing the state ref never mis-pair a
+delayed reply after a newer daemon deletes its command. You can also run a pass by hand with
+`crq tidy <repo> <pr>` (`--dry-run` reports what it would remove).
+
 <details>
 <summary>Run it persistently (macOS launchd / Linux systemd)</summary>
 
@@ -383,11 +394,21 @@ least 10 minutes of silence.
 crq next <repo> <pr>      # ⭐ the agent loop: emit the single next action as JSON (--wait blocks)
 crq loop <repo> <pr>      # blocking one-shot round: fire + wait + emit JSON findings
 crq feedback <repo> <pr>  # current normalized findings as JSON, WITHOUT triggering a review
+crq threads <repo> <pr>                                     # every unresolved thread, outdated included
 crq resolve <thread-id> [<thread-id>...]                    # resolve addressed review threads
 crq decline <thread-id> [...] --reason "<why>" [--resolve]  # record why a finding is declined
 crq drain install         # ⭐ unattended: watch every PR and fix what needs fixing
 crq watch                 #    what the drain runs: drive open PRs through crq next, one JSON
                           #    line each (--dispatch starts a fix session; --once for cron)
+crq hold <repo> <pr> --reason "<why>"                       # persistently stop reviews for a PR
+crq unhold <repo> <pr>                                      # resume reviews for a held PR
+crq hold                                                    # list held PRs
+
+crq tidy <repo> <pr>      # delete crq's own spent review-trigger comments (--dry-run previews)
+
+crq reviewers <repo>      # which bots review this project, and what each costs
+crq reviewers set <repo> [--bots <a,b>] [--required <a,b>] # choose them (either flag alone)
+crq reviewers clear <repo>                                 # back to the fleet default
 
 crq dismiss <repo> <pr> <finding-id> [...] --reason "<why>"  # account for a finding with no thread
 crq autoreview            # ⭐ review ALL open PRs automatically, rate-coordinated
@@ -395,7 +416,7 @@ crq autoreview            # ⭐ review ALL open PRs automatically, rate-coordina
 crq status                # show the dashboard: queue, in-flight, quota, next slot
 crq doctor                # JSON readiness report (gh/auth/config/CLI) — never writes to GitHub
 crq preflight [...]       # run the local CodeRabbit CLI pre-push and normalize its JSON
-crq cancel <repo> <pr>    # take a PR out of the line
+crq cancel <repo> <pr>    # abandon the current round; autoreview may enqueue it again
 crq init                  # first-time setup of the gate repo
 crq debug <enqueue|pump|refresh|state>   # diagnosis only — review loops should use crq next
 crq version               # print the version
@@ -407,6 +428,12 @@ the exit code. **`crq loop` exit codes:** `0` converged or no
 actionable findings, `10` actionable findings returned in `.findings[]`, `2` timed out waiting for
 feedback. crq keys resolution off GitHub's own thread state, so a finding keeps reappearing in
 `feedback`/`loop` until its thread is resolved (or declined-and-resolved) on GitHub.
+
+Use `crq hold` for an administrative pause: the hold survives autoreview passes and prevents both
+primary and co-reviewer triggers until `crq unhold`. `crq cancel` only abandons the current round,
+so fleet autoreview may discover the still-open PR and enqueue it again. Creating a hold requires a
+live autoreview daemon that advertises hold support; this keeps an older standby from acquiring the
+fleet lease while the active daemon maintains it.
 
 <details>
 <summary>Feedback JSON shape</summary>
@@ -465,6 +492,7 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_EXCLUDE` | _(none)_ | denylist — crq never reviews, watches or fixes these `owner/name` repos (comma-separated) |
 | `CRQ_AUTOREVIEW_SKIP_AUTHORS` | `dependabot[bot]` | PR authors `autoreview` never enqueues (comma-separated; case and `[bot]` suffix don't matter) — set to empty to auto-review bot PRs too; manual `crq review` is unaffected |
 | `CRQ_AUTOREVIEW_SKIP_MARKER` | `<!-- crq:skip-autoreview -->` | exact PR-body marker that suppresses fleet auto-review; set empty to disable; manual `crq loop` is unaffected |
+| `CRQ_TIDY` | `0` | set to `1` to delete crq's own spent review-trigger comments as rounds progress (`crq tidy` by hand is unaffected) |
 | `CRQ_REQUIRED_BOTS` | `coderabbitai[bot]` | bots that must review the head for convergence (crq waits for all of them) |
 | `CRQ_COBOTS` | `codex,bugbot,macroscope` | co-reviewers crq surfaces and (optionally) triggers; set empty to disable all |
 | `CRQ_COBOT_<NAME>_REQUIRED` | `0` | make that co-reviewer gate convergence (folds it into `CRQ_REQUIRED_BOTS`); `<NAME>` ∈ `CODEX`, `BUGBOT`, `MACROSCOPE` |
@@ -517,7 +545,9 @@ the same fire step as the CodeRabbit one. Bugbot and Macroscope default to `self
 already auto-review every push: crq stays silent unless a bot it has seen working misses the current
 head for longer than `CRQ_COBOT_<NAME>_GRACE`. In every mode crq suppresses the trigger when the bot
 auto-reviews, has already reviewed the head, has a check run in flight, or has a live command on the
-PR — so no bot is ever double-asked.
+PR — so no bot is ever double-asked. A mode you set explicitly wins over requiredness, per-repo
+requiredness included: `crq reviewers set` gives a required bot the trigger its registry default
+would have had, but never overrides a `never` you configured yourself.
 
 A co-reviewer that joins a round on its own (an actionable comment, a review, a check run) gates that
 round dynamically: convergence waits for it even though it isn't required. An exhaustion notice — for

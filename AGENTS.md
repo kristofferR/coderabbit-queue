@@ -30,16 +30,19 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
   credential-safe Git execution, stale-worktree pruning, and mirror migration.
   Owns persistent filesystem and process I/O for checkouts; `crq` supplies only
   configured roots and a current-token resolver.
+- `internal/state/` — persisted schema v4: one `Round` per PR, one global
 - `internal/state/` — persisted schema v3: one `Round` per PR, one global
   `FireSlot`, the CodeRabbit `AccountQuota`, an `Archive` ring. Round transition
-  methods, the CAS store, and dashboard rendering. `Round.CoBots` holds per-
+  methods, durable tombstones for tidied trigger comments, the CAS store, and
+  dashboard rendering. `Round.CoBots` holds per-
   co-reviewer trigger bookkeeping; Codex's entry is **dual-written** to the
   legacy `Codex*` round fields because the fleet shares one state ref across
   binary versions (`Normalize` folds them back on load). `Round` and `State` also
   **round-trip unknown JSON members** (`tolerant.go`), so a field a newer binary
   added survives being read and rewritten by an older one — which is what makes
-  adding one safe without another dual-write, and without a schema bump (an
-  unknown version auto-reinitialises and would erase the fleet's rounds).
+  ordinary additions safe without another dual-write or schema bump. Schema v4
+  is the deliberate exception: older v3 clients refuse it, fencing pumping
+  clients that cannot enforce administrative holds.
 - `internal/engine/` — PURE decision logic, `now` passed in, no ctx/gh:
   `DecideFire` (the single fire owner), `Progress` (fired/reviewing round
   transitions), `Completion` (the one "is the round done?"), `BlockingFindings`
@@ -76,9 +79,25 @@ r.Head == head → skip`. A completed round stays as the "this head was reviewed
 dedup marker. A rate-limited requeue parks the round in `awaiting_retry` (keeping
 its head/attempts/history), it does not delete a fired marker.
 
+The one exception to that skip is `Round.ReviewersChanged`: a reviewer change
+requeues the repository's completed rounds, but only for PRs that are open —
+marking the closed ones instead of handing Pump dead work. A marked round is
+reopened by whichever enqueue path next sees the PR alive, so reopening a PR
+picks up the requirements it missed while it was shut.
+
 The global `FireSlot` allows ≤1 concurrent fire fleet-wide (CAS). A bot ack
 releases the slot while the review keeps running (the round moves to
-`reviewing`); the round itself stays open until `Completion` is done.
+`reviewing`); the round itself stays open until `Completion` is done. The
+converse does not hold: convergence alone never releases the slot. A repository
+whose required set omits the primary converges as soon as its co-reviewers
+answer, and completing there would hand the slot to the next PR while the
+metered command is still unanswered — so a round that spent the quota stays
+`fired` until the primary acknowledges or its in-flight timeout expires. Staying
+`fired` holds the slot only while the round exists, and converging is what tells
+the agent to push, so the loop also stamps `FireSlot.HoldUntil`: the hold belongs
+to the command, not to the head it was posted at, and it outlives the supersede
+that the success it reported invites. Every fire gate asks `SlotHeld`, not
+"is there a round holding it".
 
 ## observe → decide → apply
 

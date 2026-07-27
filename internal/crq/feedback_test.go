@@ -375,6 +375,93 @@ func TestFeedbackRejectsCompletionReplyFromEarlierRound(t *testing.T) {
 	}
 }
 
+func TestFeedbackPairsRepliesWithTidiedCommandHistory(t *testing.T) {
+	cfg := firingConfig()
+	sha := "abcdef1234567890"
+	head := sha[:9]
+	firedAt := time.Now().UTC().Add(-10 * time.Minute)
+	oldCommandAt := firedAt.Add(-5 * time.Minute)
+	completion := "<!-- This is an auto-generated reply by CodeRabbit -->\n✅ Action performed\n\nReview finished."
+	mk := func(id int64, login, body string, at time.Time) ghapi.IssueComment {
+		ic := ghapi.IssueComment{ID: id, Body: body, CreatedAt: at, UpdatedAt: at}
+		ic.User.Login = login
+		return ic
+	}
+
+	gh := newFakeGitHub()
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey("o/repo", 3)] = pull
+	// Tidy removed command 1. Its delayed completion lands after command 2,
+	// and must still pair with the remembered command 1.
+	gh.comments[fakeKey("o/repo", 3)] = []ghapi.IssueComment{
+		mk(2, "kristofferR", cfg.ReviewCommand, firedAt),
+		mk(3, cfg.Bot, completion, firedAt.Add(30*time.Second)),
+	}
+	prior := ghapi.Review{
+		ID:          9,
+		CommitID:    "0123456fedcba",
+		State:       "COMMENTED",
+		SubmittedAt: oldCommandAt.Add(-time.Hour),
+		Body:        "**Actionable comments posted: 2**",
+	}
+	prior.User.Login = cfg.Bot
+	gh.reviews[fakeKey("o/repo", 3)] = []ghapi.Review{prior}
+
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		old, err := st.NewRound("o/repo", 3, "0123456fe", oldCommandAt)
+		if err != nil {
+			return err
+		}
+		if err := old.Reserve("old", "host", oldCommandAt); err != nil {
+			return err
+		}
+		if err := old.Fire(1, oldCommandAt); err != nil {
+			return err
+		}
+		old.RecordPosted(cfg.Bot, 1, oldCommandAt)
+		st.PutRound(*old)
+
+		current, err := st.Supersede("o/repo", 3, head, firedAt)
+		if err != nil {
+			return err
+		}
+		if err := current.Reserve("current", "host", firedAt); err != nil {
+			return err
+		}
+		if err := current.Fire(2, firedAt); err != nil {
+			return err
+		}
+		current.RecordPosted(cfg.Bot, 2, firedAt)
+		if err := current.Acknowledge(); err != nil {
+			return err
+		}
+		st.PutRound(*current)
+		// Tidy persisted the old command outside Archive before removing it.
+		// Enough unrelated rounds then finish to evict this PR's old round from
+		// the fleet-wide ring before its delayed completion arrives.
+		st.RecordTidied("o/repo", 3, PostedCommand{ID: 1, Bot: cfg.Bot, At: oldCommandAt})
+		for i := 0; i < ArchiveMax; i++ {
+			st.Archive = append(st.Archive, Round{
+				Repo: "o/other", PR: 100 + i, Head: "999999999",
+				Phase: PhaseCompleted, EnqueuedAt: oldCommandAt,
+			})
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := NewService(cfg, gh, store, nil).Feedback(context.Background(), "o/repo", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.ReviewedBy[cfg.Bot] || report.Converged {
+		t.Fatalf("the old command's delayed completion converged the current round: %#v", report)
+	}
+}
+
 func TestFeedbackSkipsReviewAnsweredCommandsWhenPairingCompletionReplies(t *testing.T) {
 	cfg := Config{
 		Bot:               "coderabbitai[bot]",
@@ -1049,6 +1136,13 @@ func TestFeedbackUsesNoActionCompletionAfterCodexThumbsUp(t *testing.T) {
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("o/repo", 1)] = pull
+	command := ghapi.IssueComment{
+		ID:        99,
+		Body:      "@coderabbitai review",
+		CreatedAt: started,
+		UpdatedAt: started,
+	}
+	command.User.Login = "kristofferR"
 	comment := ghapi.IssueComment{
 		ID:        1,
 		Body:      "No actionable comments were generated in the recent review. 🎉",
@@ -1056,7 +1150,7 @@ func TestFeedbackUsesNoActionCompletionAfterCodexThumbsUp(t *testing.T) {
 		UpdatedAt: started.Add(time.Minute),
 	}
 	comment.User.Login = "coderabbitai[bot]"
-	gh.comments[fakeKey("o/repo", 1)] = []ghapi.IssueComment{comment}
+	gh.comments[fakeKey("o/repo", 1)] = []ghapi.IssueComment{command, comment}
 	thumb := ghapi.Reaction{Content: "+1", CreatedAt: started.Add(2 * time.Minute)}
 	thumb.User.Login = "chatgpt-codex-connector[bot]"
 	gh.reactions[99] = []ghapi.Reaction{thumb}
@@ -2228,3 +2322,79 @@ func TestExcludeSkipNoticeIsTargeted(t *testing.T) {
 // Which occurrences of a stable id count as settled is decided by the head each
 // one names, not by this filter — see
 // TestCoReplayBugbotSiblingSettlementUsesHead, which drives the real threads.
+
+// The loop completes the round it waited on, which releases the fire slot. With
+// the primary outside the required set the round converges without it, so that
+// completion would hand the next pull request a second concurrent metered
+// command while this one's is still unanswered. Holding leaves the round fired
+// for a Pump to finish — on the acknowledgement, or on the in-flight timeout.
+func TestCompleteWaitRoundHoldsAnUnacknowledgedFireSlot(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	now := time.Now().UTC()
+	repo, pr, head := "o/r", 4, "aaaaaaaa1"
+	seedRound(t, store, cfg, repo, pr, head, PhaseFired, now, 12)
+
+	svc.completeWaitRound(ctx, repo, pr, head, true, &cfg)
+	if got := roundPhase(t, store, repo, pr); got != PhaseFired {
+		t.Fatalf("phase = %s, want the round left fired while the primary is silent", got)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.FireSlot == nil {
+		t.Fatal("the fire slot must stay held until the primary acknowledges")
+	}
+
+	svc.completeWaitRound(ctx, repo, pr, head, false, &cfg)
+	if got := roundPhase(t, store, repo, pr); got != PhaseCompleted {
+		t.Fatalf("phase = %s, want an acknowledged round completed as before", got)
+	}
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.FireSlot != nil {
+		t.Fatalf("completing the round must release the slot, got %+v", st.FireSlot)
+	}
+}
+
+// Converging is the loop's signal to push, and the push supersedes the round the
+// held slot points at. Leaving the round fired is therefore not enough on its
+// own: the replacement round archives its predecessor, Normalize drops a slot no
+// round holds, and the next Pump spends the account allowance on a second review
+// command while the first is still unanswered.
+func TestAHeldFireSlotSurvivesTheHeadAdvanceItInvites(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.InflightTimeout = time.Hour
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	now := time.Now().UTC()
+	repo, pr, head := "o/r", 5, "aaaaaaaa1"
+	seedRound(t, store, cfg, repo, pr, head, PhaseFired, now, 12)
+	svc.completeWaitRound(ctx, repo, pr, head, true, &cfg)
+
+	// The push: the agent acted on the success the loop just reported.
+	if _, err := store.Update(ctx, func(st *State) error {
+		_, err := st.Supersede(repo, pr, "bbbbbbbb2", now)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.SlotHeld(now) {
+		t.Fatalf("fire slot = %+v, want it still held for the unanswered command", st.FireSlot)
+	}
+	// Bounded by the in-flight window, so an unanswered command cannot wedge the
+	// queue for longer than crq would have waited for it anyway.
+	if st.SlotHeld(now.Add(cfg.InflightTimeout + time.Minute)) {
+		t.Error("the hold must expire with the in-flight window it was taken for")
+	}
+}

@@ -14,20 +14,26 @@ import (
 // the package qualifier, and without colliding with the many `state`/`st`
 // variable names in this package.
 type (
-	State        = crqstate.State
-	Round        = crqstate.Round
-	Phase        = crqstate.Phase
-	FireSlot     = crqstate.FireSlot
-	AccountQuota = crqstate.AccountQuota
-	LeaderLease  = crqstate.LeaderLease
-	Revision     = crqstate.Revision
-	StateStore   = crqstate.StateStore
-	StoreConfig  = crqstate.StoreConfig
+	State         = crqstate.State
+	Round         = crqstate.Round
+	Phase         = crqstate.Phase
+	FireSlot      = crqstate.FireSlot
+	AccountQuota  = crqstate.AccountQuota
+	LeaderLease   = crqstate.LeaderLease
+	PostedCommand = crqstate.PostedCommand
+	RepoReviewers = crqstate.RepoReviewers
+	Revision      = crqstate.Revision
+	StateStore    = crqstate.StateStore
+	StoreConfig   = crqstate.StoreConfig
+
+	LeaderCapabilityLease = crqstate.LeaderCapabilityLease
+
 	// RepoDrainSwitch is one repository's answer to whether crq may fix it.
 	RepoDrainSwitch = crqstate.RepoDrainSwitch
 )
 
 const (
+	ArchiveMax         = crqstate.ArchiveMax
 	PhaseQueued        = crqstate.PhaseQueued
 	PhaseReserved      = crqstate.PhaseReserved
 	PhaseFired         = crqstate.PhaseFired
@@ -40,6 +46,8 @@ const (
 	DispatchTTL = crqstate.DispatchTTL
 	// DrainUnhealthyAfter is how many passes may fail to dispatch before crq says so.
 	DrainUnhealthyAfter = crqstate.DrainUnhealthyAfter
+	// CapsRepoOverrides is the binary capability per-repo reviewer overrides need.
+	CapsRepoOverrides = crqstate.CapsRepoOverrides
 )
 
 var (
@@ -56,6 +64,7 @@ func (c Config) storeConfig() StoreConfig {
 		Timezone:       c.Timezone,
 		Scope:          c.Scope,
 		CoReviewers:    c.coReviewerSummary(),
+		Host:           c.WriterID(),
 		MinInterval:    c.MinInterval,
 	}
 }
@@ -92,7 +101,7 @@ func NewMemoryStore(cfg Config) *crqstate.MemoryStore {
 	return crqstate.NewMemoryStore(cfg.storeConfig())
 }
 
-// DefaultState returns a fresh v3 state seeded with the configured scope, used
+// DefaultState returns a fresh current-schema state seeded with the configured scope, used
 // by tests and init.
 func DefaultState(cfg Config) State {
 	st := crqstate.New()
@@ -128,6 +137,12 @@ func (c Config) policy() engine.Policy {
 		RateLimitCoDegrade: c.RateLimitCoDegrade,
 	}
 	for _, cb := range c.CoBots {
+		// A registry-backed primary keeps a silenced CoBots entry so observation
+		// can use that registry's wording and check hooks. It is still the
+		// primary, not a dynamic co-reviewer convergence gate.
+		if sameBot(cb.Login, c.Bot) {
+			continue
+		}
 		p.CoReviewers = append(p.CoReviewers, engine.CoReviewerPolicy{
 			Login:         cb.Login,
 			Command:       cb.Command,

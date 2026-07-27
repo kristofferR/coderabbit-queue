@@ -135,6 +135,21 @@ func TestUnknownFlag(t *testing.T) {
 	}
 }
 
+func TestReasonFlagDetection(t *testing.T) {
+	for _, args := range [][]string{
+		{"owner/repo", "1", "--reason", ""},
+		{"owner/repo", "1", "--reason="},
+		{"--reason=unused", "owner/repo", "1"},
+	} {
+		if !hasReasonArg(args) {
+			t.Errorf("hasReasonArg(%v) = false, want true", args)
+		}
+	}
+	if hasReasonArg([]string{"owner/repo", "1"}) {
+		t.Error("arguments without --reason were reported as having it")
+	}
+}
+
 // parseDismissArgs decides what counts as a finding ID, so a typo must not
 // quietly become one.
 func TestParseDismissArgs(t *testing.T) {

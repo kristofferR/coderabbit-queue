@@ -160,6 +160,16 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 			break
 		}
 	}
+	// A submitted Review is not the only way the primary finishes. It also
+	// answers a command with a completion reply and no Review object, and
+	// reading only obs.Reviews there means crq posts the command again and buys
+	// a second review of code it has already been told about. The reply is
+	// paired to THIS round's command, so it only counts while the round still
+	// tracks the head, and it must carry the evidence Completion asks for — a
+	// reply nothing backs would mark an unreviewed head reviewed for good.
+	if !reviewedHead && r.Head == obs.Head {
+		reviewedHead = PrimaryCompletedRound(r, obs, p)
+	}
 	// Belt-and-braces live check: even with a fresh round, never fire at a
 	// head the bot has already reviewed (e.g. state was reinitialized). But a
 	// CodeRabbit review does not finish a round that a gating co-reviewer still
@@ -304,7 +314,7 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, prim
 	anchor := selfHealAnchor(r, obs, primaryUnavailable)
 	for _, cp := range p.coReviewers() {
 		co := obs.co(cp.Login)
-		gates := requiredBot(p, cp.Login) || co.AutoActive || primaryUnavailable
+		gates := requiredBot(p, cp.Login) || co.AutoActive || primaryUnavailable || r.ForceCoReviewer(cp.Login)
 		if !gates || coReviewedHead(obs, cp.Login) {
 			continue
 		}

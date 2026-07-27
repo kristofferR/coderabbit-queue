@@ -913,6 +913,12 @@ func (g *GitHub) ListIssueComments(ctx context.Context, repo string, issue int) 
 	return out, err
 }
 
+func (g *GitHub) GetIssueComment(ctx context.Context, repo string, commentID int64) (IssueComment, error) {
+	var out IssueComment
+	err := g.request(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/issues/comments/%d", repoPath(repo), commentID), nil, &out)
+	return out, err
+}
+
 // ListIssueCommentsPage fetches a single page (GitHub returns oldest-first), so
 // callers that only need the oldest comments (e.g. calibration pruning) don't
 // page through thousands of them.

@@ -160,6 +160,17 @@ call rather than looping a subprocess per thread.
 crq keys off GitHub's resolution state: an addressed finding keeps reappearing in `crq feedback`
 until its thread is resolved on GitHub. Resolve only threads you actually addressed; leave the rest open.
 
+After a push, every thread from the previous head is **outdated**. Findings leave those out on
+purpose — the code they point at is gone — so `crq feedback` no longer gives you their IDs even
+though they are still open on the PR. List them instead of reaching for the GitHub API:
+
+```bash
+crq threads "$REPO" "$PR"
+```
+
+It returns every unresolved thread, outdated ones included, current ones first, each with the
+`thread_id` that `crq resolve` and `crq decline` take.
+
 For a finding you are **not** addressing, record why instead of leaving it silently open:
 
 ```bash
@@ -195,6 +206,62 @@ every required reviewer has answered.
 Each session's output is written to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log`
 (last five per PR). Three dispatch attempts in a row that start nothing put `dispatch failing` on the dashboard
 and the status line.
+## Holding a PR
+
+To stop crq reviewing a PR — a draft you are still shaping, a branch waiting on a decision:
+
+```bash
+crq hold "$REPO" "$PR" --reason "waiting on the API decision"
+crq unhold "$REPO" "$PR"
+crq hold                                   # what is held
+```
+
+One write, honoured by every path that picks a round to fire, so there is no window in which a daemon
+fires anyway. Creating a hold requires a live autoreview daemon that advertises hold support, so an
+older standby cannot acquire the fleet lease while that daemon maintains it. It does not cancel a
+review already in flight; that one is bought.
+
+## Spent Trigger Comments
+
+crq deletes its own `@coderabbitai review` / `@codex review` comments once the round that posted
+them has progressed and the bot has answered, so a PR driven through a dozen rounds stays readable.
+Set `CRQ_TIDY=1` to do this automatically under `crq autoreview`, or run it on demand:
+
+```bash
+crq tidy "$REPO" "$PR" [--dry-run]
+```
+
+It only ever removes comments **crq posted** — candidates come from the comments each round recorded
+writing, never from matching text, and never one the round merely adopted (a person's request to
+review is not crq's to erase). A candidate must also still read as that one-line command: crq posts
+under your own account, so a recorded comment someone has since edited into a note is their words and
+it stays. A candidate also has to predate the current head, because a newer
+command is one crq would adopt instead of posting again; a request crq's own retry replaced is spent
+either way, and an unreadable head keeps everything. Never the bots' own comments, because an
+auto-generated reply can be a rate-limit or skipped-review notice that crq reads as evidence.
+
+## Which Bots Review Which Project
+
+```bash
+crq reviewers "$REPO"                                   # who runs here, and what each costs
+crq reviewers set "$REPO" --bots codex --required codex # Codex the only required co-reviewer
+crq reviewers clear "$REPO"                             # back to the fleet default
+```
+
+Each reviewer reports its `budget`: `account` is serialized against the shared CodeRabbit allowance,
+`none` runs immediately, outside that queue. That is the only property the queue cares about — it says
+what a reviewer costs, never whether a round waits for it. `--required` alone decides that, and either
+flag may be given without the other (`--bots` and `--required` update separate halves of the override).
+
+The setting lives in the shared state ref, so the daemon and every agent read the same one.
+
+The primary reviewer is fleet-wide: an override chooses the **co-reviewers**. Leaving the primary out
+of `--required` means the round does not wait for it — not that it is never triggered, so it still
+spends account quota. `--required` cannot be empty (a
+round gating on nobody converges before anything runs); use `clear` to drop the override.
+
+If the output lists `lagging_hosts`, those hosts are driving the queue with a binary that predates
+per-repo overrides — they will keep using the fleet default until upgraded.
 
 ## Findings With No Thread
 
