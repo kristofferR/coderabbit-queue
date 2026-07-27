@@ -1,4 +1,4 @@
-// Package state defines crq's persisted schema v3: one Round per tracked PR,
+// Package state defines crq's persisted schema v4: one Round per tracked PR,
 // a single global fire slot, and the CodeRabbit account quota. A Round is
 // never deleted, only transitioned (or archived when superseded by a new
 // head) — the invariant that makes "forgot we already requested a review at
@@ -295,11 +295,10 @@ func (l LeaderCapabilityLease) HasCapability(want string) bool {
 	return false
 }
 
-// State is schema v3. It persists as state.json in the git state ref exactly
-// like v2; only the payload shape changed (no migration — v2 payloads
-// auto-reinit, crq is pre-release).
+// State is schema v4. It persists as state.json in the existing git state ref;
+// v3 is migrated in place so its live rounds survive the compatibility fence.
 type State struct {
-	Version int   `json:"v"` // 3
+	Version int   `json:"v"` // 4
 	Rev     int64 `json:"rev"`
 	NextSeq int64 `json:"next_seq"`
 
@@ -353,7 +352,7 @@ func (s State) LeaderHasCapability(want string) bool {
 		s.LeaderCapabilities.HasCapability(want)
 }
 
-const SchemaVersion = 3
+const SchemaVersion = 4
 
 // ArchiveMax bounds the finished-rounds ring. Active rounds are never
 // evicted — only Archive is trimmed — so a live "already fired at this head"

@@ -197,6 +197,40 @@ func TestNextNeverSchedulesAHotLoop(t *testing.T) {
 	}
 }
 
+func TestNextReportsAdministrativeHoldAfterDrainFirst(t *testing.T) {
+	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr := "owner/repo", 505
+	head := "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		st.Hold(repo, pr, "waiting on a decision", "operator", base)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	held := f.next(repo, pr)
+	f.wantAction(held, engine.ActionBlocked)
+	if held.Reason != "held: waiting on a decision" {
+		t.Errorf("reason = %q, want the administrative hold", held.Reason)
+	}
+	if held.RecheckAfter != nil {
+		t.Errorf("an administrative hold cannot clear on a timer: %s", held.RecheckAfter)
+	}
+	if got := f.reviewsPosted(repo, pr); got != 0 {
+		t.Fatalf("held PR posted %d reviews", got)
+	}
+
+	// Current-head findings still come first: the hold must not hide work that
+	// can be drained without moving the head.
+	f.botReviewComment(repo, pr, 901, head, "internal/state/state.go", 42,
+		"_⚠️ Potential issue_\n\nThis dereferences a nil round.")
+	f.wantAction(f.next(repo, pr), engine.ActionFix)
+}
+
 // The local-work probe decides push-vs-done, so "is this checkout even the
 // PR's repository" has to be exact. Substring matching made owner/app match a
 // checkout of owner/application and read its HEAD as unlanded work.

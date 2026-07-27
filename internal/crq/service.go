@@ -1910,7 +1910,7 @@ func isCommentCapError(err error) bool {
 
 // Wait enqueues repo#pr and pumps until a review fires for its head (code 0),
 // current-head feedback is already available (code 3), the wait times out (code
-// 2), or the PR is closed (code 2). The wait IS the round: a fired/reviewing
+// 2), or the PR is closed or held (code 2). The wait IS the round: a fired/reviewing
 // round for the head is the in-flight wait, a completed round is the "already
 // reviewed" dedup marker, and firedMarker/waitingHead read those states off the
 // round rather than a separate wait record.
@@ -1943,7 +1943,7 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 			}
 			if result.Held {
 				return PumpResult{
-					Action: "skipped",
+					Action: "held",
 					Repo:   repo,
 					PR:     pr,
 					Head:   result.Head,

@@ -61,16 +61,33 @@ func stripFencedCode(body string) string {
 func stripIndentedCode(body string) string {
 	var out strings.Builder
 	inParagraph := false
+	var listIndents []int
 	for _, line := range strings.SplitAfter(body, "\n") {
 		if strings.TrimSpace(line) == "" {
 			out.WriteString(line)
 			inParagraph = false
 			continue
 		}
-		if markdownIndent(line) >= 4 {
+		indent := markdownIndent(line)
+		for len(listIndents) > 0 && indent < listIndents[len(listIndents)-1] {
+			listIndents = listIndents[:len(listIndents)-1]
+		}
+		containerIndent := 0
+		if len(listIndents) > 0 {
+			containerIndent = listIndents[len(listIndents)-1]
+		}
+		if contentIndent, ok := markdownListContentIndent(line, containerIndent); ok {
+			listIndents = append(listIndents, contentIndent)
+			out.WriteString(line)
+			inParagraph = continuesMarkdownParagraph(line)
+			continue
+		}
+		relativeIndent := indent - containerIndent
+		if relativeIndent >= 4 {
 			// Indentation cannot interrupt a CommonMark paragraph. Without a
 			// preceding blank line this is paragraph continuation, not an
-			// indented code block.
+			// indented code block. Indentation is relative to the active list
+			// container: four absolute spaces can be ordinary list-item content.
 			if inParagraph {
 				out.WriteString(line)
 				continue
@@ -84,6 +101,70 @@ func stripIndentedCode(body string) string {
 		inParagraph = continuesMarkdownParagraph(line)
 	}
 	return out.String()
+}
+
+// markdownListContentIndent returns the column where a list item's content
+// starts. CommonMark measures an indented code block from that column, not from
+// the left edge of the document.
+func markdownListContentIndent(line string, containerIndent int) (int, bool) {
+	line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+	column, at := leadingIndent(line)
+	if column < containerIndent || column-containerIndent > 3 || at >= len(line) {
+		return 0, false
+	}
+	start := at
+	switch line[at] {
+	case '-', '+', '*':
+		at++
+	default:
+		digits := 0
+		for at < len(line) && line[at] >= '0' && line[at] <= '9' && digits < 9 {
+			at++
+			digits++
+		}
+		if digits == 0 || at >= len(line) || (line[at] != '.' && line[at] != ')') {
+			return 0, false
+		}
+		at++
+	}
+	markerWidth := at - start
+	if at == len(line) {
+		return column + markerWidth + 1, true
+	}
+	if line[at] != ' ' && line[at] != '\t' {
+		return 0, false
+	}
+	padding := 0
+	for at < len(line) && (line[at] == ' ' || line[at] == '\t') {
+		next := padding + 1
+		if line[at] == '\t' {
+			next = padding + 4 - padding%4
+		}
+		if next > 4 {
+			break
+		}
+		padding = next
+		at++
+	}
+	if padding == 0 || (at < len(line) && (line[at] == ' ' || line[at] == '\t')) {
+		padding = 1
+	}
+	return column + markerWidth + padding, true
+}
+
+func leadingIndent(line string) (columns, bytes int) {
+	for bytes < len(line) {
+		switch line[bytes] {
+		case ' ':
+			columns++
+		case '\t':
+			columns += 4 - columns%4
+		default:
+			return columns, bytes
+		}
+		bytes++
+	}
+	return columns, bytes
 }
 
 func continuesMarkdownParagraph(line string) bool {
@@ -128,17 +209,7 @@ func markdownThematicBreak(text string) bool {
 }
 
 func markdownIndent(line string) int {
-	columns := 0
-	for i := 0; i < len(line); i++ {
-		switch line[i] {
-		case ' ':
-			columns++
-		case '\t':
-			columns += 4 - columns%4
-		default:
-			return columns
-		}
-	}
+	columns, _ := leadingIndent(line)
 	return columns
 }
 

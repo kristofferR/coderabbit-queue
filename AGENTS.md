@@ -26,7 +26,7 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
   The only package (besides dialect) allowed to say "rate limit".
   `ListCheckRuns` fetches a ref's check runs (envelope-paged, ETag'd); matching
   them to a bot is dialect's `ClassifyCheckRun`, never gh's.
-- `internal/state/` — persisted schema v3: one `Round` per PR, one global
+- `internal/state/` — persisted schema v4: one `Round` per PR, one global
   `FireSlot`, the CodeRabbit `AccountQuota`, an `Archive` ring. Round transition
   methods, the CAS store, and dashboard rendering. `Round.CoBots` holds per-
   co-reviewer trigger bookkeeping; Codex's entry is **dual-written** to the
@@ -34,8 +34,9 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
   binary versions (`Normalize` folds them back on load). `Round` and `State` also
   **round-trip unknown JSON members** (`tolerant.go`), so a field a newer binary
   added survives being read and rewritten by an older one — which is what makes
-  adding one safe without another dual-write, and without a schema bump (an
-  unknown version auto-reinitialises and would erase the fleet's rounds).
+  ordinary additions safe without another dual-write or schema bump. Schema v4
+  is the deliberate exception: older v3 clients refuse it, fencing pumping
+  clients that cannot enforce administrative holds.
 - `internal/engine/` — PURE decision logic, `now` passed in, no ctx/gh:
   `DecideFire` (the single fire owner), `Progress` (fired/reviewing round
   transitions), `Completion` (the one "is the round done?"), `BlockingFindings`

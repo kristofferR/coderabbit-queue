@@ -525,18 +525,20 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 	if waitCode == 2 {
 		status := "timeout"
 		code := 2
-		if waitResult.Action == "skipped" {
+		switch waitResult.Action {
+		case "skipped":
 			status = "skipped"
+			code = 0
+			s.completeWaitRound(ctx, repo, pr, "")
+		case "held":
+			status = "held"
 			code = 0
 		}
 		// The slot wait timed out (CRQ_WAIT_TIMEOUT) without firing a review. Don't
 		// enter the feedback poll — that would burn another feedback timeout and could
-		// return stale pre-existing findings despite no new review round. Report the
-		// timeout so the caller retries later instead. A skipped wait result is
-		// terminal, not retryable, so preserve it as a skipped report.
-		if waitResult.Action == "skipped" {
-			s.completeWaitRound(ctx, repo, pr, "")
-		}
+		// return stale pre-existing findings despite no new review round. A held
+		// result is administrative, not completion: an already-fired round must
+		// stay open so its acknowledgement still owns the FireSlot.
 		return FeedbackReport{Status: status, Repo: NormalizeRepo(repo), PR: pr, Head: waitResult.Head, Reason: waitResult.Reason, ReviewedBy: map[string]bool{}, Findings: []dialect.Finding{}}, code, nil
 	}
 	head = waitResult.Head

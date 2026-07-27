@@ -81,15 +81,15 @@ type StateStore interface {
 	SyncDashboard(context.Context, State) error
 }
 
-// GitStateStore persists v3 state as state.json in a git ref, with the same
-// compare-and-swap mechanism as v2 (12 retries on UpdateRef 409/422).
+// GitStateStore persists v4 state as state.json in a git ref, with the same
+// compare-and-swap mechanism as v3 (12 retries on UpdateRef 409/422).
 //
-// An OLDER payload is discarded and reinitialized: crq is pre-release, there is
-// no migration, and a v2 payload describes a world this binary cannot act on.
-// A NEWER one is refused. The fleet runs mixed binary versions during a rolling
-// deploy, so reinitializing there would mean the first old binary to wake up
-// erases every live round the new ones are working — the whole account's queue,
-// silently, in the one situation the version field exists to detect.
+// V3 is migrated in place; still older payloads are discarded because crq is
+// pre-release and they describe a world this binary cannot act on. A NEWER one
+// is refused. The fleet runs mixed binary versions during a rolling deploy, so
+// reinitializing there would mean the first old binary to wake up erases every
+// live round the new ones are working — the whole account's queue, silently, in
+// the one situation the version field exists to detect.
 type GitStateStore struct {
 	cfg StoreConfig
 	gh  *gh.GitHub
@@ -146,8 +146,9 @@ func (s *GitStateStore) Load(ctx context.Context) (State, Revision, error) {
 	if err != nil {
 		return State{}, Revision{}, err
 	}
-	// Peek at the schema version before a full decode: a v2 (or unknown) payload
-	// must not be coerced field-by-field into v3, it must be discarded.
+	// Peek at the schema version before a full decode. V3 is the one supported
+	// migration: v4 intentionally fences v3 pumping clients from administrative
+	// holds, while preserving every live v3 round during the rollout.
 	var probe struct {
 		Version int `json:"v"`
 	}
@@ -158,17 +159,18 @@ func (s *GitStateStore) Load(ctx context.Context) (State, Revision, error) {
 		return State{}, Revision{}, s.refuse(
 			fmt.Sprintf("holds schema v%d, which this binary (v%d) does not understand", probe.Version, SchemaVersion), nil)
 	}
-	if probe.Version != SchemaVersion {
+	if probe.Version < SchemaVersion-1 {
 		s.logf("state ref %s holds schema v%d (want v%d) — reinitializing to a fresh state (no migration; crq is pre-release)", s.cfg.StateRef, probe.Version, SchemaVersion)
 		return s.fresh(), rev, nil
 	}
 	var st State
 	if err := json.Unmarshal(raw, &st); err != nil {
-		// The version says this binary should understand it and it does not.
-		// That is a shape change inside v3, not an obsolete payload, so the
-		// rounds it describes are live and must not be thrown away.
-		return State{}, Revision{}, s.refuse("holds a v"+strconv.Itoa(SchemaVersion)+" payload this binary cannot decode", err)
+		// The version says this binary should understand or migrate it and it
+		// does not, so the rounds it describes are live and must not be thrown
+		// away.
+		return State{}, Revision{}, s.refuse("holds a v"+strconv.Itoa(probe.Version)+" payload this binary cannot decode", err)
 	}
+	st.Version = SchemaVersion
 	st.Normalize(time.Now().UTC())
 	return st, rev, nil
 }

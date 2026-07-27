@@ -191,7 +191,7 @@ func dash(s string) string {
 	return s
 }
 
-// RenderDashboard renders the human-facing dashboard for v3 state: rounds by
+// RenderDashboard renders the human-facing dashboard for the current state: rounds by
 // phase instead of v2's queue/fired/awaiting maps.
 func RenderDashboard(st State, cfg StoreConfig) string {
 	loc := dashboardLoc(cfg)
