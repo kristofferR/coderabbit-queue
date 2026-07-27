@@ -270,7 +270,7 @@ func run(ctx context.Context, args []string) int {
 		once := fs.Bool("once", false, "run one pass and exit")
 		interval := fs.Duration("interval", 0, "time between passes")
 		attempts := fs.Int("max-attempts", 0, "dispatches allowed per head")
-		concurrency := fs.Int("concurrency", 0, "fix sessions allowed to run at once")
+		concurrency := fs.Int("concurrency", 0, "cap on concurrent fix sessions (0 = no cap)")
 		if err := fs.Parse(flagArgs); err != nil {
 			return 1
 		}
@@ -622,12 +622,14 @@ worktree crq checked out at that head, with:
 The command comes from CRQ_DISPATCH_CMD or from everything after --. It is run
 directly, not through a shell, so nothing expands that you did not write.
 
-Sessions run concurrently, up to CRQ_DISPATCH_CONCURRENCY (default 3), and OFF
-the decision loop: a long session no longer blocks every other PR behind it. The
-decisions themselves stay serial, because that is what keeps the account-metered
-review in one queue — only the sessions, which spend no CodeRabbit quota,
-overlap. When every slot is busy a PR waits for the next pass rather than
-stalling the loop.
+Sessions run concurrently and OFF the decision loop, with no cap by default. The
+queue exists for the account-metered review and nothing else; fixing findings
+spends none of that allowance, so a PR whose findings are ready gets a session
+now rather than a place in a line. CRQ_DISPATCH_CONCURRENCY (or --concurrency)
+sets a cap if a machine cannot take the load — a resource valve, not a queue.
+
+The decisions themselves stay serial, because that is what keeps the metered
+review in one queue.
 
 crq still does not decide which findings are real — it starts the session and
 says which PR to look at; the session judges. Every dispatch is claimed under

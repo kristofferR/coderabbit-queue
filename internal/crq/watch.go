@@ -34,8 +34,10 @@ type WatchOptions struct {
 	Command []string
 	// MaxAttempts bounds dispatches per head. 0 means the configured default.
 	MaxAttempts int
-	// Concurrency is how many fix sessions may run at once. 0 means the
-	// configured default.
+	// Concurrency caps how many fix sessions run at once. 0 means no cap, which
+	// is the default: fixing findings spends no CodeRabbit quota, so it has no
+	// reason to queue. It exists only as a resource valve for a machine that
+	// cannot take the load.
 	Concurrency int
 }
 
@@ -66,13 +68,17 @@ type WatchEvent struct {
 // session for one PR, and bounded per head, so a fix that keeps not working
 // stops instead of spending a review round each time.
 func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchEvent) error) error {
-	// Fix sessions run OUTSIDE the pass. Running one inline blocked every other
-	// PR for as long as it took — one twenty-minute session meant twenty minutes
-	// in which nothing else was even looked at.
+	// Fix sessions run OUTSIDE the pass, and by default without a cap.
 	//
-	// The decisions stay serial on purpose. `Next` is what enqueues and fires,
-	// so deciding one PR at a time is what keeps the account-metered review in
-	// one queue; only the sessions, which spend no CodeRabbit quota, overlap.
+	// The queue exists for exactly one thing: the account-metered review. Fixing
+	// findings spends none of that allowance, so making a PR wait for a dispatch
+	// slot queues work that has no reason to wait — the same mistake crq already
+	// corrected for co-only rounds, which bypass the slot and the quota gate
+	// entirely. A PR whose findings are ready gets a session now.
+	//
+	// The decisions stay serial on purpose: `Next` is what enqueues and fires, so
+	// deciding one PR at a time is what keeps the metered review in one queue.
+	// Only the sessions overlap.
 	pool := newDispatchPool(opts.Concurrency)
 	defer pool.wait()
 	if opts.Interval <= 0 {
@@ -459,9 +465,11 @@ type dispatchPool struct {
 	wg    sync.WaitGroup
 }
 
+// newDispatchPool bounds concurrent sessions. size <= 0 means no bound, which is
+// the default: this is a resource valve, not a queue.
 func newDispatchPool(size int) *dispatchPool {
 	if size <= 0 {
-		size = 1
+		return &dispatchPool{}
 	}
 	return &dispatchPool{slots: make(chan struct{}, size)}
 }
@@ -469,15 +477,22 @@ func newDispatchPool(size int) *dispatchPool {
 // start runs fn in the pool. It reports whether a session was started, and why
 // not when it was not.
 func (p *dispatchPool) start(fn func()) (bool, string) {
-	select {
-	case p.slots <- struct{}{}:
-	default:
-		return false, "at dispatch capacity; will retry next pass"
+	if p.slots != nil {
+		select {
+		case p.slots <- struct{}{}:
+		default:
+			// Only reachable when an operator has set a cap. Unfixed findings
+			// waiting on a slot is the shape of problem this whole command
+			// exists to remove, so say so rather than logging it as routine.
+			return false, "at the configured dispatch cap (CRQ_DISPATCH_CONCURRENCY); this PR waits"
+		}
 	}
 	p.wg.Add(1)
 	go func() {
 		defer func() {
-			<-p.slots
+			if p.slots != nil {
+				<-p.slots
+			}
 			p.wg.Done()
 		}()
 		fn()

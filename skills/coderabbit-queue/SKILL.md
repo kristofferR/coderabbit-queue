@@ -174,9 +174,10 @@ finding. Pass `--keep-open` to leave it unresolved deliberately.
 ## Unattended Drain
 
 `crq watch --dispatch` starts a fix session for every PR whose action is `fix`, in a worktree crq
-checked out at that head. Sessions run concurrently (`CRQ_DISPATCH_CONCURRENCY`, default 3) and off
-the decision loop, so a long one blocks nothing; the decisions stay serial, which is what keeps the
-account-metered review in one queue.
+checked out at that head. Sessions run concurrently and off the decision loop, with **no cap by default** — fixing findings
+spends no account quota, so it does not belong in a queue. `CRQ_DISPATCH_CONCURRENCY` sets one if the
+machine cannot take the load. The decisions stay serial, which is what keeps the metered review in
+one queue.
 
 One command sets it up — `crq drain install` writes the prompt, a wrapper and this platform's
 service (systemd user unit, or a launchd agent on macOS), makes it survive a logout, and starts it;

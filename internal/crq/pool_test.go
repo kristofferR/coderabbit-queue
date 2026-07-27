@@ -1,6 +1,7 @@
 package crq
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -58,4 +59,40 @@ func TestDispatchPoolWaitsForRunningSessions(t *testing.T) {
 	if done != 3 {
 		t.Errorf("wait returned with %d/3 sessions finished", done)
 	}
+}
+
+// The queue exists for the account-metered review and nothing else. Fixing
+// findings spends none of that allowance, so a PR whose findings are ready must
+// get a session now — not a place in a line. Capping it at three was the same
+// mistake crq already corrected for co-only rounds.
+func TestDispatchIsNotQueuedByDefault(t *testing.T) {
+	pool := newDispatchPool(0) // the default: no cap
+	release := make(chan struct{})
+
+	for i := 0; i < 25; i++ {
+		if ok, why := pool.start(func() { <-release }); !ok {
+			t.Fatalf("session %d was made to wait: %s — unmetered work must not queue", i, why)
+		}
+	}
+	close(release)
+	pool.wait()
+}
+
+// A cap is a resource valve an operator opts into, and hitting it has to say so
+// in those terms rather than reading as routine.
+func TestConfiguredCapSaysItIsAConfiguredCap(t *testing.T) {
+	pool := newDispatchPool(1)
+	release := make(chan struct{})
+	if ok, _ := pool.start(func() { <-release }); !ok {
+		t.Fatal("the first session should run")
+	}
+	ok, why := pool.start(func() {})
+	if ok {
+		t.Fatal("a cap of one allowed two")
+	}
+	if !strings.Contains(why, "CRQ_DISPATCH_CONCURRENCY") {
+		t.Errorf("reason = %q, want it to name the setting that caused the wait", why)
+	}
+	close(release)
+	pool.wait()
 }

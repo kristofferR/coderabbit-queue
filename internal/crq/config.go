@@ -54,7 +54,9 @@ type Config struct {
 	WatchInterval       time.Duration
 	DispatchCommand     []string
 	DispatchMaxAttempts int
-	// DispatchConcurrency is how many fix sessions may run at once.
+	// DispatchConcurrency caps concurrent fix sessions. 0 (the default) means no
+	// cap: fixing findings spends no account quota, so it does not belong in a
+	// queue. It is a resource valve for a machine that cannot take the load.
 	DispatchConcurrency int
 	// WorkspaceRoot holds crq's own mirrors and worktrees. Read here rather than
 	// from the process environment, so a value in ~/.config/crq/env — the
@@ -192,7 +194,7 @@ func LoadConfig() (Config, error) {
 		WatchInterval:       durationEnv(env, "CRQ_WATCH_INTERVAL", 2*time.Minute),
 		DispatchCommand:     splitArgv(env["CRQ_DISPATCH_CMD"]),
 		DispatchMaxAttempts: intEnv(env, "CRQ_DISPATCH_MAX_ATTEMPTS", 3),
-		DispatchConcurrency: intEnv(env, "CRQ_DISPATCH_CONCURRENCY", 3),
+		DispatchConcurrency: intEnv(env, "CRQ_DISPATCH_CONCURRENCY", 0),
 		WorkspaceRoot:       env["CRQ_WORKSPACE"],
 		NoOpen:              env["CRQ_NO_OPEN"] != "",
 		DryRun:              env["CRQ_DRY_RUN"] == "1",
