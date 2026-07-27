@@ -678,25 +678,22 @@ func firedOrEnqueuedAt(r Round) time.Time {
 }
 
 // applyFire executes a DecideFire verdict.
+//
+// The decision was made from a configuration that may have been replaced since.
+// Acting on it would post a trigger for a co-reviewer an operator has just
+// removed, skip one they have just required, or record that a head is reviewed
+// by a set that no longer gates it — so the verdicts the reviewer configuration
+// decides revalidate it (overrideChanged) inside their own commit point, the CAS
+// mutation that claims the trigger, reserves the slot or writes the dedupe
+// marker. Checking it in a separate read here would leave exactly the window it
+// is meant to close: SetReviewers commits in between, and the mutation goes on
+// to apply the decision the new configuration would not have made.
 func (s *Service) applyFire(ctx context.Context, cfg Config, round Round, obs engine.Observation, d engine.FireDecision, now time.Time) (PumpResult, error) {
-	// The decision was made from a configuration that may have been replaced
-	// since. Acting on it would post a trigger for a co-reviewer an operator has
-	// just removed, skip one they have just required, or record that a head is
-	// reviewed by a set that no longer gates it — so only the verdicts the
-	// reviewer configuration decides pay for the re-read. FireNo is by far the
-	// most common outcome of a pump, and a Load is four API calls against the
-	// git-backed store.
-	if fireFollowsReviewers(d.Verdict) {
-		if st, _, err := s.store.Load(ctx); err == nil && overrideChanged(&st, round.Repo, cfg) {
-			return PumpResult{Action: "lost_race", Repo: round.Repo, PR: round.PR, Head: round.Head,
-				Reason: "reviewer configuration changed while deciding"}, nil
-		}
-	}
 	switch d.Verdict {
 	case engine.FireDrop:
 		return s.abandonRound(ctx, round, "pr closed", "skipped")
 	case engine.FireDedupe:
-		return s.dedupeRound(ctx, round, now, d.Reason)
+		return s.dedupeRound(ctx, cfg, round, now, d.Reason)
 	case engine.FireCoOnly:
 		return s.fireCoOnly(ctx, cfg, round, d.PostCo, d.Reason, now)
 	case engine.FireCoDeferred:
@@ -712,24 +709,6 @@ func (s *Service) applyFire(ctx context.Context, cfg Config, round Round, obs en
 	default: // FireNo
 		return PumpResult{Action: mapFireNo(d.Reason), Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: d.Reason}, nil
 	}
-}
-
-// fireFollowsReviewers reports whether a verdict was decided by the repository's
-// reviewer configuration: the four that post a command it chose, and FireDedupe,
-// whose completed round asserts that everyone this repository gates on has
-// already answered the head. Dedupe posts nothing, so SetReviewers cannot see it
-// coming — the round is still queued when the override lands, and a requeue of a
-// queued round is a no-op — yet the marker it writes is exactly what stops the
-// newly required reviewer from ever being asked.
-//
-// The rest either write nothing to GitHub or write a round transition the
-// override has no say in, and their round-identity CAS already guards them.
-func fireFollowsReviewers(v engine.FireVerdict) bool {
-	switch v {
-	case engine.FireCoOnly, engine.FireCoDeferred, engine.FireAdopt, engine.FirePost, engine.FireDedupe:
-		return true
-	}
-	return false
 }
 
 func mapFireNo(reason string) string {
@@ -777,7 +756,7 @@ func (s *Service) abandonRound(ctx context.Context, round Round, reason, action 
 
 // dedupeRound completes a not-yet-fired round because the bot already reviewed
 // its head, leaving the completed round as the dedupe marker (v2's Fired[key]).
-func (s *Service) dedupeRound(ctx context.Context, round Round, now time.Time, reason string) (PumpResult, error) {
+func (s *Service) dedupeRound(ctx context.Context, cfg Config, round Round, now time.Time, reason string) (PumpResult, error) {
 	result := PumpResult{Action: "deduped", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}
 	if s.cfg.DryRun {
 		return result, nil
@@ -786,7 +765,13 @@ func (s *Service) dedupeRound(ctx context.Context, round Round, now time.Time, r
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		deduped = false
 		r := st.Round(round.Repo, round.PR)
-		if !sameRound(r, round) || !r.FireEligible(now) {
+		// The marker this writes asserts that everyone the repository gates on has
+		// already answered the head, so a reviewer change committed since the
+		// decision voids it — and voids it permanently: dedupe posts nothing, so
+		// SetReviewers cannot see it coming, the round is still queued when the
+		// override lands (requeuing a queued round is a no-op), yet the marker is
+		// exactly what stops the newly required reviewer from ever being asked.
+		if !sameRound(r, round) || !r.FireEligible(now) || overrideChanged(st, round.Repo, cfg) {
 			return ErrNoChange
 		}
 		if err := r.Dedupe(now); err != nil {
@@ -853,7 +838,9 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 				return ErrNoChange
 			}
 			r := st.Round(round.Repo, round.PR)
-			if !sameRound(r, round) || !r.FireEligible(now) {
+			// postCo below was chosen by cfg's reviewers; a change since means the
+			// claims written here are for a set the operator has replaced.
+			if !sameRound(r, round) || !r.FireEligible(now) || overrideChanged(st, round.Repo, cfg) {
 				return ErrNoChange
 			}
 			if err := r.Reserve(token, s.cfg.WriterID(), now); err != nil {
@@ -909,13 +896,15 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 		return PumpResult{Action: "fired", Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: reason}, nil
 	}
 
-	// Reserve the slot, then post the command.
+	// Reserve the slot, then post the command. The reservation is this fire's
+	// commit point — nothing is posted before it — so it is where the reviewer
+	// configuration the decision used is revalidated.
 	reserved, err := s.store.Update(ctx, func(st *State) error {
 		if st.FireSlot != nil {
 			return ErrNoChange
 		}
 		r := st.Round(round.Repo, round.PR)
-		if !sameRound(r, round) || !r.FireEligible(now) {
+		if !sameRound(r, round) || !r.FireEligible(now) || overrideChanged(st, round.Repo, cfg) {
 			return ErrNoChange
 		}
 		if err := r.Reserve(token, s.cfg.WriterID(), now); err != nil {
@@ -1026,7 +1015,9 @@ func (s *Service) fireCoOnly(ctx context.Context, cfg Config, round Round, login
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		claimed = claimed[:0]
 		r := st.Round(round.Repo, round.PR)
-		if !sameRound(r, round) || !r.FireEligible(now) {
+		// The claim is what authorizes the posts below, so the reviewer set that
+		// chose them must still be the configured one when it commits.
+		if !sameRound(r, round) || !r.FireEligible(now) || overrideChanged(st, round.Repo, cfg) {
 			return ErrNoChange
 		}
 		for _, login := range logins {
@@ -1394,7 +1385,10 @@ func (s *Service) fireCoDeferred(ctx context.Context, cfg Config, round Round, d
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		adopted, claimed = 0, claimed[:0]
 		r := st.Round(round.Repo, round.PR)
-		if !sameRound(r, round) || (r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry) {
+		// As in fireCoOnly: the claims and adoptions written here name the
+		// co-reviewers cfg chose, so a reviewer change since voids them.
+		if !sameRound(r, round) || (r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry) ||
+			overrideChanged(st, round.Repo, cfg) {
 			return ErrNoChange
 		}
 		changed := false

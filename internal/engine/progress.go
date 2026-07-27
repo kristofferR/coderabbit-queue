@@ -125,31 +125,35 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 		return Transition{Outcome: OutRetry, Reason: "review failed", RetryAt: now.Add(p.retryBackoff())}
 	}
 
-	if completion.Done {
+	// Convergence and slot release answer different questions. A repository may
+	// leave the primary out of its required set (required Codex only), and then
+	// completion is done the moment that co-reviewer answers — while the
+	// account-metered command this round posted is still unacknowledged.
+	// Completing here would release the fire slot, letting the next PR spend the
+	// shared allowance alongside a review that is still running, and would leave a
+	// late account-block reply landing on a completed round nobody progresses. So
+	// a round that spent the quota stays fired until the primary speaks (below) or
+	// its in-flight timeout gives up on it; a co-only round posted no command of
+	// its own and has nothing to wait for.
+	if completion.Done && (r.Phase != state.PhaseFired || r.CoOnly) {
 		return Transition{Outcome: OutComplete, Reason: "feedback complete"}
 	}
 
 	if r.Phase == state.PhaseFired {
-		// A bare reaction acknowledges the command; the review is still running.
-		if obs.Reacted {
-			return Transition{Outcome: OutReviewing, Reason: "bot reacted"}
-		}
-		// Any other bot comment in the round window acknowledges it too — but an
-		// account-block/paused/already-reviewed notice is not an ack (v2), and
-		// neither is the in-progress summary of a PREVIOUS round edit... which
-		// it cannot be: UpdatedAt gates the window. An in-progress summary IS
-		// an ack that reviewing started.
-		for _, ev := range obs.Events {
-			if !sameBot(ev.Bot, p.Bot) || ev.CommentID == r.CommandID || ev.UpdatedAt.Before(firedAt) {
-				continue
+		if reason, acked := primaryAck(r, obs, p, firedAt); acked {
+			if completion.Done {
+				return Transition{Outcome: OutComplete, Reason: "feedback complete"}
 			}
-			switch ev.Kind {
-			case dialect.EvRateLimited, dialect.EvPaused, dialect.EvAlreadyReviewed:
-				continue
-			}
-			return Transition{Outcome: OutReviewing, Reason: "bot responded"}
+			return Transition{Outcome: OutReviewing, Reason: reason}
 		}
 		if now.Sub(firedAt) > p.InflightTimeout {
+			// Nothing more is owed: everything this repository gates on has
+			// answered and the slot has been held for the whole in-flight window,
+			// so the serialization the wait exists for is satisfied. Re-firing
+			// would buy another metered review no configured reviewer asked for.
+			if completion.Done {
+				return Transition{Outcome: OutComplete, Reason: "feedback complete; primary never acknowledged"}
+			}
 			return Transition{Outcome: OutRetry, Reason: "in-flight timeout", RetryAt: now.Add(p.retryBackoff())}
 		}
 		return Transition{Outcome: KeepWaiting, Reason: "review in flight"}
@@ -160,6 +164,31 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 	// not the daemon's — the daemon keeps waiting for real bot evidence rather
 	// than re-firing a review that is still in progress.
 	return Transition{Outcome: KeepWaiting, Reason: "reviewing"}
+}
+
+// primaryAck reports whether the primary has acknowledged this round's command,
+// and how — the condition that releases the fire slot.
+//
+// A bare reaction acknowledges it; so does any other comment of the bot's in the
+// round window — but an account-block/paused/already-reviewed notice is not an
+// ack (v2), and neither is the in-progress summary of a PREVIOUS round edit...
+// which it cannot be: UpdatedAt gates the window. An in-progress summary IS an
+// ack that reviewing started.
+func primaryAck(r state.Round, obs Observation, p Policy, firedAt time.Time) (string, bool) {
+	if obs.Reacted {
+		return "bot reacted", true
+	}
+	for _, ev := range obs.Events {
+		if !sameBot(ev.Bot, p.Bot) || ev.CommentID == r.CommandID || ev.UpdatedAt.Before(firedAt) {
+			continue
+		}
+		switch ev.Kind {
+		case dialect.EvRateLimited, dialect.EvPaused, dialect.EvAlreadyReviewed:
+			continue
+		}
+		return "bot responded", true
+	}
+	return "", false
 }
 
 // resolveBlockWindow ports v2's requeueInflight window logic: reuse the

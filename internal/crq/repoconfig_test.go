@@ -292,6 +292,60 @@ func TestDedupeIsRevalidatedAgainstAReviewerChange(t *testing.T) {
 	}
 }
 
+// hookedStore runs a hook once, immediately before the next Update's mutation
+// reaches the store — the window a fire effect's own CAS has to close, and the
+// one a check made before the write cannot see into.
+type hookedStore struct {
+	StateStore
+	hook func()
+}
+
+func (h *hookedStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {
+	if h.hook != nil {
+		hook := h.hook
+		h.hook = nil
+		hook()
+	}
+	return h.StateStore.Update(ctx, mutate)
+}
+
+// The revalidation has to happen in the write itself: an override that lands
+// after any pre-flight re-read but before the dedupe commits would otherwise
+// still complete the round under the reviewer set it replaced.
+func TestDedupeIsRevalidatedInsideItsWrite(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = codexCoBots(nil)
+	store := NewMemoryStore(cfg)
+	hooked := &hookedStore{StateStore: store}
+	svc := NewService(cfg, newFakeGitHub(), hooked, nil)
+	now := time.Now().UTC()
+	repo, pr, head := "o/r", 11, "aaaaaaaa1"
+	seedRound(t, store, cfg, repo, pr, head, PhaseQueued, now, 0)
+
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := *st.Round(repo, pr)
+	hooked.hook = func() {
+		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+			t.Error(err)
+		}
+	}
+	dedupe := engine.FireDecision{Verdict: engine.FireDedupe, Reason: "bot already reviewed head"}
+	result, err := svc.applyFire(ctx, svc.cfgFor(st, repo), round, engine.Observation{}, dedupe, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != "lost_race" {
+		t.Errorf("action = %q, want the dedupe voided by the override that beat its write", result.Action)
+	}
+	if got := roundPhase(t, store, repo, pr); got != PhaseQueued {
+		t.Fatalf("phase = %s, want the round left queued so the new reviewer is asked", got)
+	}
+}
+
 // Every reviewers path rejects a target that is not exactly owner/name. The read
 // path never contacts GitHub, so a typo would otherwise report the fleet default
 // and exit 0 — a plausible answer about a project that does not exist.

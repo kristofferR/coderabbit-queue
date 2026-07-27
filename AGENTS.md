@@ -80,7 +80,12 @@ picks up the requirements it missed while it was shut.
 
 The global `FireSlot` allows ≤1 concurrent fire fleet-wide (CAS). A bot ack
 releases the slot while the review keeps running (the round moves to
-`reviewing`); the round itself stays open until `Completion` is done.
+`reviewing`); the round itself stays open until `Completion` is done. The
+converse does not hold: convergence alone never releases the slot. A repository
+whose required set omits the primary converges as soon as its co-reviewers
+answer, and completing there would hand the slot to the next PR while the
+metered command is still unanswered — so a round that spent the quota stays
+`fired` until the primary acknowledges or its in-flight timeout expires.
 
 ## observe → decide → apply
 

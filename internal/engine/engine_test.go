@@ -166,6 +166,45 @@ func TestReviewAtHeadCompletesRound(t *testing.T) {
 	}
 }
 
+// TestFireSlotHeldUntilPrimaryAcknowledges separates convergence from slot
+// release. A repository may leave the primary out of its required set (required
+// Codex only), and then the round converges the moment Codex answers — while the
+// account-metered command it posted is still unacknowledged. Completing there
+// would hand the slot to the next PR mid-review, which is the serialization the
+// whole queue exists for.
+func TestFireSlotHeldUntilPrimaryAcknowledges(t *testing.T) {
+	p := withCodex(policy, "@codex review")
+	p.RequiredBots = []string{dialect.CodexBotLogin}
+	obs := Observation{Head: "abcdef123", Open: true,
+		Reviews: []ReviewSeen{{Bot: dialect.CodexBotLogin, ReviewID: 4, Commit: "abcdef1234567890", SubmittedAt: t0.Add(time.Minute)}}}
+
+	r := firedRound(t, "abcdef123")
+	if got := Completion(r, obs, p); !got.Done {
+		t.Fatalf("the only required reviewer answered; want a converged round, got %+v", got)
+	}
+	if tr := Progress(r, state.AccountQuota{}, obs, t0.Add(2*time.Minute), p); tr.Outcome != KeepWaiting {
+		t.Fatalf("converged is not acknowledged — the slot must stay held, got %+v", tr)
+	}
+	// The primary reacts to the command: the slot has done its job, so the
+	// converged round completes.
+	acked := obs
+	acked.Reacted = true
+	if tr := Progress(r, state.AccountQuota{}, acked, t0.Add(2*time.Minute), p); tr.Outcome != OutComplete {
+		t.Fatalf("an acknowledged converged round must complete, got %+v", tr)
+	}
+	// It never reacts: the in-flight window ends the wait rather than buying a
+	// second metered review no configured reviewer asked for.
+	if tr := Progress(r, state.AccountQuota{}, obs, t0.Add(16*time.Minute), p); tr.Outcome != OutComplete {
+		t.Fatalf("the in-flight timeout must end a converged round, not re-fire it, got %+v", tr)
+	}
+	// A co-only round spent no quota and holds no slot, so it completes at once.
+	co := firedRound(t, "abcdef123")
+	co.CoOnly = true
+	if tr := Progress(co, state.AccountQuota{}, obs, t0.Add(2*time.Minute), p); tr.Outcome != OutComplete {
+		t.Fatalf("a co-only round has no primary command to wait on, got %+v", tr)
+	}
+}
+
 func TestInflightTimeoutCarriesCooldown(t *testing.T) {
 	r := firedRound(t, "abcdef123")
 	now := t0.Add(16 * time.Minute)

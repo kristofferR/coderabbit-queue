@@ -312,7 +312,10 @@ func (s *Service) cfgFor(st State, repo string) Config {
 //
 // Deciding and writing are two steps. An operator removing a co-reviewer between
 // them would otherwise have crq claim and post that bot's trigger anyway, on the
-// authority of a configuration that no longer exists.
+// authority of a configuration that no longer exists. It is therefore called
+// from INSIDE the CAS mutation that commits the decision, where the state it
+// reads is the state the write lands on; a separate read beforehand would leave
+// the same window one step earlier.
 func overrideChanged(st *State, repo string, cfg Config) bool {
 	ov, _ := st.RepoOverride(repo)
 	switch {
