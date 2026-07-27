@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PR detail — 4 UX options</title>
+<link rel="icon" href="icons/repo-carrier.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,650;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="opt.css">
+<style>
+.f{border:1px solid var(--edge);border-radius:8px;margin-bottom:7px;overflow:hidden;background:var(--card)}
+.f>.s{display:flex;gap:9px;align-items:baseline;padding:8px 12px}
+.f .sev{width:4px;align-self:stretch;flex:none;border-radius:2px}
+.f .ttl{font-weight:550;font-size:13px}
+.f .loc{font-size:11.5px;color:var(--faint)}
+.f .end{margin-left:auto;flex:none}
+.f .body{border-top:1px solid #EEF0F3;padding:9px 14px;font-size:12.5px;color:var(--mut)}
+.f .body pre{font-family:"IBM Plex Mono",monospace;font-size:11.5px;background:#F5F6F8;border:1px solid var(--edge);
+  border-radius:6px;padding:7px 10px;margin:7px 0;white-space:pre-wrap}
+.sevh{font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;padding:9px 0 5px;color:var(--faint)}
+.tl{position:relative;padding-left:26px}
+.tl::before{content:"";position:absolute;left:7px;top:6px;bottom:10px;width:2px;background:var(--edge)}
+.tl .ev{position:relative;padding:7px 0}
+.tl .ev::before{content:"";position:absolute;left:-23px;top:12px;width:9px;height:9px;border-radius:50%;
+  background:var(--card);border:2px solid var(--edge2)}
+.tl .ev.ok::before{border-color:var(--ok);background:var(--ok)}
+.tl .ev.warn::before{border-color:var(--warn-fg);background:var(--warn-fg)}
+.tl .ev.now::before{border-color:var(--acc);background:var(--acc);box-shadow:0 0 0 3px var(--acc-bg)}
+.tl .t{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--faint)}
+.tree a{display:block;padding:5px 9px;border-radius:7px;font-size:12.5px;color:var(--mut);
+  font-family:"IBM Plex Mono",monospace}
+.tree a.on{background:var(--acc-bg);color:var(--acc)}
+.tree .dir{font-size:11px;color:var(--faint);padding:7px 9px 3px;letter-spacing:.04em;text-transform:uppercase;
+  font-family:"IBM Plex Sans",sans-serif;font-weight:600}
+
+/* one variant at a time — the jump chips are radios, not anchors */
+#O-A,#O-B,#O-C,#O-D{position:absolute;left:-9999px}
+.opt{display:none}
+#O-A:checked ~ #a,#O-B:checked ~ #b,#O-C:checked ~ #c,#O-D:checked ~ #d{display:block}
+.optbar .jump label{font-size:12.5px;font-weight:600;color:var(--mut);border:1px solid var(--edge);
+  border-radius:8px;padding:3px 12px;cursor:pointer}
+.optbar .jump label:hover{border-color:var(--acc-edge);color:var(--acc);background:var(--acc-bg)}
+#O-A:checked ~ .optbar label[for="O-A"],#O-B:checked ~ .optbar label[for="O-B"],
+#O-C:checked ~ .optbar label[for="O-C"],#O-D:checked ~ .optbar label[for="O-D"]{
+  background:var(--ink);border-color:var(--ink);color:#fff}
+.opt{border-top:none;padding-top:18px}
+</style>
+</head>
+<body>
+<input type="radio" name="opt" id="O-A" checked><input type="radio" name="opt" id="O-B"><input type="radio" name="opt" id="O-C"><input type="radio" name="opt" id="O-D">
+
+<div class="optbar">
+  <span class="crq">crq</span><h1>Pull request detail</h1>
+  <span class="sub">4 UX options · same styling, different structure</span>
+  <span class="jump"><label for="O-A">A</label><label for="O-B">B</label><label for="O-C">C</label><label for="O-D">D</label>
+    <a class="back" href="options.html">All pages ↩</a></span>
+</div>
+
+<div class="intro">
+  <p>The job: work through the findings on one PR, while knowing where the round stands. Same data in
+  all four — <b>Carrier#85</b> mid-fix at <span class="mono">d94c17e6b</span>, six open findings, a fix
+  session running on mbp, one earlier head superseded.</p>
+</div>
+
+<!-- A -->
+<section class="opt" id="a">
+  <div class="opthd"><span class="optlet">A</span>
+    <div><h2>Findings left, round state right</h2>
+      <p class="why">Findings by severity in the main column; the round, fix session and history in a
+      sidebar. What we have today.</p></div>
+    <div class="tags"><span class="pill mut sm plain">both at once</span><span class="pill mut sm plain">narrower findings</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> The queue state is always in view, so “why hasn't this converged?” never needs
+      a click. Severity grouping puts the worst thing first.</div>
+    <div class="bad"><b>Costly</b> The sidebar takes a third of the width from the content you actually read, and
+      code snippets in findings get cramped.</div></div>
+
+  <div class="frame">
+    <div style="display:grid;grid-template-columns:1fr 300px;gap:12px">
+      <div>
+        <div class="card" style="margin:0 0 10px"><div class="hd">
+          <img class="rico lg" src="icons/repo-carrier.png" alt="">
+          <div><h3 class="mono">Carrier#85</h3><div class="note">notifications: debounce unread badge count</div></div>
+          <span class="pill ok sm">Fixing · 1 of 3</span>
+          <span class="end"><button class="btn ghost sm">Hold…</button><button class="btn ghost sm">Cancel</button></span></div></div>
+        <div class="card" style="margin:0">
+          <div class="hd"><h3>Findings</h3><span class="sum">6 open · 1 dismissed</span></div>
+          <div class="body">
+            <div class="sevh" style="color:var(--sev-maj)">Major · 1</div>
+            <div class="f"><div class="s"><span class="sev" style="background:var(--sev-maj)"></span>
+              <span><span class="ttl">Deep-link handler opens renderer-supplied URLs</span><br>
+                <span class="loc mono"><img class="bico sm" src="icons/bot-codex.png" alt="">src/ipc/links.ts:84 · thread open</span></span>
+              <span class="end pill warn sm">major</span></div>
+              <div class="body">Allowlist https/mailto before handing the URL to the shell.
+                <pre>- shell.open(url)
++ if (!/^(https?|mailto):/.test(url)) return</pre></div></div>
+            <div class="sevh" style="color:var(--sev-pot)">Potential · 3</div>
+            <div class="f"><div class="s"><span class="sev" style="background:var(--sev-pot)"></span>
+              <span><span class="ttl">Unread badge cache never clears on account switch</span><br>
+                <span class="loc mono"><img class="bico sm" src="icons/bot-coderabbit.png" alt="">src/badge.ts:41</span></span>
+              <span class="end pill warn sm">potential</span></div></div>
+            <div class="f"><div class="s"><span class="sev" style="background:var(--sev-pot)"></span>
+              <span><span class="ttl">Reconnect loop lacks jitter</span><br>
+                <span class="loc mono"><img class="bico sm" src="icons/bot-codex.png" alt="">src/socket.ts:129</span></span>
+              <span class="end pill warn sm">potential</span></div></div>
+          </div></div>
+      </div>
+      <div>
+        <div class="card" style="margin:0 0 10px"><div class="hd plain"><h3>Fix session</h3></div>
+          <div class="body" style="padding-top:6px"><span class="pill ok sm">Running 9:49</span>
+            <div class="note" style="margin-top:5px">mbp · attempt 1 of 3 · 6 findings · <a href="#a">log</a></div></div></div>
+        <div class="card" style="margin:0 0 10px"><div class="hd plain"><h3>Round</h3></div>
+          <div class="body" style="padding-top:4px">
+            <div class="rowline"><span>Phase</span><span class="end"><span class="pill ok sm">Reviewing</span></span></div>
+            <div class="rowline"><span>Fired</span><span class="end num">13:12:44</span></div>
+            <div class="rowline"><span>Reviewed by</span><span class="end">
+              <img class="bico sm" src="icons/bot-coderabbit.png" alt=""><img class="bico sm" src="icons/bot-codex.png" alt=""></span></div>
+            <div class="rowline"><span>Checks</span><span class="end note">Bugbot clean</span></div></div></div>
+        <div class="card" style="margin:0"><div class="hd plain"><h3>History</h3></div>
+          <div class="body" style="padding-top:4px">
+            <div class="rowline"><span class="mono note">d94c17e6b</span><span class="end note">current</span></div>
+            <div class="rowline"><span class="mono note">52c9ab310</span><span class="end note">superseded</span></div></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- B -->
+<section class="opt" id="b">
+  <div class="opthd"><span class="optlet">B</span>
+    <div><h2>The round as a story</h2>
+      <p class="why">A timeline down the page: enqueued, fired, acked, each bot's verdict, findings as they
+      arrived, the fix session, and what's still pending.</p></div>
+    <div class="tags"><span class="pill mut sm plain">explains itself</span><span class="pill mut sm plain">weaker as a worklist</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Best answer to “what happened here?” — the order of events is the content, so a
+      stuck or slow round becomes legible without knowing the vocabulary.</div>
+    <div class="bad"><b>Costly</b> Poor for actually working through six findings: they're scattered by time
+      rather than gathered by severity or file.</div></div>
+
+  <div class="frame">
+    <div class="card" style="max-width:800px;margin:0 auto">
+      <div class="hd"><img class="rico lg" src="icons/repo-carrier.png" alt="">
+        <div><h3 class="mono">Carrier#85</h3><div class="note">at d94c17e6b · round 3 of this PR</div></div>
+        <span class="end pill ok sm">Fixing now</span></div>
+      <div class="body">
+        <div class="tl">
+          <div class="ev ok"><span class="t">13:02:19</span>
+            <div><b>Enqueued</b> — new head pushed, previous round superseded</div></div>
+          <div class="ev ok"><span class="t">13:12:44</span>
+            <div><b>Fired</b> — took the fire slot and asked CodeRabbit for a review <span class="note">(attempt 1)</span></div></div>
+          <div class="ev ok"><span class="t">13:13:01</span>
+            <div><b>CodeRabbit acknowledged</b> — slot released, other PRs could move again</div></div>
+          <div class="ev ok"><span class="t">13:13:04</span>
+            <div><img class="bico sm" src="icons/bot-codex.png" alt=""> <b>Codex commanded</b>,
+              <img class="bico sm" src="icons/bot-bugbot.png" alt=""> <b>Bugbot claimed</b></div></div>
+          <div class="ev warn"><span class="t">13:20:38</span>
+            <div><b>CodeRabbit reviewed</b> — 3 findings
+              <span class="note">(1 potential in badge.ts, 1 potential in cache.ts, 1 minor)</span></div></div>
+          <div class="ev warn"><span class="t">13:26:11</span>
+            <div><b>Codex reviewed</b> — 3 findings <span class="pill warn sm" style="margin-left:5px">1 major</span>
+              <span class="note">deep-link handler opens renderer-supplied URLs</span></div></div>
+          <div class="ev ok"><span class="t">13:27:02</span>
+            <div><img class="bico sm" src="icons/bot-bugbot.png" alt=""> <b>Bugbot check clean</b> at this commit</div></div>
+          <div class="ev ok"><span class="t">13:31:50</span>
+            <div><b>You dismissed 1 finding</b> — “the custom updater handles our notarization flow”</div></div>
+          <div class="ev now"><span class="t">13:41:37</span>
+            <div><b>Fix session started on mbp</b> — working through 6 findings, running
+              <span class="num">9:49</span> · attempt 1 of 3 · <a href="#b">log</a></div></div>
+          <div class="ev"><span class="t">next</span>
+            <div class="note">When it pushes, the round supersedes and a new one begins at the new head.
+              Convergence needs CodeRabbit and Codex to review that head with nothing blocking.</div></div>
+        </div>
+        <div style="display:flex;gap:9px;margin-top:12px"><a class="btn sm" href="#b">Open the 6 findings</a>
+          <button class="btn ghost sm">Hold…</button></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- C -->
+<section class="opt" id="c">
+  <div class="opthd"><span class="optlet">C</span>
+    <div><h2>Findings full width</h2>
+      <p class="why">One column. A single summary strip carries the round state; everything else is the
+      findings themselves, with room for code.</p></div>
+    <div class="tags"><span class="pill mut sm plain">best for reading code</span><span class="pill mut sm plain">state is one line</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Diffs and quoted code fit without wrapping, and nothing competes with the work.
+      Bulk actions (resolve several, dismiss several) have room to exist.</div>
+    <div class="bad"><b>Costly</b> Round state is compressed to a strip; history and the fix-session detail move
+      behind a disclosure.</div></div>
+
+  <div class="frame">
+    <div class="card" style="margin:0">
+      <div class="hd"><img class="rico" src="icons/repo-carrier.png" alt="">
+        <h3 class="mono" style="font-size:13.5px">Carrier#85</h3>
+        <span class="pill ok sm">Reviewing</span><span class="pill ok sm">Fixing 9:49 on mbp</span>
+        <span class="note">CodeRabbit ✓ · Codex ✓ · Bugbot clean · 6 open</span>
+        <span class="end"><a href="#c" class="note">round details ▾</a><button class="btn ghost sm">Hold…</button></span></div>
+      <div class="body">
+        <div class="rowline" style="padding-top:0"><input type="checkbox"> <span class="note">select all</span>
+          <span class="end" style="display:flex;gap:7px"><button class="btn ghost sm">Resolve selected</button>
+            <button class="btn ghost sm">Decline selected…</button>
+            <span class="note">sort: <b>severity</b> · <a href="#c">file</a> · <a href="#c">bot</a></span></span></div>
+        <div class="f"><div class="s"><input type="checkbox"><span class="sev" style="background:var(--sev-maj)"></span>
+          <span><span class="ttl">Deep-link handler opens renderer-supplied URLs without an allowlist</span><br>
+            <span class="loc mono"><img class="bico sm" src="icons/bot-codex.png" alt="">src/ipc/links.ts:84 · thread open · raised 13:26</span></span>
+          <span class="end pill warn sm">major</span></div>
+          <div class="body">The renderer can pass any string to <span class="mono">open-external</span>, so a
+            crafted message link can launch <span class="mono">file://</span> or a custom scheme.
+            <pre>- shell.open(url)
++ if (!/^(https?|mailto):/.test(url)) return
++ shell.open(url)</pre>
+            <div style="display:flex;gap:7px;margin-top:7px"><button class="btn ghost sm">Resolve thread</button>
+              <button class="btn ghost sm">Decline…</button><a class="btn ghost sm" href="#c">View on GitHub ↗</a></div></div></div>
+        <div class="f"><div class="s"><input type="checkbox"><span class="sev" style="background:var(--sev-pot)"></span>
+          <span><span class="ttl">Unread badge cache never clears on account switch</span><br>
+            <span class="loc mono"><img class="bico sm" src="icons/bot-coderabbit.png" alt="">src/badge.ts:41 · thread open</span></span>
+          <span class="end pill warn sm">potential</span></div></div>
+        <div class="f"><div class="s"><input type="checkbox"><span class="sev" style="background:var(--sev-pot)"></span>
+          <span><span class="ttl">Reconnect loop lacks jitter — herds after a network drop</span><br>
+            <span class="loc mono"><img class="bico sm" src="icons/bot-codex.png" alt="">src/socket.ts:129 · thread open</span></span>
+          <span class="end pill warn sm">potential</span></div></div>
+        <div class="f"><div class="s"><input type="checkbox"><span class="sev" style="background:var(--sev-pot)"></span>
+          <span><span class="ttl">Avatar image cache has no size bound</span><br>
+            <span class="loc mono"><img class="bico sm" src="icons/bot-coderabbit.png" alt="">src/cache.ts:22 · thread open</span></span>
+          <span class="end pill warn sm">potential</span></div></div>
+        <div class="f"><div class="s"><input type="checkbox"><span class="sev" style="background:var(--sev-min)"></span>
+          <span><span class="ttl">Log line prints the full session cookie</span><br>
+            <span class="loc mono"><img class="bico sm" src="icons/bot-codex.png" alt="">src/log.ts:58 · no thread — dismissible</span></span>
+          <span class="end pill mut sm">minor</span></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- D -->
+<section class="opt" id="d">
+  <div class="opthd"><span class="optlet">D</span>
+    <div><h2>Grouped by file, like a review</h2>
+      <p class="why">A file tree on the left with finding counts; the right shows every finding in the
+      selected file, in line order.</p></div>
+    <div class="tags"><span class="pill mut sm plain">matches how you'd fix it</span>
+      <span class="pill mut sm plain">severity is secondary</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Fixing is file-by-file, so this groups the work the way you'd actually do it —
+      and reveals hot spots (three findings in one file) that severity grouping hides.</div>
+    <div class="bad"><b>Costly</b> The worst finding can be buried in a file you open third, so severity has to be
+      carried into the tree as a marker. Overkill for a PR with two findings.</div></div>
+
+  <div class="frame">
+    <div style="display:grid;grid-template-columns:250px 1fr;gap:12px">
+      <div class="card" style="margin:0"><div class="hd plain"><h3>Files</h3><span class="sum">6 findings · 5 files</span></div>
+        <div class="body" style="padding:4px 8px 10px"><div class="tree">
+          <div class="dir">src/ipc</div>
+          <a class="on" href="#d">links.ts <span class="pill warn sm" style="margin-left:4px">1 major</span></a>
+          <div class="dir">src</div>
+          <a href="#d">badge.ts <span class="pill mut sm" style="margin-left:4px">2</span></a>
+          <a href="#d">socket.ts <span class="pill mut sm" style="margin-left:4px">1</span></a>
+          <a href="#d">cache.ts <span class="pill mut sm" style="margin-left:4px">1</span></a>
+          <a href="#d">log.ts <span class="pill mut sm" style="margin-left:4px">1</span></a>
+        </div></div></div>
+      <div class="card" style="margin:0">
+        <div class="hd"><h3 class="mono" style="font-size:13.5px">src/ipc/links.ts</h3>
+          <span class="sum">1 finding · both bots reviewed this file</span>
+          <span class="end"><span class="pill ok sm">Fix session is working here now</span></span></div>
+        <div class="body">
+          <div class="f"><div class="s"><span class="sev" style="background:var(--sev-maj)"></span>
+            <span><span class="ttl">Line 84 — deep-link handler opens renderer-supplied URLs</span><br>
+              <span class="loc mono"><img class="bico sm" src="icons/bot-codex.png" alt="">codex · thread open · raised 13:26</span></span>
+            <span class="end pill warn sm">major</span></div>
+            <div class="body">
+              <pre>  82   ipcMain.handle('open-external', (_e, url) =&gt; {
+  83     log.info('opening', url)
+→ 84     shell.open(url)
+  85   })</pre>
+              A crafted message link can launch <span class="mono">file://</span> or a custom scheme.
+              Allowlist https/mailto first.
+              <div style="display:flex;gap:7px;margin-top:7px"><button class="btn ghost sm">Resolve thread</button>
+                <button class="btn ghost sm">Decline…</button><a class="btn ghost sm" href="#d">View on GitHub ↗</a></div></div></div>
+          <div class="hintbox" style="margin-top:10px">Next file with findings:
+            <a href="#d" class="mono">src/badge.ts</a> — 2 findings (1 potential, 1 minor)</div>
+        </div></div>
+    </div>
+  </div>
+</section>
+
+<details class="notes">
+  <summary>Notes on these options</summary>
+  <ul>
+    <li>These serve different questions: A and B explain <i>the round</i>, C and D help you <i>do the work</i>.
+      Since a fix session usually does the work here, B's “what happened” may matter more than it seems.</li>
+    <li>C's sort control could make D a mode rather than a separate design.</li>
+    <li>None offer re-review: the current head is already reviewed, so the fire logic would dedupe it.</li>
+  </ul>
+</details>
+
+</body>
+</html>

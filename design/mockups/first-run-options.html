@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>First run — 4 UX options</title>
+<link rel="icon" href="icons/repo-crq.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,650;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="opt.css">
+<style>
+.step{background:var(--card);border:1px solid var(--edge);border-radius:var(--r);box-shadow:var(--shadow);margin-bottom:10px}
+.step>.h{display:flex;align-items:center;gap:12px;padding:11px 16px}
+.step .n{width:23px;height:23px;border-radius:50%;background:#EEF0F3;color:var(--mut);flex:none;
+  display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600}
+.step.done .n{background:var(--ok);color:#fff}
+.step.now .n{background:var(--ink);color:#fff}
+.step.now{border-color:var(--acc-edge);box-shadow:0 0 0 3px var(--acc-bg),var(--shadow)}
+.step .h h4{font-size:13.5px;font-weight:650}
+.step .h .sum{color:var(--faint);font-size:12px}
+.step .b{padding:0 16px 14px 51px;font-size:13px;color:var(--mut)}
+.step.later{opacity:.6}
+.mark{width:52px;height:52px;border-radius:14px;display:flex;align-items:center;justify-content:center;
+  background:var(--ink);color:#fff;font-family:"IBM Plex Mono",monospace;font-size:17px;font-weight:500}
+.dots{display:flex;gap:6px}
+.dots i{width:7px;height:7px;border-radius:50%;background:var(--edge2);display:block}
+.dots i.on{background:var(--ink);width:20px;border-radius:99px}
+.dots i.done{background:var(--ok)}
+.term{background:#0F1720;border-radius:8px;padding:12px 14px;font-family:"IBM Plex Mono",monospace;
+  font-size:12px;color:#C8D2DC;line-height:1.7}
+.term .p{color:#5CBF7B}
+.term .c{color:#EDEAE2}
+.term .o{color:#77838F}
+.term .ok{color:#5CBF7B}
+
+/* one variant at a time — the jump chips are radios, not anchors */
+#O-A,#O-B,#O-C,#O-D{position:absolute;left:-9999px}
+.opt{display:none}
+#O-A:checked ~ #a,#O-B:checked ~ #b,#O-C:checked ~ #c,#O-D:checked ~ #d{display:block}
+.optbar .jump label{font-size:12.5px;font-weight:600;color:var(--mut);border:1px solid var(--edge);
+  border-radius:8px;padding:3px 12px;cursor:pointer}
+.optbar .jump label:hover{border-color:var(--acc-edge);color:var(--acc);background:var(--acc-bg)}
+#O-A:checked ~ .optbar label[for="O-A"],#O-B:checked ~ .optbar label[for="O-B"],
+#O-C:checked ~ .optbar label[for="O-C"],#O-D:checked ~ .optbar label[for="O-D"]{
+  background:var(--ink);border-color:var(--ink);color:#fff}
+.opt{border-top:none;padding-top:18px}
+</style>
+</head>
+<body>
+<input type="radio" name="opt" id="O-A" checked><input type="radio" name="opt" id="O-B"><input type="radio" name="opt" id="O-C"><input type="radio" name="opt" id="O-D">
+
+<div class="optbar">
+  <span class="crq">crq</span><h1>First run</h1>
+  <span class="sub">4 UX options · same styling, different structure</span>
+  <span class="jump"><label for="O-A">A</label><label for="O-B">B</label><label for="O-C">C</label><label for="O-D">D</label>
+    <a class="back" href="options.html">All pages ↩</a></span>
+</div>
+
+<div class="intro">
+  <p>The job: someone has just installed crq. There's no state, no bots, no repos — and none of the
+  vocabulary means anything yet. All four options avoid words like <i>fire slot</i>, <i>round</i> and
+  <i>convergence</i>, and all four make the same promise early: nothing is written to your repositories
+  by setting up.</p>
+</div>
+
+<!-- A -->
+<section class="opt" id="a">
+  <div class="opthd"><span class="optlet">A</span>
+    <div><h2>All steps on one page</h2>
+      <p class="why">A short hero, then five steps stacked; the current one is highlighted, later ones are
+      dimmed but readable. What we have today.</p></div>
+    <div class="tags"><span class="pill mut sm plain">whole path visible</span><span class="pill mut sm plain">no momentum</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> You can see how much is left before you start, and skip ahead if you've done a
+      step already (many people will have installed a bot before finding crq).</div>
+    <div class="bad"><b>Costly</b> Nothing pushes you forward, and five cards of dimmed text can read as "this is
+      a lot of work" at the exact moment you want it to feel easy.</div></div>
+
+  <div class="frame">
+    <div style="text-align:center;padding:6px 0 14px">
+      <div class="mark" style="margin:0 auto 10px">crq</div>
+      <h2 style="font-size:19px;font-weight:650">Let's get your first repository reviewed</h2>
+      <p class="note" style="max-width:520px;margin:6px auto 0;font-size:13px;color:var(--mut)">
+        One shared queue, one review at a time, so a rate limit on one repo never wastes work on another.</p></div>
+    <div class="step done"><div class="h"><span class="n">✓</span><h4>crq is installed and can reach GitHub</h4>
+      <span class="sum">authenticated as kristofferR</span><span class="end" style="margin-left:auto"><span class="pill ok sm">Done</span></span></div></div>
+    <div class="step now"><div class="h"><span class="n">2</span><h4>Create the queue's home</h4>
+      <span class="sum">one private repo holds the shared state</span>
+      <span class="end" style="margin-left:auto"><span class="pill warn sm">Do this first</span></span></div>
+      <div class="b">Every host reads and writes one small state file kept in a private repo of your own.
+        <div class="cmd" style="margin-top:9px">crq init<span class="copy">copy</span></div>
+        <div style="display:flex;gap:8px;margin-top:10px"><button class="btn sm">Run it for me</button>
+          <button class="btn ghost sm">I already have one</button></div>
+        <div class="hintbox" style="margin-top:10px">Nothing is written to your other repositories by this step.</div></div></div>
+    <div class="step later"><div class="h"><span class="n">3</span><h4>Pick your review bots</h4>
+      <span class="sum">at least one — and none of them are ours</span></div></div>
+    <div class="step later"><div class="h"><span class="n">4</span><h4>Enroll a repository</h4>
+      <span class="sum">and decide what happens to its open PRs</span></div></div>
+    <div class="step later"><div class="h"><span class="n">5</span><h4>Optional: let crq fix findings too</h4>
+      <span class="sum">autofix, on the machines you choose</span></div></div>
+  </div>
+</section>
+
+<!-- B -->
+<section class="opt" id="b">
+  <div class="opthd"><span class="optlet">B</span>
+    <div><h2>Full-screen, one question at a time</h2>
+      <p class="why">Each step takes the whole screen with a single decision and a large explanation.
+      Progress dots at the top; back and skip always available.</p></div>
+    <div class="tags"><span class="pill mut sm plain">calm</span><span class="pill mut sm plain">explains as it goes</span>
+      <span class="pill mut sm plain">hides the length</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Room to explain <i>why</i> each step exists, which matters when the concepts are
+      new. One decision per screen is hard to get wrong.</div>
+    <div class="bad"><b>Costly</b> You can't tell how long this will take, and someone who's already set up their
+      bots has to click through anyway.</div></div>
+
+  <div class="frame">
+    <div class="card" style="max-width:640px;margin:0 auto">
+      <div class="hd"><span class="dots"><i class="done"></i><i class="on"></i><i></i><i></i><i></i></span>
+        <span class="sum">Step 2 of 5</span>
+        <span class="end" style="margin-left:auto"><a class="note" href="#b">Skip setup</a></span></div>
+      <div class="body" style="padding:18px 22px 22px">
+        <h3 style="font-size:18px;font-weight:650">First, crq needs somewhere to keep its notes</h3>
+        <p style="color:var(--mut);font-size:13.5px;margin:8px 0 0">
+          crq coordinates several machines and several bots, so it keeps one small file — which PR is being
+          reviewed, what's queued, how much review quota is left — in a <b>private repository of your own</b>.
+          You keep it; nothing leaves your account.</p>
+        <div class="cmd" style="margin-top:14px">crq init<span class="copy">copy</span></div>
+        <div class="hintbox" style="margin-top:10px">This creates <span class="mono">crq-home</span> (private),
+          a calibration pull request that measures your review quota, and the Markdown dashboard issue.
+          <b>Your other repositories aren't touched.</b></div>
+        <div style="display:flex;gap:9px;margin-top:16px;align-items:center">
+          <button class="btn">Create it for me</button>
+          <button class="btn ghost">I already have one</button>
+          <span class="note" style="margin-left:auto"><a href="#b">← Back</a></span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- C -->
+<section class="opt" id="c">
+  <div class="opthd"><span class="optlet">C</span>
+    <div><h2>Steps left, live state right</h2>
+      <p class="why">The checklist on the left; on the right, what crq can see right now — updating as
+      each step completes.</p></div>
+    <div class="tags"><span class="pill mut sm plain">shows the payoff</span><span class="pill mut sm plain">busier</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Setup stops feeling like paperwork: the right column fills in as you go, and it
+      doubles as proof that a step worked. Detected tools appear without being asked for.</div>
+    <div class="bad"><b>Costly</b> Two things to read at once, and the right column is nearly empty at the very
+      start — the moment it's meant to motivate.</div></div>
+
+  <div class="frame">
+    <div style="display:grid;grid-template-columns:1fr 330px;gap:12px">
+      <div>
+        <div class="step done"><div class="h"><span class="n">✓</span><h4>crq installed · GitHub reachable</h4></div></div>
+        <div class="step now"><div class="h"><span class="n">2</span><h4>Create the queue's home</h4></div>
+          <div class="b">One private repo holds the shared state.
+            <div class="cmd" style="margin-top:9px">crq init<span class="copy">copy</span></div>
+            <div style="display:flex;gap:8px;margin-top:10px"><button class="btn sm">Run it for me</button>
+              <button class="btn ghost sm">I already have one</button></div></div></div>
+        <div class="step later"><div class="h"><span class="n">3</span><h4>Pick review bots</h4></div></div>
+        <div class="step later"><div class="h"><span class="n">4</span><h4>Enroll a repository</h4></div></div>
+      </div>
+      <div class="card" style="margin:0">
+        <div class="hd"><h3>What crq sees</h3><span class="end" style="margin-left:auto"><span class="pill ok sm">live</span></span></div>
+        <div class="body" style="padding-top:6px">
+          <div class="rowline"><span class="pill ok sm">✓</span><span>GitHub as <b>kristofferR</b></span>
+            <span class="end note">14 repos</span></div>
+          <div class="rowline"><span class="pill ok sm">✓</span><span><span class="mono">claude</span> on this machine</span>
+            <span class="end note">2.1.4</span></div>
+          <div class="rowline"><span class="pill ok sm">✓</span><span><span class="mono">codex</span> on this machine</span>
+            <span class="end note">0.94</span></div>
+          <div class="rowline"><span class="pill mut sm">○</span><span class="dim">Queue home</span>
+            <span class="end note">not created yet</span></div>
+          <div class="rowline"><span class="pill mut sm">○</span><span class="dim">Review bots</span>
+            <span class="end note">none detected</span></div>
+          <div class="rowline"><span class="pill mut sm">○</span><span class="dim">Repositories</span>
+            <span class="end note">none enrolled</span></div>
+          <div class="hintbox" style="margin-top:10px">Because <span class="mono">codex</span> is already here,
+            Codex will be suggested as a free co-reviewer in step 3.</div>
+        </div></div>
+    </div>
+  </div>
+</section>
+
+<!-- D -->
+<section class="opt" id="d">
+  <div class="opthd"><span class="optlet">D</span>
+    <div><h2>Commands, with the UI watching</h2>
+      <p class="why">For someone who'd rather stay in the terminal: the exact commands in order, each
+      ticking itself off as crq detects it's been done.</p></div>
+    <div class="tags"><span class="pill mut sm plain">honest about what runs</span>
+      <span class="pill mut sm plain">no hidden magic</span><span class="pill mut sm plain">assumes a shell</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Nothing is done on your behalf, which suits a tool whose whole job is writing to
+      your repositories. Copy-paste beats a button when you want to read the flags first.</div>
+    <div class="bad"><b>Costly</b> Asks the person to leave the page, and auto-detection has to be reliable or the
+      checklist lies.</div></div>
+
+  <div class="frame">
+    <div class="card" style="max-width:760px;margin:0 auto">
+      <div class="hd"><h3>Set up from the terminal</h3>
+        <span class="sum">three commands · the page ticks them off as it sees them</span>
+        <span class="end" style="margin-left:auto"><a class="note" href="#d">prefer buttons? →</a></span></div>
+      <div class="body">
+        <div class="rowline" style="padding-top:0"><span class="pill ok sm">done</span>
+          <span><span class="mono">crq doctor</span> — confirmed GitHub access as <b>kristofferR</b></span>
+          <span class="end note">13:48</span></div>
+        <div class="rowline"><span class="pill warn sm">now</span>
+          <span><span class="mono">crq init</span> — creates the private queue home</span>
+          <span class="end note">waiting…</span></div>
+        <div class="term" style="margin:9px 0 11px">
+          <div><span class="p">$</span> <span class="c">crq init</span></div>
+          <div class="o">creating kristofferR/crq-home (private)…</div>
+          <div class="o">  ref   crq-state-v3      shared state</div>
+          <div class="o">  issue #12               Markdown dashboard</div>
+          <div class="o">  PR    #3                quota calibration</div>
+          <div><span class="ok">✓ done</span> <span class="o">— export these, or let the dashboard remember them:</span></div>
+          <div class="o">  CRQ_REPO=kristofferR/crq-home  CRQ_ISSUE=12  CRQ_CAL_PR=3</div>
+        </div>
+        <div class="rowline"><span class="pill mut sm">next</span>
+          <span><span class="mono">crq autofix install</span> — optional, lets crq fix findings on this machine</span>
+          <span class="end note">optional</span></div>
+        <div class="hintbox" style="margin-top:11px">Bots are installed on GitHub, not here —
+          <a href="bot-guide.html">pick them in the browser →</a>. Once one repo is enrolled this page is
+          replaced by the queue.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<details class="notes">
+  <summary>Notes on these options</summary>
+  <ul>
+    <li>Worth deciding first whether crq should <i>run</i> setup steps for you (A, B, C offer buttons) or only
+      tell you what to run (D). That's a trust question more than a layout one.</li>
+    <li>C's right-hand column is reusable elsewhere — it's the same capability data the Setup page shows.</li>
+    <li>All four keep the promise "your other repositories aren't touched" above the fold.</li>
+  </ul>
+</details>
+
+</body>
+</html>

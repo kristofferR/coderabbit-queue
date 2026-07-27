@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Carrier#85 · fixing — Code Review Queue</title>
+<link rel="icon" href="icons/repo-carrier.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,650;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#F2F3F6; --card:#FFFFFF; --edge:#E3E6EB; --edge2:#C9CFD8;
+  --ink:#1B2430; --mut:#5B6472; --faint:#8B93A0;
+  --ok:#1F7A4D; --ok-bg:#EAF4EE; --ok-edge:#C7E2D2;
+  --warn:#8A5300; --warn-fg:#B45D10; --warn-bg:#FBF1E2; --warn-edge:#EAD7B4;
+  --bad:#B3362B; --bad-bg:#F9ECEA; --bad-edge:#EFCFCB;
+  --acc:#2B5FAA; --acc-bg:#EBF1FA; --acc-edge:#C9D8EF;
+  --sev-crit:#B3362B; --sev-maj:#B45D10; --sev-pot:#8A7500; --sev-min:#5B6472;
+  --r:10px; --shadow:0 1px 2px rgba(27,36,48,.05),0 4px 14px rgba(27,36,48,.04);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:14px;line-height:1.5;
+  color:var(--ink);background:var(--bg);min-width:820px}
+.mono{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.92em}
+a{color:var(--acc);text-decoration:none}
+a:hover{text-decoration:underline}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px}
+.num{font-variant-numeric:tabular-nums}
+.dim{color:var(--faint)}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;
+  padding:1px 10px 1px 7px;border-radius:99px;border:1px solid transparent;white-space:nowrap}
+.pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+.pill.ok{color:var(--ok);background:var(--ok-bg);border-color:var(--ok-edge)}
+.pill.warn{color:var(--warn);background:var(--warn-bg);border-color:var(--warn-edge)}
+.pill.bad{color:var(--bad);background:var(--bad-bg);border-color:var(--bad-edge)}
+.pill.mut{color:var(--mut);background:#EEF0F3;border-color:var(--edge)}
+.pill.acc{color:var(--acc);background:var(--acc-bg);border-color:var(--acc-edge)}
+
+.topbar{display:flex;align-items:center;flex-wrap:wrap;gap:16px;background:var(--card);
+  border-bottom:1px solid var(--edge);padding:10px 24px;position:sticky;top:0;z-index:6}
+.brand{display:flex;align-items:baseline;gap:10px}
+.brand .crq{font-family:"IBM Plex Mono",monospace;font-weight:500;font-size:13px;color:#fff;
+  background:var(--ink);border-radius:6px;padding:2px 7px}
+.brand .name{font-weight:650;font-size:16px;letter-spacing:-.01em}
+.topbar nav{display:flex;gap:4px;margin-left:8px}
+.topbar nav a{color:var(--mut);padding:5px 12px;border-radius:8px;font-weight:500;font-size:13.5px}
+.topbar nav a:hover{background:var(--bg);text-decoration:none}
+.topbar nav a.on{color:var(--ink);background:var(--bg)}
+.fresh{margin-left:auto;display:flex;align-items:center;gap:7px;color:var(--mut);font-size:12px}
+.fresh::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--ok)}
+
+.wrap{max-width:1180px;margin:0 auto;padding:18px 24px 80px}
+.crumb{font-size:12.5px;color:var(--faint);margin-bottom:8px}
+
+/* PR header + action bar */
+.phead{background:var(--card);border:1px solid var(--edge);border-radius:var(--r);box-shadow:var(--shadow);
+  padding:14px 20px;margin-bottom:14px}
+.phead .r1{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.rico{width:24px;height:24px;border-radius:7px;object-fit:cover;background:#fff;border:1px solid var(--edge);flex:none}
+.bico{width:17px;height:17px;border-radius:5px;border:1px solid var(--edge);background:#fff;vertical-align:-4px;margin-right:4px}
+.phead h1{font-size:18px;font-weight:650;letter-spacing:-.01em}
+.phead h1 .mono{font-weight:500;color:var(--mut)}
+.phead .acts{margin-left:auto;display:flex;gap:8px}
+.btn{font:inherit;font-weight:600;font-size:13px;border:none;border-radius:8px;padding:6px 15px;cursor:pointer;
+  background:var(--ink);color:#fff}
+.btn:hover{background:#2E3C4E}
+.btn.ghost{background:none;border:1px solid var(--edge);color:var(--mut)}
+.btn.ghost:hover{border-color:var(--edge2)}
+.phead .r2{display:flex;gap:16px;margin-top:8px;font-size:12.5px;color:var(--mut);flex-wrap:wrap;align-items:center}
+.phead .r2 .gh{margin-left:auto}
+
+.cols{display:grid;grid-template-columns:minmax(0,1fr) 372px;gap:16px;align-items:start}
+.card{background:var(--card);border:1px solid var(--edge);border-radius:var(--r);margin-bottom:14px;box-shadow:var(--shadow)}
+.card>.hd{display:flex;align-items:baseline;gap:10px;padding:12px 18px 8px}
+.card>.hd h2{font-size:14.5px;font-weight:650}
+.card>.hd .ct{color:var(--faint);font-size:12.5px}
+.card>.hd .end{margin-left:auto;font-size:12.5px;color:var(--faint)}
+
+/* observation banner */
+.obs{display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--mut);
+  background:var(--acc-bg);border:1px solid var(--acc-edge);border-radius:8px;padding:7px 14px;margin:0 0 14px}
+.obs b{color:var(--acc)}
+.obs .end{margin-left:auto}
+
+/* findings */
+.sevgrp{padding:0 18px 6px}
+.sevh{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;letter-spacing:.05em;
+  text-transform:uppercase;padding:8px 0 4px}
+.sevh.crit{color:var(--sev-crit)}.sevh.maj{color:var(--sev-maj)}.sevh.pot{color:var(--sev-pot)}.sevh.min{color:var(--sev-min)}
+.f{border:1px solid var(--edge);border-radius:8px;margin-bottom:8px;overflow:hidden}
+.f summary{list-style:none;cursor:pointer;display:flex;gap:10px;align-items:baseline;padding:9px 14px}
+.f summary::-webkit-details-marker{display:none}
+.f summary:hover{background:#F7F8FA}
+.f .sev{width:4px;align-self:stretch;flex:none;border-radius:2px}
+.f .ttl{font-weight:550;font-size:13.5px}
+.f .loc{font-size:12px;color:var(--faint)}
+.f .who{margin-left:auto;display:flex;gap:8px;align-items:baseline;flex:none}
+.f .body{border-top:1px solid #EEF0F3;padding:10px 16px;font-size:13px;color:var(--mut)}
+.f .body pre{font-family:"IBM Plex Mono",monospace;font-size:12px;background:#F5F6F8;border:1px solid var(--edge);
+  border-radius:6px;padding:8px 12px;margin:8px 0;white-space:pre-wrap}
+.f .facts{display:flex;gap:8px;margin-top:8px}
+.dismissed{padding:4px 18px 14px}
+.dismissed .d{font-size:12.5px;color:var(--faint);padding:6px 0;border-top:1px dashed var(--edge)}
+
+/* right column */
+.kv{display:flex;justify-content:space-between;gap:10px;padding:7px 18px;font-size:13px;border-bottom:1px solid #EEF0F3}
+.kv:last-child{border-bottom:none}
+.kv .k{color:var(--mut)}
+.kv .v{text-align:right;font-weight:500}
+.kv .v.dim{font-weight:400}
+.rb{display:flex;gap:10px;align-items:baseline;padding:7px 18px;font-size:13px;border-bottom:1px solid #EEF0F3}
+.rb:last-child{border-bottom:none}
+.rb .t{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--faint);flex:none;width:88px}
+.hist .rb .t{width:auto;min-width:88px}
+.dispatch{border:1px solid var(--ok-edge);background:var(--ok-bg);border-radius:8px;margin:0 18px 14px;padding:10px 14px;font-size:13px}
+.dispatch .r1{display:flex;gap:10px;align-items:baseline}
+.dispatch .r2{color:var(--mut);font-size:12.5px;margin-top:4px}
+.notes{position:fixed;left:14px;bottom:12px;max-width:390px;font-size:12px;color:var(--mut);
+  background:var(--card);border:1px solid var(--edge);border-radius:8px;padding:8px 14px;z-index:10;box-shadow:var(--shadow)}
+.notes summary{cursor:pointer;color:var(--acc);font-weight:500}
+.notes ul{margin:6px 0 4px 16px}
+
+.layoutpick{display:flex;align-items:center;gap:4px;margin-left:14px;padding-left:14px;border-left:1px solid var(--edge)}
+.layoutpick .lbl{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin-right:3px}
+.layoutpick a{width:25px;height:25px;border-radius:7px;border:1px solid var(--edge);display:flex;
+  align-items:center;justify-content:center;font-size:12.5px;font-weight:650;color:var(--mut);text-decoration:none}
+.layoutpick a:hover{border-color:var(--acc-edge);color:var(--acc);background:var(--acc-bg);text-decoration:none}
+.layoutpick a.on{background:var(--ink);border-color:var(--ink);color:#fff}
+
+/* ---- narrower windows: reflow instead of overflowing ---- */
+@media (max-width:1400px){
+  .shell{grid-template-columns:minmax(0,1fr)!important}
+  .rail,.feedcol,.panel{position:static!important}
+  .cols{grid-template-columns:minmax(0,1fr)!important}
+}
+@media (max-width:1150px){
+  .quota{grid-template-columns:1fr!important}
+  .bots,.hosts,.grid,.botrow,.cards{grid-template-columns:1fr 1fr!important}
+  .kv,.set,.flat{grid-template-columns:minmax(0,1fr)!important;gap:5px!important}
+  .kv .prv,.set .ov,.flat .ov{text-align:left!important}
+  .c-host{display:none}
+  table.tools th.h{width:auto}
+}
+@media (max-width:940px){
+  .bots,.hosts,.grid,.botrow,.cards{grid-template-columns:1fr!important}
+  .tradeoff{grid-template-columns:1fr!important}
+  .c-att{display:none}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand"><span class="crq">crq</span><span class="name">Code Review Queue</span></div>
+  <nav>
+    <a href="overview.html">Overview</a>
+    <a href="settings.html">Repos</a>
+    <a href="bot-guide.html">Bots</a>
+    <a href="setup.html">Setup</a>
+    <a href="fleet-settings.html">Settings</a>
+  </nav>
+  <span class="layoutpick" title="This page is built as option A — B/C/D open the comparison">
+    <span class="lbl">Layout</span><a class="on" href="pr-detail.html">A</a><a href="pr-detail-options.html#b">B</a><a href="pr-detail-options.html#c">C</a><a href="pr-detail-options.html#d">D</a>
+  </span>
+  <div class="fresh num">live · rev 4182 · 13:51:26</div>
+</div>
+
+<div class="wrap">
+  <div class="crumb"><a href="overview.html">Overview</a> / kristofferR/Carrier / #85 <span class="dim">· see also the <a href="pr-detail-converged.html">converged variant</a></span></div>
+
+  <div class="phead">
+    <div class="r1">
+      <h1><img class="rico" src="icons/repo-carrier.png" alt=""> <span class="mono">Carrier#85</span> — notifications: debounce unread badge count</h1>
+      <span class="pill ok">Fixing · attempt 1 of 3</span>
+      <span class="pill mut">Open</span>
+      <div class="acts">
+        <button class="btn ghost">Hold…</button>
+        <button class="btn ghost">Cancel round…</button>
+        <button class="btn ghost" title="Re-runs the GitHub observation">Refresh</button>
+      </div>
+    </div>
+    <div class="r2">
+      <span>head <span class="mono">d94c17e6b</span></span>
+      <span>round fired 13:12:44 · attempts 1</span>
+      <span>host <span class="mono">mbp</span></span>
+      <span class="gh"><a href="#">Open on GitHub ↗</a></span>
+    </div>
+  </div>
+
+  <div class="cols">
+  <div>
+
+    <div class="obs">
+      <b>Observed 13:49:12</b> at <span class="mono">d94c17e6b</span> — cached; auto-refreshes every
+      60 s while the fix session runs.
+      <span>Converged: <b>no</b> — 6 findings block · reviewed by CodeRabbit ✓ · Codex ✓ · Bugbot check clean</span>
+      <a class="end" href="#">Refresh now</a>
+    </div>
+
+    <div class="card">
+      <div class="hd"><h2>Findings</h2><span class="ct">6 open · 1 dismissed</span>
+        <span class="end">a fix session is working through these now</span></div>
+
+      <div class="sevgrp">
+        <div class="sevh maj">Major · 1</div>
+        <details class="f" open>
+          <summary>
+            <span class="sev" style="background:var(--sev-maj)"></span>
+            <span><span class="ttl">Deep-link handler opens renderer-supplied URLs without an allowlist</span><br>
+              <span class="loc mono"><img class="bico" src="icons/bot-codex.png" alt="">src/ipc/links.ts:84 · codex · thread open</span></span>
+            <span class="who"><span class="pill warn">major</span></span>
+          </summary>
+          <div class="body">
+            The renderer can pass any string to <span class="mono">open-external</span>, so a crafted
+            message link can launch <span class="mono">file://</span> or a custom scheme. Allowlist
+            https/mailto before handing it to the shell.
+            <pre>- shell.open(url)
++ if (!/^(https?|mailto):/.test(url)) return
++ shell.open(url)</pre>
+            <div class="facts">
+              <button class="btn ghost">Resolve thread</button>
+              <button class="btn ghost">Decline…</button>
+              <a class="btn ghost" href="#" style="text-decoration:none">View on GitHub ↗</a>
+            </div>
+          </div>
+        </details>
+      </div>
+
+      <div class="sevgrp">
+        <div class="sevh pot">Potential · 3</div>
+        <details class="f"><summary><span class="sev" style="background:var(--sev-pot)"></span>
+          <span><span class="ttl">Unread badge cache never clears on account switch</span><br>
+          <span class="loc mono"><img class="bico" src="icons/bot-coderabbit.png" alt="">src/badge.ts:41 · coderabbit · thread open</span></span>
+          <span class="who"><span class="pill warn" style="color:var(--sev-pot)">potential</span></span></summary>
+          <div class="body">The count is keyed by window, not by account, so switching accounts keeps the previous badge until restart.</div>
+        </details>
+        <details class="f"><summary><span class="sev" style="background:var(--sev-pot)"></span>
+          <span><span class="ttl">Reconnect loop lacks jitter — herds after a network drop</span><br>
+          <span class="loc mono"><img class="bico" src="icons/bot-codex.png" alt="">src/socket.ts:129 · codex · thread open</span></span>
+          <span class="who"><span class="pill warn" style="color:var(--sev-pot)">potential</span></span></summary>
+          <div class="body">Every window reconnects on the same 5 s tick, so a Wi-Fi blip reconnects them in lockstep. Add ±20 % jitter.</div>
+        </details>
+        <details class="f"><summary><span class="sev" style="background:var(--sev-pot)"></span>
+          <span><span class="ttl">Avatar image cache has no size bound</span><br>
+          <span class="loc mono"><img class="bico" src="icons/bot-coderabbit.png" alt="">src/cache.ts:22 · coderabbit · thread open</span></span>
+          <span class="who"><span class="pill warn" style="color:var(--sev-pot)">potential</span></span></summary>
+          <div class="body">Cached avatars are never evicted; a long-lived session grows the cache without limit. Cap it (LRU, ~50 MB).</div>
+        </details>
+      </div>
+
+      <div class="sevgrp">
+        <div class="sevh min">Minor · 2</div>
+        <details class="f"><summary><span class="sev" style="background:var(--sev-min)"></span>
+          <span><span class="ttl">Log line prints the full session cookie</span><br>
+          <span class="loc mono"><img class="bico" src="icons/bot-codex.png" alt="">src/log.ts:58 · codex · no thread — dismissible</span></span>
+          <span class="who"><span class="pill mut">minor</span></span></summary>
+          <div class="body">Redact cookie and token values in request logging.
+            <div class="facts"><button class="btn ghost">Dismiss… <span class="dim">(this head only)</span></button></div></div>
+        </details>
+        <details class="f"><summary><span class="sev" style="background:var(--sev-min)"></span>
+          <span><span class="ttl">Magic number 3600 — name it</span><br>
+          <span class="loc mono"><img class="bico" src="icons/bot-coderabbit.png" alt="">src/badge.ts:12 · coderabbit · thread open</span></span>
+          <span class="who"><span class="pill mut">minor</span></span></summary>
+          <div class="body">Extract <span class="mono">SECONDS_PER_HOUR</span> or use a duration helper.</div>
+        </details>
+      </div>
+
+      <div class="dismissed">
+        <div class="d">Dismissed · <b>“Use Tauri’s built-in updater instead of the custom one”</b>
+          (codex, potential) — <i>“the custom updater handles our notarization flow”</i> · by kristoffer 13:22 · this head only</div>
+      </div>
+    </div>
+
+  </div>
+  <aside>
+
+    <div class="card">
+      <div class="hd"><h2>Fix session</h2><span class="ct">live</span></div>
+      <div class="dispatch">
+        <div class="r1"><span class="pill ok">Running · <span class="num" data-elapsed="589">9:49</span></span>
+          <span class="mono dim">mbp · attempt 1 of 3</span></div>
+        <div class="r2">claimed 13:41:37 · heartbeat 13:51:02 · working through 6 findings ·
+          <a href="#">session log</a></div>
+      </div>
+      <div class="kv"><span class="k">While the session holds this round</span>
+        <span class="v dim">queue state hidden; released on push or exit</span></div>
+    </div>
+
+    <div class="card">
+      <div class="hd"><h2>Round</h2><span class="ct mono">d94c17e6b</span></div>
+      <div class="kv"><span class="k">Phase</span><span class="v"><span class="pill ok">Reviewing</span> <span class="dim">held by fix session</span></span></div>
+      <div class="kv"><span class="k">Enqueued</span><span class="v num">13:02:19</span></div>
+      <div class="kv"><span class="k">Fired</span><span class="v num">13:12:44 · attempt 1</span></div>
+      <div class="kv"><span class="k">Reviewed by</span><span class="v"><img class="bico" src="icons/bot-coderabbit.png" alt="">13:20 · <img class="bico" src="icons/bot-codex.png" alt="">13:26</span></div>
+      <div class="kv"><span class="k">Checks</span><span class="v"><img class="bico" src="icons/bot-bugbot.png" alt="">clean @ <span class="mono">d94c17e6b</span></span></div>
+      <div class="kv"><span class="k">Hold</span><span class="v dim">none</span></div>
+      <div class="kv"><span class="k">Note</span><span class="v dim">“dispatched to fix 6 findings”</span></div>
+      <div class="kv"><span class="k">Cost — estimated</span>
+        <span class="v">$1.35 <span class="dim">Macroscope 27 KB · CodeRabbit within plan</span></span></div>
+      <div class="kv"><span class="k">Cost — actual</span>
+        <span class="v">$1.28 <span class="dim">billed on the check run · 81 agent credits</span></span></div>
+    </div>
+
+    <div class="card hist">
+      <div class="hd"><h2>Round history</h2><span class="ct">this PR</span></div>
+      <div class="rb"><span class="t num">13:12 →</span><span><span class="mono">d94c17e6b</span> · current — reviewed, 6 findings, fixing</span></div>
+      <div class="rb"><span class="t num">11:47</span><span><span class="mono">52c9ab310</span> · superseded — new head pushed mid-review</span></div>
+      <div class="rb"><span class="t num">09:31</span><span><span class="mono">e17f04d22</span> · completed — converged, 2 findings fixed</span></div>
+    </div>
+
+  </aside>
+  </div><!-- /cols -->
+</div>
+
+<details class="notes">
+  <summary>Mockup notes</summary>
+  <ul>
+    <li>PR detail, two layers: the round/history column renders instantly from cached state; the findings + convergence banner come from the on-demand GitHub observation (timestamp + Refresh shown).</li>
+    <li>The major finding is painted expanded; others use native details. Thread-backed findings offer Resolve/Decline; the thread-less minor offers Dismiss (this head only). No Re-review action — forced same-head re-review needs new engine semantics.</li>
+    <li>Severity vocabulary and ranking match internal/dialect (critical &gt; major &gt; potential &gt; minor); none critical here.</li>
+    <li>The fix-session elapsed counter ticks; in production the whole page live-updates on state push.</li>
+  </ul>
+</details>
+
+<script>
+const t0=performance.now();
+function fmt(s){const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
+  return(h?h+":"+String(m).padStart(2,"0"):m)+":"+String(x).padStart(2,"0");}
+setInterval(()=>{const dt=Math.floor((performance.now()-t0)/1000);
+  document.querySelectorAll("[data-elapsed]").forEach(el=>{el.textContent=fmt(+el.dataset.elapsed+dt);});
+},1000);
+</script>
+</body>
+</html>

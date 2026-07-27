@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UX options — Code Review Queue</title>
+<link rel="icon" href="icons/repo-crq.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,650;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="opt.css">
+<style>
+.wrap{max-width:1120px;margin:0 auto;padding:24px 24px 80px}
+h1.big{font-size:23px;font-weight:650}
+.set{background:var(--card);border:1px solid var(--edge);border-radius:var(--r);box-shadow:var(--shadow);
+  margin-bottom:12px;overflow:hidden}
+.set>.h{display:flex;align-items:center;gap:12px;padding:13px 18px;border-bottom:1px solid #EEF0F3}
+.set>.h h2{font-size:15.5px;font-weight:650}
+.set>.h .q{color:var(--faint);font-size:12.5px}
+.set>.h .end{margin-left:auto}
+.opts{display:grid;grid-template-columns:repeat(4,1fr)}
+.o{padding:12px 16px;border-right:1px solid #EEF0F3;font-size:12.5px;color:var(--mut)}
+.o:last-child{border-right:none}
+.o .let{display:inline-flex;width:20px;height:20px;border-radius:6px;background:var(--ink);color:#fff;
+  align-items:center;justify-content:center;font-weight:650;font-size:11.5px;margin-right:7px}
+.o .nm{font-weight:600;color:var(--ink);font-size:13px}
+.o .d{margin-top:4px}
+.o.cur{background:var(--acc-bg)}
+.o.cur .let{background:var(--acc)}
+.tip{font-size:11.5px;color:var(--faint);margin-top:6px}
+</style>
+</head>
+<body>
+
+<div class="optbar">
+  <span class="crq">crq</span><h1>UX options</h1>
+  <span class="sub">4 per page · identical styling, different structure</span>
+  <span class="jump"><a class="back" href="index.html">Back to the mockups ↩</a></span>
+</div>
+
+<div class="wrap">
+  <h1 class="big">Pick a structure for each page</h1>
+  <p style="color:var(--mut);max-width:840px;margin:6px 0 4px">
+    Every option uses the same components, colours, type and wording — so these are decisions about
+    <b>layout, grouping, ordering and how much is visible at once</b>, not about looks. Options marked
+    <span class="pill acc sm plain">built</span> are what the current mockups already do.
+    Options can also be combined; the notes at the bottom of each page say where.</p>
+  <p class="tip">Each page now shows <b>one option at a time</b> — the A/B/C/D chips in its top bar swap
+    the whole variant, so you can compare like-for-like instead of scrolling past all four.
+    The <b>Overview</b> goes further: its four options are built as complete pages inside
+    <a href="overview.html">overview.html</a> itself, switchable from the same chips in the app's own top bar.</p>
+
+  <div class="set">
+    <div class="h"><h2>Overview</h2>
+      <span class="q">Is anything stuck, and does it need me?</span>
+      <span class="end"><a class="btn sm" href="overview-options.html">Open →</a></span></div>
+    <div class="opts">
+      <div class="o"><span class="let">A</span><span class="nm">One table, every PR</span>
+        <div class="d">Sortable rows; densest, but flattens state into a column.</div></div>
+      <div class="o"><span class="let">B</span><span class="nm">Three lanes</span>
+        <div class="d">Metered · co-review · autofix — the quota block stays in one column.</div></div>
+      <div class="o"><span class="let">C</span><span class="nm">Only what needs you</span>
+        <div class="d">One sentence, then decisions; healthy work folded away.</div></div>
+      <div class="o"><span class="let">D</span><span class="nm">Feed-led</span>
+        <div class="d">The stream is the page; state is a strip on top.</div></div>
+    </div>
+  </div>
+
+  <div class="set">
+    <div class="h"><h2>Per-repo settings</h2>
+      <span class="q">How do you get to a repo, and how much of its config do you see at once?</span>
+      <span class="end"><a class="btn sm" href="settings-options.html">Open →</a></span></div>
+    <div class="opts">
+      <div class="o cur"><span class="let">A</span><span class="nm">Rail + long form</span>
+        <div class="d">Repo list left, everything stacked right. <span class="pill acc sm plain">built</span></div></div>
+      <div class="o"><span class="let">B</span><span class="nm">Switcher + tabs</span>
+        <div class="d">Repo as a dropdown; settings split across short tabs.</div></div>
+      <div class="o"><span class="let">C</span><span class="nm">Fleet table, expand to edit</span>
+        <div class="d">All repos as rows; drift between them is visible.</div></div>
+      <div class="o"><span class="let">D</span><span class="nm">Bulk matrix</span>
+        <div class="d">Repos × settings; multi-select and change several at once.</div></div>
+    </div>
+  </div>
+
+  <div class="set">
+    <div class="h"><h2>Add a repository</h2>
+      <span class="q">How much ceremony, and where does the backlog question live?</span>
+      <span class="end"><a class="btn sm" href="add-repo-options.html">Open →</a></span></div>
+    <div class="opts">
+      <div class="o cur"><span class="let">A</span><span class="nm">Stacked steps</span>
+        <div class="d">All steps visible, one save. <span class="pill acc sm plain">built</span></div></div>
+      <div class="o"><span class="let">B</span><span class="nm">Wizard</span>
+        <div class="d">One question per screen; the backlog gets a whole screen.</div></div>
+      <div class="o"><span class="let">C</span><span class="nm">One dense form</span>
+        <div class="d">Everything at once with a sticky cost summary.</div></div>
+      <div class="o"><span class="let">D</span><span class="nm">Quick add + plan</span>
+        <div class="d">Pick a repo, read the plan crq would apply, confirm.</div></div>
+    </div>
+  </div>
+
+  <div class="set">
+    <div class="h"><h2>Setup &amp; readiness</h2>
+      <span class="q">Is it a reference, or a repair tool?</span>
+      <span class="end"><a class="btn sm" href="setup-options.html">Open →</a></span></div>
+    <div class="opts">
+      <div class="o cur"><span class="let">A</span><span class="nm">Cards + tool × host matrix</span>
+        <div class="d">Gaps per machine at a glance. <span class="pill acc sm plain">built</span></div></div>
+      <div class="o"><span class="let">B</span><span class="nm">One host at a time</span>
+        <div class="d">Matches how you actually fix a machine.</div></div>
+      <div class="o"><span class="let">C</span><span class="nm">Fix this next</span>
+        <div class="d">One problem, one fix, everything healthy folded away.</div></div>
+      <div class="o"><span class="let">D</span><span class="nm">Doctor report</span>
+        <div class="d">Every check as a filterable line, like the CLI.</div></div>
+    </div>
+  </div>
+
+  <div class="set">
+    <div class="h"><h2>Review bot guide</h2>
+      <span class="q">Explain each bot, or compare them side by side?</span>
+      <span class="end"><a class="btn sm" href="bot-guide-options.html">Open →</a></span></div>
+    <div class="opts">
+      <div class="o cur"><span class="let">A</span><span class="nm">Card per bot</span>
+        <div class="d">Room to explain each one. <span class="pill acc sm plain">built</span></div></div>
+      <div class="o"><span class="let">B</span><span class="nm">Comparison table</span>
+        <div class="d">Aligned attributes; built for choosing.</div></div>
+      <div class="o"><span class="let">C</span><span class="nm">Recommendation first</span>
+        <div class="d">“Use these two, here's why” — the rest demoted.</div></div>
+      <div class="o"><span class="let">D</span><span class="nm">List + detail</span>
+        <div class="d">Room for real setup docs and what crq reads.</div></div>
+    </div>
+  </div>
+
+  <div class="set">
+    <div class="h"><h2>Pull request detail</h2>
+      <span class="q">Explain the round, or help you work through the findings?</span>
+      <span class="end"><a class="btn sm" href="pr-detail-options.html">Open →</a></span></div>
+    <div class="opts">
+      <div class="o cur"><span class="let">A</span><span class="nm">Findings + state sidebar</span>
+        <div class="d">Both at once. <span class="pill acc sm plain">built</span></div></div>
+      <div class="o"><span class="let">B</span><span class="nm">Timeline</span>
+        <div class="d">The round as a story — best “what happened here?”.</div></div>
+      <div class="o"><span class="let">C</span><span class="nm">Findings full width</span>
+        <div class="d">Room for code; bulk resolve/decline.</div></div>
+      <div class="o"><span class="let">D</span><span class="nm">Grouped by file</span>
+        <div class="d">Like a code review; reveals hot files.</div></div>
+    </div>
+  </div>
+
+  <div class="set">
+    <div class="h"><h2>Fleet settings</h2>
+      <span class="q">How do you organise ~25 settings without hiding their blast radius?</span>
+      <span class="end"><a class="btn sm" href="fleet-settings-options.html">Open →</a></span></div>
+    <div class="opts">
+      <div class="o cur"><span class="let">A</span><span class="nm">Long grouped page</span>
+        <div class="d">One scroll, save per group. <span class="pill acc sm plain">built</span></div></div>
+      <div class="o"><span class="let">B</span><span class="nm">Tabs</span>
+        <div class="d">Short screens, one group at a time.</div></div>
+      <div class="o"><span class="let">C</span><span class="nm">Section nav + one save</span>
+        <div class="d">Classic settings app; totals every pending change.</div></div>
+      <div class="o"><span class="let">D</span><span class="nm">Searchable flat list</span>
+        <div class="d">Type the name; env var shown next to each.</div></div>
+    </div>
+  </div>
+
+  <div class="set">
+    <div class="h"><h2>First run</h2>
+      <span class="q">Should crq run the setup steps for you, or tell you what to run?</span>
+      <span class="end"><a class="btn sm" href="first-run-options.html">Open →</a></span></div>
+    <div class="opts">
+      <div class="o cur"><span class="let">A</span><span class="nm">All steps on one page</span>
+        <div class="d">See the whole path up front. <span class="pill acc sm plain">built</span></div></div>
+      <div class="o"><span class="let">B</span><span class="nm">Full-screen wizard</span>
+        <div class="d">One question per screen, room to explain why.</div></div>
+      <div class="o"><span class="let">C</span><span class="nm">Steps + live detection</span>
+        <div class="d">Right column fills in as you go.</div></div>
+      <div class="o"><span class="let">D</span><span class="nm">Terminal-first</span>
+        <div class="d">Commands to copy; the page ticks them off.</div></div>
+    </div>
+  </div>
+
+  <p class="tip" style="margin-top:16px">Eight pages · 32 options. The current mockups implement the ones
+    marked <span class="pill acc sm plain">built</span>; the overview's four are all new, since the existing
+    overview is a blend of A and B.</p>
+</div>
+
+</body>
+</html>

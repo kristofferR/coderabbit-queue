@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>coderabbit-queue#140 · converged — Code Review Queue</title>
+<link rel="icon" href="icons/repo-crq.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,650;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#F2F3F6; --card:#FFFFFF; --edge:#E3E6EB; --edge2:#C9CFD8;
+  --ink:#1B2430; --mut:#5B6472; --faint:#8B93A0;
+  --ok:#1F7A4D; --ok-bg:#EAF4EE; --ok-edge:#C7E2D2;
+  --warn:#8A5300; --warn-fg:#B45D10; --warn-bg:#FBF1E2; --warn-edge:#EAD7B4;
+  --bad:#B3362B; --bad-bg:#F9ECEA; --bad-edge:#EFCFCB;
+  --acc:#2B5FAA; --acc-bg:#EBF1FA; --acc-edge:#C9D8EF;
+  --sev-maj:#B45D10; --sev-pot:#8A7500; --sev-min:#5B6472;
+  --r:10px; --shadow:0 1px 2px rgba(27,36,48,.05),0 4px 14px rgba(27,36,48,.04);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:14px;line-height:1.5;
+  color:var(--ink);background:var(--bg);min-width:820px}
+.mono{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.92em}
+a{color:var(--acc);text-decoration:none}
+a:hover{text-decoration:underline}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px}
+.num{font-variant-numeric:tabular-nums}
+.dim{color:var(--faint)}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;
+  padding:1px 10px 1px 7px;border-radius:99px;border:1px solid transparent;white-space:nowrap}
+.pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+.pill.ok{color:var(--ok);background:var(--ok-bg);border-color:var(--ok-edge)}
+.pill.warn{color:var(--warn);background:var(--warn-bg);border-color:var(--warn-edge)}
+.pill.bad{color:var(--bad);background:var(--bad-bg);border-color:var(--bad-edge)}
+.pill.mut{color:var(--mut);background:#EEF0F3;border-color:var(--edge)}
+.pill.acc{color:var(--acc);background:var(--acc-bg);border-color:var(--acc-edge)}
+.pill.sm{font-size:11px;padding:0 8px 0 6px}
+.pill.sm::before{width:6px;height:6px}
+
+.topbar{display:flex;align-items:center;flex-wrap:wrap;gap:16px;background:var(--card);
+  border-bottom:1px solid var(--edge);padding:10px 24px;position:sticky;top:0;z-index:6}
+.brand{display:flex;align-items:baseline;gap:10px}
+.brand .crq{font-family:"IBM Plex Mono",monospace;font-weight:500;font-size:13px;color:#fff;
+  background:var(--ink);border-radius:6px;padding:2px 7px}
+.brand .name{font-weight:650;font-size:16px;letter-spacing:-.01em}
+.topbar nav{display:flex;gap:4px;margin-left:8px}
+.topbar nav a{color:var(--mut);padding:5px 12px;border-radius:8px;font-weight:500;font-size:13.5px}
+.topbar nav a:hover{background:var(--bg);text-decoration:none}
+.topbar nav a.on{color:var(--ink);background:var(--bg)}
+.fresh{margin-left:auto;display:flex;align-items:center;gap:7px;color:var(--mut);font-size:12px}
+.fresh::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--ok)}
+
+.wrap{max-width:1180px;margin:0 auto;padding:18px 24px 80px}
+.crumb{font-size:12.5px;color:var(--faint);margin-bottom:8px}
+
+.phead{background:var(--card);border:1px solid var(--edge);border-radius:var(--r);box-shadow:var(--shadow);
+  padding:14px 20px;margin-bottom:14px}
+.phead .r1{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.rico{width:24px;height:24px;border-radius:7px;object-fit:cover;background:#fff;border:1px solid var(--edge);flex:none}
+.bico{width:17px;height:17px;border-radius:5px;border:1px solid var(--edge);background:#fff;vertical-align:-4px;margin-right:4px}
+.phead h1{font-size:18px;font-weight:650;letter-spacing:-.01em}
+.phead h1 .mono{font-weight:500;color:var(--mut)}
+.phead .acts{margin-left:auto;display:flex;gap:8px}
+.btn{font:inherit;font-weight:600;font-size:13px;border:none;border-radius:8px;padding:6px 15px;cursor:pointer;
+  background:var(--ink);color:#fff}
+.btn:hover{background:#2E3C4E}
+.btn.ghost{background:none;border:1px solid var(--edge);color:var(--mut)}
+.btn.ghost:hover{border-color:var(--edge2)}
+.btn[disabled]{opacity:.45;cursor:not-allowed}
+.phead .r2{display:flex;gap:16px;margin-top:8px;font-size:12.5px;color:var(--mut);flex-wrap:wrap;align-items:center}
+.phead .r2 .gh{margin-left:auto}
+
+/* the headline verdict */
+.verdict{display:flex;align-items:center;gap:14px;background:linear-gradient(135deg,#F1F9F4,var(--ok-bg));
+  border:1px solid var(--ok-edge);border-radius:var(--r);padding:14px 20px;margin-bottom:14px;box-shadow:var(--shadow)}
+.verdict .big{font-size:16px;font-weight:650;color:var(--ok)}
+.verdict .sub{font-size:13px;color:var(--mut);margin-top:2px}
+.verdict .who{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+.cols{display:grid;grid-template-columns:minmax(0,1fr) 372px;gap:16px;align-items:start}
+.card{background:var(--card);border:1px solid var(--edge);border-radius:var(--r);margin-bottom:14px;box-shadow:var(--shadow)}
+.card>.hd{display:flex;align-items:baseline;gap:10px;padding:12px 18px 8px}
+.card>.hd h2{font-size:14.5px;font-weight:650}
+.card>.hd .ct{color:var(--faint);font-size:12.5px}
+.card>.hd .end{margin-left:auto;font-size:12.5px;color:var(--faint)}
+
+.obs{display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--mut);
+  background:#FAFBFC;border:1px solid var(--edge);border-radius:8px;padding:7px 14px;margin:0 0 14px}
+.obs b{color:var(--ink)}
+.obs .end{margin-left:auto}
+
+/* settled findings */
+.sec{padding:2px 18px 8px}
+.sech{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;letter-spacing:.05em;
+  text-transform:uppercase;color:var(--faint);padding:10px 0 6px}
+.f{border:1px solid var(--edge);border-radius:8px;margin-bottom:8px;overflow:hidden}
+.f summary{list-style:none;cursor:pointer;display:flex;gap:10px;align-items:baseline;padding:9px 14px}
+.f summary::-webkit-details-marker{display:none}
+.f summary:hover{background:#F7F8FA}
+.f .sev{width:4px;align-self:stretch;flex:none;border-radius:2px}
+.f .ttl{font-weight:550;font-size:13.5px}
+.f .ttl.struck{text-decoration:line-through;text-decoration-color:var(--edge2);color:var(--mut)}
+.f .loc{font-size:12px;color:var(--faint)}
+.f .who{margin-left:auto;flex:none}
+.f .body{border-top:1px solid #EEF0F3;padding:10px 16px;font-size:13px;color:var(--mut)}
+.reply{border-left:3px solid var(--ok-edge);background:#FAFCFB;border-radius:0 6px 6px 0;padding:8px 12px;margin-top:8px}
+.reply .rh{font-size:12px;color:var(--faint);margin-bottom:3px}
+.reply.retained{border-left-color:var(--warn-edge);background:#FDFBF6}
+.empty{padding:22px 18px 26px;text-align:center;color:var(--mut)}
+.empty .big{font-size:15px;font-weight:600;color:var(--ink)}
+.empty p{font-size:13px;margin-top:4px}
+
+.kv{display:flex;justify-content:space-between;gap:10px;padding:7px 18px;font-size:13px;border-bottom:1px solid #EEF0F3}
+.kv:last-child{border-bottom:none}
+.kv .k{color:var(--mut)}
+.kv .v{text-align:right;font-weight:500}
+.kv .v.dim{font-weight:400}
+.rb{display:flex;gap:10px;align-items:baseline;padding:7px 18px;font-size:13px;border-bottom:1px solid #EEF0F3}
+.rb:last-child{border-bottom:none}
+.rb .t{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--faint);flex:none;min-width:88px}
+.next{margin:0 18px 14px;border:1px solid var(--acc-edge);background:var(--acc-bg);border-radius:8px;
+  padding:10px 14px;font-size:13px}
+.next b{color:var(--acc)}
+.notes{position:fixed;left:14px;bottom:12px;max-width:400px;font-size:12px;color:var(--mut);
+  background:var(--card);border:1px solid var(--edge);border-radius:8px;padding:8px 14px;z-index:10;box-shadow:var(--shadow)}
+.notes summary{cursor:pointer;color:var(--acc);font-weight:500}
+.notes ul{margin:6px 0 4px 16px}
+
+/* ---- narrower windows: reflow instead of overflowing ---- */
+@media (max-width:1400px){
+  .shell{grid-template-columns:minmax(0,1fr)!important}
+  .rail,.feedcol,.panel{position:static!important}
+  .cols{grid-template-columns:minmax(0,1fr)!important}
+}
+@media (max-width:1150px){
+  .quota{grid-template-columns:1fr!important}
+  .bots,.hosts,.grid,.botrow,.cards{grid-template-columns:1fr 1fr!important}
+  .kv,.set,.flat{grid-template-columns:minmax(0,1fr)!important;gap:5px!important}
+  .kv .prv,.set .ov,.flat .ov{text-align:left!important}
+  .c-host{display:none}
+  table.tools th.h{width:auto}
+}
+@media (max-width:940px){
+  .bots,.hosts,.grid,.botrow,.cards{grid-template-columns:1fr!important}
+  .tradeoff{grid-template-columns:1fr!important}
+  .c-att{display:none}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand"><span class="crq">crq</span><span class="name">Code Review Queue</span></div>
+  <nav>
+    <a href="overview.html">Overview</a>
+    <a href="settings.html">Repos</a>
+    <a href="bot-guide.html">Bots</a>
+    <a href="setup.html">Setup</a>
+    <a href="fleet-settings.html">Settings</a>
+  </nav>
+  <div class="fresh num">live · rev 4182 · 13:51:26</div>
+</div>
+
+<div class="wrap">
+  <div class="crumb"><a href="overview.html">Overview</a> / kristofferR/coderabbit-queue / #140</div>
+
+  <div class="phead">
+    <div class="r1">
+      <h1><img class="rico" src="icons/repo-crq.png" alt=""> <span class="mono">coderabbit-queue#140</span>
+        — queue: let the closed-PR sweep see past the front</h1>
+      <span class="pill ok">Converged</span>
+      <span class="pill mut">Open</span>
+      <div class="acts">
+        <button class="btn ghost">Hold…</button>
+        <button class="btn ghost" disabled title="No active round — this head is already reviewed">Cancel round</button>
+        <button class="btn ghost">Refresh</button>
+      </div>
+    </div>
+    <div class="r2">
+      <span>head <span class="mono">6b7d90e12</span></span>
+      <span>round fired 13:18:02 · completed 13:29:45 · attempts 1</span>
+      <span>host <span class="mono">mbp</span></span>
+      <span class="gh"><a href="#">Open on GitHub ↗</a></span>
+    </div>
+  </div>
+
+  <div class="verdict">
+    <div>
+      <div class="big">Nothing left to do — every required reviewer finished clean</div>
+      <div class="sub">6 findings were raised on earlier heads and are all accounted for. crq will not
+        review this head again; a new push starts a new round.</div>
+    </div>
+    <div class="who">
+      <span class="pill ok sm"><img class="bico" src="icons/bot-coderabbit.png" alt="" style="width:14px;height:14px;margin:0">CodeRabbit ✓</span>
+      <span class="pill ok sm"><img class="bico" src="icons/bot-codex.png" alt="" style="width:14px;height:14px;margin:0">Codex ✓</span>
+      <span class="pill ok sm"><img class="bico" src="icons/bot-bugbot.png" alt="" style="width:14px;height:14px;margin:0">Bugbot clean</span>
+      <span class="pill mut sm">Macroscope — off here</span>
+    </div>
+  </div>
+
+  <div class="cols">
+  <div>
+
+    <div class="obs">
+      <b>Observed 13:29:45</b> at <span class="mono">6b7d90e12</span> — this round is finished, so
+      nothing is re-polled. <span class="end"><a href="#">Refresh anyway</a></span>
+    </div>
+
+    <div class="card">
+      <div class="hd"><h2>Findings</h2><span class="ct">0 open · 6 settled</span>
+        <span class="end">nothing is blocking this pull request</span></div>
+
+      <div class="empty">
+        <div class="big">No open findings</div>
+        <p>Everything raised on this PR has been fixed, resolved, declined or dismissed.</p>
+      </div>
+
+      <div class="sec">
+        <div class="sech">Fixed and resolved · 4</div>
+
+        <details class="f"><summary><span class="sev" style="background:var(--sev-maj)"></span>
+          <span><span class="ttl struck">Closed-PR sweep stopped at the first open round</span><br>
+            <span class="loc mono"><img class="bico" src="icons/bot-codex.png" alt="">internal/crq/auto.go:212 · codex · resolved 13:11</span></span>
+          <span class="who"><span class="pill ok sm">Fixed</span></span></summary>
+          <div class="body">Fixed in <span class="mono">e41b8c07</span> — the sweep now scans the whole
+            queue instead of returning at the front. Thread resolved by crq after the push.</div>
+        </details>
+
+        <details class="f"><summary><span class="sev" style="background:var(--sev-pot)"></span>
+          <span><span class="ttl struck">Sweep could mark a round on a PR that reopened mid-pass</span><br>
+            <span class="loc mono"><img class="bico" src="icons/bot-coderabbit.png" alt="">internal/crq/auto.go:240 · coderabbit · resolved 13:11</span></span>
+          <span class="who"><span class="pill ok sm">Fixed</span></span></summary>
+          <div class="body">Re-checks the PR state inside the same pass before marking.</div>
+        </details>
+
+        <details class="f"><summary><span class="sev" style="background:var(--sev-pot)"></span>
+          <span><span class="ttl struck">Table test missed the empty-queue case</span><br>
+            <span class="loc mono"><img class="bico" src="icons/bot-codex.png" alt="">internal/engine/engine_test.go:918 · codex · resolved 13:11</span></span>
+          <span class="who"><span class="pill ok sm">Fixed</span></span></summary>
+          <div class="body">Added the row; the empty queue now asserts “no eligible round”.</div>
+        </details>
+
+        <details class="f"><summary><span class="sev" style="background:var(--sev-min)"></span>
+          <span><span class="ttl struck">Comment drifted from the behaviour it describes</span><br>
+            <span class="loc mono"><img class="bico" src="icons/bot-coderabbit.png" alt="">internal/state/state.go:1553 · coderabbit · resolved 13:11</span></span>
+          <span class="who"><span class="pill ok sm">Fixed</span></span></summary>
+          <div class="body">Comment rewritten to match the live-slot rule.</div>
+        </details>
+
+        <div class="sech">Declined, with the bot’s answer · 2</div>
+
+        <details class="f" open><summary><span class="sev" style="background:var(--sev-pot)"></span>
+          <span><span class="ttl">Add a migration path for the v3 state key</span><br>
+            <span class="loc mono"><img class="bico" src="icons/bot-coderabbit.png" alt="">internal/state/state.go:184 · coderabbit · declined 13:22</span></span>
+          <span class="who"><span class="pill ok sm">Withdrawn</span></span></summary>
+          <div class="body">
+            Declined: “crq is pre-release with no users — a migration shim would be dead code from the
+            day it lands.”
+            <div class="reply"><div class="rh"><img class="bico" src="icons/bot-coderabbit.png" alt="">CodeRabbit replied 13:24 — crq read this as <b>withdrawn</b></div>
+              “Understood — with no released versions in the wild, the schema fence is sufficient and a
+              migration path would add untested code. Withdrawing the suggestion.”</div>
+          </div>
+        </details>
+
+        <details class="f"><summary><span class="sev" style="background:var(--sev-min)"></span>
+          <span><span class="ttl">Prefer <span class="mono">errors.Join</span> over the wrapped chain</span><br>
+            <span class="loc mono"><img class="bico" src="icons/bot-codex.png" alt="">internal/crq/service.go:2184 · codex · declined 13:23</span></span>
+          <span class="who"><span class="pill warn sm">Stood by it</span></span></summary>
+          <div class="body">
+            Declined: “the wrapped chain keeps the CAS conflict distinguishable at the call site.”
+            <div class="reply retained"><div class="rh"><img class="bico" src="icons/bot-codex.png" alt="">Codex replied 13:25 — crq read this as <b>retained</b></div>
+              “Fair, though <span class="mono">errors.Join</span> would still allow
+              <span class="mono">errors.Is</span> on both. Leaving it to your judgement.”</div>
+            <div class="dim" style="margin-top:8px;font-size:12.5px">A retained finding doesn’t block —
+              it’s recorded so the disagreement is visible later.</div>
+          </div>
+        </details>
+      </div>
+    </div>
+
+  </div>
+  <aside>
+
+    <div class="card">
+      <div class="hd"><h2>What happens next</h2></div>
+      <div class="next">
+        <b>Nothing — merge when you’re ready.</b> This head is reviewed and recorded, so the queue
+        won’t spend another metered review on it. Push a new commit and a fresh round is enqueued
+        automatically.
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="hd"><h2>Round</h2><span class="ct mono">6b7d90e12</span></div>
+      <div class="kv"><span class="k">Phase</span><span class="v"><span class="pill ok">Completed</span></span></div>
+      <div class="kv"><span class="k">Enqueued</span><span class="v num">13:16:40</span></div>
+      <div class="kv"><span class="k">Fired</span><span class="v num">13:18:02 · attempt 1</span></div>
+      <div class="kv"><span class="k">Completed</span><span class="v num">13:29:45</span></div>
+      <div class="kv"><span class="k">Reviewed by</span>
+        <span class="v"><img class="bico" src="icons/bot-coderabbit.png" alt="">13:21 ·
+          <img class="bico" src="icons/bot-codex.png" alt="">13:26</span></div>
+      <div class="kv"><span class="k">Checks</span>
+        <span class="v"><img class="bico" src="icons/bot-bugbot.png" alt="">clean @ <span class="mono">6b7d90e12</span></span></div>
+      <div class="kv"><span class="k">Autofix</span><span class="v dim">not needed — no blocking findings</span></div>
+      <div class="kv"><span class="k">Hold</span><span class="v dim">none</span></div>
+      <div class="kv"><span class="k">Note</span><span class="v dim">“converged”</span></div>
+    </div>
+
+    <div class="card">
+      <div class="hd"><h2>Round history</h2><span class="ct">this PR · 3 heads</span></div>
+      <div class="rb"><span class="t num">13:16 →</span>
+        <span><span class="mono">6b7d90e12</span> · current — converged, 0 open findings</span></div>
+      <div class="rb"><span class="t num">12:44</span>
+        <span><span class="mono">3ad0f1c58</span> · completed — 2 findings, fixed by autofix on mbp</span></div>
+      <div class="rb"><span class="t num">11:58</span>
+        <span><span class="mono">2f41ac8d3</span> · superseded — new head arrived mid-review</span></div>
+    </div>
+
+  </aside>
+  </div>
+</div>
+
+<details class="notes">
+  <summary>Mockup notes</summary>
+  <ul>
+    <li>The settled counterpart to <a href="pr-detail.html">the mid-fix PR</a>: same layout, but the
+      headline is a verdict and the findings list is history rather than work.</li>
+    <li>Declined findings show <b>the bot’s reply and how crq read it</b> — withdrawn vs stood by —
+      which is a real classifier in dialect, and the reason a decline isn’t just a silent dismissal.</li>
+    <li>“Cancel round” is disabled with the reason, and there is no re-review button: the current head
+      is already reviewed, so the fire logic would dedupe it and the button would lie.</li>
+    <li>Observation isn’t re-polled on a finished round — the banner says so and still offers a manual
+      refresh.</li>
+  </ul>
+</details>
+
+</body>
+</html>

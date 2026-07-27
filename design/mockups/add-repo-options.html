@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Add repo — 4 UX options</title>
+<link rel="icon" href="icons/repo-crq.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,650;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="opt.css">
+<style>
+.step{background:var(--card);border:1px solid var(--edge);border-radius:var(--r);box-shadow:var(--shadow);margin-bottom:10px}
+.step>.h{display:flex;align-items:center;gap:12px;padding:11px 16px}
+.step .n{width:23px;height:23px;border-radius:50%;background:#EEF0F3;color:var(--mut);flex:none;
+  display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600}
+.step.done .n{background:var(--ok);color:#fff}
+.step.now .n{background:var(--ink);color:#fff}
+.step.now{border-color:var(--acc-edge);box-shadow:0 0 0 3px var(--acc-bg),var(--shadow)}
+.step .h h4{font-size:13.5px;font-weight:650}
+.step .h .sum{color:var(--faint);font-size:12px}
+.step .h .end{margin-left:auto;font-size:12px}
+.step .b{padding:0 16px 14px 51px}
+.step.later{opacity:.6}
+.opt2{border:1px solid var(--edge);border-radius:8px;padding:9px 13px;display:flex;gap:11px;font-size:13px}
+.opt2.sel{border-color:var(--warn-edge);background:var(--warn-bg)}
+.opt2 .t{font-weight:550}
+.opt2 .d{font-size:12px;color:var(--mut)}
+.botpick{border:1px solid var(--edge);border-radius:8px;padding:8px 11px;display:flex;gap:9px;
+  align-items:center;font-size:12.5px;color:var(--mut)}
+.botpick.sel{border-color:var(--ok-edge);background:var(--ok-bg)}
+.botpick .nm{font-weight:600;color:var(--ink);font-size:13px;display:block}
+.dots{display:flex;gap:7px;align-items:center}
+.dots i{width:8px;height:8px;border-radius:50%;background:var(--edge2);display:block}
+.dots i.on{background:var(--ink);width:22px;border-radius:99px}
+.dots i.done{background:var(--ok)}
+
+/* one variant at a time — the jump chips are radios, not anchors */
+#O-A,#O-B,#O-C,#O-D{position:absolute;left:-9999px}
+.opt{display:none}
+#O-A:checked ~ #a,#O-B:checked ~ #b,#O-C:checked ~ #c,#O-D:checked ~ #d{display:block}
+.optbar .jump label{font-size:12.5px;font-weight:600;color:var(--mut);border:1px solid var(--edge);
+  border-radius:8px;padding:3px 12px;cursor:pointer}
+.optbar .jump label:hover{border-color:var(--acc-edge);color:var(--acc);background:var(--acc-bg)}
+#O-A:checked ~ .optbar label[for="O-A"],#O-B:checked ~ .optbar label[for="O-B"],
+#O-C:checked ~ .optbar label[for="O-C"],#O-D:checked ~ .optbar label[for="O-D"]{
+  background:var(--ink);border-color:var(--ink);color:#fff}
+.opt{border-top:none;padding-top:18px}
+</style>
+</head>
+<body>
+<input type="radio" name="opt" id="O-A" checked><input type="radio" name="opt" id="O-B"><input type="radio" name="opt" id="O-C"><input type="radio" name="opt" id="O-D">
+
+<div class="optbar">
+  <span class="crq">crq</span><h1>Add a repository</h1>
+  <span class="sub">4 UX options · same styling, different flow</span>
+  <span class="jump"><label for="O-A">A</label><label for="O-B">B</label><label for="O-C">C</label><label for="O-D">D</label>
+    <a class="back" href="options.html">All pages ↩</a></span>
+</div>
+
+<div class="intro">
+  <p>The job: choose a repo, choose bots, accept or adjust the defaults, and decide what happens to the
+  pull requests that are <b>already open</b> — the one question that can spend a lot of review quota at
+  once. All four options end in a single save and state the backlog cost before it.</p>
+</div>
+
+<!-- A -->
+<section class="opt" id="a">
+  <div class="opthd"><span class="optlet">A</span>
+    <div><h2>Stacked steps, all visible</h2>
+      <p class="why">Every step on one page; completed ones collapse to a summary line you can reopen.
+      What we have today.</p></div>
+    <div class="tags"><span class="pill mut sm plain">whole path visible</span><span class="pill mut sm plain">one save</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> You can see what's coming and revise an earlier answer without losing your
+      place. Nothing is committed until the end.</div>
+    <div class="bad"><b>Costly</b> Longer page, and the "current" step is only signalled by styling — easy to
+      scroll past on a big screen.</div></div>
+
+  <div class="frame">
+    <div class="step done"><div class="h"><span class="n">✓</span><h4>Pick a repository</h4>
+      <span class="sum"><span class="rfall">S</span> <span class="mono">kristofferR/smarter_resume</span> · Go · 7 open PRs</span>
+      <a class="end" href="#a">Change</a></div></div>
+    <div class="step done"><div class="h"><span class="n">✓</span><h4>Choose review bots</h4>
+      <span class="sum">CodeRabbit + Codex, both required — fleet default</span><a class="end" href="#a">Change</a></div></div>
+    <div class="step done"><div class="h"><span class="n">✓</span><h4>Initial settings</h4>
+      <span class="sum">all fleet defaults · autofix on · claude / sonnet / high</span><a class="end" href="#a">Change</a></div></div>
+    <div class="step now"><div class="h"><span class="n">4</span><h4>Start policy</h4>
+      <span class="sum">what happens to the 7 PRs already open?</span></div>
+      <div class="b">
+        <div style="display:grid;gap:7px">
+          <label class="opt2"><input type="radio" name="pa"><span><span class="t">New PRs and future pushes only</span>
+            <span class="pill ok sm plain" style="margin-left:6px">default</span>
+            <span class="d">The backlog is left alone.</span></span></label>
+          <label class="opt2"><input type="radio" name="pa"><span><span class="t">Selected existing PRs</span>
+            <span class="d">Pick which of the 7 to enqueue.</span></span></label>
+          <label class="opt2 sel"><input type="radio" name="pa" checked><span><span class="t">All eligible open PRs</span>
+            <span class="d">Enqueue the whole backlog now.</span></span></label>
+        </div>
+        <div class="impact" style="margin-top:11px"><b>This would enqueue 7 PRs — about 7 metered reviews</b>
+          against the shared quota (blocked until 14:32, so they queue behind the window).
+          <span class="dim">2 are dependabot PRs and get skipped → 5 rounds actually enqueue.</span></div>
+      </div></div>
+    <div class="step later"><div class="h"><span class="n">5</span><h4>Enroll</h4>
+      <span class="sum">one save — the record plus only what you changed</span></div>
+      <div class="b"><button class="btn">Enroll smarter_resume</button></div></div>
+  </div>
+</section>
+
+<!-- B -->
+<section class="opt" id="b">
+  <div class="opthd"><span class="optlet">B</span>
+    <div><h2>One step at a time</h2>
+      <p class="why">A focused wizard: a single question per screen, progress dots, back and next.</p></div>
+    <div class="tags"><span class="pill mut sm plain">impossible to miss a step</span><span class="pill mut sm plain">more clicks</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> The start-policy question gets a whole screen, which suits its weight. Good
+      for the very first repo, when none of the vocabulary is familiar yet.</div>
+    <div class="bad"><b>Costly</b> Slow for the fifth repo, and revising an earlier answer means walking back
+      through the flow.</div></div>
+
+  <div class="frame">
+    <div class="card" style="max-width:660px;margin:0 auto">
+      <div class="hd"><span class="dots"><i class="done"></i><i class="done"></i><i class="done"></i><i class="on"></i><i></i></span>
+        <span class="sum">Step 4 of 5</span><span class="end"><a href="#b" class="note">Cancel</a></span></div>
+      <div class="body">
+        <h3 style="font-size:16px;font-weight:650">What about the 7 pull requests already open?</h3>
+        <p class="note" style="margin:6px 0 12px;font-size:13px;color:var(--mut)">
+          <span class="rfall">S</span> <span class="mono">smarter_resume</span> has 7 open PRs. crq can
+          leave them alone, or start reviewing them now.</p>
+        <div style="display:grid;gap:7px">
+          <label class="opt2"><input type="radio" name="pb" checked><span><span class="t">New PRs and future pushes only</span>
+            <span class="pill ok sm plain" style="margin-left:6px">recommended</span>
+            <span class="d">Nothing is enqueued today. The next push starts the first round.</span></span></label>
+          <label class="opt2"><input type="radio" name="pb"><span><span class="t">Let me pick which ones</span>
+            <span class="d">Choose from the 7 on the next screen.</span></span></label>
+          <label class="opt2"><input type="radio" name="pb"><span><span class="t">All of them</span>
+            <span class="d">≈7 metered reviews — the quota is blocked until 14:32, so they'd queue.</span></span></label>
+        </div>
+        <div style="display:flex;gap:9px;margin-top:16px;align-items:center">
+          <button class="btn ghost">← Back</button><button class="btn">Next →</button>
+          <span class="note" style="margin-left:auto">Nothing is saved until the last step</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- C -->
+<section class="opt" id="c">
+  <div class="opthd"><span class="optlet">C</span>
+    <div><h2>One dense form</h2>
+      <p class="why">No steps at all. Everything on a single screen with a sticky bar that keeps the
+      consequence and the save button in view.</p></div>
+    <div class="tags"><span class="pill mut sm plain">fastest for a power user</span><span class="pill mut sm plain">busy first impression</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Enrolling repo number six takes seconds; the sticky summary means the quota
+      cost is always on screen, not buried in a step you already passed.</div>
+    <div class="bad"><b>Costly</b> Dense and unguided — the start-policy choice sits among ordinary fields
+      instead of being given weight.</div></div>
+
+  <div class="frame">
+    <div class="card" style="margin:0">
+      <div class="hd"><h3>Enroll a repository</h3><span class="sum">nothing is written until you save</span></div>
+      <div class="body" style="display:grid;grid-template-columns:1fr 1fr;gap:14px 22px">
+        <div>
+          <div class="kv" style="grid-template-columns:110px 1fr;padding-top:0"><span class="k">Repository</span>
+            <span><select style="width:100%"><option>kristofferR/smarter_resume — 7 open PRs</option></select></span></div>
+          <div class="kv" style="grid-template-columns:110px 1fr"><span class="k">Bots</span>
+            <span style="display:flex;gap:6px;flex-wrap:wrap">
+              <span class="botpick sel"><img class="bico sm" src="icons/bot-coderabbit.png" alt="">CodeRabbit</span>
+              <span class="botpick sel"><img class="bico sm" src="icons/bot-codex.png" alt="">Codex</span>
+              <span class="botpick"><img class="bico sm" src="icons/bot-bugbot.png" alt="">Bugbot</span>
+              <span class="botpick"><img class="bico sm" src="icons/bot-macroscope.png" alt="">Macroscope</span></span></div>
+          <div class="kv" style="grid-template-columns:110px 1fr"><span class="k">Required</span>
+            <span class="note">CodeRabbit + Codex <a href="#c">change</a></span></div>
+          <div class="kv" style="grid-template-columns:110px 1fr"><span class="k">Autofix</span>
+            <span><span class="seg"><span>Off</span><span>On</span><span class="on">Default (on)</span></span></span></div>
+        </div>
+        <div>
+          <div class="kv" style="grid-template-columns:110px 1fr;padding-top:0"><span class="k">Start with</span>
+            <span><select style="width:100%"><option>New PRs and future pushes only (default)</option>
+              <option>Selected existing PRs…</option><option selected>All 7 eligible open PRs</option></select></span></div>
+          <div class="kv" style="grid-template-columns:110px 1fr"><span class="k">Fix agent</span>
+            <span class="note">claude · sonnet · high <span class="dim">(fleet default)</span> <a href="#c">override</a></span></div>
+          <div class="kv" style="grid-template-columns:110px 1fr"><span class="k">Skip authors</span>
+            <span class="note">dependabot[bot], renovate[bot] <span class="dim">(fleet default)</span></span></div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;padding:11px 16px;border-top:1px solid var(--edge);
+        background:#FAFBFC;border-radius:0 0 var(--r) var(--r);position:sticky;bottom:0">
+        <span class="impact" style="flex:1;border-left-width:4px"><b>On save:</b> enrolls smarter_resume with
+          CodeRabbit + Codex and enqueues <b>5 of 7</b> open PRs (2 skipped as dependabot) ≈ 5 metered reviews.</span>
+        <button class="btn">Enroll</button><button class="btn ghost">Cancel</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- D -->
+<section class="opt" id="d">
+  <div class="opthd"><span class="optlet">D</span>
+    <div><h2>Quick add, then review what it will do</h2>
+      <p class="why">Pick a repo and crq immediately shows the plan it would apply from fleet defaults.
+      Confirm it, or open any line to change it.</p></div>
+    <div class="tags"><span class="pill mut sm plain">two clicks in the common case</span>
+      <span class="pill mut sm plain">defaults do the work</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Matches the truth that almost every repo should just inherit the fleet setup.
+      The plan reads as a sentence, so the consequence is the main content, not a footnote.</div>
+    <div class="bad"><b>Costly</b> Customising means expanding rows, so heavier setups take slightly more work
+      than the flat form in C.</div></div>
+
+  <div class="frame">
+    <div class="card" style="max-width:720px;margin:0 auto">
+      <div class="hd"><h3>Add repository</h3><span class="end"><span class="searchbox">⌕ smarter_resume</span></span></div>
+      <div class="body">
+        <div class="rowline" style="padding-bottom:12px">
+          <span class="rfall lg">S</span>
+          <div><div style="font-weight:600" class="mono">kristofferR/smarter_resume</div>
+            <div class="note">Go · public · 7 open PRs · last push 2 days ago</div></div>
+          <span class="end pill ok sm">Ready to enroll</span></div>
+
+        <div class="hintbox" style="margin:4px 0 10px"><b>Here's what crq would do</b> — every line comes
+          from your fleet defaults. Change any of them, or accept as is.</div>
+
+        <div class="rowline"><span style="width:22px" class="dim">1</span>
+          <span>Review with <img class="bico sm" src="icons/bot-coderabbit.png" alt=""> <b>CodeRabbit</b> and
+            <img class="bico sm" src="icons/bot-codex.png" alt=""> <b>Codex</b>, waiting for both</span>
+          <a class="end" href="#d">change</a></div>
+        <div class="rowline"><span style="width:22px" class="dim">2</span>
+          <span>Start with <b>new PRs only</b> — the 7 already open are left alone
+            <span class="dim">(no quota spent today)</span></span>
+          <a class="end" href="#d">change</a></div>
+        <div class="rowline"><span style="width:22px" class="dim">3</span>
+          <span>Let crq <b>fix findings</b> with claude · sonnet · high, up to 3 attempts</span>
+          <a class="end" href="#d">change</a></div>
+        <div class="rowline"><span style="width:22px" class="dim">4</span>
+          <span>Skip PRs by <span class="mono">dependabot[bot]</span> and <span class="mono">renovate[bot]</span></span>
+          <a class="end" href="#d">change</a></div>
+
+        <div style="display:flex;gap:9px;margin-top:14px;align-items:center">
+          <button class="btn">Enroll with this plan</button>
+          <button class="btn ghost">Customise everything…</button>
+          <span class="note" style="margin-left:auto">Picked up on the daemon's next pass (~1 min)</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<details class="notes">
+  <summary>Notes on these options</summary>
+  <ul>
+    <li>The backlog contract is the real content of this page — compare how visible each option makes it.
+      A gives it a step, B a whole screen, C a sticky line, D a sentence in the plan.</li>
+    <li>All four write once, and all four state the metered cost including the dependabot skip.</li>
+    <li>D degrades into C via "Customise everything…", so they aren't mutually exclusive.</li>
+  </ul>
+</details>
+
+</body>
+</html>

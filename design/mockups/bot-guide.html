@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Review bots — Code Review Queue</title>
+<link rel="icon" href="icons/repo-crq.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,650;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#F2F3F6; --card:#FFFFFF; --edge:#E3E6EB; --edge2:#C9CFD8;
+  --ink:#1B2430; --mut:#5B6472; --faint:#8B93A0;
+  --ok:#1F7A4D; --ok-bg:#EAF4EE; --ok-edge:#C7E2D2;
+  --warn:#8A5300; --warn-fg:#B45D10; --warn-bg:#FBF1E2; --warn-edge:#EAD7B4;
+  --bad:#B3362B; --bad-bg:#F9ECEA; --bad-edge:#EFCFCB;
+  --acc:#2B5FAA; --acc-bg:#EBF1FA; --acc-edge:#C9D8EF;
+  --r:10px; --shadow:0 1px 2px rgba(27,36,48,.05),0 4px 14px rgba(27,36,48,.04);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:14px;line-height:1.5;
+  color:var(--ink);background:var(--bg);min-width:820px}
+.mono{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.92em}
+a{color:var(--acc);text-decoration:none}
+a:hover{text-decoration:underline}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px}
+.num{font-variant-numeric:tabular-nums}
+.dim{color:var(--faint)}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;
+  padding:1px 10px 1px 7px;border-radius:99px;border:1px solid transparent;white-space:nowrap}
+.pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+.pill.ok{color:var(--ok);background:var(--ok-bg);border-color:var(--ok-edge)}
+.pill.warn{color:var(--warn);background:var(--warn-bg);border-color:var(--warn-edge)}
+.pill.mut{color:var(--mut);background:#EEF0F3;border-color:var(--edge)}
+.pill.acc{color:var(--acc);background:var(--acc-bg);border-color:var(--acc-edge)}
+
+.topbar{display:flex;align-items:center;flex-wrap:wrap;gap:16px;background:var(--card);
+  border-bottom:1px solid var(--edge);padding:10px 24px;position:sticky;top:0;z-index:6}
+.brand{display:flex;align-items:baseline;gap:10px}
+.brand .crq{font-family:"IBM Plex Mono",monospace;font-weight:500;font-size:13px;color:#fff;
+  background:var(--ink);border-radius:6px;padding:2px 7px}
+.brand .name{font-weight:650;font-size:16px;letter-spacing:-.01em}
+.topbar nav{display:flex;gap:4px;margin-left:8px}
+.topbar nav a{color:var(--mut);padding:5px 12px;border-radius:8px;font-weight:500;font-size:13.5px}
+.topbar nav a:hover{background:var(--bg);text-decoration:none}
+.topbar nav a.on{color:var(--ink);background:var(--bg)}
+.fresh{margin-left:auto;display:flex;align-items:center;gap:7px;color:var(--mut);font-size:12px}
+.fresh::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--ok)}
+
+.wrap{max-width:1120px;margin:0 auto;padding:22px 24px 80px}
+h1{font-size:20px;font-weight:650;letter-spacing:-.01em}
+.sub{color:var(--mut);font-size:13.5px;margin:2px 0 4px;max-width:760px}
+.policy{font-size:12.5px;color:var(--faint);margin-bottom:18px}
+.policy b{color:var(--mut)}
+
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.bot{background:var(--card);border:1px solid var(--edge);border-radius:var(--r);box-shadow:var(--shadow);
+  display:flex;flex-direction:column}
+.bot.suggested{border-color:var(--ok-edge);box-shadow:0 0 0 3px var(--ok-bg),var(--shadow)}
+.bot .hd{display:flex;align-items:center;gap:12px;padding:14px 20px 0}
+.bot .logo{width:38px;height:38px;border-radius:10px;flex:none;border:1px solid var(--edge);background:#fff;object-fit:cover}
+.bot .hd h2{font-size:16px;font-weight:650}
+.bot .hd .role{font-size:12px;color:var(--faint)}
+.bot .hd .st{margin-left:auto}
+.sugline{margin:10px 20px 0;font-size:12.5px;color:var(--ok);background:var(--ok-bg);
+  border:1px solid var(--ok-edge);border-radius:8px;padding:6px 12px}
+.sugline b{font-weight:600}
+.bot .body{padding:12px 20px 0;font-size:13.5px;color:var(--mut);flex:1}
+.bot .body p{margin-bottom:8px}
+.req{font-size:12.5px;color:var(--faint);border-top:1px dashed var(--edge);padding-top:8px}
+.req .chk{color:var(--faint)}
+.steps{list-style:none;margin:8px 0 0;font-size:12.5px;color:var(--mut)}
+.steps li{padding:3px 0 3px 22px;position:relative}
+.steps li::before{content:"";position:absolute;left:4px;top:9px;width:7px;height:7px;border-radius:50%;
+  border:1.5px solid var(--edge2)}
+.steps li.done::before{background:var(--ok);border-color:var(--ok)}
+.bot .cta{display:flex;gap:10px;align-items:center;padding:14px 20px 8px;flex-wrap:wrap}
+.btn{font:inherit;font-weight:600;font-size:13px;border:none;border-radius:8px;padding:6px 16px;cursor:pointer;
+  background:var(--ink);color:#fff}
+.btn:hover{background:#2E3C4E}
+.btn.ghost{background:none;border:1px solid var(--edge);color:var(--mut)}
+.btn.ghost:hover{border-color:var(--edge2)}
+.disc{font-size:11.5px;color:var(--faint);padding:0 20px 14px}
+
+.layoutpick{display:flex;align-items:center;gap:4px;margin-left:14px;padding-left:14px;border-left:1px solid var(--edge)}
+.layoutpick .lbl{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin-right:3px}
+.layoutpick a{width:25px;height:25px;border-radius:7px;border:1px solid var(--edge);display:flex;
+  align-items:center;justify-content:center;font-size:12.5px;font-weight:650;color:var(--mut);text-decoration:none}
+.layoutpick a:hover{border-color:var(--acc-edge);color:var(--acc);background:var(--acc-bg);text-decoration:none}
+.layoutpick a.on{background:var(--ink);border-color:var(--ink);color:#fff}
+
+/* ---- narrower windows: reflow instead of overflowing ---- */
+@media (max-width:1400px){
+  .shell{grid-template-columns:minmax(0,1fr)!important}
+  .rail,.feedcol,.panel{position:static!important}
+  .cols{grid-template-columns:minmax(0,1fr)!important}
+}
+@media (max-width:1150px){
+  .quota{grid-template-columns:1fr!important}
+  .bots,.hosts,.grid,.botrow,.cards{grid-template-columns:1fr 1fr!important}
+  .kv,.set,.flat{grid-template-columns:minmax(0,1fr)!important;gap:5px!important}
+  .kv .prv,.set .ov,.flat .ov{text-align:left!important}
+  .c-host{display:none}
+  table.tools th.h{width:auto}
+}
+@media (max-width:940px){
+  .bots,.hosts,.grid,.botrow,.cards{grid-template-columns:1fr!important}
+  .tradeoff{grid-template-columns:1fr!important}
+  .c-att{display:none}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand"><span class="crq">crq</span><span class="name">Code Review Queue</span></div>
+  <nav>
+    <a href="overview.html">Overview</a>
+    <a href="settings.html">Repos</a>
+    <a class="on" href="bot-guide.html">Bots</a>
+    <a href="setup.html">Setup</a>
+    <a href="fleet-settings.html">Settings</a>
+  </nav>
+  <span class="layoutpick" title="This page is built as option A — B/C/D open the comparison">
+    <span class="lbl">Layout</span><a class="on" href="bot-guide.html">A</a><a href="bot-guide-options.html#b">B</a><a href="bot-guide-options.html#c">C</a><a href="bot-guide-options.html#d">D</a>
+  </span>
+  <div class="fresh num">live · rev 4182 · 13:51:26</div>
+</div>
+
+<div class="wrap">
+  <h1>Review bots</h1>
+  <p class="sub">The reviewers Code Review Queue can orchestrate: one metered primary plus free
+  co-reviewers. Status is best-effort, read from activity crq has already classified on your repos —
+  it never blocks enabling a bot.</p>
+  <p class="policy"><b>Suggestions are based on compatibility, not referral compensation.</b>
+  Some signup links are referral links — each is labeled.</p>
+
+  <div class="grid">
+
+    <div class="bot suggested">
+      <div class="hd">
+        <img class="logo" src="icons/bot-coderabbit.png" alt="CodeRabbit logo">
+        <div><h2>CodeRabbit</h2><div class="role">Primary reviewer · metered by the shared account quota</div></div>
+        <span class="st pill ok">Seen recently · 13:50</span>
+      </div>
+      <div class="sugline"><b>Suggested for this repo</b> — kristofferR/coderabbit-queue is public, and CodeRabbit’s
+        Pro tier is free for open source.</div>
+      <div class="body">
+        <p>Full-PR reviews with summaries and inline findings; the reviewer crq paces through the
+        account-wide queue and fire slot.</p>
+        <div class="req">Requires the CodeRabbit GitHub App. Free for public repos; paid plans for
+        private ones — <a href="#">pricing ↗</a> <span class="chk">(last checked 2026-07-27)</span>.</div>
+        <ol class="steps">
+          <li class="done">GitHub App installed</li>
+          <li class="done">Repo access granted</li>
+          <li class="done">Active on 6 repos</li>
+        </ol>
+      </div>
+      <div class="cta">
+        <a class="btn" href="settings.html">Manage repositories</a>
+        <a class="btn ghost" href="#">Visit vendor ↗ <span class="dim">referral</span></a>
+      </div>
+      <div class="disc">Referral link — supports Code Review Queue development.</div>
+    </div>
+
+    <div class="bot suggested">
+      <div class="hd">
+        <img class="logo" src="icons/bot-codex.png" alt="Codex logo">
+        <div><h2>Codex</h2><div class="role">Co-reviewer · free, no crq quota</div></div>
+        <span class="st pill ok">Seen recently · 13:50</span>
+      </div>
+      <div class="sugline"><b>Suggested</b> — the <span class="mono">codex</span> CLI is on
+        <span class="mono">mbp</span>, so you appear to already have a ChatGPT/Codex setup that
+        includes cloud code review.</div>
+      <div class="body">
+        <p>Deep defect-finding on demand (<span class="mono">@codex review</span>); crq triggers it
+        per round and reads its verdicts, including reply rebuttals on declined findings.</p>
+        <div class="req">Included with ChatGPT plans that carry Codex — <a href="#">plans ↗</a>
+        <span class="chk">(last checked 2026-07-27)</span>. Requires the Codex GitHub connector.</div>
+        <ol class="steps">
+          <li class="done">GitHub connector installed</li>
+          <li class="done">Repo access granted</li>
+          <li class="done">Active on 5 repos</li>
+        </ol>
+      </div>
+      <div class="cta">
+        <a class="btn" href="settings.html">Manage repositories</a>
+        <a class="btn ghost" href="#">Visit vendor ↗</a>
+      </div>
+      <div class="disc">No referral program — plain link.</div>
+    </div>
+
+    <div class="bot">
+      <div class="hd">
+        <img class="logo" src="icons/bot-bugbot.png" alt="Cursor Bugbot logo">
+        <div><h2>Cursor Bugbot</h2><div class="role">Co-reviewer · free, no crq quota</div></div>
+        <span class="st pill warn">Previously seen · 2026-07-21</span>
+      </div>
+      <div class="body">
+        <p>Bug-focused review (<span class="mono">bugbot run</span>) from the Cursor team; strongest
+        when you already live in Cursor. crq self-heals its triggers when it goes quiet.</p>
+        <div class="req">Requires a Cursor subscription with Bugbot — <a href="#">details ↗</a>
+        <span class="chk">(last checked 2026-07-27)</span>.</div>
+        <ol class="steps">
+          <li class="done">GitHub App installed</li>
+          <li class="done">Repo access granted</li>
+          <li>Enabled in crq on 2 of 6 repos</li>
+        </ol>
+      </div>
+      <div class="cta">
+        <a class="btn" href="settings.html">Configure in Code Review Queue</a>
+        <a class="btn ghost" href="#">Visit vendor ↗ <span class="dim">referral</span></a>
+      </div>
+      <div class="disc">Referral link — supports Code Review Queue development.</div>
+    </div>
+
+    <div class="bot">
+      <div class="hd">
+        <img class="logo" src="icons/bot-macroscope.png" alt="Macroscope logo">
+        <div><h2>Macroscope</h2><div class="role">Co-reviewer · free tier, no crq quota</div></div>
+        <span class="st pill mut">Setup not verified</span>
+      </div>
+      <div class="body">
+        <p>Architecture-aware review (<span class="mono">@macroscope-app review</span>) with
+        clean/issues verdicts crq reads directly. Worth trying if neither Codex nor Bugbot fits.</p>
+        <div class="req">Free tier available — <a href="#">pricing ↗</a>
+        <span class="chk">(last checked 2026-07-27)</span>. Requires the Macroscope GitHub App.</div>
+        <ol class="steps">
+          <li>Install the GitHub App</li>
+          <li>Grant access to the repos you’ll enable</li>
+          <li>Enable it in crq — verification happens on its first review</li>
+        </ol>
+      </div>
+      <div class="cta">
+        <a class="btn" href="#">View setup</a>
+        <a class="btn ghost" href="#">Visit vendor ↗ <span class="dim">referral</span></a>
+      </div>
+      <div class="disc">Referral link — supports Code Review Queue development. You can enable an
+      unverified bot anywhere — status catches up after its first review.</div>
+    </div>
+
+  </div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Add repo — Code Review Queue</title>
+<link rel="icon" href="icons/repo-crq.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,650;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#F2F3F6; --card:#FFFFFF; --edge:#E3E6EB; --edge2:#C9CFD8;
+  --ink:#1B2430; --mut:#5B6472; --faint:#8B93A0;
+  --ok:#1F7A4D; --ok-bg:#EAF4EE; --ok-edge:#C7E2D2;
+  --warn:#8A5300; --warn-fg:#B45D10; --warn-bg:#FBF1E2; --warn-edge:#EAD7B4;
+  --bad:#B3362B; --bad-bg:#F9ECEA; --bad-edge:#EFCFCB;
+  --acc:#2B5FAA; --acc-bg:#EBF1FA; --acc-edge:#C9D8EF;
+  --r:10px; --shadow:0 1px 2px rgba(27,36,48,.05),0 4px 14px rgba(27,36,48,.04);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:14px;line-height:1.5;
+  color:var(--ink);background:var(--bg);min-width:820px}
+.mono{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.92em}
+a{color:var(--acc);text-decoration:none}
+a:hover{text-decoration:underline}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px}
+.num{font-variant-numeric:tabular-nums}
+.dim{color:var(--faint)}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;
+  padding:1px 10px 1px 7px;border-radius:99px;border:1px solid transparent;white-space:nowrap}
+.pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+.pill.ok{color:var(--ok);background:var(--ok-bg);border-color:var(--ok-edge)}
+.pill.warn{color:var(--warn);background:var(--warn-bg);border-color:var(--warn-edge)}
+.pill.mut{color:var(--mut);background:#EEF0F3;border-color:var(--edge)}
+.pill.acc{color:var(--acc);background:var(--acc-bg);border-color:var(--acc-edge)}
+
+.topbar{display:flex;align-items:center;flex-wrap:wrap;gap:16px;background:var(--card);
+  border-bottom:1px solid var(--edge);padding:10px 24px;position:sticky;top:0;z-index:6}
+.brand{display:flex;align-items:baseline;gap:10px}
+.brand .crq{font-family:"IBM Plex Mono",monospace;font-weight:500;font-size:13px;color:#fff;
+  background:var(--ink);border-radius:6px;padding:2px 7px}
+.brand .name{font-weight:650;font-size:16px;letter-spacing:-.01em}
+.topbar nav{display:flex;gap:4px;margin-left:8px}
+.topbar nav a{color:var(--mut);padding:5px 12px;border-radius:8px;font-weight:500;font-size:13.5px}
+.topbar nav a:hover{background:var(--bg);text-decoration:none}
+.topbar nav a.on{color:var(--ink);background:var(--bg)}
+.fresh{margin-left:auto;display:flex;align-items:center;gap:7px;color:var(--mut);font-size:12px}
+.fresh::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--ok)}
+
+.wrap{max-width:860px;margin:0 auto;padding:22px 24px 80px}
+.crumb{font-size:12.5px;color:var(--faint);margin-bottom:8px}
+h1{font-size:20px;font-weight:650;letter-spacing:-.01em;margin-bottom:2px}
+.sub{color:var(--mut);font-size:13.5px;margin-bottom:18px}
+
+.step{background:var(--card);border:1px solid var(--edge);border-radius:var(--r);
+  box-shadow:var(--shadow);margin-bottom:12px;position:relative}
+.step .hd{display:flex;align-items:center;gap:12px;padding:12px 18px}
+.step .n{width:24px;height:24px;border-radius:50%;background:#EEF0F3;color:var(--mut);
+  display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:600;flex:none}
+.step.done .n{background:var(--ok);color:#fff}
+.step.act .n{background:var(--ink);color:#fff}
+.step .hd h2{font-size:14.5px;font-weight:650}
+.step .hd .sum{color:var(--mut);font-size:13px}
+.step .hd .edit{margin-left:auto;font-size:12.5px}
+.step.act{border-color:var(--acc-edge);box-shadow:0 0 0 3px var(--acc-bg),var(--shadow)}
+.step .body{padding:2px 18px 16px 54px}
+.step.dis{opacity:.55}
+
+/* step 1 summary chips */
+.repochip{display:inline-flex;align-items:center;gap:10px;border:1px solid var(--edge);border-radius:8px;
+  padding:6px 12px;background:#FBFBFC;font-size:13px}
+.repochip .nm{font-weight:600}
+.rfall{display:inline-flex;width:18px;height:18px;border-radius:5px;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff;background:#7A8496;flex:none}
+.rico{width:18px;height:18px;border-radius:5px;object-fit:cover;background:#fff;border:1px solid var(--edge);flex:none}
+.bico{width:20px;height:20px;border-radius:6px;border:1px solid var(--edge);background:#fff;flex:none;margin-right:2px}
+.bot .nmrow{display:flex;align-items:center;gap:8px}
+
+/* step 2 mini bot cards */
+.botrow{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:6px}
+.bot{border:1px solid var(--edge);border-radius:8px;padding:9px 12px;font-size:12.5px;color:var(--mut);
+  display:flex;gap:10px;align-items:flex-start}
+.bot input{margin-top:3px;accent-color:var(--ok)}
+.bot .nm{font-weight:600;color:var(--ink);font-size:13px}
+.bot .sug{display:inline-flex;margin-left:6px}
+.bot.sel{border-color:var(--ok-edge);background:var(--ok-bg)}
+
+/* step 4 — start policy (ACTIVE) */
+.pol{display:flex;flex-direction:column;gap:8px;margin-top:6px}
+.opt{display:flex;gap:12px;border:1px solid var(--edge);border-radius:8px;padding:10px 14px;cursor:pointer}
+.opt input{margin-top:3px;accent-color:var(--ink)}
+.opt .t{font-weight:550}
+.opt .d{font-size:12.5px;color:var(--mut)}
+.opt.sel{border-color:var(--warn-edge);background:var(--warn-bg)}
+.opt .def{font-size:11px;color:var(--ok);font-weight:600;letter-spacing:.04em;margin-left:8px}
+.impact{border:1px solid var(--warn-edge);border-left:4px solid var(--warn-fg);background:var(--warn-bg);
+  border-radius:8px;padding:10px 14px;margin-top:12px;font-size:13px}
+.impact b{color:var(--warn)}
+.impact .sub2{color:var(--mut);font-size:12.5px;margin-top:4px}
+
+.btnrow{display:flex;gap:10px;align-items:center;margin-top:16px}
+.btn{font:inherit;font-weight:600;font-size:13.5px;border:none;border-radius:8px;padding:8px 20px;cursor:pointer;
+  background:var(--ink);color:#fff}
+.btn:hover{background:#2E3C4E}
+.btn.ghost{background:none;border:1px solid var(--edge);color:var(--mut)}
+.expect{font-size:12.5px;color:var(--mut);margin-top:10px}
+.expect b{color:var(--ink)}
+
+.notes{position:fixed;left:14px;bottom:12px;max-width:390px;font-size:12px;color:var(--mut);
+  background:var(--card);border:1px solid var(--edge);border-radius:8px;padding:8px 14px;z-index:10;box-shadow:var(--shadow)}
+.notes summary{cursor:pointer;color:var(--acc);font-weight:500}
+.notes ul{margin:6px 0 4px 16px}
+
+.layoutpick{display:flex;align-items:center;gap:4px;margin-left:14px;padding-left:14px;border-left:1px solid var(--edge)}
+.layoutpick .lbl{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin-right:3px}
+.layoutpick a{width:25px;height:25px;border-radius:7px;border:1px solid var(--edge);display:flex;
+  align-items:center;justify-content:center;font-size:12.5px;font-weight:650;color:var(--mut);text-decoration:none}
+.layoutpick a:hover{border-color:var(--acc-edge);color:var(--acc);background:var(--acc-bg);text-decoration:none}
+.layoutpick a.on{background:var(--ink);border-color:var(--ink);color:#fff}
+
+/* ---- narrower windows: reflow instead of overflowing ---- */
+@media (max-width:1400px){
+  .shell{grid-template-columns:minmax(0,1fr)!important}
+  .rail,.feedcol,.panel{position:static!important}
+  .cols{grid-template-columns:minmax(0,1fr)!important}
+}
+@media (max-width:1150px){
+  .quota{grid-template-columns:1fr!important}
+  .bots,.hosts,.grid,.botrow,.cards{grid-template-columns:1fr 1fr!important}
+  .kv,.set,.flat{grid-template-columns:minmax(0,1fr)!important;gap:5px!important}
+  .kv .prv,.set .ov,.flat .ov{text-align:left!important}
+  .c-host{display:none}
+  table.tools th.h{width:auto}
+}
+@media (max-width:940px){
+  .bots,.hosts,.grid,.botrow,.cards{grid-template-columns:1fr!important}
+  .tradeoff{grid-template-columns:1fr!important}
+  .c-att{display:none}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand"><span class="crq">crq</span><span class="name">Code Review Queue</span></div>
+  <nav>
+    <a href="overview.html">Overview</a>
+    <a class="on" href="settings.html">Repos</a>
+    <a href="bot-guide.html">Bots</a>
+    <a href="setup.html">Setup</a>
+    <a href="fleet-settings.html">Settings</a>
+  </nav>
+  <span class="layoutpick" title="This page is built as option A — B/C/D open the comparison">
+    <span class="lbl">Layout</span><a class="on" href="add-repo.html">A</a><a href="add-repo-options.html#b">B</a><a href="add-repo-options.html#c">C</a><a href="add-repo-options.html#d">D</a>
+  </span>
+  <div class="fresh num">live · rev 4182 · 13:51:26</div>
+</div>
+
+<div class="wrap">
+  <div class="crumb"><a href="settings.html">Repos</a> / Add repo</div>
+  <h1>Enroll a repository in automatic review</h1>
+  <p class="sub">Nothing is written until the final step — the whole flow is one save.</p>
+
+  <div class="step done">
+    <div class="hd"><span class="n">✓</span><h2>Pick a repository</h2>
+      <span class="sum">from 14 repos under <span class="mono">kristofferR</span> (2 already enrolled, 1 excluded by env)</span>
+      <a class="edit" href="#">Change</a></div>
+    <div class="body">
+      <span class="repochip"><span class="rfall">S</span><span class="nm mono">kristofferR/smarter_resume</span>
+        <span class="pill mut">public</span><span class="dim">Go · 7 open PRs · last push 2 days ago · no favicon in repo</span></span>
+    </div>
+  </div>
+
+  <div class="step done">
+    <div class="hd"><span class="n">✓</span><h2>Choose review bots</h2>
+      <span class="sum">CodeRabbit (required) + Codex (required) — fleet default</span>
+      <a class="edit" href="#">Change</a></div>
+    <div class="body">
+      <div class="botrow">
+        <label class="bot sel"><input type="checkbox" checked>
+          <span><span class="nmrow"><img class="bico" src="icons/bot-coderabbit.png" alt=""><span class="nm">CodeRabbit</span></span><span class="sug"><span class="pill ok">Suggested — public repo: free Pro for open source</span></span><br>
+          Primary reviewer, metered by the shared quota.</span></label>
+        <label class="bot sel"><input type="checkbox" checked>
+          <span><span class="nmrow"><img class="bico" src="icons/bot-codex.png" alt=""><span class="nm">Codex</span></span><span class="sug"><span class="pill ok">Suggested — codex CLI detected on mbp</span></span><br>
+          Co-reviewer; free with your existing ChatGPT/Codex setup.</span></label>
+        <label class="bot"><input type="checkbox">
+          <span><span class="nmrow"><img class="bico" src="icons/bot-bugbot.png" alt=""><span class="nm">Cursor Bugbot</span></span>Co-reviewer · previously seen (2026-07-21).</span></label>
+        <label class="bot"><input type="checkbox">
+          <span><span class="nmrow"><img class="bico" src="icons/bot-macroscope.png" alt=""><span class="nm">Macroscope</span> <span class="pill mut">Setup not verified</span></span> ·
+          <a href="bot-guide.html">set up →</a><br>Enabling anyway is fine — it just can’t be verified yet.</span></label>
+      </div>
+    </div>
+  </div>
+
+  <div class="step done">
+    <div class="hd"><span class="n">✓</span><h2>Initial settings</h2>
+      <span class="sum">everything at fleet default (fix sessions default-on · claude / sonnet / high)</span>
+      <a class="edit" href="#">Change</a></div>
+  </div>
+
+  <div class="step act">
+    <div class="hd"><span class="n">4</span><h2>Start policy</h2>
+      <span class="sum">what happens to the 7 PRs that are already open?</span></div>
+    <div class="body">
+      <div class="pol">
+        <label class="opt"><input type="radio" name="pol">
+          <span><span class="t">New PRs and future pushes only</span><span class="def">DEFAULT</span><br>
+          <span class="d">The backlog is left alone; crq starts with the next PR or push.</span></span></label>
+        <label class="opt"><input type="radio" name="pol">
+          <span><span class="t">Selected existing PRs</span><br>
+          <span class="d">Pick which of the 7 open PRs to enqueue now.</span></span></label>
+        <label class="opt sel"><input type="radio" name="pol" checked>
+          <span><span class="t">All eligible open PRs</span><br>
+          <span class="d">Enqueue the whole backlog now.</span></span></label>
+      </div>
+      <div class="impact">
+        <b>This would enqueue 7 open PRs — about 7 metered CodeRabbit reviews</b> against the shared
+        account quota (currently blocked until 14:32, so they queue behind the window).
+        <div class="sub2">2 of the 7 are by <span class="mono">dependabot[bot]</span> and will be skipped
+        by the fleet skip-authors rule → <b>5 rounds actually enqueued</b>.</div>
+        <div class="sub2" style="border-top:1px dashed var(--warn-edge);margin-top:8px;padding-top:8px">
+          <b style="color:var(--warn)">Estimated cost ≈ $4.90.</b> Macroscope bills $0.05 per KB of diff
+          with a 10 KB floor — 58 KB across the 5 PRs, two of them under the floor. CodeRabbit is $0
+          while inside the plan allowance, then $0.25 per file.
+          <span class="dim">Estimate from today’s diff sizes; prices last checked 2026-07-27.</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step dis">
+    <div class="hd"><span class="n">5</span><h2>Enroll</h2>
+      <span class="sum">one save — writes the enrollment record and only the settings you changed</span></div>
+    <div class="body">
+      <div class="btnrow">
+        <button class="btn">Enroll smarter_resume</button>
+        <button class="btn ghost">Cancel</button>
+      </div>
+      <p class="expect">After saving: <b>picked up on the daemon’s next auto-review pass</b> (~1 min).
+      If no daemon holds the leader lease, this escalates: “No daemon is running — nothing will be
+      enqueued until one is.”</p>
+    </div>
+  </div>
+</div>
+
+<details class="notes">
+  <summary>Mockup notes</summary>
+  <ul>
+    <li>All steps painted stacked; step 4 (start policy — the backlog contract) is the active one, with its impact summary. “All eligible open PRs” is selected to show quota exposure; the real default is “New PRs only”.</li>
+    <li>Suggestion badges state their criterion inline; an unverified bot is never disabled — it enrolls with a warning.</li>
+    <li>In production this is one route with progressive steps; nothing is written until Enroll (one CAS write).</li>
+  </ul>
+</details>
+
+</body>
+</html>

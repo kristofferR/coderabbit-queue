@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Setup — 4 UX options</title>
+<link rel="icon" href="icons/repo-crq.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,650;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="opt.css">
+<style>
+.mark{font-size:13px}
+.mark.ok{color:var(--ok)}.mark.bad{color:var(--bad)}.mark.warn{color:var(--warn-fg)}.mark.mut{color:var(--edge2)}
+.tool .nm{font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:12.5px}
+.tool .why{font-size:12px;color:var(--mut);margin-top:1px;max-width:400px}
+.grp td{background:#FAFBFC;font-size:10.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--mut)}
+.grp td span{font-weight:400;letter-spacing:0;text-transform:none;color:var(--faint);margin-left:7px}
+.hostcard{border:1px solid var(--edge);border-radius:8px;padding:9px 12px;font-size:12.5px;color:var(--mut)}
+.hostcard.bad{border-color:var(--bad-edge);background:var(--bad-bg)}
+.hostcard .nm{font-family:"IBM Plex Mono",monospace;font-weight:650;color:var(--ink);font-size:13px}
+.bar{height:7px;border-radius:99px;background:#EEF0F3;overflow:hidden;display:flex}
+.bar i{display:block;height:100%}
+
+/* one variant at a time — the jump chips are radios, not anchors */
+#O-A,#O-B,#O-C,#O-D{position:absolute;left:-9999px}
+.opt{display:none}
+#O-A:checked ~ #a,#O-B:checked ~ #b,#O-C:checked ~ #c,#O-D:checked ~ #d{display:block}
+.optbar .jump label{font-size:12.5px;font-weight:600;color:var(--mut);border:1px solid var(--edge);
+  border-radius:8px;padding:3px 12px;cursor:pointer}
+.optbar .jump label:hover{border-color:var(--acc-edge);color:var(--acc);background:var(--acc-bg)}
+#O-A:checked ~ .optbar label[for="O-A"],#O-B:checked ~ .optbar label[for="O-B"],
+#O-C:checked ~ .optbar label[for="O-C"],#O-D:checked ~ .optbar label[for="O-D"]{
+  background:var(--ink);border-color:var(--ink);color:#fff}
+.opt{border-top:none;padding-top:18px}
+</style>
+</head>
+<body>
+<input type="radio" name="opt" id="O-A" checked><input type="radio" name="opt" id="O-B"><input type="radio" name="opt" id="O-C"><input type="radio" name="opt" id="O-D">
+
+<div class="optbar">
+  <span class="crq">crq</span><h1>Setup &amp; readiness</h1>
+  <span class="sub">4 UX options · same styling, different structure</span>
+  <span class="jump"><label for="O-A">A</label><label for="O-B">B</label><label for="O-C">C</label><label for="O-D">D</label>
+    <a class="back" href="options.html">All pages ↩</a></span>
+</div>
+
+<div class="intro">
+  <p>The job: answer “is everything crq needs actually present?”, on the first run <b>and</b> six months
+  later when one host stops fixing. The running example is the same in all four: <b>atlas</b> has
+  <span class="mono">claude</span> installed for your shell but invisible to its service, which is why
+  autofix has failed there four times.</p>
+</div>
+
+<!-- A -->
+<section class="opt" id="a">
+  <div class="opthd"><span class="optlet">A</span>
+    <div><h2>Checklist cards + tool × host matrix</h2>
+      <p class="why">Grouped by concern — access, tools, hosts, bots, repos — with the CLI tools as a grid
+      of tools down and machines across. What we have today.</p></div>
+    <div class="tags"><span class="pill mut sm plain">gaps visible per machine</span><span class="pill mut sm plain">wide</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> The matrix makes “installed here, missing there” obvious in one glance, which
+      is the actual shape of most fleet problems.</div>
+    <div class="bad"><b>Costly</b> Wide table, and it grows awkwardly past ~4 hosts. Everything is shown at
+      equal weight, so the one blocking problem doesn't stand out on its own.</div></div>
+
+  <div class="frame">
+    <div class="card" style="margin:0 0 10px">
+      <div class="hd"><h3>2 things need attention</h3>
+        <span class="end"><span class="pill ok sm">6 ready</span><span class="pill warn sm">2 attention</span>
+          <span class="pill mut sm">1 optional missing</span><button class="btn ghost sm">Re-run</button></span></div>
+      <div class="body" style="padding-top:8px"><div class="bar">
+        <i style="background:var(--ok);width:66%"></i><i style="background:var(--warn-fg);width:22%"></i>
+        <i style="background:var(--bad);width:12%"></i></div></div>
+    </div>
+    <div class="card" style="margin:0">
+      <div class="hd"><h3>Command-line tools</h3><span class="sum">what each host needs on its PATH</span>
+        <span class="end"><span class="pill bad sm">1 blocking</span></span></div>
+      <div class="body">
+        <table class="t">
+          <thead><tr><th>Tool</th><th class="c">mbp</th><th class="c">atlas</th><th class="c">wsl</th></tr></thead>
+          <tbody>
+            <tr class="grp"><td colspan="4">Required <span>— no daemon runs without these</span></td></tr>
+            <tr class="tool"><td><div class="nm">crq</div><div class="why">Every host must run the same version.</div></td>
+              <td class="c"><span class="pill ok sm">2.4.1</span></td><td class="c"><span class="pill ok sm">2.4.1</span></td>
+              <td class="c"><span class="pill warn sm">2.3.0 behind</span></td></tr>
+            <tr class="tool"><td><div class="nm">git</div><div class="why">Mirrors and worktrees.</div></td>
+              <td class="c"><span class="pill ok sm">2.51</span></td><td class="c"><span class="pill ok sm">2.47</span></td>
+              <td class="c"><span class="pill ok sm">2.43</span></td></tr>
+            <tr class="tool"><td><div class="nm">gh</div><div class="why">How crq gets a token.</div></td>
+              <td class="c"><span class="pill ok sm">auth</span></td><td class="c"><span class="pill ok sm">auth</span></td>
+              <td class="c"><span class="pill ok sm">auth</span></td></tr>
+            <tr class="grp"><td colspan="4">Recommended <span>— each turns on a feature</span></td></tr>
+            <tr class="tool"><td><div class="nm">claude</div><div class="why">The default autofix agent.</div></td>
+              <td class="c"><span class="pill ok sm">2.1.4</span></td>
+              <td class="c"><span class="pill bad sm">not on service PATH</span></td>
+              <td class="c"><span class="pill mut sm">missing</span></td></tr>
+            <tr class="tool"><td><div class="nm">coderabbit</div><div class="why">Local preflight before pushing.</div></td>
+              <td class="c"><span class="pill ok sm">0.3.4</span></td><td class="c"><span class="pill mut sm">missing</span></td>
+              <td class="c"><span class="pill mut sm">missing</span></td></tr>
+            <tr class="tool"><td><div class="nm">macroscope</div><div class="why">Second local opinion.</div></td>
+              <td class="c"><span class="pill mut sm">missing</span></td><td class="c"><span class="pill mut sm">missing</span></td>
+              <td class="c"><span class="pill mut sm">missing</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- B -->
+<section class="opt" id="b">
+  <div class="opthd"><span class="optlet">B</span>
+    <div><h2>One host at a time</h2>
+      <p class="why">Pick a machine, see everything about that machine: its tools, services, versions and
+      last error — in the order you'd fix them.</p></div>
+    <div class="tags"><span class="pill mut sm plain">matches how you fix things</span>
+      <span class="pill mut sm plain">scales to many hosts</span><span class="pill mut sm plain">no cross-host view</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> You fix one machine at a time, in one SSH session, and this page matches that.
+      Adding a fourth or fifth host costs nothing.</div>
+    <div class="bad"><b>Costly</b> “Which hosts lack claude?” needs three clicks instead of one look, and
+      fleet-wide problems are harder to spot.</div></div>
+
+  <div class="frame">
+    <div style="display:grid;grid-template-columns:210px 1fr;gap:12px">
+      <div class="card" style="margin:0"><div class="hd plain"><h3>Hosts</h3></div>
+        <div class="body" style="padding:6px 8px 10px"><div class="side">
+          <a href="#b"><span class="pill ok sm">●</span> mbp <span class="note">· leader</span></a>
+          <a class="on" href="#b"><span class="pill bad sm">●</span> atlas <span class="note">· 4 failures</span></a>
+          <a href="#b"><span class="pill mut sm">●</span> wsl <span class="note">· quiet</span></a>
+          <a href="#b" class="note">+ add a host…</a></div></div></div>
+      <div class="card" style="margin:0">
+        <div class="hd"><h3 class="mono">atlas</h3><span class="pill bad sm">Unhealthy</span>
+          <span class="sum">Linux · reporting since 09:02</span>
+          <span class="end"><button class="btn ghost sm">Re-check</button></span></div>
+        <div class="body">
+          <div class="impact" style="margin-bottom:11px"><b>Autofix has failed 4 times in a row here.</b>
+            <span class="mono">claude: command not found (PATH empty in unit)</span> — the binary exists at
+            <span class="mono">~/.local/bin/claude</span> but the service can't see it.</div>
+          <div class="cmd" style="margin-bottom:6px"><span class="os">1</span>systemctl --user edit crq-autofix.service<span class="copy">copy</span></div>
+          <div class="cmd" style="margin-bottom:6px"><span class="os">2</span>Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin<span class="copy">copy</span></div>
+          <div class="cmd"><span class="os">3</span>systemctl --user restart crq-autofix.service<span class="copy">copy</span></div>
+          <table class="t" style="margin-top:13px">
+            <thead><tr><th>On this host</th><th>Status</th><th>Detail</th></tr></thead>
+            <tbody>
+              <tr><td class="mono">crq</td><td><span class="pill ok sm">2.4.1</span></td><td class="note">/usr/local/bin · matches the fleet</td></tr>
+              <tr><td class="mono">git · gh</td><td><span class="pill ok sm">ok</span></td><td class="note">2.47 · authenticated</td></tr>
+              <tr><td class="mono">claude</td><td><span class="pill bad sm">unusable</span></td><td class="note">in your shell, not in the unit</td></tr>
+              <tr><td class="mono">codex</td><td><span class="pill ok sm">0.94</span></td><td class="note">could be the fix agent instead</td></tr>
+              <tr><td>Review daemon</td><td><span class="pill mut sm">standby</span></td><td class="note">mbp holds the lease</td></tr>
+              <tr><td>Autofix service</td><td><span class="pill bad sm">failing</span></td><td class="note">last success 09:41 · 4 attempts since</td></tr>
+            </tbody></table>
+        </div></div>
+    </div>
+  </div>
+</section>
+
+<!-- C -->
+<section class="opt" id="c">
+  <div class="opthd"><span class="optlet">C</span>
+    <div><h2>One thing to fix, in order</h2>
+      <p class="why">The page decides what matters most and shows only that, with everything already
+      healthy folded away behind a line.</p></div>
+    <div class="tags"><span class="pill mut sm plain">zero triage</span><span class="pill mut sm plain">calm</span>
+      <span class="pill mut sm plain">hides the whole picture</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Nothing competes for attention: there is one next action and a reason. Ideal
+      for a page you visit precisely because something broke.</div>
+    <div class="bad"><b>Costly</b> A poor reference — you can't answer “what version is wsl on?” without
+      expanding. It also has to rank problems correctly, which is a judgement the other options avoid.</div></div>
+
+  <div class="frame">
+    <div class="card" style="max-width:720px;margin:0 auto">
+      <div class="hd"><h3>Fix this next</h3><span class="sum">1 of 2 problems · the other is optional</span>
+        <span class="end"><span class="pill ok sm">Everything else is fine</span></span></div>
+      <div class="body">
+        <h3 style="font-size:16px;font-weight:650">Autofix can't start on <span class="mono">atlas</span></h3>
+        <p style="color:var(--mut);font-size:13px;margin:5px 0 11px">Four attempts in a row failed with
+          <span class="mono">claude: command not found</span>. The agent is installed for your shell, but
+          <span class="mono">crq-autofix.service</span> starts with an empty PATH, so it can't see it.
+          Reviews are unaffected — only fixing is stuck.</p>
+        <div class="cmd" style="margin-bottom:6px"><span class="os">on atlas</span>systemctl --user edit crq-autofix.service<span class="copy">copy</span></div>
+        <div class="cmd"><span class="os">add</span>Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin<span class="copy">copy</span></div>
+        <div style="display:flex;gap:9px;margin-top:12px;align-items:center">
+          <button class="btn">I've done it — re-check</button>
+          <button class="btn ghost">Use codex on atlas instead</button>
+          <button class="btn ghost">Turn autofix off there</button></div>
+        <div class="rowline" style="margin-top:14px;border-top:1px solid var(--edge);padding-top:11px">
+          <span class="mark warn">●</span><span><b>Next:</b> wsl is on crq 2.3.0 and predates the autofix
+            rename, so it ignores autofix settings</span><a class="end" href="#c">show</a></div>
+        <div class="rowline"><span class="mark ok">●</span>
+          <span class="dim">6 checks passed — GitHub access, queue home, required tools, bots, repos, quota</span>
+          <a class="end" href="#c">show all</a></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- D -->
+<section class="opt" id="d">
+  <div class="opthd"><span class="optlet">D</span>
+    <div><h2>Doctor report</h2>
+      <p class="why">Every check as one flat, filterable list — the web rendering of
+      <span class="mono">crq doctor</span>, with the fix inline.</p></div>
+    <div class="tags"><span class="pill mut sm plain">dense</span><span class="pill mut sm plain">filterable</span>
+      <span class="pill mut sm plain">familiar from the CLI</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Complete and compact: every check, one line each, filter to failures and work
+      down. Same mental model as the CLI you already trust.</div>
+    <div class="bad"><b>Costly</b> Reads as a log rather than a setup experience — poor for a first run, when
+      the words don't mean anything yet.</div></div>
+
+  <div class="frame">
+    <div class="card" style="margin:0">
+      <div class="hd"><h3>Diagnostics</h3><span class="sum">21 checks · 13:51:24</span>
+        <span class="end" style="gap:6px">
+          <span class="pill acc sm plain">All</span><span class="pill bad sm">Failing 1</span>
+          <span class="pill warn sm">Warnings 2</span><span class="pill mut sm plain">Passing 18</span>
+          <span class="searchbox">⌕ filter…</span></span></div>
+      <table class="t pad">
+        <thead><tr><th style="width:22px"></th><th>Check</th><th>Scope</th><th>Result</th><th>Fix</th></tr></thead>
+        <tbody>
+          <tr><td><span class="mark bad">●</span></td><td class="nm">autofix.agent.path</td>
+            <td class="mono note">atlas</td>
+            <td>claude not on the service PATH · 4 consecutive failures</td>
+            <td><a href="#d">add Environment=PATH…</a></td></tr>
+          <tr><td><span class="mark warn">●</span></td><td class="nm">version.match</td>
+            <td class="mono note">wsl</td><td>2.3.0 · fleet is on 2.4.1 · predates the autofix rename</td>
+            <td><a href="#d">reinstall</a></td></tr>
+          <tr><td><span class="mark warn">●</span></td><td class="nm">enrollment.source</td>
+            <td class="mono note">IPTVChecker</td><td>enrolled by CRQ_REPOS on mbp, not by shared state</td>
+            <td><a href="#d">move into state</a></td></tr>
+          <tr><td><span class="mark ok">●</span></td><td class="nm">github.token</td><td class="mono note">all</td>
+            <td>authenticated as kristofferR · scopes repo, read:org</td><td class="dim">—</td></tr>
+          <tr><td><span class="mark ok">●</span></td><td class="nm">github.rest.budget</td><td class="mono note">all</td>
+            <td>4,412 of 5,000 remaining · resets 14:12</td><td class="dim">—</td></tr>
+          <tr><td><span class="mark ok">●</span></td><td class="nm">state.ref</td><td class="mono note">crq-home</td>
+            <td>crq-state-v3 · schema v4 · rev 4182</td><td class="dim">—</td></tr>
+          <tr><td><span class="mark ok">●</span></td><td class="nm">leader.lease</td><td class="mono note">mbp</td>
+            <td>held · expires in 2m41s</td><td class="dim">—</td></tr>
+          <tr><td><span class="mark ok">●</span></td><td class="nm">quota.calibration</td><td class="mono note">account</td>
+            <td>blocked until 14:32 · read 13:50:41</td><td class="dim">—</td></tr>
+          <tr><td><span class="mark ok">●</span></td><td class="nm">tools.required</td><td class="mono note">all hosts</td>
+            <td>crq, git, gh present everywhere</td><td class="dim">—</td></tr>
+          <tr><td><span class="mark ok">●</span></td><td class="nm">bots.active</td><td class="mono note">account</td>
+            <td>CodeRabbit, Codex seen today · Bugbot 07-21 · Macroscope unverified</td><td class="dim">—</td></tr>
+          <tr><td><span class="mark mut">●</span></td><td class="nm">tools.optional</td><td class="mono note">atlas, wsl</td>
+            <td class="dim">coderabbit CLI missing — preflight unavailable there</td><td><a href="#d">install</a></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<details class="notes">
+  <summary>Notes on these options</summary>
+  <ul>
+    <li>These trade completeness against focus. A and D are references; B and C are repair tools.</li>
+    <li>Worth considering as a pair: C as the default view with “show all” revealing D.</li>
+    <li>All four state the same distinction — a tool must be visible to the <i>service</i>, not just your
+      shell — because that's the failure that actually happens.</li>
+  </ul>
+</details>
+
+</body>
+</html>
