@@ -181,6 +181,11 @@ func primaryAck(r state.Round, obs Observation, p Policy, firedAt time.Time) (st
 	if obs.Reacted {
 		return "bot reacted", true
 	}
+	for _, review := range obs.Reviews {
+		if sameBot(review.Bot, p.Bot) && reviewMatchesRound(review, r.Head, firedAt) {
+			return "review submitted", true
+		}
+	}
 	for _, ev := range obs.Events {
 		if !sameBot(ev.Bot, p.Bot) || ev.CommentID == r.CommandID || ev.UpdatedAt.Before(firedAt) {
 			continue

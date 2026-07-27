@@ -120,6 +120,40 @@ func TestNextDrivesAReviewRound(t *testing.T) {
 	}
 }
 
+func TestNextPreservesUnacknowledgedSlotBeforeReturningPush(t *testing.T) {
+	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = []string{dialect.CodexBotLogin}
+		cfg.FeedbackBots = cfg.RequiredBots
+	})
+	repo, pr, head := "owner/repo", 506, "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.next(repo, pr)
+
+	f.clk.advance(time.Minute)
+	f.gh.mu.Lock()
+	review := ghapi.Review{
+		ID: 900, CommitID: head, State: "COMMENTED",
+		SubmittedAt: f.clk.now(), Body: "[review body]",
+	}
+	review.User.Login = dialect.CodexBotLogin
+	f.gh.reviews[fakeKey(repo, pr)] = append(f.gh.reviews[fakeKey(repo, pr)], review)
+	f.gh.mu.Unlock()
+	f.setLocalWork(true, "uncommitted changes in the working tree")
+
+	report := f.next(repo, pr)
+	f.wantAction(report, engine.ActionPush)
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.FireSlot == nil || st.FireSlot.HoldUntil == nil || !st.SlotHeld(f.clk.now()) {
+		t.Fatalf("push returned without preserving the unanswered primary slot: %+v", st.FireSlot)
+	}
+}
+
 // `next` advances the queue as a side effect, and that step owns the review
 // fire — so the two halves of drain-first are both properties of ONE decision:
 // undrained feedback for the current head must not buy another review of that

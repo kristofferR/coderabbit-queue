@@ -229,6 +229,17 @@ func TestFireSlotHeldUntilPrimaryAcknowledges(t *testing.T) {
 	}
 }
 
+func TestSubmittedPrimaryReviewAcknowledgesTheRound(t *testing.T) {
+	firedAt := t0.Add(-time.Minute)
+	r := state.Round{Phase: state.PhaseFired, Head: "abcdef123", FiredAt: &firedAt}
+	obs := Observation{Reviews: []ReviewSeen{{
+		Bot: "coderabbitai[bot]", Commit: "abcdef1234567890", SubmittedAt: t0,
+	}}}
+	if PrimaryAckPending(r, obs, policy) {
+		t.Fatal("a submitted primary review must acknowledge the command that produced it")
+	}
+}
+
 func TestInflightTimeoutCarriesCooldown(t *testing.T) {
 	r := firedRound(t, "abcdef123")
 	now := t0.Add(16 * time.Minute)

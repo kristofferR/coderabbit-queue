@@ -923,7 +923,8 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 	if s.Account.BlockedUntil != nil && s.Account.BlockedUntil.After(now) {
 		blocked = s.Account.BlockedUntil.UTC()
 	}
-	slotBusy := s.SlotHeld(now)
+	liveSlotBusy := s.SlotRound() != nil
+	orphanSlotBusy := !liveSlotBusy && s.SlotHeld(now)
 	// The pacing gate applies to whichever round fires next, so it bounds every
 	// entry's earliest possible start.
 	var paced time.Time
@@ -970,7 +971,7 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 		queued = append(queued, e)
 	}
 
-	// A held slot stops EVERYTHING, free-running rounds included.
+	// A live slot stops EVERYTHING, free-running rounds included.
 	//
 	// Not because they need the slot — they do not — but because Pump returns as
 	// soon as it sees a slot holder, so the quota-free path that would advance
@@ -979,12 +980,19 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 	// ready here would promise action the daemon cannot take until the holder is
 	// acknowledged. (An agent's own `crq next` can still resolve such a round
 	// directly, which is why this describes the queue rather than forbidding it.)
-	if slotBusy {
+	if liveSlotBusy {
 		for i := range queued {
 			queued[i].ReadyAt, queued[i].Why = time.Time{}, WaitSlotBusy
 		}
 		for i := range freeRunning {
 			freeRunning[i].ReadyAt, freeRunning[i].Why = time.Time{}, WaitSlotBusy
+		}
+	} else if orphanSlotBusy {
+		// An orphaned bounded hold still blocks another metered fire, but Pump
+		// deliberately scans past it for quota-free work. Reflect that split:
+		// ordinary rounds wait on the slot while co-only rounds remain ready.
+		for i := range queued {
+			queued[i].ReadyAt, queued[i].Why = time.Time{}, WaitSlotBusy
 		}
 	}
 

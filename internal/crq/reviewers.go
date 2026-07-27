@@ -224,7 +224,7 @@ func (c Config) ForRepo(ov RepoReviewers) Config {
 			// check-run hooks, and dropping it costs the PRIMARY its evidence.
 		case containsBot(enabled, cb.Login):
 			cb.Required = containsBot(required, cb.Login)
-			cb = promoteTrigger(cb)
+			cb = reconcileTrigger(cb)
 		default:
 			continue
 		}
@@ -261,7 +261,7 @@ func (c Config) ForRepo(ov RepoReviewers) Config {
 		// one that was configured.
 		if cb, ok := c.knownCoBot(login); ok {
 			cb.Required = containsBot(required, login)
-			keep = append(keep, promoteTrigger(cb))
+			keep = append(keep, reconcileTrigger(cb))
 			have[dialect.NormalizeBotName(login)] = true
 		}
 	}
@@ -278,24 +278,31 @@ func (c Config) ForRepo(ov RepoReviewers) Config {
 	return out
 }
 
-// promoteTrigger stops a required co-reviewer from being one crq never asks.
+// reconcileTrigger recomputes a co-reviewer's implicit mode after a repository
+// override changes its requiredness.
 //
 // A fleet entry carries the trigger its OWN required-ness produced: Codex
 // defaults to never and only becomes always when required. Retaining that entry
-// while making the bot required leaves the engine waiting for evidence no
-// command was ever posted for. Only a never trigger is promoted; a self-heal
-// trigger remains the bot's normal mode. Reviewer-change reopens carry their
-// one-shot force on the Round instead, so the override does not permanently
-// change how that bot runs on later heads.
-func promoteTrigger(cb CoBotConfig) CoBotConfig {
-	if !cb.Required || cb.Trigger != engine.TriggerNever || cb.Command == "" || cb.TriggerExplicit {
+// while changing requiredness must therefore handle both directions: promote a
+// newly required Codex, and demote one a repository made optional. Explicit
+// operator settings still win. Reviewer-change reopens carry their one-shot
+// force on the Round instead, so the override does not permanently change how
+// that bot runs on later heads.
+func reconcileTrigger(cb CoBotConfig) CoBotConfig {
+	if cb.TriggerExplicit {
 		return cb
 	}
-	if co, ok := dialect.CoReviewerByName(cb.Name); ok && co.RequiredTrigger != "" {
-		cb.Trigger = triggerMode(co.RequiredTrigger, engine.TriggerAlways)
+	co, ok := dialect.CoReviewerByName(cb.Name)
+	if !ok {
 		return cb
 	}
-	cb.Trigger = engine.TriggerAlways
+	cb.Trigger = triggerMode(co.DefaultTrigger, engine.TriggerSelfHeal)
+	if cb.Required && co.RequiredTrigger != "" {
+		cb.Trigger = triggerMode(co.RequiredTrigger, cb.Trigger)
+	}
+	if cb.Command == "" {
+		cb.Trigger = engine.TriggerNever
+	}
 	return cb
 }
 

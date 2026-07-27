@@ -104,6 +104,40 @@ func TestOverrideCanEnableABotTheFleetDoesNot(t *testing.T) {
 	}
 }
 
+func TestOverrideRecomputesImplicitTriggerAfterRemovingRequiredness(t *testing.T) {
+	fleet := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":        "codex",
+		"CRQ_REQUIRED_BOTS": "coderabbitai[bot],codex",
+	})
+	got := fleet.ForRepo(RepoReviewers{
+		CoBots:      []string{"codex"},
+		SetCoBots:   true,
+		Required:    []string{"coderabbitai[bot]"},
+		SetRequired: true,
+	})
+	if len(got.CoBots) != 1 {
+		t.Fatalf("CoBots = %+v, want Codex still enabled", got.CoBots)
+	}
+	if got.CoBots[0].Required || got.CoBots[0].Trigger != engine.TriggerNever {
+		t.Fatalf("Codex = %+v, want optional with its implicit never trigger", got.CoBots[0])
+	}
+
+	explicit := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":              "codex",
+		"CRQ_REQUIRED_BOTS":       "coderabbitai[bot],codex",
+		"CRQ_COBOT_CODEX_TRIGGER": "always",
+	})
+	got = explicit.ForRepo(RepoReviewers{
+		CoBots:      []string{"codex"},
+		SetCoBots:   true,
+		Required:    []string{"coderabbitai[bot]"},
+		SetRequired: true,
+	})
+	if got.CoBots[0].Trigger != engine.TriggerAlways {
+		t.Fatalf("explicit Codex trigger = %q, want always preserved", got.CoBots[0].Trigger)
+	}
+}
+
 // A primary that is itself a registry bot keeps its silenced entry through an
 // override: that entry is where its wording and check-run hooks come from, so
 // dropping it costs the PRIMARY its evidence and the round waits for a bot

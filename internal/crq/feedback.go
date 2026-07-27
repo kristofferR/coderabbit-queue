@@ -816,7 +816,7 @@ func (s *Service) pushWaitDeadline(ctx context.Context, repo string, pr int, hea
 // and the hold is stamped on the slot so the push this success invites cannot
 // drop it along with the superseded round. Only the convergence callers pass it;
 // a timed-out or never fired wait must still end.
-func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, head string, holdUnacked bool, cfg *Config) {
+func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, head string, holdUnacked bool, cfg *Config) error {
 	repo = NormalizeRepo(repo)
 	changed := false
 	state, err := s.store.Update(ctx, func(st *State) error {
@@ -842,6 +842,7 @@ func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, he
 				until := r.FiredAt.UTC().Add(s.cfg.InflightTimeout)
 				if until.After(s.clock()) && (st.FireSlot.HoldUntil == nil || st.FireSlot.HoldUntil.Before(until)) {
 					st.HoldSlotUntil(until)
+					changed = true
 					return nil
 				}
 			}
@@ -859,11 +860,12 @@ func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, he
 		if s.log != nil {
 			s.log.Printf("warning: failed to clear feedback wait for %s#%d: %v", repo, pr, err)
 		}
-		return
+		return err
 	}
 	if changed {
 		s.sync(ctx, state)
 	}
+	return nil
 }
 
 // waitToFire runs Wait (enqueue + coordinated fire), riding out GitHub REST rate
