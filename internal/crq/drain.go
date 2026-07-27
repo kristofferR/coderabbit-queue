@@ -105,7 +105,12 @@ func (s *Service) InstallDrain(ctx context.Context, agent string, agentArgs []st
 		plan.Commands = []string{
 			"loginctl enable-linger " + os.Getenv("USER"),
 			"systemctl --user daemon-reload",
-			"systemctl --user enable --now crq-drain",
+			"systemctl --user enable crq-drain",
+			// restart, not "enable --now": --now does nothing to a unit that is
+			// already running, so reinstalling with a different agent or prompt
+			// silently kept the old one going. An install that appears to succeed
+			// and changes nothing is the worst of both.
+			"systemctl --user restart crq-drain",
 		}
 	}
 	invocation, err := agentInvocation(agent, plan.Prompt, agentArgs)

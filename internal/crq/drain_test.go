@@ -186,3 +186,29 @@ func fakeAgent(t *testing.T, name string) string {
 	}
 	return path
 }
+
+// "enable --now" does nothing to a unit that is already running, so a reinstall
+// with a different agent kept the old one going — an install that reports
+// success and changes nothing.
+func TestInstallDrainRestartsAnAlreadyRunningService(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("launchd bootout/bootstrap already replaces a running agent")
+	}
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/name": true}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	plan, err := svc.InstallDrain(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarts := false
+	for _, c := range plan.Commands {
+		if strings.Contains(c, "restart") {
+			restarts = true
+		}
+	}
+	if !restarts {
+		t.Errorf("commands = %v, want one that replaces a running service", plan.Commands)
+	}
+}
