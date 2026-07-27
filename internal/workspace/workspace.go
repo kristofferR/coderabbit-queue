@@ -160,6 +160,7 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 		}
 	}
 	if _, err := os.Stat(filepath.Join(path, "HEAD")); err == nil {
+		dropFetched := w.hasLegacyFetchedHeads(ctx, path)
 		if cerr := w.migrateMirror(ctx, path); cerr != nil {
 			return "", fmt.Errorf("configuring %s: %w", repo, cerr)
 		}
@@ -169,8 +170,13 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 		// After the fetch, because it is the fetch that puts the current value of
 		// every remote branch under refs/remotes/origin — which is what makes the
 		// copies an old clone left in refs/heads redundant.
-		if derr := w.dropFetchedHeads(ctx, path); derr != nil {
-			return "", fmt.Errorf("migrating %s: %w", repo, derr)
+		if dropFetched {
+			if derr := w.dropFetchedHeads(ctx, path); derr != nil {
+				return "", fmt.Errorf("migrating %s: %w", repo, derr)
+			}
+		}
+		if err := w.setConfig(ctx, path, fetchedHeadsMigratedKey, "true"); err != nil {
+			return "", fmt.Errorf("recording migration of %s: %w", repo, err)
 		}
 		return path, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -212,6 +218,13 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 	if _, err := w.git(ctx, pending, "fetch", "--prune", "origin", originRefspec, tagRefspec); err != nil {
 		return "", fmt.Errorf("cloning %s: %w", repo, err)
 	}
+	// A new mirror never copied remote branches into refs/heads. Record that
+	// before exposing it: from this point on that namespace belongs entirely to
+	// sessions, so no later refresh may mistake one of their branches for a
+	// legacy clone's copy.
+	if _, err := w.git(ctx, pending, "config", fetchedHeadsMigratedKey, "true"); err != nil {
+		return "", fmt.Errorf("configuring %s: %w", repo, err)
+	}
 	if err := os.Rename(pending, path); err != nil {
 		if _, statErr := os.Stat(filepath.Join(path, "HEAD")); statErr == nil {
 			return path, nil // somebody else won the race; their mirror is as good
@@ -240,6 +253,36 @@ const originRefspec = "+refs/heads/*:refs/remotes/origin/*"
 // tagRefspec is explicit so --prune removes deleted tags, and forced so a
 // release tag moved on the remote is refreshed instead of rejected as stale.
 const tagRefspec = "+refs/tags/*:refs/tags/*"
+
+// fetchedHeadsMigratedKey records that refs/heads has already been handed over
+// from an old clone to sessions. Without this marker, every refresh would keep
+// applying migration heuristics to branches sessions created afterwards.
+const fetchedHeadsMigratedKey = "crq.fetched-heads-migrated"
+
+// hasLegacyFetchedHeads identifies the one migration allowed to delete local
+// branches. A marker proves it already ran; otherwise only old fetch/push
+// mirror configuration proves refs/heads contains copies made by the clone.
+// An unmarked mirror already using the current configuration may predate the
+// marker, but its local branches belong to sessions and must be preserved.
+func (w Workspace) hasLegacyFetchedHeads(ctx context.Context, path string) bool {
+	if migrated, err := w.git(ctx, path, "config", "--bool", "--get", fetchedHeadsMigratedKey); err == nil && migrated == "true" {
+		return false
+	}
+	if mirror, err := w.git(ctx, path, "config", "--bool", "--get", "remote.origin.mirror"); err == nil && mirror == "true" {
+		return true
+	}
+	fetch, err := w.git(ctx, path, "config", "--get-all", "remote.origin.fetch")
+	if err != nil {
+		return false
+	}
+	for _, refspec := range strings.Split(fetch, "\n") {
+		_, dst, ok := strings.Cut(strings.TrimPrefix(refspec, "+"), ":")
+		if ok && (dst == "refs/*" || dst == "refs/heads/*" || strings.HasPrefix(dst, "refs/heads/")) {
+			return true
+		}
+	}
+	return false
+}
 
 // migrateMirror brings a mirror an older crq left behind up to the rules this
 // one depends on, and is a no-op on a mirror that already follows them.
@@ -316,7 +359,8 @@ func (w Workspace) fetchMirror(ctx context.Context, path string) error {
 }
 
 // dropFetchedHeads removes the branch copies an older `git clone --mirror` wrote
-// into refs/heads.
+// into refs/heads. It runs once for an unmarked mirror; after it succeeds,
+// Mirror records fetchedHeadsMigratedKey and this namespace belongs to sessions.
 //
 // Changing the refspec does not move refs a previous clone already made: they go
 // on occupying the names refs/heads reserves for the sessions — `git checkout -b

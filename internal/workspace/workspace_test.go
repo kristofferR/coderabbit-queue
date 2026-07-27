@@ -686,6 +686,72 @@ func TestMirrorKeepsASessionBranchThatIsNotCheckedOut(t *testing.T) {
 	}
 }
 
+// Once an old mirror's fetched heads have been removed, refs/heads belongs to
+// sessions. An equal-tip branch is still session state: deleting it on every
+// refresh also deletes its tracking configuration and reflog.
+func TestMirrorKeepsAnEqualTipSessionBranchAfterMigration(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	origin := filepath.Join(base, repo)
+	sha := originRepo(t, origin)
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+	if _, err := gitDir(ctx, origin, "branch", "feature"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Exercise the legacy-clone migration before the session takes ownership of
+	// the name. Later Mirror calls must not run that cleanup against its branch.
+	mirror, err := ws.mirrorPath(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(mirror), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(ctx, "", "clone", "--mirror", "--quiet", ws.remoteURL(repo), mirror); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	co, err := ws.Checkout(ctx, repo, 7, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"checkout", "-b", "feature"},
+		{"config", "branch.feature.remote", "origin"},
+		{"config", "branch.feature.merge", "refs/heads/feature"},
+		{"checkout", "--detach"},
+	} {
+		if _, err := co.Git(ctx, args...); err != nil {
+			t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+		}
+	}
+	if _, err := co.Git(ctx, "reflog", "exists", "refs/heads/feature"); err != nil {
+		t.Fatalf("session branch had no reflog before refresh: %v", err)
+	}
+
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := gitDir(ctx, mirror, "rev-parse", "refs/heads/feature"); err != nil || got != sha {
+		t.Errorf("refs/heads/feature = %q err=%v, want equal-tip session branch %s", got, err, sha)
+	}
+	if got, err := gitDir(ctx, mirror, "config", "--get", "branch.feature.remote"); err != nil || got != "origin" {
+		t.Errorf("branch.feature.remote = %q err=%v, want tracking configuration preserved", got, err)
+	}
+	if got, err := gitDir(ctx, mirror, "config", "--get", "branch.feature.merge"); err != nil || got != "refs/heads/feature" {
+		t.Errorf("branch.feature.merge = %q err=%v, want tracking configuration preserved", got, err)
+	}
+	if _, err := gitDir(ctx, mirror, "reflog", "exists", "refs/heads/feature"); err != nil {
+		t.Errorf("session branch reflog was deleted: %v", err)
+	}
+}
+
 // A mirror with a second remote.origin.fetch refused a single-value write —
 // "cannot overwrite multiple values with a single value" — which would have
 // failed every later Mirror call for that repository for good.
