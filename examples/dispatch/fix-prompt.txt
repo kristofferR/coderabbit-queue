@@ -1,0 +1,34 @@
+You are draining review feedback on ONE pull request, unattended. crq has checked
+out the PR head into this worktree and put the findings on disk.
+
+  repo:     $CRQ_DISPATCH_REPO
+  pr:       $CRQ_DISPATCH_PR
+  head:     $CRQ_DISPATCH_HEAD
+  findings: $CRQ_DISPATCH_FINDINGS  (JSON array)
+
+This checkout is DETACHED at the head commit. STAY detached — do not create or
+check out a branch here. The checkout is backed by a mirror shared with every
+other PR, and a branch checked out in one worktree makes git refuse to fetch it
+for all of them, which stops every other dispatch.
+
+Commit on the detached HEAD and push it to the PR's branch by name:
+  branch=$(gh pr view "$CRQ_DISPATCH_PR" --repo "$CRQ_DISPATCH_REPO" --json headRefName --jq .headRefName)
+  git push origin "HEAD:refs/heads/$branch"
+
+Then:
+1. Read the findings file. Verify EACH finding against the code as it is now.
+   Some will already be fixed, or be wrong — say so rather than changing code to
+   satisfy them.
+2. Fix the genuine ones. Minimal changes, in the style of the surrounding code.
+3. gofmt -l . && go vet ./... && go test ./... -count=1 must all pass.
+4. Commit, then push as above. Never force-push. No AI attribution in the
+   commit message or anywhere else.
+5. For each finding you addressed that has a thread_id:
+     crq resolve <thread-id> [<thread-id>...]
+   For one you are NOT addressing:
+     crq decline <thread-id> --reason "why"
+   A decline needs a real reason. Do not decline to clear the list.
+
+Hard limits: do not open pull requests, do not merge anything, do not force-push,
+do not touch code unrelated to the findings, do not change another repository.
+If the findings are already fixed, resolve their threads and stop.

@@ -22,11 +22,11 @@ func TestDispatchClaim(t *testing.T) {
 	}
 
 	// A heartbeat keeps a long session's claim alive.
-	if !round.HeartbeatDispatch("tok-a", now.Add(9*time.Minute)) {
+	if ok, _ := round.HeartbeatDispatch("tok-a", now.Add(9*time.Minute)); !ok {
 		t.Error("the owner must be able to heartbeat")
 	}
-	if round.HeartbeatDispatch("tok-b", now.Add(9*time.Minute)) {
-		t.Error("a heartbeat from another token must be refused")
+	if ok, taken := round.HeartbeatDispatch("tok-b", now.Add(9*time.Minute)); ok || !taken {
+		t.Errorf("another token got ok=%v taken=%v, want refused and told the claim is live", ok, taken)
 	}
 	if ok, _ := round.ClaimDispatch("host-b", "tok-b", now.Add(10*time.Minute), 3); ok {
 		t.Error("a heartbeated claim must not be stolen")
@@ -69,5 +69,32 @@ func TestDispatchClaim(t *testing.T) {
 	fresh := &Round{Repo: "o/r", PR: 1, Head: "bbbbbbbb2"}
 	if ok, _ := fresh.ClaimDispatch("host-c", "tok-e", stale, 3); !ok {
 		t.Error("a new head must be dispatchable again")
+	}
+}
+
+// A session's own push moves the head, so crq supersedes the round and the fresh
+// one carries no claim. Reading that as "somebody took this round" killed the
+// session between pushing and resolving — every single time it succeeded.
+func TestHeartbeatSeparatesSupersededFromStolen(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+
+	// Superseded: the claim is gone, and nobody else holds one.
+	fresh := &Round{Repo: "o/r", PR: 1, Head: "bbbbbbbb2"}
+	if ok, taken := fresh.HeartbeatDispatch("tok-a", now); ok || taken {
+		t.Errorf("superseded round gave ok=%v taken=%v, want a benign miss", ok, taken)
+	}
+
+	// Stolen: somebody else holds a LIVE claim.
+	stolen := &Round{Repo: "o/r", PR: 1, Head: "aaaaaaaa1"}
+	if ok, _ := stolen.ClaimDispatch("other", "tok-b", now, 3); !ok {
+		t.Fatal("setup: the other watcher should have claimed it")
+	}
+	if ok, taken := stolen.HeartbeatDispatch("tok-a", now); ok || !taken {
+		t.Errorf("stolen round gave ok=%v taken=%v, want taken", ok, taken)
+	}
+
+	// A claim that expired is not somebody else working: nothing is running.
+	if ok, taken := stolen.HeartbeatDispatch("tok-a", now.Add(2*DispatchTTL)); ok || taken {
+		t.Errorf("expired claim gave ok=%v taken=%v, want a benign miss", ok, taken)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -262,8 +263,21 @@ func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextRe
 	defer cancel()
 	lost := s.beatDispatch(runCtx, report, token, cancel)
 
+	// A session's output went nowhere, so when one failed there was nothing to
+	// read but the fact that nothing happened. Every session gets a file, and
+	// the path is logged before it starts so it is findable while it runs.
+	logPath, logFile, err := s.sessionLog(ctx, report)
+	if err != nil {
+		s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
+		_ = co.Remove(context.WithoutCancel(ctx))
+		return false, "could not open a session log: " + err.Error()
+	}
+	defer logFile.Close()
+
 	cmd := exec.CommandContext(runCtx, opts.Command[0], opts.Command[1:]...)
 	cmd.Dir = co.Dir
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
 	cmd.Env = append(os.Environ(),
 		"CRQ_DISPATCH_REPO="+report.Repo,
 		fmt.Sprintf("CRQ_DISPATCH_PR=%d", report.PR),
@@ -271,8 +285,8 @@ func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextRe
 		"CRQ_DISPATCH_FINDINGS="+findingsPath,
 	)
 	if s.log != nil {
-		s.log.Printf("watch: dispatching %s for %s#%d@%s (%d findings)",
-			opts.Command[0], report.Repo, report.PR, report.Head, len(report.Findings))
+		s.log.Printf("watch: dispatching %s for %s#%d@%s (%d findings) — log: %s",
+			opts.Command[0], report.Repo, report.PR, report.Head, len(report.Findings), logPath)
 	}
 	runErr := cmd.Run()
 	s.releaseDispatch(context.WithoutCancel(ctx), report, token, true)
@@ -280,8 +294,9 @@ func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextRe
 		return false, "another watcher took this round; the session was stopped"
 	}
 	if runErr != nil {
-		_ = co.Remove(context.WithoutCancel(ctx))
-		return false, "fix session failed: " + runErr.Error()
+		// Keep the worktree AND name the log: a failed session is the one whose
+		// state somebody needs to look at.
+		return false, fmt.Sprintf("fix session failed: %v (log: %s)", runErr, logPath)
 	}
 
 	// Keep a worktree the session left work in. Removing it discards fixes that
@@ -369,24 +384,36 @@ func (s *Service) beatDispatch(ctx context.Context, report NextReport, token str
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				held := false
+				taken := false
 				if _, err := s.store.Update(ctx, func(st *State) error {
 					round := st.Round(report.Repo, report.PR)
-					if round == nil || !round.HeartbeatDispatch(token, s.clock()) {
+					if round == nil {
 						return ErrNoChange
 					}
-					held = true
+					ok, byOther := round.HeartbeatDispatch(token, s.clock())
+					taken = byOther
+					if !ok {
+						return ErrNoChange
+					}
 					st.PutRound(*round)
 					return nil
 				}); err != nil {
-					// A failed write is not proof the claim is gone; the next
-					// tick decides. Only an explicit "not yours" ends the session.
+					// A failed write is not proof of anything; the next tick
+					// decides.
 					continue
 				}
-				if !held {
+				if taken {
+					// Somebody else is running a session for this round. Two in
+					// one worktree is worse than none.
 					lost.Store(true)
 					stop()
 					return
+				}
+				// The claim is simply gone: the round was superseded, which is
+				// what this session's own push does. Stop heartbeating and let
+				// it finish — resolving its threads comes AFTER the push.
+				if !taken && ctx.Err() == nil {
+					continue
 				}
 			}
 		}
@@ -439,3 +466,52 @@ func (p *dispatchPool) start(fn func()) (bool, string) {
 // wait blocks until every running session has finished, so a --once run does not
 // return while its sessions are still writing.
 func (p *dispatchPool) wait() { p.wg.Wait() }
+
+// sessionLog opens the file a fix session's output goes to, and prunes the ones
+// nobody is going to read.
+func (s *Service) sessionLog(ctx context.Context, report NextReport) (string, *os.File, error) {
+	root, err := s.workspace(ctx).root()
+	if err != nil {
+		return "", nil, err
+	}
+	owner, name, ok := splitRepo(report.Repo)
+	if !ok {
+		return "", nil, fmt.Errorf("repo must be owner/name, got %q", report.Repo)
+	}
+	dir := filepath.Join(root, "logs", owner, name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", nil, err
+	}
+	pruneSessionLogs(dir, report.PR)
+	path := filepath.Join(dir, fmt.Sprintf("%d-%s-%s.log",
+		report.PR, shortSHA(report.Head), s.clock().UTC().Format("20060102T150405")))
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return "", nil, err
+	}
+	return path, file, nil
+}
+
+// pruneSessionLogs keeps the most recent few logs per PR. Older ones describe a
+// head nobody is working on any more.
+func pruneSessionLogs(dir string, pr int) {
+	const keep = 5
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	prefix := fmt.Sprintf("%d-", pr)
+	var mine []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), prefix) && strings.HasSuffix(e.Name(), ".log") {
+			mine = append(mine, e.Name())
+		}
+	}
+	if len(mine) <= keep {
+		return
+	}
+	sort.Strings(mine) // the timestamp is in the name, so this is chronological
+	for _, name := range mine[:len(mine)-keep] {
+		_ = os.Remove(filepath.Join(dir, name))
+	}
+}

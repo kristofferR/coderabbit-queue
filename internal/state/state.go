@@ -661,15 +661,24 @@ func (r *Round) ClaimDispatch(host, token string, now time.Time, maxAttempts int
 	return true, ""
 }
 
-// HeartbeatDispatch refreshes a claim this token owns. False means the claim is
-// gone or belongs to somebody else, which is how a watcher learns it was taken
-// over and should stop.
-func (r *Round) HeartbeatDispatch(token string, now time.Time) bool {
-	if r.Dispatch == nil || r.Dispatch.Token != token {
-		return false
+// HeartbeatDispatch refreshes a claim this token owns.
+//
+// The two ways it can fail are NOT the same thing, and treating them alike is
+// what made a session destroy its own work. taken is true only when somebody
+// else holds a live claim — the case where continuing would put two sessions in
+// one worktree. A claim that is merely GONE means the round was superseded,
+// which is what a session's own push does: it moves the head, the round is
+// archived, and the fresh round carries no claim. Killing the session there ends
+// it between pushing and resolving, every time it succeeds.
+func (r *Round) HeartbeatDispatch(token string, now time.Time) (ok, taken bool) {
+	if r.Dispatch == nil {
+		return false, false
+	}
+	if r.Dispatch.Token != token {
+		return false, r.DispatchHeld(now)
 	}
 	r.Dispatch.Heartbeat = now.UTC()
-	return true
+	return true, false
 }
 
 // ReleaseDispatch drops a claim this token owns, keeping the attempt count.

@@ -171,6 +171,23 @@ thread left open keeps its finding actionable and `crq next` would repeat `fix` 
 disagreement is not lost: if the bot contests the decline, crq re-surfaces that reply as its own
 finding. Pass `--keep-open` to leave it unresolved deliberately.
 
+## Unattended Drain
+
+`crq watch --dispatch` starts a fix session for every PR whose action is `fix`, in a worktree crq
+checked out at that head. Sessions run concurrently (`CRQ_DISPATCH_CONCURRENCY`, default 3) and off
+the decision loop, so a long one blocks nothing; the decisions stay serial, which is what keeps the
+account-metered review in one queue.
+
+Ready-to-use unit, wrapper and prompt: `examples/dispatch/`. Two rules the prompt earned the hard
+way — a session must stay on a detached HEAD and push by ref (`git push origin HEAD:refs/heads/…`),
+because the worktrees share one mirror and a branch checked out in one of them makes git refuse to
+fetch for every PR; and it resolves threads AFTER pushing, which crq now allows by distinguishing a
+superseded round from a stolen one.
+
+Each session's output is written to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log`
+(last five per PR). Three passes in a row that start nothing puts `dispatch failing` on the dashboard
+and the status line.
+
 ## Fleet Auto-Review
 
 To keep all open PRs in scope reviewed while CodeRabbit native auto-review is off:
