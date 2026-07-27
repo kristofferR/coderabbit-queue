@@ -184,14 +184,17 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 // the command line are the operator's own request and outrank the list — but not
 // the exclusion, exactly as at the top of the pass.
 //
-// An empty list is the fleet having no list, not a list that allows nothing:
-// without one crq scans by scope, which is how autoReviewPass reads it too.
+// An emptied list is not "watch everything" here. Unlike autoReviewPass, which
+// falls back to scanning by scope, a pass with no repositories of its own has
+// nothing to watch at all and refuses to run — so a candidate gathered under the
+// old list is one the live policy no longer covers, and treating the empty list
+// as permissive would dispatch a fix for a repository the fleet just dropped.
 func watchesRepo(cfg Config, explicit []string, repo string) bool {
 	key := NormalizeRepo(repo)
 	if cfg.ExcludeRepos[key] {
 		return false
 	}
-	if len(explicit) > 0 || len(cfg.AllowRepos) == 0 {
+	if len(explicit) > 0 {
 		return true
 	}
 	return cfg.AllowRepos[key]

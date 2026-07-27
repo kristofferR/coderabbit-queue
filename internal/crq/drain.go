@@ -424,7 +424,20 @@ func drainEnvFor(cfg Config, plan DrainInstall) map[string]string {
 		coNames = append(coNames, co.Name)
 		prefix := "CRQ_COBOT_" + strings.ToUpper(co.Name)
 		env[prefix+"_CMD"] = co.Command
-		env[prefix+"_TRIGGER"] = string(co.Trigger)
+		// The explicitness bit has to survive the install, not just the mode. An
+		// implicit trigger is the registry default for how the bot is REQUIRED,
+		// recomputed whenever that changes; writing it out as a value makes the
+		// service read it back as an operator's explicit choice, and a later
+		// fleet `required-bots` change can then no longer promote the bot to its
+		// required trigger — leaving a required reviewer that is never commanded
+		// and a round that waits for it forever. Empty is the environment's
+		// "unset", and it is written rather than omitted so an inherited variable
+		// cannot supply an explicitness the installing host did not have.
+		trigger := ""
+		if co.TriggerExplicit {
+			trigger = string(co.Trigger)
+		}
+		env[prefix+"_TRIGGER"] = trigger
 		env[prefix+"_REQUIRED"] = strconv.FormatBool(co.Required)
 		env[prefix+"_GRACE"] = co.SelfHealGrace.String()
 	}

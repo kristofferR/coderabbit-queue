@@ -1221,3 +1221,55 @@ func TestWatchRereadsTheRepositoryListBeforeEachCandidate(t *testing.T) {
 		t.Fatalf("round = %+v, want an unwatched repository never queued", round)
 	}
 }
+
+// Emptying the list is the same removal. `crq watch` has no scope fallback — a
+// pass with no repositories of its own refuses to run at all — so an emptied
+// list left the candidates of the pass already running as the only repositories
+// crq would ever act on, each one no longer covered by the live policy.
+func TestWatchDropsCandidatesWhenTheRepositoryListIsEmptied(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/repo": true}
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", 1, "aaaaaaaa1"
+	gh.pulls[fakeKey("owner/repo", 1)] = pull
+
+	store := NewMemoryStore(cfg)
+	hooked := &loadHookedStore{StateStore: store}
+	svc := NewService(cfg, gh, hooked, nil)
+	hooked.hook = func() {
+		if err := svc.SetFleetConfig(ctx, "repos", ""); err != nil {
+			t.Error(err)
+		}
+	}
+
+	var seen []WatchEvent
+	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0),
+		func(e WatchEvent) error { seen = append(seen, e); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 0 {
+		t.Fatalf("events = %+v, want no work once the fleet's list is emptied mid-pass", seen)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("owner/repo", 1); round != nil {
+		t.Fatalf("round = %+v, want an unwatched repository never queued", round)
+	}
+}
+
+// A repository named on the command line is the operator's own request and
+// outranks the fleet's list, emptied or not — only the exclusion overrides it.
+func TestWatchesRepoHonoursExplicitTargetsAndExclusion(t *testing.T) {
+	empty := Config{}
+	if !watchesRepo(empty, []string{"owner/repo"}, "owner/repo") {
+		t.Error("an explicitly requested repository must stay watched with no fleet list")
+	}
+	excluded := Config{ExcludeRepos: map[string]bool{"owner/repo": true}}
+	if watchesRepo(excluded, []string{"owner/repo"}, "owner/repo") {
+		t.Error("exclusion outranks an explicit target")
+	}
+}

@@ -1011,6 +1011,42 @@ func TestFleetReviewerChangeDoesNotFailOnAnInaccessibleHistoricalRepository(t *t
 	}
 }
 
+// A co-reviewer's command, trigger mode or self-heal grace moves no membership,
+// so reconciliation compares the same reviewer sets before and after and never
+// reads the open-PR map. Building one anyway spent a REST lookup on every
+// repository ever recorded in Rounds — and made a purely local timing update
+// fail whenever one of those historical lookups was throttled.
+func TestFleetCoBotTimingChangeScansNoPullRequests(t *testing.T) {
+	ctx := context.Background()
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":        "codex,bugbot",
+		"CRQ_REQUIRED_BOTS": "coderabbitai[bot]",
+	})
+	gh := newFakeGitHub()
+	gh.listPullErrs["owner/repo"] = &ghapi.RateLimitError{Kind: "secondary"}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.PutRound(Round{Repo: "owner/repo", PR: 7, Head: "bbbbbbb22", Phase: PhaseCompleted})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+	for _, key := range []string{"cobot-bugbot-grace", "cobot-bugbot-cmd", "cobot-bugbot-trigger"} {
+		value := map[string]string{
+			"cobot-bugbot-grace":   "12m",
+			"cobot-bugbot-cmd":     "bugbot run",
+			"cobot-bugbot-trigger": "selfheal",
+		}[key]
+		if err := svc.SetFleetConfig(ctx, key, value); err != nil {
+			t.Fatalf("set %s: %v", key, err)
+		}
+		if _, err := svc.UnsetFleetConfig(ctx, key); err != nil {
+			t.Fatalf("unset %s: %v", key, err)
+		}
+	}
+}
+
 func TestFleetReviewerChangePropagatesGitHubThrottling(t *testing.T) {
 	ctx := context.Background()
 	cfg := isolatedConfig(t, map[string]string{

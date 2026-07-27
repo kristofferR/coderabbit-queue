@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
 )
 
@@ -266,7 +267,8 @@ func TestDrainUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 	cfg.SettleWindow = 17 * time.Second
 	cfg.CoBots = []CoBotConfig{{
 		Name: "bugbot", Login: "cursor[bot]", Command: "bugbot run now",
-		Trigger: engine.TriggerAlways, Required: true, SelfHealGrace: 4 * time.Minute,
+		Trigger: engine.TriggerAlways, TriggerExplicit: true,
+		Required: true, SelfHealGrace: 4 * time.Minute,
 	}}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 	plan := DrainInstall{Platform: "linux", Wrapper: "/tmp/crq drain", LogDir: "/tmp/crq logs"}
@@ -295,6 +297,43 @@ func TestDrainUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 			t.Errorf("unit does not carry %q:\n%s", want, unit)
 		}
 	}
+}
+
+// An implicit trigger must install as unset. Freezing the resolved mode into the
+// unit makes the service read it as an operator's choice, and the registry
+// default for a bot the fleet later REQUIRES can then never be recomputed — so a
+// required Codex would be waited for and never commanded.
+func TestDrainEnvInstallsAnImplicitTriggerAsUnset(t *testing.T) {
+	cfg := firingConfig()
+	cfg.CoBots = []CoBotConfig{{
+		Name: "codex", Login: dialect.CodexBotLogin, Command: "@codex review",
+		Trigger: engine.TriggerNever, SelfHealGrace: 10 * time.Minute,
+	}}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	env := svc.drainEnv(DrainInstall{})
+	trigger, ok := env["CRQ_COBOT_CODEX_TRIGGER"]
+	if !ok || trigger != "" {
+		t.Fatalf("CRQ_COBOT_CODEX_TRIGGER = %q, present=%t; want an explicit empty value", trigger, ok)
+	}
+	// The installed service reloads from this environment: the mode has to come
+	// back implicit, so requiring the bot still promotes it to always.
+	reloaded := resolveCoBot(env, mustCoReviewer(t, "codex"), true)
+	if reloaded.TriggerExplicit {
+		t.Fatal("reloaded trigger is explicit; the installing host had no such setting")
+	}
+	if reloaded.Trigger != engine.TriggerAlways {
+		t.Fatalf("required codex reloaded with trigger %q, want always", reloaded.Trigger)
+	}
+}
+
+func mustCoReviewer(t *testing.T, name string) dialect.CoReviewer {
+	t.Helper()
+	co, ok := dialect.CoReviewerByName(name)
+	if !ok {
+		t.Fatalf("unknown co-reviewer %q", name)
+	}
+	return co
 }
 
 func TestDrainEnvCarriesAnIntentionallyEmptySkipMarker(t *testing.T) {

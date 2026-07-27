@@ -2532,6 +2532,48 @@ func TestRefreshQuotaRejectsAReadingFromAnObsoleteFleetScope(t *testing.T) {
 	}
 }
 
+// Only the scope says which account a probe answered for. Refusing the write
+// because some unrelated fleet setting moved under the read dropped the block
+// the probe had just found — and Update reports a refused write as success, so
+// the same pump went on to post a metered review inside that window.
+func TestRefreshQuotaRecordsABlockAcrossAnUnrelatedFleetChange(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CalibrationPR = 77
+	cfg.GateRepo = "o/state"
+	cfg.CalibrationTTL = time.Minute
+	gh := newFakeGitHub()
+	inner := NewMemoryStore(cfg)
+	store := &hookedStore{StateStore: inner}
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	svc.now = func() time.Time { return now }
+
+	reply := ghapi.IssueComment{
+		ID:        5,
+		Body:      "auto-generated reply by CodeRabbit\n> **Next review available in:** **45 minutes**",
+		CreatedAt: now.Add(-10 * time.Second), UpdatedAt: now.Add(-10 * time.Second),
+	}
+	reply.User.Login = cfg.Bot
+	gh.comments[fakeKey(cfg.GateRepo, 77)] = []ghapi.IssueComment{reply}
+	store.hook = func() {
+		if _, err := inner.Update(ctx, func(st *State) error {
+			st.SetFleetValue("min-interval", "45m")
+			return nil
+		}); err != nil {
+			t.Error(err)
+		}
+	}
+
+	updated, err := svc.RefreshQuota(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Account.BlockedUntil == nil || !updated.Account.BlockedUntil.After(now.Add(40*time.Minute)) {
+		t.Fatalf("account = %+v, want the probe's block recorded despite the unrelated policy change", updated.Account)
+	}
+}
+
 func TestRefreshQuotaDoesNotProbeOrWriteInDryRun(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{

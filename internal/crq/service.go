@@ -1939,7 +1939,17 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		current := s.fleetCfg(*st)
-		if current.FleetRevision != cfg.FleetRevision {
+		// Only the scope invalidates the reading: it says WHICH account the probe
+		// answered for, and a scope that moved under the read already reset the
+		// quota to be recalibrated, so writing the old account's answer over that
+		// reset would state a window for an account crq no longer queues.
+		//
+		// Every other fleet setting leaves the reading true, and refusing it over
+		// one — as a whole-revision comparison did — discarded a still-standing
+		// account block, since Update reports a refused write as success: this
+		// same pump then went on to post a metered review inside the blocked
+		// window it had just been told about.
+		if !sameFoldedSet(current.Scope, cfg.Scope) {
 			return ErrNoChange
 		}
 		currentTTL := current.CalibrationTTL

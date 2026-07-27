@@ -303,8 +303,17 @@ func (s *Service) requireNoAdvancedDrivers(st *State, key string) error {
 	return nil
 }
 
+// prepareFleetReviewerChange fetches the open PRs reconciliation needs, for the
+// keys that can actually move a round.
+//
+// Only MEMBERSHIP asks that question. reopenForChangedReviewers compares the
+// required and co-reviewer login sets and returns before touching this map when
+// they match, and a co-reviewer's command, trigger mode or self-heal grace never
+// moves either — so asking for the open PRs of every repository ever recorded in
+// Rounds bought nothing, spent a REST lookup per historical repository, and made
+// a purely local timing update fail whenever one of them was throttled.
 func (s *Service) prepareFleetReviewerChange(ctx context.Context, key string) (map[string]map[int]bool, error) {
-	if !isReviewerFleetKey(key) {
+	if !isReviewerMembershipFleetKey(key) {
 		return nil, nil
 	}
 	st, _, err := s.store.Load(ctx)
@@ -316,10 +325,11 @@ func (s *Service) prepareFleetReviewerChange(ctx context.Context, key string) (m
 
 // seedsReviewers reports whether seeding would record a reviewer setting the
 // fleet has no answer for yet, which is the case where the effective reviewers
-// can move and existing rounds have to be reconciled against them.
+// can move and existing rounds have to be reconciled against them. Same
+// membership-only question as prepareFleetReviewerChange, for the same reason.
 func seedsReviewers(st State) bool {
 	for _, key := range FleetKeys() {
-		if !isReviewerFleetKey(key) {
+		if !isReviewerMembershipFleetKey(key) {
 			continue
 		}
 		if _, ok := st.FleetValue(key); !ok {
