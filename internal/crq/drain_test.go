@@ -54,6 +54,21 @@ func TestInstallDrainPlansWithoutWriting(t *testing.T) {
 	}
 }
 
+func TestInstallDrainHonoursConfiguredDryRun(t *testing.T) {
+	cfg := firingConfig()
+	cfg.DryRun = true
+	cfg.AllowRepos = map[string]bool{"owner/repo": true}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	plan, err := svc.InstallDrain(context.Background(), fakeAgent(t, "claude"), nil, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.DryRun || plan.Started {
+		t.Fatalf("configured dry-run installation applied its plan: %+v", plan)
+	}
+}
+
 // A missing agent must fail loudly at install time. Discovering it at the first
 // dispatch means a drain that looks installed and fixes nothing.
 func TestInstallDrainRefusesWithoutAnAgent(t *testing.T) {

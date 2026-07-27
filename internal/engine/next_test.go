@@ -65,6 +65,11 @@ func TestNextAction(t *testing.T) {
 		return completionOf(map[string]bool{nextPrimary: cr, "chatgpt-codex-connector[bot]": codex})
 	}
 	deferredUntil := t0.Add(30 * time.Minute)
+	coPendingRound := state.Round{
+		Phase:    state.PhaseCompleted,
+		Dispatch: &state.DispatchClaim{Heartbeat: t0},
+	}
+	coPendingRound.SetCoCommand(nextCoBot, 42, t0.Add(-time.Minute))
 
 	cases := []struct {
 		name    string
@@ -88,6 +93,49 @@ func TestNextAction(t *testing.T) {
 			in: NextInput{
 				Obs: openObs(), Completion: both(true, true),
 				Findings: []dialect.Finding{finding(nextHead)}, LocalWork: true,
+			},
+			want: ActionFix,
+		},
+		{
+			name: "live fix session holds findings while a reviewer is reading",
+			in: NextInput{
+				Round: state.Round{
+					Phase:    state.PhaseReviewing,
+					Dispatch: &state.DispatchClaim{Heartbeat: t0},
+				},
+				Obs: openObs(), Completion: both(false, true), LocalWork: true,
+				Findings: []dialect.Finding{finding(nextHead)}, MinDelay: time.Minute,
+				Primary: nextPrimary,
+			},
+			want: ActionHold, wantAt: t0.Add(time.Minute),
+			pending: []string{nextPrimary},
+		},
+		{
+			name: "live fix session holds findings while a co-reviewer is reading",
+			in: NextInput{
+				Round: coPendingRound,
+				Obs:   openObs(),
+				Completion: completionOf(map[string]bool{
+					nextPrimary: true, "chatgpt-codex-connector[bot]": true, nextCoBot: false,
+				}),
+				LocalWork: true, Findings: []dialect.Finding{finding(nextHead)},
+				Deferred: true, DeferredUntil: &deferredUntil,
+				MinDelay: time.Minute, Primary: nextPrimary,
+			},
+			want: ActionHold, wantAt: t0.Add(time.Minute),
+			pending: []string{nextCoBot},
+		},
+		{
+			name: "live fix session may replace a queued review that nobody is reading",
+			in: NextInput{
+				Round: state.Round{
+					Phase:             state.PhaseAwaitingRetry,
+					DispatchHoldPhase: state.PhaseQueued,
+					Dispatch:          &state.DispatchClaim{Heartbeat: t0},
+				},
+				Obs: openObs(), Completion: both(false, true), LocalWork: true,
+				Findings: []dialect.Finding{finding(nextHead)}, MinDelay: time.Minute,
+				Primary: nextPrimary,
 			},
 			want: ActionFix,
 		},

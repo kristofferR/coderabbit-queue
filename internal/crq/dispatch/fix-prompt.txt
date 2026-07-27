@@ -40,12 +40,14 @@ Then:
    an older commit: the push already superseded it.
 6. Ask crq whether the head may move, then push:
      crq next "$CRQ_DISPATCH_REPO" "$CRQ_DISPATCH_PR"
-   Push (as above) unless `.action` is `hold` or `wait`. Those two mean a
-   reviewer is reading THIS commit, and moving the head would restart or strand
-   its review and spend another metered round; for them, block on
+   Push (as above) unless `.action` is `hold` or `wait`. crq accounts for this
+   live session's local commit before repeating its still-open findings, so
+   those actions take priority when a reviewer is reading THIS commit. Moving
+   the head would restart or strand that review and spend another metered
+   round; for `hold` or `wait`, block on
    `crq next --wait "$CRQ_DISPATCH_REPO" "$CRQ_DISPATCH_PR"` and push when it
-   stops saying so. Anything else — including `fix`, which is where a session
-   that has just made changes usually lands — means push now. Never force-push.
+   stops saying so. Anything else — including `fix` once no in-progress
+   reviewer holds the head — means push now. Never force-push.
 7. ONLY after the push is confirmed on the branch, account for each finding
    with a thread_id.
    With a thread_id, for one you addressed:

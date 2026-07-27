@@ -315,6 +315,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				Action: report.Action, Reason: report.Reason,
 				Findings: len(report.Findings), At: s.clock().UTC(),
 			}
+			var result <-chan dispatchResult
 			if opts.dispatching() && report.Action == string(engine.ActionFix) && drainOff[NormalizeRepo(repo)] {
 				event.Skipped = "draining is off for this repository (crq drain on " + NormalizeRepo(repo) + ")"
 			} else if opts.dispatching() && report.Action == string(engine.ActionFix) && !s.mayDispatch(repo, pull) {
@@ -322,14 +323,28 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			} else if opts.dispatching() && report.Action == string(engine.ActionFix) {
 				// Claimed here, run in the pool: the pass moves on to the next PR
 				// while this session runs.
-				var result <-chan dispatchResult
 				event.Dispatched, event.Skipped, result = s.startDispatchResult(ctx, opts, pool, report)
-				if opts.Once {
-					pending = append(pending, pendingEvent{event: event, result: result})
-					continue
+			}
+			if opts.dispatching() && report.Action == string(engine.ActionFix) && !event.Dispatched {
+				// The peek above deliberately avoided firing before a session
+				// could claim the findings. If no session actually started,
+				// however, a carried finding from an older head must not suppress
+				// Next forever: Next knows it may enqueue and review the current
+				// head because FindingsOnHead is empty.
+				if _, advanceErr := s.Next(ctx, repo, pull.Number); advanceErr != nil {
+					if _, throttled := ghapi.ThrottleWait(advanceErr); throttled {
+						return advanceErr
+					}
+					if s.log != nil {
+						s.log.Printf("watch: advancing skipped fix for %s#%d: %v", repo, pull.Number, advanceErr)
+					}
+					if opts.Once {
+						failures = append(failures, fmt.Sprintf("%s#%d: %v", repo, pull.Number, advanceErr))
+					}
 				}
-			} else if opts.Once {
-				pending = append(pending, pendingEvent{event: event})
+			}
+			if opts.Once {
+				pending = append(pending, pendingEvent{event: event, result: result})
 				continue
 			}
 			if emit != nil {
@@ -580,6 +595,7 @@ func (s *Service) dispatchWithStart(
 	defer logFile.Close()
 
 	cmd := exec.CommandContext(runCtx, opts.Command[0], opts.Command[1:]...)
+	configureDispatchProcess(cmd)
 	cmd.Dir = co.Dir
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile

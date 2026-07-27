@@ -571,6 +571,40 @@ func TestPartialDismissalWillNotSupersedeIntoAQueuedRound(t *testing.T) {
 	}
 }
 
+func TestPartialDismissalAllowedWhileDispatchHoldsTheRound(t *testing.T) {
+	f := newReplayFixture(t, time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC))
+	repo, pr, head := "owner/repo", 79, "aaaaaaaa1"
+
+	var seq int64
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		r, err := st.NewRound(repo, pr, head, f.clk.now())
+		if err != nil {
+			return err
+		}
+		if ok, why := r.ClaimDispatch("host", "token", f.clk.now(), 3); !ok {
+			return fmt.Errorf("claim dispatch: %s", why)
+		}
+		seq = r.Seq
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	dismissed, _, err := f.svc.recordDismissal(
+		f.ctx, repo, pr, head, []string{"threadless"}, "handled locally", false, seq,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dismissed) != 1 {
+		t.Fatalf("dismissed = %v, want the threadless finding recorded", dismissed)
+	}
+	if round := f.round(repo, pr); round == nil || !round.DispatchHeld(f.clk.now()) {
+		t.Fatalf("dismissal disturbed the dispatch hold: %+v", round)
+	}
+}
+
 // The documented fix flow dismisses a threadless finding with the fixes for it
 // still in the working tree, and the round that dismissal leaves behind has
 // asked for nothing yet. Reading it as a review in progress made `crq next`

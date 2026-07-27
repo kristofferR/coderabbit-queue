@@ -77,3 +77,32 @@ func TestDrainHealthStreaksAreIndependentPerHost(t *testing.T) {
 		t.Fatalf("normalized summary = %+v, want it rebuilt from per-host records", loaded.Drain)
 	}
 }
+
+func TestDrainHealthExpiresRetiredHosts(t *testing.T) {
+	now := time.Date(2026, 7, 27, 8, 0, 0, 0, time.UTC)
+	st := New()
+	for i := 0; i < DrainUnhealthyAfter; i++ {
+		st.NoteDispatch("retired", false, "cannot start", now)
+	}
+	st.NoteDispatch("active", true, "", now.Add(DrainHealthTTL))
+
+	if _, ok := st.Drains["retired"]; ok {
+		t.Fatal("inactive retired host remained in dispatch health")
+	}
+	if st.Drain == nil || st.Drain.Host != "active" || st.Drain.Unhealthy() {
+		t.Fatalf("fleet summary = %+v, want the active healthy host", st.Drain)
+	}
+
+	lastFailureAt := now
+	loaded := State{Drains: map[string]DrainHealth{
+		"retired": {
+			Host:                "retired",
+			ConsecutiveFailures: DrainUnhealthyAfter,
+			LastFailureAt:       &lastFailureAt,
+		},
+	}}
+	loaded.Normalize(now.Add(DrainHealthTTL))
+	if loaded.Drain != nil || len(loaded.Drains) != 0 {
+		t.Fatalf("normalization retained expired dispatch health: drain=%+v drains=%+v", loaded.Drain, loaded.Drains)
+	}
+}

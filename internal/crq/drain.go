@@ -51,8 +51,9 @@ type DrainInstall struct {
 // a setup people get wrong is a setup that silently does nothing, which is the
 // failure this whole feature is about.
 func (s *Service) InstallDrain(ctx context.Context, agent string, agentArgs []string, repos []string, dryRun bool) (DrainInstall, error) {
-	plan, err := DrainPlan(s.cfg, agent, agentArgs, repos, dryRun)
-	if err != nil || dryRun {
+	effectiveDryRun := dryRun || s.cfg.DryRun
+	plan, err := DrainPlan(s.cfg, agent, agentArgs, repos, effectiveDryRun)
+	if err != nil || effectiveDryRun {
 		return plan, err
 	}
 	return s.applyDrain(ctx, plan)

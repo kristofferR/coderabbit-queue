@@ -24,7 +24,7 @@ type DrainSetting struct {
 // somebody made the call, and when.
 func (s *Service) SetDrainEnabled(ctx context.Context, repo string, enabled bool, reason string) (DrainSetting, error) {
 	repo = NormalizeRepo(repo)
-	if repo == "" {
+	if _, _, ok := splitRepo(repo); !ok {
 		return DrainSetting{}, fmt.Errorf("repo must be owner/name")
 	}
 	now := s.clock().UTC()
@@ -42,6 +42,9 @@ func (s *Service) SetDrainEnabled(ctx context.Context, repo string, enabled bool
 // setting was there.
 func (s *Service) ClearDrainEnabled(ctx context.Context, repo string) (bool, error) {
 	repo = NormalizeRepo(repo)
+	if _, _, ok := splitRepo(repo); !ok {
+		return false, fmt.Errorf("repo must be owner/name")
+	}
 	cleared := false
 	if _, err := s.store.Update(ctx, func(st *State) error {
 		cleared = st.ClearDrainSwitch(repo)

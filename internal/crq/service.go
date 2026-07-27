@@ -518,13 +518,16 @@ func (s *Service) recordDismissal(ctx context.Context, repo string, pr int, head
 			// underneath this call, so the decision is about a commit nobody is
 			// looking at any more.
 			return fmt.Errorf("%s#%d moved to %s while dismissing; re-read the findings", repo, pr, round.Head)
-		case !allowCreate && (round == nil || round.Head != head || engine.CanStillFire(*round)):
+		case !allowCreate && (round == nil || round.Head != head ||
+			(engine.CanStillFire(*round) && !round.DispatchHeld(s.clock()))):
 			// The guard is about whether a FIRE-ELIGIBLE round would exist with
 			// other findings still open, not about whether a round object
 			// exists. A queued round is just as dangerous as a new one: Pump can
 			// hand it to DecideFire, which sees no findings and cannot enforce
-			// drain-first. So is a round on the previous head, because the
-			// supersede below would replace it with a fresh queued one.
+			// drain-first. A live dispatch claim is the exception: it excludes
+			// this exact round from Pump until the session pushes or releases it.
+			// So is a round on the previous head, because the supersede below
+			// would replace it with a fresh queued one.
 			return fmt.Errorf("%s#%d has other unaddressed findings at %s: dismiss or resolve them in the same pass, so no round is queued while work is open", repo, pr, head)
 		case round == nil:
 			var err error

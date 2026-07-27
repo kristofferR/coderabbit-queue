@@ -868,6 +868,12 @@ func (r *Round) ReleaseDispatch(token string) bool {
 // outcomes arrive one at a time and any success resets the count.
 const DrainUnhealthyAfter = 3
 
+// DrainHealthTTL is how long a host that reports no dispatch outcome remains
+// part of the fleet health summary. A retired or renamed host cannot report its
+// own recovery, so retaining it forever would make one historical failure the
+// permanent fleet verdict.
+const DrainHealthTTL = 24 * time.Hour
+
 // DrainHealth is the watcher's dispatch record: whether fix sessions are
 // actually starting.
 //
@@ -910,12 +916,20 @@ func (s *State) NoteDispatch(host string, started bool, reason string, now time.
 		drain.LastFailureAt = &at
 	}
 	s.Drains[host] = drain
-	s.summarizeDrains()
+	s.summarizeDrains(now)
 }
 
-func (s *State) summarizeDrains() {
+func (s *State) summarizeDrains(now time.Time) {
 	var summary *DrainHealth
-	for _, drain := range s.Drains {
+	for host, drain := range s.Drains {
+		latest := drain.LastFailureAt
+		if timeAfter(drain.LastSuccessAt, latest) {
+			latest = drain.LastSuccessAt
+		}
+		if latest != nil && !latest.Add(DrainHealthTTL).After(now.UTC()) {
+			delete(s.Drains, host)
+			continue
+		}
 		candidate := drain
 		if summary == nil ||
 			candidate.ConsecutiveFailures > summary.ConsecutiveFailures ||
@@ -1157,7 +1171,7 @@ func (s *State) Normalize(now time.Time) {
 		}
 	}
 	if s.Drains != nil {
-		s.summarizeDrains()
+		s.summarizeDrains(now)
 	}
 	if s.FireSlot != nil && s.SlotRound() == nil {
 		s.FireSlot = nil

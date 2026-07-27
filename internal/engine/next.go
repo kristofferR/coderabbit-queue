@@ -43,7 +43,8 @@ type Action struct {
 	// Pending lists the required bots with no review evidence for this head,
 	// in the caller's configured order.
 	Pending []string
-	// Findings carries the actionable feedback for ActionFix.
+	// Findings carries actionable feedback for ActionFix, and remains visible
+	// when a live dispatch must temporarily hold its fixes for a reviewer.
 	Findings []dialect.Finding
 }
 
@@ -114,6 +115,13 @@ func NextAction(in NextInput, now time.Time) Action {
 	// 1. Findings first. An agent that starts a new review round on top of
 	//    unresolved feedback burns account quota to be told the same thing.
 	//
+	//    One caller already knows it handled the findings even though GitHub
+	//    cannot know yet: the live dispatch session must push before resolving
+	//    its threads. If that session holds local work while another required
+	//    reviewer is already reading this head, the safe next action is the hold,
+	//    not another copy of the same findings. This is deliberately tied to the
+	//    dispatch claim; ordinary dirty worktrees must still see every finding.
+	//
 	//    A threadless finding has no lever the caller can pull — nothing clears
 	//    it but a push whose review supersedes it — so it can repeat. Suppressing
 	//    it once the tree is dirty was tried and is WORSE: any unrelated dirty
@@ -123,6 +131,16 @@ func NextAction(in NextInput, now time.Time) Action {
 	//    deliberately errs toward repeating. Clearing them properly needs an
 	//    explicit dismissal, not an inference from local state.
 	if blocking := BlockingFindings(in.Findings, in.Obs.Head); len(blocking) > 0 {
+		if in.LocalWork && in.Round.DispatchHeld(now) &&
+			pendingReviewRequested(in, pending) {
+			return Action{
+				Kind:     ActionHold,
+				Reason:   "do not push: a required reviewer has not answered for this head",
+				At:       in.nextCheck(now, nil, pending),
+				Pending:  pending,
+				Findings: blocking,
+			}
+		}
 		return Action{
 			Kind:     ActionFix,
 			Reason:   "actionable findings for this head",
@@ -230,6 +248,26 @@ func NextAction(in NextInput, now time.Time) Action {
 		return Action{Kind: ActionPush, Reason: "all required reviewers answered on this head"}
 	}
 	return Action{Kind: ActionDone, Reason: "converged: no findings and every required reviewer answered"}
+}
+
+func pendingReviewRequested(in NextInput, pending []string) bool {
+	for _, login := range pending {
+		if sameBot(login, in.Primary) {
+			if reviewRequested(in.Round) {
+				return true
+			}
+			continue
+		}
+		co := in.Round.Co(login)
+		if co.CommandedAt != nil || co.ClaimedAt != nil {
+			return true
+		}
+		if dialect.IsCodexBot(login) &&
+			(in.Round.CodexCommandedAt != nil || in.Round.CodexClaimedAt != nil) {
+			return true
+		}
+	}
+	return false
 }
 
 // settling reports whether the quiet period after the last evidence is still
