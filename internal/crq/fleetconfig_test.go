@@ -564,3 +564,51 @@ func TestInaccessibleRepoLookupClassification(t *testing.T) {
 		})
 	}
 }
+
+// A key only a newer crq knows is the one divergence this host cannot act on:
+// applyFleet ignores it, and reporting only the settings this binary understands
+// would have `crq config` and `crq doctor` both call the host fully in step
+// while it silently drops part of the shared policy.
+func TestFleetConfigReportsSettingsOnlyANewerCrqKnows(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.ExplicitFleetEnv = map[string]bool{}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("some-future-knob", "7")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	items, err := svc.FleetConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reported *FleetSetting
+	for i, item := range items {
+		if item.Key == "some-future-knob" {
+			reported = &items[i]
+		}
+	}
+	if reported == nil || !reported.Unknown || reported.Error == "" {
+		t.Fatalf("crq config must report the recorded key it ignores, got %+v", items)
+	}
+	diverged, err := svc.FleetDivergence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diverged) != 1 || !strings.Contains(diverged[0], "some-future-knob") {
+		t.Fatalf("doctor divergence = %v, want the ignored setting named", diverged)
+	}
+
+	// And the remedy doctor names has to work: refusing to unset a key this
+	// binary does not know would leave it unremovable from every older host.
+	if dropped, err := svc.UnsetFleetConfig(ctx, "some-future-knob"); err != nil || !dropped {
+		t.Fatalf("unset = %v %v, want the recorded key dropped", dropped, err)
+	}
+	if _, err := svc.UnsetFleetConfig(ctx, "never-recorded"); err == nil {
+		t.Fatal("a key that is neither known nor recorded is still a typo")
+	}
+}

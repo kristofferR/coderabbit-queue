@@ -56,7 +56,7 @@ func fleetSettings() map[string]fleetSetting {
 				cfg.AllowRepos = repos
 				return err
 			},
-			Show: func(cfg Config) string { return strings.Join(sortedRepoKeys(cfg.AllowRepos), ",") },
+			Show: func(cfg Config) string { return strings.Join(sortedSetKeys(cfg.AllowRepos), ",") },
 		},
 		"exclude": {
 			Doc: "repositories crq never reviews, watches or fixes",
@@ -66,7 +66,7 @@ func fleetSettings() map[string]fleetSetting {
 				cfg.ExcludeRepos = repos
 				return err
 			},
-			Show: func(cfg Config) string { return strings.Join(sortedRepoKeys(cfg.ExcludeRepos), ",") },
+			Show: func(cfg Config) string { return strings.Join(sortedSetKeys(cfg.ExcludeRepos), ",") },
 		},
 		"required-bots": {
 			Doc: "logins that must review a head before a round converges",
@@ -138,6 +138,15 @@ func fleetSettings() map[string]fleetSetting {
 				return nil
 			},
 			Show: func(cfg Config) string { return cfg.SkipMarker },
+		},
+		"skip-authors": {
+			Doc: "PR authors autoreview never enqueues (empty reviews every author)",
+			Env: "CRQ_AUTOREVIEW_SKIP_AUTHORS",
+			Apply: func(cfg *Config, v string) error {
+				cfg.SkipAuthors = authorSet(v)
+				return nil
+			},
+			Show: func(cfg Config) string { return strings.Join(sortedSetKeys(cfg.SkipAuthors), ",") },
 		},
 	}
 }
@@ -246,7 +255,7 @@ func sortedKeys(m map[string]string) []string {
 	return out
 }
 
-func sortedRepoKeys(m map[string]bool) []string {
+func sortedSetKeys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)

@@ -865,6 +865,57 @@ func TestCompletionIsRevalidatedInsideItsWrite(t *testing.T) {
 	}
 }
 
+// A retry is policy-dependent too: its RetryAt and account block are computed
+// from the fleet's rate-limit fallback, so a widened window landing in the same
+// decision/write gap would be persisted at the old, earlier deadline — and the
+// account unblocked in time for another metered review the fleet meant to defer.
+func TestRetryIsRevalidatedInsideItsWrite(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	hooked := &hookedStore{StateStore: store}
+	svc := NewService(cfg, newFakeGitHub(), hooked, nil)
+	now := time.Now().UTC()
+	repo, pr, head := "o/r", 14, "aaaaaaaa1"
+	seedRound(t, store, cfg, repo, pr, head, PhaseFired, now, 22)
+
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := svc.cfgFor(st, repo)
+	hooked.hook = func() {
+		if _, err := store.Update(ctx, func(st *State) error {
+			st.SetFleetValue("rate-limit-fallback", "2h")
+			return nil
+		}); err != nil {
+			t.Error(err)
+		}
+	}
+	until := now.Add(15 * time.Minute)
+	retry := engine.Transition{
+		Outcome: engine.OutRetry,
+		Reason:  dialect.ReasonRateLimited,
+		RetryAt: until,
+		Blocked: &engine.AccountBlock{Until: until, CommentID: 99, CommentUpdated: now},
+	}
+	if _, err := hooked.Update(ctx, func(st *State) error {
+		return svc.applyTransition(st, st.Round(repo, pr), retry, now, stale)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := roundPhase(t, store, repo, pr); got != PhaseFired {
+		t.Fatalf("phase = %s, want the stale retry dropped so it is recomputed under the fleet's window", got)
+	}
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Account.BlockedUntil != nil {
+		t.Fatalf("the block computed from the old window must not be recorded, got %v", st.Account.BlockedUntil)
+	}
+}
+
 // Feedback and its completion write have the same decision/write window as
 // Progress. A reviewer override landing in that window must leave the in-flight
 // round open so the next observation can ask the newly required reviewer.

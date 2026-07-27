@@ -627,6 +627,61 @@ func TestAutoReviewScanSkipsConfiguredAuthors(t *testing.T) {
 	}
 }
 
+// Who autoreview skips is fleet policy for the same reason the body marker is:
+// leadership moves between hosts, and a Dependabot PR skipped on the machine
+// that held the lease yesterday must not spend the shared allowance on the one
+// that holds it today.
+func TestAutoReviewScanSkipsTheFleetsAuthors(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:          "o/gate",
+		Scope:             []string{"o"},
+		Host:              "h",
+		Bot:               "coderabbitai[bot]",
+		ReviewCommand:     "@coderabbitai review",
+		LeaderTTL:         time.Minute,
+		AutoReviewMaxScan: 10,
+		SkipAuthors:       authorSet("renovate[bot]"),
+	}
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{
+		{Repo: "o/app", Number: 1, Author: "Dependabot"},
+		{Repo: "o/app", Number: 2, Author: "renovate[bot]"},
+		{Repo: "o/app", Number: 3, Author: "alice"},
+	}
+	for pr := 1; pr <= 3; pr++ {
+		var pull ghapi.Pull
+		pull.State = "open"
+		pull.Head.SHA = "abcdef1234567890"
+		gh.pulls[fakeKey("o/app", pr)] = pull
+	}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("skip-authors", "dependabot[bot]")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	if err := svc.AutoReview(ctx, AutoOptions{Once: true, Incremental: true}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Round("o/app", 1) != nil {
+		t.Fatalf("the fleet's skipped author must never be queued, got %#v", st.Round("o/app", 1))
+	}
+	if st.Round("o/app", 2) == nil {
+		t.Fatal("the fleet's list replaces this host's, so its author is reviewed again")
+	}
+	if st.Round("o/app", 3) == nil {
+		t.Fatalf("a human-authored PR must still be enqueued, got rounds=%#v", st.Rounds)
+	}
+}
+
 func TestAutoReviewScanSkipsMarkedPRs(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{

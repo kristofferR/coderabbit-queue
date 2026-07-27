@@ -2401,6 +2401,45 @@ func TestCompleteWaitRoundHoldsAnUnacknowledgedFireSlot(t *testing.T) {
 	}
 }
 
+// The hold is bounded by the in-flight window Progress gives up at, and that
+// window is fleet policy. A host whose own value is shorter would otherwise
+// stamp a hold that lapses while Progress is still waiting on the command,
+// letting the next pull request spend the allowance alongside it.
+func TestHeldFireSlotUsesTheFleetsInflightTimeout(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.InflightTimeout = time.Minute // this host's own, shorter, answer
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	now := time.Now().UTC()
+	repo, pr, head := "o/r", 6, "aaaaaaaa1"
+	seedRound(t, store, cfg, repo, pr, head, PhaseFired, now, 12)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("inflight-timeout", "2h")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fleet := svc.cfgFor(st, repo)
+
+	svc.completeWaitRound(ctx, repo, pr, head, true, &fleet)
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.FireSlot == nil || st.FireSlot.HoldUntil == nil {
+		t.Fatalf("the slot must be held for the unanswered command, got %+v", st.FireSlot)
+	}
+	want := now.Add(2 * time.Hour)
+	if !st.FireSlot.HoldUntil.Equal(want) {
+		t.Fatalf("hold until = %s, want the fleet's window %s", st.FireSlot.HoldUntil, want)
+	}
+}
+
 // Converging is the loop's signal to push, and the push supersedes the round the
 // held slot points at. Leaving the round fired is therefore not enough on its
 // own: the replacement round archives its predecessor, Normalize drops a slot no

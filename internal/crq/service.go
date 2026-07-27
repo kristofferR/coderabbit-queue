@@ -856,17 +856,26 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 // where the state it reads is the state the write lands on.
 func (s *Service) applyTransition(st *State, r *Round, tr engine.Transition, now time.Time, cfg Config) error {
 	key := QueueKey(r.Repo, r.PR)
+	// Completion and retry are the policy-dependent outcomes, so both are dropped
+	// when the policy moved under them. The completed round is the "this head was
+	// reviewed" dedup marker, and reopenForChangedReviewers deliberately leaves an
+	// in-flight round alone — it is already going to answer — so a reviewer change
+	// committing between the decision and this write would be answered by neither:
+	// the marker dedupes the head under the set that no longer gates it. A retry
+	// carries a RetryAt and an account block computed from the fleet's fallback
+	// and backoff windows, so a widened window would be persisted at the old,
+	// earlier deadline and let another metered review fire inside it. Dropping is
+	// safe either way: the round keeps the slot and the next pump decides again
+	// under the current policy. The other outcomes record facts — an ack, a closed
+	// PR, a reservation that never posted — that no policy change revises.
 	switch tr.Outcome {
-	case engine.OutComplete:
-		// The completed round is the "this head was reviewed" dedup marker, and
-		// reopenForChangedReviewers deliberately leaves an in-flight round alone —
-		// it is already going to answer. A reviewer change that commits between
-		// the decision and this write would therefore be answered by neither: the
-		// marker dedupes the head under the set that no longer gates it. Drop the
-		// stale transition; the next pump decides again under the new set.
+	case engine.OutComplete, engine.OutRetry:
 		if overrideChanged(st, r.Repo, cfg) {
 			return ErrNoChange
 		}
+	}
+	switch tr.Outcome {
+	case engine.OutComplete:
 		if err := r.Complete(); err != nil {
 			return err
 		}

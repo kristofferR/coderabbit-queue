@@ -26,11 +26,19 @@ type FleetSetting struct {
 	// Error is why a recorded value was not applied, when this binary could not
 	// read it.
 	Error string `json:"error,omitempty"`
+	// Unknown marks a setting the fleet records that this binary has no notion
+	// of — written by a newer crq. Nothing is in force for it here, so Value and
+	// Env are empty and only the key is worth reporting.
+	Unknown bool `json:"unknown,omitempty"`
 	// Lagging names active queue drivers that cannot enforce fleet policy.
 	Lagging []string `json:"lagging_hosts,omitempty"`
 }
 
-// FleetConfig reports every fleet setting, in force and as this host has it.
+// FleetConfig reports every fleet setting, in force and as this host has it —
+// including the ones only a newer crq knows. Reporting just the keys this binary
+// understands would hide exactly the case that matters: a recorded setting this
+// process silently ignores, while `crq config` and `crq doctor` call the host
+// fully in step with the fleet.
 func (s *Service) FleetConfig(ctx context.Context) ([]FleetSetting, error) {
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
@@ -56,6 +64,18 @@ func (s *Service) FleetConfig(ctx context.Context) ([]FleetSetting, error) {
 			item.HostValue = &host
 		}
 		out = append(out, item)
+	}
+	for _, key := range st.FleetKeys() {
+		if _, known := settings[key]; known {
+			continue
+		}
+		out = append(out, FleetSetting{
+			Key:     key,
+			Unknown: true,
+			Source:  "host",
+			Error:   "not a setting this crq understands; it is being ignored on this host",
+			Lagging: lagging,
+		})
 	}
 	return out, nil
 }
@@ -88,9 +108,15 @@ func (s *Service) SetFleetConfig(ctx context.Context, key, value string) error {
 
 // UnsetFleetConfig returns one setting to whatever each host says, reporting
 // whether the fleet had an opinion to drop.
+//
+// A key this binary does not know is refused only when the fleet has not
+// recorded it either. Dropping one it HAS recorded is the remedy `crq doctor`
+// names for a setting a newer crq wrote and this host ignores, and refusing it
+// would leave that key unremovable from every host but the newest.
 func (s *Service) UnsetFleetConfig(ctx context.Context, key string) (bool, error) {
-	if _, ok := fleetSettings()[key]; !ok {
-		return false, fmt.Errorf("unknown setting %q", key)
+	known := false
+	if _, ok := fleetSettings()[key]; ok {
+		known = true
 	}
 	open, err := s.prepareFleetReviewerChange(ctx, key)
 	if err != nil {
@@ -98,6 +124,9 @@ func (s *Service) UnsetFleetConfig(ctx context.Context, key string) (bool, error
 	}
 	dropped := false
 	_, err = s.updateFleet(ctx, func(st *State) error {
+		if _, recorded := st.FleetValue(key); !known && !recorded {
+			return fmt.Errorf("unknown setting %q", key)
+		}
 		if err := s.requireFleetCapableDrivers(st); err != nil {
 			return err
 		}
@@ -210,6 +239,9 @@ func (s *Service) FleetDivergence(ctx context.Context) ([]string, error) {
 	var out []string
 	for _, item := range items {
 		switch {
+		case item.Unknown:
+			out = append(out, fmt.Sprintf("%s is recorded for the fleet but is not a setting this crq understands; upgrade crq on this host or run crq config unset %s",
+				item.Key, item.Key))
 		case item.Error != "":
 			out = append(out, fmt.Sprintf("%s: the fleet's value is one this crq cannot read (%s); using this host's %q",
 				item.Key, item.Error, item.Value))

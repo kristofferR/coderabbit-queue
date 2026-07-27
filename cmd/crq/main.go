@@ -1124,7 +1124,7 @@ each host is behaving correctly according to what it can see. These settings
 have one answer for the fleet:
 
   scope, repos, exclude, required-bots, min-interval, inflight-timeout,
-  rate-limit-fallback, calibrate-ttl, settle, skip-marker
+  rate-limit-fallback, calibrate-ttl, settle, skip-marker, skip-authors
 
 Three kinds of setting deliberately stay local: where the state lives
 (CRQ_REPO, CRQ_ISSUE, CRQ_STATE_REF — a host cannot read fleet policy until it

@@ -266,7 +266,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			if len(cfg.AllowRepos) > 0 && !cfg.AllowRepos[repo] {
 				return false, nil
 			}
-			if s.cfg.SkipAuthors[dialect.NormalizeBotName(strings.ToLower(pr.Author))] {
+			if cfg.SkipAuthors[dialect.NormalizeBotName(strings.ToLower(pr.Author))] {
 				return false, nil
 			}
 			if cfg.SkipsReview(pr.Body) {
