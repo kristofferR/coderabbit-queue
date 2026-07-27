@@ -743,8 +743,12 @@ func (s *Service) beatDispatch(ctx context.Context, report NextReport, token str
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				taken, gone := false, false
+				var taken, gone bool
 				if _, err := s.store.Update(ctx, func(st *State) error {
+					// Reset per ATTEMPT, not per tick: Update re-runs this
+					// closure on a CAS conflict, and a verdict left over from
+					// an attempt that lost would be read as this one's.
+					taken, gone = false, false
 					round := st.Round(report.Repo, report.PR)
 					// A round for ANOTHER head is not this round: superseding is
 					// what this session's own push does, and the fresh round's
