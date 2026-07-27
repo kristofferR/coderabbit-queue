@@ -1,37 +1,38 @@
 # Unattended review drain
 
 `crq watch --dispatch` turns "this PR needs fixing" into a session that fixes it.
-These are the files to run it as a service, and the prompt that survived contact
-with it.
 
-| file | what it is |
-|---|---|
-| `crq-drain` | wrapper that runs `crq watch --dispatch` with an agent and prompt |
-| `crq-drain.service` | systemd --user unit; `Restart=always` + linger keeps it alive |
-| `fix-prompt.txt` | what the fix session is told |
+```bash
+crq drain install                 # prompt + wrapper + service, started
+crq drain install --dry-run       # print what it would write first
+```
 
-## The prompt earned two of its rules the hard way
+That writes the fix prompt, a wrapper, and a systemd user unit (or a launchd
+agent on macOS), enables lingering so it survives a logout, and starts it. There
+are no files in this directory to copy: the prompt crq installs is embedded in
+the binary, so it cannot drift from the one documented here.
 
-**Stay detached.** crq's worktrees are backed by one mirror shared by every PR in
-the repository. A session that ran `git checkout -B <branch>` put that branch in
-the mirror, and git then refused to fetch it — for *every* PR. One session's
-branch stopped every dispatch in the fleet for hours. Sessions commit on the
-detached HEAD and push by ref instead:
+## Two rules the prompt earned the hard way
+
+**Sessions stay on a detached HEAD and push by ref.** crq's worktrees are backed
+by one mirror shared by every PR in the repository. A session that ran
+`git checkout -B <branch>` put that branch in the mirror, and git then refused to
+fetch it — for *every* PR. One session's branch stopped every dispatch for hours.
 
 ```bash
 git push origin "HEAD:refs/heads/$branch"
 ```
 
-**Resolve after pushing, and expect to still be running.** A session's push moves
-the head, which supersedes the round and drops its dispatch claim. crq used to
-read that as "another watcher took this round" and kill the session — between
-the push and the resolve, every time it succeeded. Only a claim somebody else
-actively holds stops a session now.
+**Threads are resolved after pushing, and the session survives to do it.** A
+push moves the head, which supersedes the round and drops its dispatch claim.
+crq used to read that as "another watcher took this round" and kill the session
+between the push and the resolve — every time it succeeded. Only a claim
+somebody else actively holds stops a session now.
 
 ## Where to look when it misbehaves
 
 - `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log` — each session's own
-  output, the last five per PR.
-- `drain.err` — one line per dispatch, naming the session log.
-- The dashboard issue and `crq status --line` — three failed passes in a row and
-  both say `dispatch failing` rather than leaving it to be noticed.
+  output, the last five per PR. A failed session also keeps its worktree.
+- `~/.local/state/crq/drain.err` — one line per dispatch, naming the session log.
+- The dashboard issue and `crq status --line` — three passes in a row that start
+  nothing and both say `dispatch failing`, rather than leaving it to be noticed.

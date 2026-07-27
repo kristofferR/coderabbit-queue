@@ -178,7 +178,9 @@ checked out at that head. Sessions run concurrently (`CRQ_DISPATCH_CONCURRENCY`,
 the decision loop, so a long one blocks nothing; the decisions stay serial, which is what keeps the
 account-metered review in one queue.
 
-Ready-to-use unit, wrapper and prompt: `examples/dispatch/`. Two rules the prompt earned the hard
+One command sets it up — `crq drain install` writes the prompt, a wrapper and this platform's
+service (systemd user unit, or a launchd agent on macOS), makes it survive a logout, and starts it;
+`--dry-run` prints the paths first. Two rules the prompt earned the hard
 way — a session must stay on a detached HEAD and push by ref (`git push origin HEAD:refs/heads/…`),
 because the worktrees share one mirror and a branch checked out in one of them makes git refuse to
 fetch for every PR; and it resolves threads AFTER pushing, which crq now allows by distinguishing a

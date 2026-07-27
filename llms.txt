@@ -202,6 +202,16 @@ convergence never hides a rebuttal you have not answered. Address it or decline 
 reason; the loop clears it once the bot withdraws (or you stop declining and fix it). Ambiguous bot
 replies surface too — crq errs toward showing a possible rebuttal rather than burying it.
 
+Run the whole thing unattended — crq watches every open PR and starts a fix session for the ones
+that need one:
+
+```bash
+crq drain install            # prompt + wrapper + service, started; --dry-run to preview
+```
+
+Session output goes to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log`. Three passes in a
+row that start nothing put `dispatch failing` on the dashboard and the status line.
+
 Current feedback without triggering a review:
 
 ```bash

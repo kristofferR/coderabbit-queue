@@ -224,6 +224,34 @@ func run(ctx context.Context, args []string) int {
 		}
 		printJSON(result)
 		return 0
+	case "drain":
+		fs := flag.NewFlagSet("drain", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		agent := fs.String("agent", "", "fix agent to run (default: claude on PATH)")
+		dryRun := fs.Bool("dry-run", false, "print what would be written and run")
+		sub := ""
+		rest := args[1:]
+		if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+			sub, rest = rest[0], rest[1:]
+		}
+		if err := fs.Parse(rest); err != nil {
+			return 1
+		}
+		if sub != "install" {
+			fatal(errors.New("usage: crq drain install [--agent <path>] [--dry-run] [<repo>...]"))
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		plan, ierr := service.InstallDrain(ctx, *agent, fs.Args(), *dryRun)
+		if ierr != nil {
+			fatal(ierr)
+			return 1
+		}
+		printJSON(plan)
+		return 0
 	case "watch":
 		fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 		fs.SetOutput(os.Stderr)
@@ -398,6 +426,8 @@ USAGE
   crq decline <thread-id> [...] --reason "<why>" [--keep-open]
                                    reply on a thread to record why a finding is declined
                                    (resolves it; --keep-open leaves it open)
+  crq drain install [--agent <path>] [--dry-run] [<repo>...]
+                                   install and start the unattended review drain
   crq watch [--dispatch] [--once] [<repo>...] [-- <fix command>]
                                    drive open PRs through crq next; --dispatch starts a
                                    session to fix the ones that need it
@@ -554,6 +584,25 @@ replies contesting the decline, crq re-surfaces that reply as its own finding.
 
 Pass --keep-open to leave it unresolved anyway (an on-the-record disagreement you
 intend to keep working). Thread IDs come from .findings[].thread_id.
+`)
+	case "drain":
+		fmt.Print(`crq drain install [--agent <path>] [--dry-run] [<repo>...]
+
+Install and start the unattended review drain: crq watches every open PR and
+starts a fix session for the ones that need one.
+
+It writes the fix prompt, a wrapper, and a service definition for this platform
+(a systemd user unit, or a launchd agent on macOS), turns on whatever that
+platform needs to survive a logout, and starts it. --dry-run prints the paths and
+commands without touching anything.
+
+The agent defaults to "claude" on PATH; pass --agent for something else. It is
+run with permissions bypassed because it is unattended — an interactive prompt
+for "go test" or "git push" would hang forever with nobody to answer it. What
+keeps that bounded is the isolated worktree, one claimed session per PR,
+CRQ_DISPATCH_MAX_ATTEMPTS per head, and the prompt's stated scope.
+
+Repositories default to CRQ_REPOS.
 `)
 	case "watch":
 		fmt.Print(`crq watch [--dispatch] [--once] [--interval <d>] [--max-attempts <n>] [<repo>...] [-- <cmd>...]
