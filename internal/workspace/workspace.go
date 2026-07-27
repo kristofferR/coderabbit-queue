@@ -74,8 +74,13 @@ func (w Workspace) git(ctx context.Context, dir string, args ...string) (string,
 		return gitDir(ctx, dir, args...)
 	}
 	full := append([]string{"-c", "credential.helper=", "-c", "credential.helper=" + credentialHelper}, args...)
-	return gitEnv(ctx, dir, []string{"CRQ_GIT_TOKEN=" + token}, full...)
+	return gitEnv(ctx, dir, []string{TokenEnv + "=" + token}, full...)
 }
+
+// TokenEnv is the variable credentialHelper reads the token from. A caller that
+// runs git in a checkout — rather than through this package — has to set it, so
+// the name is part of the contract rather than an internal detail.
+const TokenEnv = "CRQ_GIT_TOKEN"
 
 // credentialHelper answers for https://github.com and nothing else.
 //
@@ -198,6 +203,12 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 	if _, err := w.git(ctx, pending, "config", "remote.origin.fetch", originRefspec); err != nil {
 		return "", fmt.Errorf("configuring %s: %w", repo, err)
 	}
+	// Before the fetch, so the mirror is complete the moment it is renamed into
+	// place: another worker may pick it up as soon as it exists, and it would
+	// find one with no helper for its own git commands to use.
+	if err := w.persistCredentialHelper(ctx, pending); err != nil {
+		return "", fmt.Errorf("configuring %s: %w", repo, err)
+	}
 	if _, err := w.git(ctx, pending, "fetch", "--prune", "origin", originRefspec, tagRefspec); err != nil {
 		return "", fmt.Errorf("cloning %s: %w", repo, err)
 	}
@@ -244,7 +255,36 @@ func (w Workspace) migrateMirror(ctx context.Context, path string) error {
 	// the refspec does not clear: a plain `git push` from a session's worktree
 	// would then mirror the whole local ref namespace, publishing internal refs
 	// and deleting remote branches this repository has never heard of.
-	return w.unsetConfig(ctx, path, "remote.origin.mirror")
+	if err := w.unsetConfig(ctx, path, "remote.origin.mirror"); err != nil {
+		return err
+	}
+	return w.persistCredentialHelper(ctx, path)
+}
+
+// persistCredentialHelper writes the helper SNIPPET into the mirror's config,
+// for the git commands this package does not run itself.
+//
+// A worktree is made for somebody else to work in, and that somebody runs a
+// plain `git push`. Everything here injects the helper with -c, which lasts
+// exactly as long as one command, and git reads no GITHUB_TOKEN of its own — so
+// on a host holding only a token, a caller could do all of its work in a
+// checkout and fail at the last step of every one of them.
+//
+// The secret still never lands on disk: what is persisted READS TokenEnv from
+// the environment, so only a caller that sets it can use it, and a mirror
+// somebody else finds on disk hands out nothing.
+func (w Workspace) persistCredentialHelper(ctx context.Context, path string) error {
+	if strings.TrimSpace(w.Token) == "" && w.TokenSource == nil {
+		return nil // the host's own helper answers; leave its configuration alone
+	}
+	// gitDir, not w.git: w.git injects a credential.helper of its own, so this
+	// read would answer with that injected value and conclude the mirror is
+	// already configured when its config is in fact empty.
+	if cur, err := gitDir(ctx, path, "config", "--local", "--get-all", "credential.helper"); err == nil && cur == credentialHelper {
+		return nil
+	}
+	_, err := gitDir(ctx, path, "config", "--local", "--replace-all", "credential.helper", credentialHelper)
+	return err
 }
 
 // fetchMirror brings the mirror at path up to date.

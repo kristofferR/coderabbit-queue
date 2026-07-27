@@ -988,3 +988,52 @@ func TestFreshHeartbeatAvoidsDeepPruningDecision(t *testing.T) {
 		t.Fatal("fresh checkout root did not take the heartbeat fast path")
 	}
 }
+
+// A worktree is made for somebody else to work in, and that somebody pushes with
+// a plain `git push`. crq's own commands pass the credential helper with -c,
+// which lasts one command, so the mirror has to carry it for the ones this
+// package does not run.
+func TestMirrorPersistsTheCredentialHelperForOtherCallers(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir(), Token: "ghp_secret_value"}
+	ctx := context.Background()
+
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := gitDir(ctx, mirror, "config", "--local", "--get", "credential.helper")
+	if err != nil {
+		t.Fatalf("no credential helper persisted, so a session's own push has none: %v", err)
+	}
+	if got != credentialHelper {
+		t.Errorf("persisted credential.helper = %q, want the workspace helper", got)
+	}
+	// The snippet, never the secret: a mirror somebody else finds on disk must
+	// hand out nothing without TokenEnv set in the environment.
+	if strings.Contains(got, "ghp_secret_value") {
+		t.Error("the token itself was written into the mirror's config")
+	}
+}
+
+// Without a token there is nothing to inject, and rewriting the host's own
+// credential configuration would be crq overriding a choice that is not its own.
+func TestMirrorLeavesTheHostsCredentialConfigurationAlone(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := gitDir(ctx, mirror, "config", "--local", "--get", "credential.helper"); got != "" {
+		t.Errorf("credential.helper = %q, want none written when crq has no token", got)
+	}
+}
