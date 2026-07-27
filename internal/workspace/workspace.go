@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -73,12 +74,7 @@ func (w Workspace) git(ctx context.Context, dir string, args ...string) (string,
 	if token == "" {
 		return gitDir(ctx, dir, args...)
 	}
-	// A linked checkout can write executable configuration into the shared
-	// mirror. Do not let hooks or an fsmonitor command inherit the token from a
-	// later workspace operation.
 	full := append([]string{
-		"-c", "core.hooksPath=" + os.DevNull,
-		"-c", "core.fsmonitor=false",
 		"-c", "credential.helper=",
 		"-c", "credential.helper=" + credentialHelper,
 	}, args...)
@@ -168,31 +164,8 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 		}
 	}
 	if _, err := os.Stat(filepath.Join(path, "HEAD")); err == nil {
-		dropFetched := w.hasLegacyFetchedHeads(ctx, path)
-		if dropFetched {
-			// Persist the pending state before migrateMirror clears the legacy
-			// configuration that identified these heads. A failed fetch or
-			// deletion must be retried by the next refresh.
-			if err := w.setConfig(ctx, path, fetchedHeadsMigratedKey, "false"); err != nil {
-				return "", fmt.Errorf("recording pending migration of %s: %w", repo, err)
-			}
-		}
-		if cerr := w.migrateMirror(ctx, path); cerr != nil {
-			return "", fmt.Errorf("configuring %s: %w", repo, cerr)
-		}
-		if ferr := w.fetchMirror(ctx, path, repo); ferr != nil {
-			return "", fmt.Errorf("fetching %s: %w", repo, ferr)
-		}
-		// After the fetch, because it is the fetch that puts the current value of
-		// every remote branch under refs/remotes/origin — which is what makes the
-		// copies an old clone left in refs/heads redundant.
-		if dropFetched {
-			if derr := w.dropFetchedHeads(ctx, path); derr != nil {
-				return "", fmt.Errorf("migrating %s: %w", repo, derr)
-			}
-		}
-		if err := w.setConfig(ctx, path, fetchedHeadsMigratedKey, "true"); err != nil {
-			return "", fmt.Errorf("recording migration of %s: %w", repo, err)
+		if err := w.refreshMirror(ctx, path, repo); err != nil {
+			return "", err
 		}
 		return path, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -225,13 +198,16 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 	if _, err := w.git(ctx, pending, "config", "remote.origin.fetch", originRefspec); err != nil {
 		return "", fmt.Errorf("configuring %s: %w", repo, err)
 	}
+	if err := w.enableWorktreeConfig(ctx, pending); err != nil {
+		return "", fmt.Errorf("configuring %s: %w", repo, err)
+	}
 	// Before the fetch, so the mirror is complete the moment it is renamed into
 	// place: another worker may pick it up as soon as it exists, and it would
 	// find one with no helper for its own git commands to use.
 	if err := w.persistCredentialHelper(ctx, pending); err != nil {
 		return "", fmt.Errorf("configuring %s: %w", repo, err)
 	}
-	if _, err := w.git(ctx, pending, "fetch", "--prune", "origin", originRefspec, tagRefspec); err != nil {
+	if _, err := w.git(ctx, pending, "fetch", "--prune", "--no-tags", w.remoteURL(repo), originRefspec, tagRefspec); err != nil {
 		return "", fmt.Errorf("cloning %s: %w", repo, err)
 	}
 	// A new mirror never copied remote branches into refs/heads. Record that
@@ -250,6 +226,103 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 	return path, nil
 }
 
+func (w Workspace) refreshMirror(ctx context.Context, path, repo string) error {
+	// A true marker proves refs/heads already belongs to sessions. The fast path
+	// avoids serializing ordinary refreshes after the one-time migration.
+	if w.fetchedHeadsMigrationComplete(ctx, path) && w.worktreeConfigComplete(ctx, path) {
+		return w.refreshMigratedMirror(ctx, path, repo)
+	}
+
+	unlock, err := lockMirrorMigration(ctx, path)
+	if err != nil {
+		return fmt.Errorf("locking migration of %s: %w", repo, err)
+	}
+	defer unlock()
+
+	// Another process may have completed the migration while this one waited.
+	if w.fetchedHeadsMigrationComplete(ctx, path) && w.worktreeConfigComplete(ctx, path) {
+		return w.refreshMigratedMirror(ctx, path, repo)
+	}
+
+	dropFetched := w.hasLegacyFetchedHeads(ctx, path)
+	if dropFetched {
+		// Persist the pending state before migrateMirror clears the legacy
+		// configuration that identified these heads. A failed fetch or deletion
+		// must be retried by the next refresh.
+		if err := w.setConfig(ctx, path, fetchedHeadsMigratedKey, "false"); err != nil {
+			return fmt.Errorf("recording pending migration of %s: %w", repo, err)
+		}
+	}
+	if err := w.migrateMirror(ctx, path); err != nil {
+		return fmt.Errorf("configuring %s: %w", repo, err)
+	}
+	if err := w.fetchMirror(ctx, path, repo); err != nil {
+		return fmt.Errorf("fetching %s: %w", repo, err)
+	}
+	// The lock keeps a second refresh from acting on a stale migration decision
+	// or returning a checkout while legacy refs are still eligible for deletion.
+	if dropFetched {
+		if err := w.dropFetchedHeads(ctx, path); err != nil {
+			return fmt.Errorf("migrating %s: %w", repo, err)
+		}
+	}
+	if err := w.setConfig(ctx, path, fetchedHeadsMigratedKey, "true"); err != nil {
+		return fmt.Errorf("recording migration of %s: %w", repo, err)
+	}
+	return nil
+}
+
+func (w Workspace) refreshMigratedMirror(ctx context.Context, path, repo string) error {
+	if err := w.migrateMirror(ctx, path); err != nil {
+		return fmt.Errorf("configuring %s: %w", repo, err)
+	}
+	if err := w.fetchMirror(ctx, path, repo); err != nil {
+		return fmt.Errorf("fetching %s: %w", repo, err)
+	}
+	return nil
+}
+
+func (w Workspace) fetchedHeadsMigrationComplete(ctx context.Context, path string) bool {
+	migrated, err := w.git(ctx, path, "config", "--bool", "--get", fetchedHeadsMigratedKey)
+	return err == nil && migrated == "true"
+}
+
+func (w Workspace) worktreeConfigComplete(ctx context.Context, path string) bool {
+	enabled, err := w.git(ctx, path, "config", "--bool", "--get", "extensions.worktreeConfig")
+	if err != nil || enabled != "true" {
+		return false
+	}
+	if _, err := w.git(ctx, path, "config", "--local", "--get", "core.bare"); err == nil {
+		return false
+	}
+	bare, err := w.git(ctx, path, "config", "--worktree", "--bool", "--get", "core.bare")
+	return err == nil && bare == "true"
+}
+
+func lockMirrorMigration(ctx context.Context, path string) (func(), error) {
+	file, err := os.OpenFile(filepath.Join(path, "crq-migration.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return func() {
+				_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+				_ = file.Close()
+			}, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			_ = file.Close()
+			return nil, err
+		}
+		if err := sleepCtx(ctx, 100*time.Millisecond); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+	}
+}
+
 // remoteURL is the URL crq clones from. CRQ_REMOTE_BASE exists so a test can
 // point at a local path; in production it is github.com over https, which is
 // what the host's credential helper is configured for.
@@ -266,9 +339,10 @@ func (w Workspace) remoteURL(repo string) string {
 // out in a worktree makes any fetch that would update it fail outright.
 const originRefspec = "+refs/heads/*:refs/remotes/origin/*"
 
-// tagRefspec is explicit so --prune removes deleted tags, and forced so a
-// release tag moved on the remote is refreshed instead of rejected as stale.
-const tagRefspec = "+refs/tags/*:refs/tags/*"
+// Remote tags live outside refs/tags, which belongs to sessions just like
+// refs/heads. This lets refreshes prune and force-update the remote's view
+// without deleting or moving tags a live checkout created.
+const tagRefspec = "+refs/tags/*:refs/crq/remotes/origin/tags/*"
 
 // fetchedHeadsMigratedKey records whether refs/heads has been handed over from
 // an old clone to sessions. False means cleanup is pending; true means later
@@ -304,6 +378,9 @@ func (w Workspace) hasLegacyFetchedHeads(ctx context.Context, path string) bool 
 // migrateMirror brings a mirror an older crq left behind up to the rules this
 // one depends on, and is a no-op on a mirror that already follows them.
 func (w Workspace) migrateMirror(ctx context.Context, path string) error {
+	if err := w.enableWorktreeConfig(ctx, path); err != nil {
+		return err
+	}
 	// Enforce the refspec on EVERY call, not only at clone time. A mirror
 	// created before this rule still fetches +refs/*:refs/*, and one branch
 	// created in a worktree then wedges every future fetch for the whole
@@ -319,6 +396,34 @@ func (w Workspace) migrateMirror(ctx context.Context, path string) error {
 		return err
 	}
 	return w.persistCredentialHelper(ctx, path)
+}
+
+func (w Workspace) enableWorktreeConfig(ctx context.Context, path string) error {
+	// Push URLs are worktree-specific. Enabling that extension requires moving
+	// core.bare into the main worktree's config; otherwise linked worktrees also
+	// inherit bare=true and Git refuses commands that need a working tree.
+	if w.worktreeConfigComplete(ctx, path) {
+		return nil
+	}
+	if err := w.setConfig(ctx, path, "extensions.worktreeConfig", "true"); err != nil {
+		return err
+	}
+	if _, err := w.git(ctx, path, "config", "--worktree", "--replace-all", "core.bare", "true"); err != nil {
+		return err
+	}
+	bare, err := w.git(ctx, path, "config", "--worktree", "--bool", "--get", "core.bare")
+	if err != nil {
+		return fmt.Errorf("verifying worktree core.bare: %w", err)
+	}
+	if bare != "true" {
+		return fmt.Errorf("verifying worktree core.bare: got %q, want true", bare)
+	}
+	if _, err := w.git(ctx, path, "config", "--local", "--get", "core.bare"); err == nil {
+		if _, err := w.git(ctx, path, "config", "--local", "--unset-all", "core.bare"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // persistCredentialHelper writes the helper SNIPPET into the mirror's config,
@@ -370,11 +475,10 @@ func (w Workspace) fetchMirror(ctx context.Context, path, repo string) error {
 	// current. Retry briefly rather than failing a dispatch over that.
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
-		// Use the mirror's repository explicitly. origin is shared with linked
-		// checkouts, and a fork session may have repointed it for its own push.
-		// Refreshing the mirror must neither trust nor rewrite that session's
-		// push destination.
-		if _, err = w.git(ctx, path, "fetch", "--prune", w.remoteURL(repo), originRefspec, tagRefspec); err == nil {
+		// Use the mirror's repository explicitly. Older checkouts may have
+		// repointed the shared origin before push URLs became worktree-local.
+		// Refreshing must neither trust nor rewrite that legacy state.
+		if _, err = w.git(ctx, path, "fetch", "--prune", "--no-tags", w.remoteURL(repo), originRefspec, tagRefspec); err == nil {
 			return nil
 		}
 		// Only contention is somebody else's success. Expired credentials, an
@@ -640,6 +744,10 @@ func (w Workspace) Checkout(ctx context.Context, repo string, pr int, sha string
 	); err != nil {
 		return Checkout{}, fmt.Errorf("checking out %s@%s: %w", repo, shortSHA(sha), err)
 	}
+	if _, err := w.git(ctx, dir, "config", "--worktree", "--replace-all", "remote.origin.pushurl", w.remoteURL(repo)); err != nil {
+		_ = removeWorktree(ctx, mirror, dir)
+		return Checkout{}, fmt.Errorf("configuring push target for %s: %w", repo, err)
+	}
 	// Held for as long as the caller's context lives, which is as long as this
 	// handle is worth anything. A caller whose context ends at once gets what it
 	// got before: a checkout that ages out of the workspace on its own.
@@ -663,7 +771,7 @@ func (w Workspace) fetchPullRef(ctx context.Context, mirror, repo string, pr int
 		return
 	}
 	ref := fmt.Sprintf("+refs/pull/%d/head:refs/remotes/origin/pull/%d", pr, pr)
-	_, _ = w.git(ctx, mirror, "fetch", w.remoteURL(repo), ref)
+	_, _ = w.git(ctx, mirror, "fetch", "--no-tags", w.remoteURL(repo), ref)
 }
 
 // workPath is the directory holding this PR's checkouts. Owner and name stay
@@ -756,7 +864,7 @@ func pruneStaleWork(ctx context.Context, mirror, repoDir string) error {
 
 func rootHeartbeatFresh(dir string, now time.Time) bool {
 	info, err := os.Stat(dir)
-	return err == nil && !info.ModTime().After(now) && now.Sub(info.ModTime()) < staleWorkAge
+	return err == nil && (info.ModTime().After(now) || now.Sub(info.ModTime()) < staleWorkAge)
 }
 
 // newestModTime is the most recent modification anywhere under dir that is not
@@ -837,6 +945,16 @@ func (c Checkout) Git(ctx context.Context, args ...string) (string, error) {
 	return c.ws.git(ctx, c.Dir, args...)
 }
 
+// SetPushURL gives this checkout its own origin push target. Fetch configuration
+// remains shared with the mirror, while sibling checkouts keep their targets.
+func (c Checkout) SetPushURL(ctx context.Context, url string) error {
+	if strings.TrimSpace(url) == "" {
+		return errors.New("push URL must not be empty")
+	}
+	_, err := c.ws.git(ctx, c.Dir, "config", "--worktree", "--replace-all", "remote.origin.pushurl", url)
+	return err
+}
+
 // gitDir runs git in dir ("" means the process's own directory) and returns its
 // trimmed stdout. Stderr is folded into the error, because "exit status 128" on
 // its own has never told anybody what went wrong.
@@ -849,13 +967,50 @@ func Git(ctx context.Context, dir string, args ...string) (string, error) {
 	return gitDir(ctx, dir, args...)
 }
 
+var repositoryLocalGitEnv = map[string]bool{
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES": true,
+	"GIT_COMMON_DIR":                   true,
+	"GIT_CONFIG":                       true,
+	"GIT_CONFIG_COUNT":                 true,
+	"GIT_CONFIG_PARAMETERS":            true,
+	"GIT_DIR":                          true,
+	"GIT_GRAFT_FILE":                   true,
+	"GIT_IMPLICIT_WORK_TREE":           true,
+	"GIT_INDEX_FILE":                   true,
+	"GIT_NAMESPACE":                    true,
+	"GIT_NO_REPLACE_OBJECTS":           true,
+	"GIT_OBJECT_DIRECTORY":             true,
+	"GIT_PREFIX":                       true,
+	"GIT_REPLACE_REF_BASE":             true,
+	"GIT_SHALLOW_FILE":                 true,
+	"GIT_WORK_TREE":                    true,
+}
+
 // gitEnv is gitDir with extra environment entries.
 func gitEnv(ctx context.Context, dir string, env []string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	// A linked checkout can write executable settings into the shared mirror.
+	// Disable them even when no token is injected, and keep an invoking Git hook
+	// from redirecting commands away from dir through repository-local variables.
+	full := append([]string{
+		"-c", "core.hooksPath=" + os.DevNull,
+		"-c", "core.fsmonitor=false",
+	}, args...)
+	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Dir = dir
-	if len(env) > 0 {
-		cmd.Env = append(os.Environ(), env...)
+	overrides := make(map[string]bool, len(env))
+	for _, entry := range env {
+		name, _, _ := strings.Cut(entry, "=")
+		overrides[name] = true
 	}
+	parent := os.Environ()
+	cmd.Env = make([]string, 0, len(parent)+len(env))
+	for _, entry := range parent {
+		name, _, _ := strings.Cut(entry, "=")
+		if !repositoryLocalGitEnv[name] && !overrides[name] {
+			cmd.Env = append(cmd.Env, entry)
+		}
+	}
+	cmd.Env = append(cmd.Env, env...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

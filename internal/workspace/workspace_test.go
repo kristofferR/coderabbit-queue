@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -212,6 +213,28 @@ func TestGitTokenTravelsInTheEnvironment(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "ghp_secret_value") {
 		t.Errorf("the token leaked into an error message: %v", err)
+	}
+}
+
+func TestGitIgnoresAnInvokingRepositoriesEnvironment(t *testing.T) {
+	intended := t.TempDir()
+	other := t.TempDir()
+	originRepo(t, intended)
+	originRepo(t, other)
+	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
+	t.Setenv("GIT_WORK_TREE", other)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(other, ".git", "index"))
+
+	got, err := gitDir(context.Background(), intended, "rev-parse", "--show-toplevel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(intended)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("git selected %q from the invoking environment, want %q", got, want)
 	}
 }
 
@@ -425,27 +448,45 @@ func TestMirrorMigrationClearsThePushMirrorFlag(t *testing.T) {
 	}
 }
 
-// Linked worktrees share remote configuration with the mirror. A session may
-// repoint origin for a fork push, but a base-repository refresh must neither
-// trust nor rewrite that session's push destination.
-func TestMirrorRefreshLeavesOriginURLAlone(t *testing.T) {
+// Each checkout has its own push URL: a fork session must not repoint a sibling
+// or the mirror, and a base-repository refresh must leave it alone.
+func TestCheckoutPushURLsAreWorktreeLocal(t *testing.T) {
 	base := t.TempDir()
 	repo := "owner/thing"
 	origin := filepath.Join(base, repo)
-	originRepo(t, origin)
+	sha := originRepo(t, origin)
 	other := filepath.Join(base, "fork/thing")
 	originRepo(t, other)
 	t.Setenv("CRQ_REMOTE_BASE", base)
 	ws := Workspace{Root: t.TempDir()}
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 
-	mirror, err := ws.Mirror(ctx, repo)
+	first, err := ws.Checkout(ctx, repo, 1, sha)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := gitDir(ctx, mirror, "remote", "set-url", "origin", other); err != nil {
+	second, err := ws.Checkout(ctx, repo, 2, sha)
+	if err != nil {
 		t.Fatal(err)
 	}
+	if err := second.SetPushURL(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := first.Git(ctx, "remote", "get-url", "--push", "origin"); err != nil || got != ws.remoteURL(repo) {
+		t.Errorf("first push URL = %q err=%v, want base %q", got, err, ws.remoteURL(repo))
+	}
+	if got, err := second.Git(ctx, "remote", "get-url", "--push", "origin"); err != nil || got != other {
+		t.Errorf("second push URL = %q err=%v, want fork %q", got, err, other)
+	}
+	mirror, err := ws.mirrorPath(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := gitDir(ctx, mirror, "config", "--local", "--get", "remote.origin.pushurl"); err == nil {
+		t.Errorf("shared push URL = %q, want none", got)
+	}
+
 	if err := os.WriteFile(filepath.Join(origin, "README.md"), []byte("base moved\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -461,8 +502,8 @@ func TestMirrorRefreshLeavesOriginURLAlone(t *testing.T) {
 	if _, err := ws.Mirror(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := gitDir(ctx, mirror, "remote", "get-url", "origin"); err != nil || got != other {
-		t.Errorf("origin URL = %q err=%v, want the session's %q left alone", got, err, other)
+	if got, err := second.Git(ctx, "remote", "get-url", "--push", "origin"); err != nil || got != other {
+		t.Errorf("fork push URL after refresh = %q err=%v, want %q", got, err, other)
 	}
 	if got, err := gitDir(ctx, mirror, "rev-parse", "refs/remotes/origin/main"); err != nil || got != want {
 		t.Errorf("fetched main = %q err=%v, want base repository head %q", got, err, want)
@@ -851,6 +892,80 @@ func TestMirrorKeepsAnEqualTipSessionBranchAfterMigration(t *testing.T) {
 	}
 }
 
+func TestConcurrentMigrationRechecksOwnershipAfterLock(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	origin := filepath.Join(base, repo)
+	sha := originRepo(t, origin)
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+	if _, err := gitDir(ctx, origin, "branch", "feature"); err != nil {
+		t.Fatal(err)
+	}
+	mirror, err := ws.mirrorPath(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(mirror), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(ctx, "", "clone", "--mirror", "--quiet", ws.remoteURL(repo), mirror); err != nil {
+		t.Fatal(err)
+	}
+
+	unlock, err := lockMirrorMigration(ctx, mirror)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := sync.OnceFunc(unlock)
+	defer release()
+	waiter := make(chan error, 1)
+	go func() {
+		_, err := ws.Mirror(ctx, repo)
+		waiter <- err
+	}()
+	select {
+	case err := <-waiter:
+		release()
+		t.Fatalf("concurrent refresh returned before the migration lock was released: %v", err)
+	case <-time.After(100 * time.Millisecond):
+		// The pre-lock checks are local config reads; still waiting proves this
+		// refresh reached the claim held above.
+	}
+
+	// Complete the migration as the lock owner, then let a session reuse an
+	// equal-tip name before the waiting refresh acquires the claim.
+	if err := ws.migrateMirror(ctx, mirror); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.fetchMirror(ctx, mirror, repo); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.dropFetchedHeads(ctx, mirror); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.setConfig(ctx, mirror, fetchedHeadsMigratedKey, "true"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(ctx, mirror, "update-ref", "refs/heads/feature", sha); err != nil {
+		t.Fatal(err)
+	}
+	release()
+
+	select {
+	case err := <-waiter:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("concurrent refresh did not finish after the migration lock was released")
+	}
+	if got, err := gitDir(ctx, mirror, "rev-parse", "refs/heads/feature"); err != nil || got != sha {
+		t.Errorf("session branch = %q err=%v, want preserved at %q", got, err, sha)
+	}
+}
+
 // A mirror with a second remote.origin.fetch refused a single-value write —
 // "cannot overwrite multiple values with a single value" — which would have
 // failed every later Mirror call for that repository for good.
@@ -901,6 +1016,19 @@ func TestMirrorRetriesLegacyHeadCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := gitDir(ctx, "", "clone", "--mirror", "--quiet", ws.remoteURL(repo), mirror); err != nil {
+		t.Fatal(err)
+	}
+	// Keep a loose copy behind the lock. Some Git versions remove only the
+	// packed copy before reporting the lock error, which is successful cleanup
+	// and must not make this retry test fail.
+	feature, err := gitDir(ctx, mirror, "rev-parse", "refs/heads/feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(mirror, "refs", "heads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mirror, "refs", "heads", "feature"), []byte(feature+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	lock := filepath.Join(mirror, "refs", "heads", "feature.lock")
@@ -1105,7 +1233,7 @@ func TestCheckoutGitRefreshesRotatedCredentials(t *testing.T) {
 	}
 }
 
-func TestMirrorPrunesDeletedTagsAndRefreshesMovedTags(t *testing.T) {
+func TestMirrorTracksRemoteTagsWithoutChangingSessionTags(t *testing.T) {
 	base := t.TempDir()
 	repo := "owner/thing"
 	origin := filepath.Join(base, repo)
@@ -1122,6 +1250,16 @@ func TestMirrorPrunesDeletedTagsAndRefreshesMovedTags(t *testing.T) {
 	mirror, err := ws.Mirror(ctx, repo)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got, err := gitDir(ctx, mirror, "rev-parse", "refs/crq/remotes/origin/tags/release"); err != nil || got != first {
+		t.Fatalf("tracked release tag = %q err=%v, want %q", got, err, first)
+	}
+	// These names now belong to sessions. A refresh must not infer ownership
+	// from whether an identically named tag exists on the remote.
+	for _, name := range []string{"deleted", "release"} {
+		if _, err := gitDir(ctx, mirror, "tag", name, first); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	if _, err := gitDir(ctx, origin, "tag", "-d", "deleted"); err != nil {
@@ -1146,11 +1284,17 @@ func TestMirrorPrunesDeletedTagsAndRefreshesMovedTags(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := gitDir(ctx, mirror, "show-ref", "--verify", "--quiet", "refs/tags/deleted"); err == nil {
-		t.Error("deleted remote tag survived in the reused mirror")
+	if got, err := gitDir(ctx, mirror, "rev-parse", "refs/tags/deleted"); err != nil || got != first {
+		t.Errorf("session tag deleted = %q err=%v, want preserved at %q", got, err, first)
 	}
-	if got, err := gitDir(ctx, mirror, "rev-parse", "refs/tags/release"); err != nil || got != second {
-		t.Errorf("release tag = %q err=%v, want moved tag %q (was %q)", got, err, second, first)
+	if got, err := gitDir(ctx, mirror, "rev-parse", "refs/tags/release"); err != nil || got != first {
+		t.Errorf("session release tag = %q err=%v, want preserved at %q", got, err, first)
+	}
+	if _, err := gitDir(ctx, mirror, "show-ref", "--verify", "--quiet", "refs/crq/remotes/origin/tags/deleted"); err == nil {
+		t.Error("deleted remote tag survived in the tracking namespace")
+	}
+	if got, err := gitDir(ctx, mirror, "rev-parse", "refs/crq/remotes/origin/tags/release"); err != nil || got != second {
+		t.Errorf("tracked release tag = %q err=%v, want moved tag %q", got, err, second)
 	}
 }
 
@@ -1228,6 +1372,44 @@ func TestCheckoutDisablesSharedExecutableConfiguration(t *testing.T) {
 	}
 }
 
+func TestTokenlessMirrorRefreshDisablesSharedHooks(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	origin := filepath.Join(base, repo)
+	originRepo(t, origin)
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "reference-transaction-ran")
+	hook := filepath.Join(hooks, "reference-transaction")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\ntouch \""+marker+"\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(ctx, mirror, "config", "core.hooksPath", hooks); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(origin, "README.md"), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "README.md"}, {"commit", "-m", "second"}} {
+		if _, err := gitDir(ctx, origin, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Errorf("shared reference-transaction hook ran during refresh: %v", err)
+	}
+}
+
 func TestFreshHeartbeatAvoidsDeepPruningDecision(t *testing.T) {
 	dir := t.TempDir()
 	old := time.Now().Add(-2 * staleWorkAge)
@@ -1244,6 +1426,29 @@ func TestFreshHeartbeatAvoidsDeepPruningDecision(t *testing.T) {
 	}
 	if !rootHeartbeatFresh(dir, now.Add(time.Second)) {
 		t.Fatal("fresh checkout root did not take the heartbeat fast path")
+	}
+}
+
+// A backward clock correction can leave the live root heartbeat ahead of now
+// while older files remain behind it. The future heartbeat is indeterminate,
+// not evidence that the checkout is abandoned.
+func TestFutureRootHeartbeatAvoidsDeepPruningDecision(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Now().Add(-2 * staleWorkAge)
+	file := filepath.Join(dir, "generated.bin")
+	if err := os.WriteFile(file, []byte("old tree stand-in"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(file, old, old); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	future := now.Add(time.Hour)
+	if err := os.Chtimes(dir, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if !rootHeartbeatFresh(dir, now) {
+		t.Fatal("future checkout heartbeat was discarded before the deep scan")
 	}
 }
 
