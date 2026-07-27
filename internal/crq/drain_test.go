@@ -69,10 +69,47 @@ func TestInstallDrainRefusesWithoutAnAgent(t *testing.T) {
 
 // The prompt crq installs is the one documented, because it is the same bytes.
 func TestEmbeddedPromptCarriesTheRulesThatCostUs(t *testing.T) {
-	for _, want := range []string{"DETACHED", "HEAD:refs/heads/", "crq resolve", "crq dismiss", "`hold` or `wait`", "ONLY after the push is confirmed"} {
+	for _, want := range []string{
+		"DETACHED",
+		"HEAD:refs/heads/",
+		"crq resolve",
+		"crq dismiss",
+		"`hold` or `wait`",
+		"`crq next --wait \"$CRQ_DISPATCH_REPO\" \"$CRQ_DISPATCH_PR\"`",
+		"ONLY after the push is confirmed",
+		"Threadless findings are the exception",
+	} {
 		if !strings.Contains(fixPrompt, want) {
 			t.Errorf("the embedded fix prompt no longer mentions %q", want)
 		}
+	}
+}
+
+func TestWriteDrainFileRestoresDeclaredMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "crq-drain")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDrainFile(path, "new", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Errorf("mode = %o, want 755", got)
+	}
+}
+
+func TestDrainStartArgumentsPreservePathsWithSpaces(t *testing.T) {
+	plan := DrainInstall{
+		Platform: "darwin",
+		Unit:     "/Users/Example User/Library/LaunchAgents/crq-drain.plist",
+	}
+	got := drainCommandArgs(plan)[1]
+	if len(got) != 4 || got[3] != plan.Unit {
+		t.Fatalf("bootstrap argv = %q, want unit path %q as one argument", got, plan.Unit)
 	}
 }
 

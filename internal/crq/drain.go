@@ -3,6 +3,7 @@ package crq
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"html"
 	"os"
@@ -181,7 +182,7 @@ exec %s watch -- %s
 		if err := os.MkdirAll(filepath.Dir(f.path), 0o755); err != nil {
 			return plan, err
 		}
-		if err := os.WriteFile(f.path, []byte(f.body), f.mode); err != nil {
+		if err := writeDrainFile(f.path, f.body, f.mode); err != nil {
 			return plan, err
 		}
 	}
@@ -192,15 +193,16 @@ exec %s watch -- %s
 	// command exists to prevent. Say which command failed, and let the caller see
 	// the paths that were written.
 	var failed []string
-	for _, line := range plan.Commands {
-		parts := strings.Fields(strings.ReplaceAll(line, "$(id -u)", currentUID()))
-		if len(parts) == 0 {
-			continue
+	commandArgs := drainCommandArgs(plan)
+	if len(plan.Commands) != len(commandArgs) {
+		return plan, errors.New("drain start commands are incomplete")
+	}
+	for i, line := range plan.Commands {
+		args := commandArgs[i]
+		if len(args) == 0 {
+			return plan, fmt.Errorf("drain start command %q has no executable", line)
 		}
-		if strings.Contains(line, "$USER") {
-			parts[len(parts)-1] = os.Getenv("USER")
-		}
-		cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
+		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 		output, err := cmd.CombinedOutput()
 		if err != nil && launchdJobAbsent(line, output) {
 			continue
@@ -222,6 +224,29 @@ exec %s watch -- %s
 	}
 	plan.Started = true
 	return plan, nil
+}
+
+func writeDrainFile(path, body string, mode os.FileMode) error {
+	if err := os.WriteFile(path, []byte(body), mode); err != nil {
+		return err
+	}
+	return os.Chmod(path, mode)
+}
+
+func drainCommandArgs(plan DrainInstall) [][]string {
+	if plan.Platform == "darwin" {
+		domain := "gui/" + currentUID()
+		return [][]string{
+			{"launchctl", "bootout", domain + "/no.kristofferr.crq-drain"},
+			{"launchctl", "bootstrap", domain, plan.Unit},
+		}
+	}
+	return [][]string{
+		{"loginctl", "enable-linger", os.Getenv("USER")},
+		{"systemctl", "--user", "daemon-reload"},
+		{"systemctl", "--user", "enable", "crq-drain"},
+		{"systemctl", "--user", "restart", "crq-drain"},
+	}
 }
 
 func currentUID() string { return fmt.Sprint(os.Getuid()) }

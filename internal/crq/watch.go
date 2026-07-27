@@ -415,9 +415,9 @@ func (s *Service) noteDispatchHealth(ctx context.Context, started bool, reason s
 		return
 	}
 	// The dashboard is where this alert is meant to be read, and a drain that has
-	// stopped working may produce no other write for hours. Only on the flip: the
-	// rendered dashboard does not change for the attempts in between.
-	if flipped {
+	// stopped working may produce no other write for hours. Every unhealthy
+	// attempt changes the rendered count, host, or error; recovery removes it.
+	if unhealthy || flipped {
 		s.sync(ctx, state)
 	}
 	if flipped && unhealthy && s.log != nil {
@@ -659,25 +659,19 @@ func sessionWork(ctx context.Context, co Checkout, head string) (bool, string) {
 	if head == "" || strings.HasPrefix(local, head) {
 		return false, "" // still on the reviewed head: nothing was committed here
 	}
-	// The session committed. Ask the remote whether that commit arrived, rather
-	// than assuming a session that exited 0 pushed: fetch, then look for a remote
-	// branch containing it.
-	if _, err := co.Git(ctx, "fetch", "origin"); err != nil {
-		return true, "the session committed, and the push could not be confirmed"
+	// The session committed. Confirm it reached THIS pull request. A commit on
+	// some other remote branch is not a successful push and must not make us
+	// discard the only checkout holding the fix.
+	if co.PR <= 0 {
+		return true, "the session committed, but its pull request ref is unknown"
 	}
-	// A fork PR's branch lives in the CONTRIBUTOR's repository, which is not
-	// `origin` here — this worktree came from the base repository's mirror, and
-	// the prompt pushes to the head repository by URL. No branch of origin will
-	// ever contain that commit, so every successful fork fix would read as
-	// unpushed work and keep its worktree forever. The base repository publishes
-	// the pushed head as refs/pull/<n>/head, which is the one ref that sees it
-	// from here; best-effort, since failing to fetch it is itself "unconfirmed".
-	if co.PR > 0 {
-		_, _ = co.Git(ctx, "fetch", "origin",
-			fmt.Sprintf("+refs/pull/%d/head:refs/remotes/origin/pr/%d", co.PR, co.PR))
+	pullRef := fmt.Sprintf("refs/remotes/origin/pr/%d", co.PR)
+	if _, err := co.Git(ctx, "fetch", "origin",
+		fmt.Sprintf("+refs/pull/%d/head:%s", co.PR, pullRef)); err != nil {
+		return true, "the session committed, and the pull request push could not be confirmed"
 	}
-	if on, err := co.Git(ctx, "branch", "--remotes", "--contains", local); err != nil || strings.TrimSpace(on) == "" {
-		return true, "the session committed work that is on no remote branch"
+	if _, err := co.Git(ctx, "merge-base", "--is-ancestor", local, pullRef); err != nil {
+		return true, "the session committed work that did not reach the pull request"
 	}
 	return false, ""
 }

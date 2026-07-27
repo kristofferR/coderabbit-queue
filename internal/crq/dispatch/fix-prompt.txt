@@ -31,32 +31,37 @@ Then:
    CLAUDE.md, CI workflow or build file documents. In a Go module that is
    `gofmt -l . && go vet ./... && go test ./... -count=1`.
 4. Commit. Add no AI attribution to the commit message or anywhere else.
-5. Ask crq whether the head may move, then push:
+5. Account for findings with NO thread_id before moving the head. A review-body
+   finding, a review-skipped notice, or an outside-diff remark is tied to the
+   reviewed commit, so `crq dismiss` rejects it after a push changes the current
+   head. Once you have judged it:
+     crq dismiss "$CRQ_DISPATCH_REPO" "$CRQ_DISPATCH_PR" <finding-id>... --reason "why"
+   A real reason is required. Do not dismiss a threadless finding carried from
+   an older commit: the push already superseded it.
+6. Ask crq whether the head may move, then push:
      crq next "$CRQ_DISPATCH_REPO" "$CRQ_DISPATCH_PR"
    Push (as above) unless `.action` is `hold` or `wait`. Those two mean a
    reviewer is reading THIS commit, and moving the head would restart or strand
    its review and spend another metered round; for them, block on
-   `crq next --wait` and push when it stops saying so. Anything else — including
-   `fix`, which is where a session that has just made changes usually lands —
-   means push now. Never force-push.
-6. ONLY after the push is confirmed on the branch, account for each finding.
+   `crq next --wait "$CRQ_DISPATCH_REPO" "$CRQ_DISPATCH_PR"` and push when it
+   stops saying so. Anything else — including `fix`, which is where a session
+   that has just made changes usually lands — means push now. Never force-push.
+7. ONLY after the push is confirmed on the branch, account for each finding
+   with a thread_id.
    With a thread_id, for one you addressed:
      crq resolve <thread-id> [<thread-id>...]
    With a thread_id, for one you are NOT addressing:
      crq decline <thread-id> --reason "why"
-   With NO thread_id — a review-body finding, a review-skipped notice, an
-   outside-diff remark — neither command can touch it, so once you have judged
-   it:
-     crq dismiss "$CRQ_DISPATCH_REPO" "$CRQ_DISPATCH_PR" <finding-id>... --reason "why"
-   A decline or a dismissal needs a real reason. Neither is for clearing the
-   list: judge the finding first, and fix what is real.
+   A decline needs a real reason. Neither command is for clearing the list:
+   judge the finding first, and fix what is real.
 
-   This order is the point. Resolving first and pushing second means a failed
-   push leaves threads marked addressed for code that is on no branch — the next
-   pass then sees no findings, dispatches nobody, and the fix is stranded for
-   good. Pushing first is recoverable both ways: die before the push and nothing
-   was claimed to be fixed; die after it and the fix is on the branch for the
-   next review to judge.
+   The threaded order is the point. Resolving first and pushing second means a
+   failed push leaves threads marked addressed for code that is on no branch —
+   the next pass then sees no findings, dispatches nobody, and the fix is
+   stranded for good. Pushing first is recoverable both ways: die before the
+   push and nothing was claimed to be fixed; die after it and the fix is on the
+   branch for the next review to judge. Threadless findings are the exception
+   because their dismissal is head-scoped and cannot be made after the push.
 
 Hard limits: do not open pull requests, do not merge anything, do not force-push,
 do not touch code unrelated to the findings, do not change another repository.

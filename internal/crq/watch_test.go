@@ -647,6 +647,40 @@ func TestDispatchHealthRecordsProcessStartBeforeItsExit(t *testing.T) {
 	}
 }
 
+type dashboardCountingStore struct {
+	StateStore
+	syncs []State
+}
+
+func (s *dashboardCountingStore) SyncDashboard(_ context.Context, state State) error {
+	s.syncs = append(s.syncs, cloneState(state))
+	return nil
+}
+
+func TestDispatchHealthSyncsEveryVisibleAlertChange(t *testing.T) {
+	cfg := firingConfig()
+	cfg.DashboardIssue = 1
+	store := &dashboardCountingStore{StateStore: NewMemoryStore(cfg)}
+	svc := NewService(cfg, newFakeGitHub(), store, &recordingLogger{})
+	ctx := context.Background()
+
+	for i := 1; i <= DrainUnhealthyAfter+1; i++ {
+		svc.noteDispatchHealth(ctx, false, fmt.Sprintf("failure %d", i))
+	}
+	if got := len(store.syncs); got != 2 {
+		t.Fatalf("dashboard syncs = %d, want threshold and later unhealthy update", got)
+	}
+	last := store.syncs[len(store.syncs)-1].Drain
+	if last == nil || last.ConsecutiveFailures != DrainUnhealthyAfter+1 || last.LastError != "failure 4" {
+		t.Fatalf("last synced health = %+v", last)
+	}
+
+	svc.noteDispatchHealth(ctx, true, "")
+	if got := len(store.syncs); got != 3 {
+		t.Fatalf("dashboard syncs after recovery = %d, want alert removal synced", got)
+	}
+}
+
 // Findings on a head crq never queued — a review somebody triggered by hand, or
 // feedback that predates the drain — used to be undispatchable forever, because
 // `Next` returns fix before enqueueing and the claim had nowhere to live.
@@ -899,6 +933,15 @@ func TestSessionWorkConfirmsAForkPushThroughThePullRef(t *testing.T) {
 	// Committed and not pushed anywhere: the worktree holds the only copy.
 	if kept, why := sessionWork(ctx, co, sha); !kept {
 		t.Errorf("kept=%v (%s), want the only copy of the fix kept", kept, why)
+	}
+
+	// Reaching any other branch in the base repository does not mean the pull
+	// request moved. The checkout is still the only safe recovery point.
+	if _, err := co.Git(ctx, "push", "origin", "HEAD:refs/heads/wrong-branch"); err != nil {
+		t.Fatal(err)
+	}
+	if kept, why := sessionWork(ctx, co, sha); !kept {
+		t.Errorf("kept=%v (%s), want a commit absent from the PR kept", kept, why)
 	}
 
 	// The contributor's branch is not in the base repository, but the PR ref is:
