@@ -168,3 +168,202 @@ func silenceTrigger(coBots []CoBotConfig, login string) []CoBotConfig {
 	}
 	return out
 }
+
+// evidenceBots is the set whose output crq reads: everyone whose findings are
+// surfaced, plus everyone it waits for. The two must never diverge — a bot crq
+// gates on whose findings it did not surface would hang the round forever.
+func (c Config) evidenceBots() map[string]struct{} {
+	return dialect.BotSet(unionBots(c.FeedbackBots, c.RequiredBots))
+}
+
+// ForRepo applies a repository's reviewer override to the fleet configuration.
+//
+// The primary is deliberately NOT overridable. Its markers and command are
+// injected into the dialect classifiers when the Service is constructed, so a
+// per-repo primary would mean per-repo classifiers — a much larger change than
+// "which co-reviewers run here", which is what the request actually is.
+func (c Config) ForRepo(ov RepoReviewers) Config {
+	if !ov.SetCoBots && !ov.SetRequired {
+		return c
+	}
+	out := c
+
+	// The effective required set, whichever half the override named.
+	required := c.RequiredBots
+	if ov.SetRequired {
+		required = ov.Required
+	}
+
+	// The effective co-reviewer set. Required implies enabled — the rule the
+	// fleet parse already follows, and it has to hold when only the required
+	// half is overridden too: a bot that gates but is never triggered makes the
+	// round wait for evidence crq never asks for.
+	enabled := ov.CoBots
+	if !ov.SetCoBots {
+		enabled = nil
+		for _, cb := range c.CoBots {
+			enabled = append(enabled, cb.Login)
+		}
+	}
+	for _, login := range required {
+		if sameBot(login, c.Bot) || containsBot(enabled, login) {
+			continue
+		}
+		if _, ok := dialect.CoReviewerByName(login); ok {
+			enabled = append(enabled, login)
+		}
+	}
+
+	keep := make([]CoBotConfig, 0, len(enabled)+1)
+	have := map[string]bool{}
+	for _, cb := range c.CoBots {
+		switch {
+		case sameBot(cb.Login, c.Bot):
+			// A primary that is itself a registry bot keeps its silenced entry
+			// whatever the override says: that entry carries its wording and
+			// check-run hooks, and dropping it costs the PRIMARY its evidence.
+		case containsBot(enabled, cb.Login):
+			cb.Required = containsBot(required, cb.Login)
+			cb = reconcileTrigger(cb)
+		default:
+			continue
+		}
+		keep = append(keep, cb)
+		have[dialect.NormalizeBotName(cb.Login)] = true
+	}
+	// A primary that is itself a registry bot but that the fleet neither enabled
+	// nor required has no entry to preserve above — and this repository naming it
+	// is exactly when its evidence has to be read. Add the silenced entry the
+	// fleet parse would have carried: without it observation loses that bot's
+	// wording and check-run hooks, so a check-only clean result is never fetched
+	// and the primary stays pending until the round times out. Recording it here
+	// also keeps the loop below from adding it as an ordinary co-reviewer, which
+	// would ask the same bot twice.
+	if primary := c.Bot; primary != "" && !have[dialect.NormalizeBotName(primary)] &&
+		(containsBot(required, primary) || containsBot(enabled, primary)) {
+		if cb, ok := c.knownCoBot(primary); ok {
+			cb.Required = containsBot(required, primary)
+			cb.Trigger = engine.TriggerNever // triggered as the primary; asking twice is the bug
+			keep = append(keep, cb)
+			have[dialect.NormalizeBotName(primary)] = true
+		}
+	}
+	// A repository may choose a bot the fleet does not enable — otherwise
+	// "which bots for which project" only ever subtracts. Its configuration
+	// comes from the registry, since there is no per-bot environment for a repo.
+	for _, login := range enabled {
+		if have[dialect.NormalizeBotName(login)] {
+			continue
+		}
+		// From the operator's resolved settings, not registry defaults: a bot the
+		// fleet disabled still has CRQ_COBOT_<NAME>_CMD/TRIGGER/GRACE, and
+		// ignoring them silently gives this repository a different bot than the
+		// one that was configured.
+		if cb, ok := c.knownCoBot(login); ok {
+			cb.Required = containsBot(required, login)
+			keep = append(keep, reconcileTrigger(cb))
+			have[dialect.NormalizeBotName(login)] = true
+		}
+	}
+	out.CoBots = keep
+	out.RequiredBots = append([]string(nil), required...)
+
+	// Rebuild the derived views from the overridden lists, exactly as
+	// LoadConfig does, so no view can answer differently from another.
+	out.Reviewers = buildReviewers(out.Bot, out.ReviewCommand, out.RequiredBots, out.CoBots)
+	out.RequiredBots = out.reviewerLogins(func(r Reviewer) bool { return r.Required })
+	if !c.FeedbackBotsExplicit {
+		out.FeedbackBots = out.reviewerLogins(func(r Reviewer) bool { return r.Required || !r.Metered() })
+	}
+	return out
+}
+
+// reconcileTrigger recomputes a co-reviewer's implicit mode after a repository
+// override changes its requiredness.
+//
+// A fleet entry carries the trigger its OWN required-ness produced: Codex
+// defaults to never and only becomes always when required. Retaining that entry
+// while changing requiredness must therefore handle both directions: promote a
+// newly required Codex, and demote one a repository made optional. Explicit
+// operator settings still win. Reviewer-change reopens carry their one-shot
+// force on the Round instead, so the override does not permanently change how
+// that bot runs on later heads.
+func reconcileTrigger(cb CoBotConfig) CoBotConfig {
+	if cb.TriggerExplicit {
+		return cb
+	}
+	co, ok := dialect.CoReviewerByName(cb.Name)
+	if !ok {
+		return cb
+	}
+	cb.Trigger = triggerMode(co.DefaultTrigger, engine.TriggerSelfHeal)
+	if cb.Required && co.RequiredTrigger != "" {
+		cb.Trigger = triggerMode(co.RequiredTrigger, cb.Trigger)
+	}
+	if cb.Command == "" {
+		cb.Trigger = engine.TriggerNever
+	}
+	return cb
+}
+
+// sameBot reports whether two spellings name the same reviewer.
+func sameBot(a, b string) bool {
+	return dialect.NormalizeBotName(a) == dialect.NormalizeBotName(b)
+}
+
+func containsBot(logins []string, login string) bool {
+	key := dialect.NormalizeBotName(login)
+	for _, candidate := range logins {
+		if dialect.NormalizeBotName(candidate) == key {
+			return true
+		}
+	}
+	return false
+}
+
+// cfgFor is the configuration crq should use for one repository: the fleet
+// default with that repository's override applied.
+func (s *Service) cfgFor(st State, repo string) Config {
+	ov, ok := st.RepoOverride(repo)
+	if !ok {
+		return s.cfg
+	}
+	out := s.cfg.ForRepo(ov)
+	out.OverrideAt = ov.UpdatedAt
+	return out
+}
+
+// overrideChanged reports whether repo's reviewer override differs from the one
+// cfg was built from.
+//
+// Deciding and writing are two steps. An operator removing a co-reviewer between
+// them would otherwise have crq claim and post that bot's trigger anyway, on the
+// authority of a configuration that no longer exists. It is therefore called
+// from INSIDE the CAS mutation that commits the decision, where the state it
+// reads is the state the write lands on; a separate read beforehand would leave
+// the same window one step earlier.
+func overrideChanged(st *State, repo string, cfg Config) bool {
+	ov, _ := st.RepoOverride(repo)
+	switch {
+	case ov.UpdatedAt == nil && cfg.OverrideAt == nil:
+		return false
+	case ov.UpdatedAt == nil || cfg.OverrideAt == nil:
+		return true
+	default:
+		return !ov.UpdatedAt.Equal(*cfg.OverrideAt)
+	}
+}
+
+// knownCoBot is a registry co-reviewer with the operator's environment applied,
+// enabled fleet-wide or not.
+func (c Config) knownCoBot(login string) (CoBotConfig, bool) {
+	for _, cb := range c.KnownCoBots {
+		if sameBot(cb.Login, login) || strings.EqualFold(cb.Name, strings.TrimSpace(login)) {
+			return cb, true
+		}
+	}
+	if co, ok := dialect.CoReviewerByName(login); ok {
+		return defaultCoBot(co, false), true
+	}
+	return CoBotConfig{}, false
+}

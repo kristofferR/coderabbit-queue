@@ -216,6 +216,32 @@ func TestLoadConfigEmptyAutoReviewSkipMarkerDisablesOptOut(t *testing.T) {
 	}
 }
 
+func TestLoadConfigTidyIsOptIn(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_TIDY", "restore-after-test")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tidy {
+		t.Fatal("automatic tidying must stay off until every fleet binary understands tombstones")
+	}
+}
+
+func TestLoadConfigTidyCanBeEnabled(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_TIDY", "1")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Tidy {
+		t.Fatal("CRQ_TIDY=1 did not enable automatic tidying")
+	}
+}
+
 func TestAuthorSetNormalizesCaseAndBotSuffix(t *testing.T) {
 	set := authorSet("Dependabot[bot], renovate ,")
 	if len(set) != 2 || !set["dependabot"] || !set["renovate"] {

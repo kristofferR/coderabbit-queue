@@ -28,9 +28,32 @@ import (
 type unknownFields map[string]json.RawMessage
 
 var (
-	roundFields = jsonFieldNames(reflect.TypeOf(Round{}))
-	stateFields = jsonFieldNames(reflect.TypeOf(State{}))
+	fireSlotFields = jsonFieldNames(reflect.TypeOf(FireSlot{}))
+	roundFields    = jsonFieldNames(reflect.TypeOf(Round{}))
+	stateFields    = jsonFieldNames(reflect.TypeOf(State{}))
 )
+
+// UnmarshalJSON decodes a fire slot and remembers anything it did not recognise.
+func (s *FireSlot) UnmarshalJSON(raw []byte) error {
+	type plain FireSlot
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknown(raw, fireSlotFields)
+	if err != nil {
+		return err
+	}
+	*s = FireSlot(decoded)
+	s.unknown = unknown
+	return nil
+}
+
+// MarshalJSON writes a fire slot back with the members it did not recognise intact.
+func (s FireSlot) MarshalJSON() ([]byte, error) {
+	type plain FireSlot
+	return mergeUnknown(plain(s), s.unknown)
+}
 
 // UnmarshalJSON decodes a round and remembers anything it did not recognise.
 func (r *Round) UnmarshalJSON(raw []byte) error {

@@ -30,8 +30,9 @@ type observation struct {
 //
 // round anchors the round-relative facts: reactions target its fired command,
 // the adoption cutoff is its LastAttemptAt, and reactions/thumbs-up are fetched
-// only for a round that has fired.
-func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round, now time.Time) (observation, error) {
+// only for a round that has fired. posted restores the chronological position
+// of crq-authored trigger comments that Tidy has removed from GitHub.
+func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, round *Round, posted []engine.CommandComment, now time.Time) (observation, error) {
 	pull, err := s.gh.GetPull(ctx, repo, pr)
 	if err != nil {
 		return observation{}, err
@@ -68,7 +69,7 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 		// filter to the configured reviewer — only CodeRabbit posts these
 		// carriers, and dropping another bot's empty review could discard real
 		// evidence a Codex-gated round waits on.
-		if s.isConfiguredBot(review.User.Login) && strings.TrimSpace(review.Body) == "" && strings.EqualFold(review.State, "COMMENTED") {
+		if cfg.isConfiguredBot(review.User.Login) && strings.TrimSpace(review.Body) == "" && strings.EqualFold(review.State, "COMMENTED") {
 			continue
 		}
 		o.eng.Reviews = append(o.eng.Reviews, engine.ReviewSeen{
@@ -86,12 +87,34 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 	o.comments = comments
 	classifier := dialect.Classifier{
 		CodeRabbit:    s.cr,
-		Bot:           s.cfg.Bot,
-		ReviewCommand: s.cfg.ReviewCommand,
-		CoReviewers:   s.classifierCoReviewers(),
+		Bot:           cfg.Bot,
+		ReviewCommand: cfg.ReviewCommand,
+		CoReviewers:   cfg.classifierCoReviewers(),
 	}
+	presentComments := make(map[int64]bool, len(comments))
 	for _, c := range comments {
+		presentComments[c.ID] = true
 		o.eng.Events = append(o.eng.Events, classifier.Classify(c.User.Login, c.Body, c.ID, c.CreatedAt, c.UpdatedAt))
+	}
+	// Tidy removes spent trigger comments, but command/reply pairing still needs
+	// their place in the chronological FIFO. PostedCommands is the persisted
+	// proof of the comments crq wrote, so restore only commands no longer on the
+	// PR; a live comment remains classified from its actual body above.
+	for _, cmd := range posted {
+		if presentComments[cmd.ID] {
+			continue
+		}
+		ev := dialect.BotEvent{
+			Kind:      dialect.EvCoCommand,
+			CommentID: cmd.ID,
+			CreatedAt: cmd.CreatedAt,
+			For:       dialect.NormalizeBotName(cmd.Bot),
+		}
+		if dialect.NormalizeBotName(cmd.Bot) == dialect.NormalizeBotName(cfg.Bot) {
+			ev.Kind = dialect.EvCommand
+			ev.For = ""
+		}
+		o.eng.Events = append(o.eng.Events, ev)
 	}
 
 	// Check runs are the only place a silent-clean Bugbot round exists, and they
@@ -101,7 +124,7 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 	// wait rather than failing the observation; the log line is the operator's
 	// signal that a required check-bearing bot may time out spuriously.
 	checksUnknown := false
-	if o.eng.Open && pull.Head.SHA != "" && s.coChecksRelevant() {
+	if o.eng.Open && pull.Head.SHA != "" && cfg.coChecksRelevant() {
 		runs, cerr := s.gh.ListCheckRuns(ctx, repo, pull.Head.SHA)
 		if cerr != nil {
 			// Record the uncertainty rather than letting "no checks returned"
@@ -114,7 +137,7 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 		} else {
 			for _, run := range runs {
 				login, verdict := dialect.ClassifyCheckRun(run.App.Slug, run.Name, run.Output.Title, run.Output.Summary, run.Status, run.Conclusion)
-				if verdict == dialect.CheckUnrelated || !s.coBotEnabled(login) {
+				if verdict == dialect.CheckUnrelated || !cfg.coBotEnabled(login) {
 					continue
 				}
 				o.eng.Checks = append(o.eng.Checks, engine.CheckSeen{Bot: login, Name: run.Name, Verdict: verdict, CompletedAt: run.CompletedAt})
@@ -125,13 +148,17 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 	// Reactions and Codex thumbs-up only matter for a round that has fired.
 	if round != nil && round.FiredAt != nil {
 		cutoff := round.FiredAt.UTC()
-		if round.CommandID != 0 {
+		// A completed round remains as the reviewed-head marker after Tidy
+		// deletes its trigger, and an adopted command can be removed by its
+		// author too. Reactions on a missing issue comment return 404, and no
+		// reaction can appear after the comment has gone, so skip that read.
+		if round.CommandID != 0 && presentComments[round.CommandID] {
 			reactions, err := s.gh.ListCommentReactions(ctx, repo, round.CommandID)
 			if err != nil {
 				return observation{}, err
 			}
 			for _, reaction := range reactions {
-				if s.isConfiguredBot(reaction.User.Login) {
+				if cfg.isConfiguredBot(reaction.User.Login) {
 					o.eng.Reacted = true
 				}
 				if isCurrentCodexThumbsUp(reaction, cutoff) {
@@ -139,7 +166,7 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 				}
 			}
 		}
-		if !o.eng.CodexThumbsUp && s.codexRelevant(o.eng) {
+		if !o.eng.CodexThumbsUp && cfg.codexRelevant(o.eng) {
 			reactions, err := s.gh.ListIssueReactions(ctx, repo, pr)
 			if err != nil {
 				return observation{}, err
@@ -156,9 +183,9 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 	// Co-reviewer activity is derived from the same snapshot: whether each bot
 	// reviews the PR unprompted (drives the fire decision) and whether it
 	// participates in the current round (drives the dynamic completion gate).
-	if len(s.cfg.CoBots) > 0 {
+	if len(cfg.CoBots) > 0 {
 		o.eng.Co = map[string]engine.CoSeen{}
-		for _, cb := range s.cfg.CoBots {
+		for _, cb := range cfg.CoBots {
 			seen := engine.CoSeen{AutoActive: engine.CoAutoActive(o.eng, cb.Login)}
 			if co, ok := dialect.CoReviewerByName(cb.Name); ok && co.AppSlug != "" {
 				seen.ChecksUnknown = checksUnknown
@@ -172,7 +199,7 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 
 	// Adoptable commands are only consulted for a fire-eligible round.
 	if round != nil && round.FireEligible(now) {
-		cr, co, err := s.reviewCommands(ctx, repo, pr, o.eng, adoptCutoff(*round), pull, comments, reviews)
+		cr, co, err := s.reviewCommands(ctx, cfg, repo, pr, o.eng, adoptCutoff(*round), pull, comments, reviews)
 		if err != nil {
 			return observation{}, err
 		}
@@ -189,9 +216,9 @@ func (s *Service) observe(ctx context.Context, repo string, pr int, round *Round
 
 // classifierCoReviewers resolves the enabled registry entries with their
 // config-resolved trigger commands.
-func (s *Service) classifierCoReviewers() []dialect.CoReviewer {
-	out := make([]dialect.CoReviewer, 0, len(s.cfg.CoBots))
-	for _, cb := range s.cfg.CoBots {
+func (c Config) classifierCoReviewers() []dialect.CoReviewer {
+	out := make([]dialect.CoReviewer, 0, len(c.CoBots))
+	for _, cb := range c.CoBots {
 		co, ok := dialect.CoReviewerByName(cb.Name)
 		if !ok {
 			continue
@@ -205,8 +232,8 @@ func (s *Service) classifierCoReviewers() []dialect.CoReviewer {
 // coChecksRelevant reports whether any enabled co-reviewer owns check runs,
 // so the extra REST fetch (ETag'd — repeat polls are 304s) is only spent when
 // a bot's evidence can live there.
-func (s *Service) coChecksRelevant() bool {
-	for _, cb := range s.cfg.CoBots {
+func (c Config) coChecksRelevant() bool {
+	for _, cb := range c.CoBots {
 		if co, ok := dialect.CoReviewerByName(cb.Name); ok && co.AppSlug != "" {
 			return true
 		}
@@ -215,8 +242,8 @@ func (s *Service) coChecksRelevant() bool {
 }
 
 // coBotEnabled reports whether login is one of the enabled co-reviewers.
-func (s *Service) coBotEnabled(login string) bool {
-	for _, cb := range s.cfg.CoBots {
+func (c Config) coBotEnabled(login string) bool {
+	for _, cb := range c.CoBots {
 		if dialect.NormalizeBotName(cb.Login) == dialect.NormalizeBotName(login) {
 			return true
 		}
@@ -236,8 +263,8 @@ func adoptCutoff(r Round) time.Time {
 
 // codexRelevant reports whether Codex participates in this round, so the extra
 // issue-reactions fetch for a Codex thumbs-up is only spent when it can matter.
-func (s *Service) codexRelevant(obs engine.Observation) bool {
-	if dialect.HasCodexBot(s.cfg.RequiredBots) {
+func (c Config) codexRelevant(obs engine.Observation) bool {
+	if dialect.HasCodexBot(c.RequiredBots) {
 		return true
 	}
 	for _, review := range obs.Reviews {
@@ -260,10 +287,10 @@ func (s *Service) codexRelevant(obs engine.Observation) bool {
 // computation (LastAttemptAt floor, head-commit date, force-push) so a stale
 // command from a previous head is excluded everywhere, and the head-guard/
 // cutoff lookups are skipped entirely when no command is on the PR.
-func (s *Service) reviewCommands(ctx context.Context, repo string, pr int, obs engine.Observation, notBeforeCutoff time.Time, pull ghapi.Pull, comments []ghapi.IssueComment, reviews []ghapi.Review) (cr []engine.CommandSeen, co map[string][]engine.CommandSeen, err error) {
-	command := strings.TrimSpace(s.cfg.ReviewCommand)
+func (s *Service) reviewCommands(ctx context.Context, cfg Config, repo string, pr int, obs engine.Observation, notBeforeCutoff time.Time, pull ghapi.Pull, comments []ghapi.IssueComment, reviews []ghapi.Review) (cr []engine.CommandSeen, co map[string][]engine.CommandSeen, err error) {
+	command := strings.TrimSpace(cfg.ReviewCommand)
 	hasCR := command != "" && hasCommentBody(comments, command)
-	coBodies := s.coCommandBodies()
+	coBodies := cfg.coCommandBodies()
 	present := map[string][]string{}
 	for key, bodies := range coBodies {
 		for _, body := range bodies {
@@ -310,7 +337,7 @@ func (s *Service) reviewCommands(ctx context.Context, repo string, pr int, obs e
 		cutoff = fp
 	}
 	if hasCR {
-		cr = s.adoptableCR(obs, cutoff, command, comments, reviews)
+		cr = s.adoptableCR(cfg, obs, cutoff, command, comments, reviews)
 	}
 	for key, bodies := range present {
 		if cmds := adoptableCo(obs, key, cutoff, bodies, comments, reviews); len(cmds) > 0 {
@@ -326,9 +353,9 @@ func (s *Service) reviewCommands(ctx context.Context, repo string, pr int, obs e
 // coCommandBodies maps each triggerable co-reviewer (normalized login) to the
 // comment bodies that count as its trigger: the config-resolved command plus
 // the registry's alternate spellings (`bugbot run` / `cursor review`).
-func (s *Service) coCommandBodies() map[string][]string {
+func (c Config) coCommandBodies() map[string][]string {
 	out := map[string][]string{}
-	for _, cb := range s.cfg.CoBots {
+	for _, cb := range c.CoBots {
 		var bodies []string
 		add := func(body string) {
 			body = strings.TrimSpace(body)
@@ -399,7 +426,7 @@ func adoptableCo(obs engine.Observation, loginKey string, cutoff time.Time, bodi
 // already-posted fire, or none. A command the bot already answered with a review
 // or a completion reply belongs to a finished round for an earlier head and is
 // never adopted (adopting it would mark the new head fired without reviewing it).
-func (s *Service) adoptableCR(obs engine.Observation, cutoff time.Time, command string, comments []ghapi.IssueComment, reviews []ghapi.Review) []engine.CommandSeen {
+func (s *Service) adoptableCR(cfg Config, obs engine.Observation, cutoff time.Time, command string, comments []ghapi.IssueComment, reviews []ghapi.Review) []engine.CommandSeen {
 	best := newestCommandSince(command, cutoff, comments)
 	if len(best) == 0 {
 		return nil
@@ -409,11 +436,11 @@ func (s *Service) adoptableCR(obs engine.Observation, cutoff time.Time, command 
 		bestAt = best[0].UpdatedAt
 	}
 	for _, review := range reviews {
-		if s.isConfiguredBot(review.User.Login) && !review.SubmittedAt.Before(bestAt) {
+		if cfg.isConfiguredBot(review.User.Login) && !review.SubmittedAt.Before(bestAt) {
 			return nil
 		}
 	}
-	if engine.CommandHasCompletionReply(obs, s.policy(), best[0].ID) {
+	if engine.CommandHasCompletionReply(obs, cfg.policy(), best[0].ID) {
 		return nil
 	}
 	return best

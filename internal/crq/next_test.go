@@ -1,8 +1,11 @@
 package crq
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -117,6 +120,40 @@ func TestNextDrivesAReviewRound(t *testing.T) {
 	f.wantAction(done, engine.ActionDone)
 	if len(done.Findings) != 0 {
 		t.Errorf("done must carry no findings, got %d", len(done.Findings))
+	}
+}
+
+func TestNextPreservesUnacknowledgedSlotBeforeReturningPush(t *testing.T) {
+	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = []string{dialect.CodexBotLogin}
+		cfg.FeedbackBots = cfg.RequiredBots
+	})
+	repo, pr, head := "owner/repo", 506, "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	f.next(repo, pr)
+
+	f.clk.advance(time.Minute)
+	f.gh.mu.Lock()
+	review := ghapi.Review{
+		ID: 900, CommitID: head, State: "COMMENTED",
+		SubmittedAt: f.clk.now(), Body: "[review body]",
+	}
+	review.User.Login = dialect.CodexBotLogin
+	f.gh.reviews[fakeKey(repo, pr)] = append(f.gh.reviews[fakeKey(repo, pr)], review)
+	f.gh.mu.Unlock()
+	f.setLocalWork(true, "uncommitted changes in the working tree")
+
+	report := f.next(repo, pr)
+	f.wantAction(report, engine.ActionPush)
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.FireSlot == nil || st.FireSlot.HoldUntil == nil || !st.SlotHeld(f.clk.now()) {
+		t.Fatalf("push returned without preserving the unanswered primary slot: %+v", st.FireSlot)
 	}
 }
 
@@ -300,5 +337,412 @@ func TestNextResolvesSummaryOnlyWithoutTheQueue(t *testing.T) {
 	}
 	if st.FireSlot == nil || st.FireSlot.Key != QueueKey("o/front", 10) {
 		t.Fatalf("the front PR must keep the fire slot, got %#v", st.FireSlot)
+	}
+}
+
+// A finding with no review thread cannot be resolved or declined — GitHub offers
+// nothing to act on — so drain-first blocks every future round on it. The
+// observed end state was a PR reporting "no review was ever requested" for its
+// current head, four rounds running. `crq dismiss` is the only way out, and this
+// pins both halves: that the deadlock is real, and that dismissing ends it.
+func TestDismissEndsTheUnresolvableFindingDeadlock(t *testing.T) {
+	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr := "owner/repo", 505
+	head := "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+
+	f.next(repo, pr)
+
+	// The review lands as a BODY finding: no inline comment, so no thread.
+	f.clk.advance(2 * time.Minute)
+	f.gh.mu.Lock()
+	r := ghapi.Review{ID: 900, CommitID: head, State: "COMMENTED", SubmittedAt: f.clk.now(),
+		Body: corpusMessage(t, "coderabbit/findings-outside-diff.md")}
+	r.User.Login = f.bot
+	key := fakeKey(repo, pr)
+	f.gh.reviews[key] = append(f.gh.reviews[key], r)
+	f.gh.mu.Unlock()
+
+	report := f.next(repo, pr)
+	f.wantAction(report, engine.ActionFix)
+	if len(report.Findings) == 0 {
+		t.Fatal("the body finding must be reported before it can be dismissed")
+	}
+	var id string
+	for _, finding := range report.Findings {
+		if finding.ThreadID == "" {
+			id = finding.ID
+			break
+		}
+	}
+	if id == "" {
+		t.Fatal("this test is only meaningful for a finding with no thread")
+	}
+
+	// It repeats forever: nothing the caller can do clears it.
+	f.clk.advance(2 * time.Minute)
+	f.wantAction(f.next(repo, pr), engine.ActionFix)
+	posted := f.reviewsPosted(repo, pr)
+
+	if _, err := f.svc.Dismiss(f.ctx, repo, pr, []string{id}, "already handled in an earlier commit"); err != nil {
+		t.Fatal(err)
+	}
+	// Dismissing is a record, not a review: it must post nothing of its own,
+	// even though it enqueues so the decision has a round to live on.
+	if got := f.reviewsPosted(repo, pr); got != posted {
+		t.Fatalf("dismissing posted a review: %d -> %d", posted, got)
+	}
+
+	f.clk.advance(2 * time.Minute)
+	after := f.next(repo, pr)
+	if after.Action == string(engine.ActionFix) {
+		t.Fatalf("a dismissed finding must stop blocking the round, got %+v", after)
+	}
+	if after.Dismissed != 1 {
+		t.Errorf("dismissed = %d, want 1 — the count is how a caller sees it was set aside, not lost", after.Dismissed)
+	}
+	for _, finding := range after.Findings {
+		if finding.ID == id {
+			t.Error("a dismissed finding must be withheld from findings")
+		}
+	}
+	// Repeating a successful dismissal must succeed: Feedback has already
+	// filtered that ID out, so validating against the current findings alone
+	// would fail an interrupted agent on its own earlier success.
+	if res, err := f.svc.Dismiss(f.ctx, repo, pr, []string{id}, "already handled in an earlier commit"); err != nil {
+		t.Errorf("repeating a dismissal must be idempotent, got %v", err)
+	} else if len(res.Already) != 1 {
+		t.Errorf("result = %+v, want the id reported as already dismissed", res)
+	}
+
+	// A threaded finding is refused: resolve and decline both put the decision on
+	// the PR where the bot can answer it, and dismissing one would converge the
+	// round with its thread still open.
+	f.gh.graphQL = func(query string, _ map[string]any, out any) error {
+		if !strings.Contains(query, "reviewThreads") {
+			return json.Unmarshal([]byte(`{"repository":{"pullRequest":{"timelineItems":{"nodes":[]}}}}`), out)
+		}
+		return json.Unmarshal([]byte(`{"repository":{"pullRequest":{"reviewThreads":{
+		  "pageInfo":{"hasNextPage":false,"endCursor":""},
+		  "nodes":[{"id":"PRRT_open","isResolved":false,"isOutdated":false,"path":"internal/state/state.go","line":42,
+		    "comments":{"totalCount":1,"nodes":[{"databaseId":902,"body":"_⚠️ Potential issue_\n\nThis dereferences a nil round.",
+		      "path":"internal/state/state.go","line":42,"author":{"login":"coderabbitai[bot]"},"commit":{"oid":"aaaaaaaa1"}}]}}]
+		}}}}`), out)
+	}
+	threaded := f.next(repo, pr)
+	var threadedID string
+	for _, finding := range threaded.Findings {
+		if finding.ThreadID != "" {
+			threadedID = finding.ID
+			break
+		}
+	}
+	if threadedID == "" {
+		t.Fatal("expected a threaded finding to try to dismiss")
+	}
+	if _, err := f.svc.Dismiss(f.ctx, repo, pr, []string{threadedID}, "not doing this one"); err == nil {
+		t.Error("dismissing a finding that HAS a thread must be refused")
+	}
+
+	// So is an ID that is not a finding here at all — a stale copy-paste would
+	// otherwise record a dismissal that silences whatever later matches it.
+	if _, err := f.svc.Dismiss(f.ctx, repo, pr, []string{"deadbeef"}, "typo"); err == nil {
+		t.Error("dismissing an unknown finding id must be refused")
+	}
+
+	// And a round that has moved on is refused rather than superseded back: the
+	// head advanced after the findings were read, so this decision is about a
+	// commit nobody is looking at, and superseding would archive the live round.
+	// A round whose Seq is not the one the findings were read against means
+	// another worker moved the PR forward — identity, not a host clock, because
+	// the fleet's clocks cannot be compared. (A round left on the previous head
+	// is the ordinary post-push state and is superseded instead — that is what
+	// the deadlock fix depends on.)
+	if _, _, err := f.svc.recordDismissal(f.ctx, repo, pr, "999999999", []string{id}, "stale", true, 0); err == nil {
+		t.Error("a round created after the read must be refused, not superseded")
+	}
+
+	// It is scoped to this head. A push supersedes the round, and the next
+	// reviewer reporting the same thing must be heard again.
+	f.clk.advance(time.Minute)
+	f.setHead(repo, pr, "bbbbbbbb2")
+	f.setCommitDate("bbbbbbbb2", f.clk.now())
+	f.next(repo, pr)
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(repo, pr); round == nil || round.IsDismissed(id) {
+		t.Errorf("the dismissal must not outlive the head it was made for, got %#v", round)
+	}
+}
+
+// Replaying a dismissal that already succeeded writes nothing, so the guard
+// against queueing a round while work is open has nothing to judge. Judging the
+// call instead of the write refused an interrupted agent on its own earlier
+// success the moment any OTHER finding was still open — with a fire-eligible
+// round for the head, which a dismissal that ended the deadlock is exactly what
+// leaves behind.
+func TestReplayedDismissalIsNotRefusedByOtherOpenFindings(t *testing.T) {
+	f := newReplayFixture(t, time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC))
+	repo, pr := "owner/repo", 506
+	head := "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, f.clk.now().Add(-time.Minute))
+	f.setLocalWork(false, "")
+
+	f.next(repo, pr)
+
+	// The head moves and threadless findings for the NEW head land before
+	// anything enqueues a round for it — the deadlock — so the dismissal that
+	// ends it supersedes the stale round, leaving a queued one behind.
+	f.clk.advance(2 * time.Minute)
+	f.setHead(repo, pr, "bbbbbbbb2")
+	f.setCommitDate("bbbbbbbb2", f.clk.now())
+	f.corpusReview(t, repo, pr, 900, "bbbbbbbb2", "coderabbit/findings-prompt-block.md")
+
+	report := f.next(repo, pr)
+	f.wantAction(report, engine.ActionFix)
+	ids := []string{}
+	for _, finding := range report.Findings {
+		if finding.ThreadID == "" {
+			ids = append(ids, finding.ID)
+		}
+	}
+	if len(ids) < 2 {
+		t.Fatalf("this test needs two threadless findings to dismiss, got %d", len(ids))
+	}
+	if _, err := f.svc.Dismiss(f.ctx, repo, pr, ids, "carried from an earlier commit"); err != nil {
+		t.Fatal(err)
+	}
+	before := f.round(repo, pr)
+	if before == nil || before.Head != "bbbbbbbb2" || !engine.CanStillFire(*before) {
+		t.Fatalf("the dismissal must leave a fire-eligible round for the new head, got %+v", before)
+	}
+
+	// A later review reports something new at that same head, so work IS open
+	// when the agent — which does not remember finishing — repeats itself.
+	f.clk.advance(time.Minute)
+	f.corpusReview(t, repo, pr, 901, "bbbbbbbb2", "coderabbit/findings-outside-diff.md")
+	res, err := f.svc.Dismiss(f.ctx, repo, pr, ids[:1], "carried from an earlier commit")
+	if err != nil {
+		t.Fatalf("replaying a completed dismissal must not be refused over another finding: %v", err)
+	}
+	if len(res.Already) != 1 || len(res.Dismissed) != 0 {
+		t.Errorf("result = %+v, want the id reported as already dismissed and nothing recorded", res)
+	}
+	// And it stays a no-op: the new finding is still the caller's to fix.
+	if after := f.round(repo, pr); after == nil || after.Seq != before.Seq || after.Phase != before.Phase {
+		t.Errorf("a replayed dismissal must not touch the round: %+v -> %+v", before, after)
+	}
+	f.wantAction(f.next(repo, pr), engine.ActionFix)
+}
+
+// A partial dismissal must not queue the new head. The round left behind by a
+// push can be past firing — completed, say — which makes it harmless where it
+// stands but not harmless superseded: superseding replaces it with a FRESH
+// queued round for the new head, and DecideFire never sees findings, so nothing
+// holds that round back while the caller still has work to do.
+func TestPartialDismissalWillNotSupersedeIntoAQueuedRound(t *testing.T) {
+	f := newReplayFixture(t, time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC))
+	repo, pr := "owner/repo", 77
+	old, head := "aaaaaaaa1", "bbbbbbbb2"
+
+	var seq int64
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		r, err := st.NewRound(repo, pr, old, f.clk.now())
+		if err != nil {
+			return err
+		}
+		r.Phase = PhaseCompleted
+		seq = r.Seq
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := f.svc.recordDismissal(f.ctx, repo, pr, head, []string{"f1"}, "one of two", false, seq); err == nil {
+		t.Error("dismissing one finding while others are open must be refused, not superseded into a queued round")
+	}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(repo, pr); round == nil || round.Head != old {
+		t.Fatalf("the stale round must be left as it was, got %#v", round)
+	}
+}
+
+// The documented fix flow dismisses a threadless finding with the fixes for it
+// still in the working tree, and the round that dismissal leaves behind has
+// asked for nothing yet. Reading it as a review in progress made `crq next`
+// answer `hold` — telling the caller to sit on its own fixes until a review of
+// the code they replace finished.
+func TestDismissalDoesNotHoldTheFixesItWasMadeFor(t *testing.T) {
+	// A required co-reviewer that never answers is what keeps the head gated
+	// once the primary's findings have landed — the case the guard is about.
+	f := newCoReplayFixture(t, time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC), requireBugbot)
+	repo, pr := "owner/repo", 507
+	f.openPull(repo, pr, "aaaaaaaa1")
+	f.setCommitDate("aaaaaaaa1", f.clk.now().Add(-time.Minute))
+	f.setLocalWork(false, "")
+
+	f.next(repo, pr)
+
+	// The deadlock's shape: the head moved and threadless findings for the NEW
+	// head landed before anything enqueued a round for it.
+	f.clk.advance(2 * time.Minute)
+	f.setHead(repo, pr, "bbbbbbbb2")
+	f.setCommitDate("bbbbbbbb2", f.clk.now())
+	f.corpusReview(t, repo, pr, 900, "bbbbbbbb2", "coderabbit/findings-prompt-block.md")
+
+	report := f.next(repo, pr)
+	f.wantAction(report, engine.ActionFix)
+	ids := []string{}
+	for _, finding := range report.Findings {
+		if finding.ThreadID == "" {
+			ids = append(ids, finding.ID)
+		}
+	}
+	if len(ids) == 0 {
+		t.Fatal("this test needs a threadless finding to dismiss")
+	}
+
+	// The caller fixes them locally, then dismisses — the order llms.txt asks
+	// for. The dismissal creates the queued round for this head.
+	f.setLocalWork(true, "uncommitted changes in the working tree")
+	if _, err := f.svc.Dismiss(f.ctx, repo, pr, ids, "fixed locally, not yet pushed"); err != nil {
+		t.Fatal(err)
+	}
+	if round := f.round(repo, pr); round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("the dismissal must leave a queued round for this head, got %+v", round)
+	}
+
+	f.clk.advance(time.Minute)
+	f.wantAction(f.next(repo, pr), engine.ActionPush)
+}
+
+// The dismissed count is of the decisions the round recorded, not of the
+// findings that still match one. A finding ID hashes the text, so a bot editing
+// the review it came from leaves nothing to match — and counting matches instead
+// reported zero, making a finding that was deliberately set aside look like one
+// that was never reported at all.
+func TestDismissedCountSurvivesTheBotEditingItsOwnReview(t *testing.T) {
+	f := newReplayFixture(t, time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC))
+	repo, pr, head := "owner/repo", 508, "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, f.clk.now().Add(-time.Minute))
+	f.setLocalWork(false, "")
+
+	f.next(repo, pr)
+	f.clk.advance(2 * time.Minute)
+	f.corpusReview(t, repo, pr, 900, head, "coderabbit/findings-outside-diff.md")
+
+	report := f.next(repo, pr)
+	f.wantAction(report, engine.ActionFix)
+	id := ""
+	for _, finding := range report.Findings {
+		if finding.ThreadID == "" {
+			id = finding.ID
+			break
+		}
+	}
+	if id == "" {
+		t.Fatal("this test needs a threadless finding to dismiss")
+	}
+	if _, err := f.svc.Dismiss(f.ctx, repo, pr, []string{id}, "handled in an earlier commit"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The bot rewrites the review the finding came from. Its text — and so its
+	// ID — is gone, but the decision about it stands.
+	f.gh.mu.Lock()
+	key := fakeKey(repo, pr)
+	for i := range f.gh.reviews[key] {
+		if f.gh.reviews[key][i].ID == 900 {
+			f.gh.reviews[key][i].Body = "Reviewed the changes."
+		}
+	}
+	f.gh.mu.Unlock()
+
+	f.clk.advance(time.Minute)
+	if after := f.next(repo, pr); after.Dismissed != 1 {
+		t.Errorf("dismissed = %d, want 1 — the record outlives the text it was made against", after.Dismissed)
+	}
+}
+
+// A dry run reports what a real one would do and writes nothing — including the
+// refusals, which is the half a caller cannot see from a blanket success.
+func TestDryRunDismissalReportsWithoutWriting(t *testing.T) {
+	f := newReplayFixture(t, time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC))
+	repo, pr, head := "owner/repo", 78, "aaaaaaaa1"
+	cfg := f.cfg
+	cfg.DryRun = true
+	var logs bytes.Buffer
+	dry := NewService(cfg, f.gh, f.store, log.New(&logs, "", 0))
+	dry.now = f.clk.now
+
+	var seq int64
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		r, err := st.NewRound(repo, pr, head, f.clk.now())
+		if err != nil {
+			return err
+		}
+		r.Phase = PhaseCompleted
+		seq = r.Seq
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	dismissed, _, err := dry.recordDismissal(f.ctx, repo, pr, head, []string{"f1"}, "set aside", true, seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dismissed) != 1 {
+		t.Errorf("a dry run must report the ids it would record, got %v", dismissed)
+	}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(repo, pr); round == nil || round.IsDismissed("f1") {
+		t.Errorf("a dry run must write nothing, got %#v", round)
+	}
+
+	// The head moved under the call: a real run refuses it, so the dry run has
+	// to say so rather than report a dismissal that could never happen.
+	if _, _, err := dry.recordDismissal(f.ctx, repo, pr, "bbbbbbbb2", []string{"f1"}, "set aside", true, seq+1); err == nil {
+		t.Error("a dry run must surface the refusal a real run would hit")
+	}
+
+	// The public operation logs the simulated result as hypothetical, rather
+	// than claiming the throwaway mutation was persisted.
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, f.clk.now())
+	f.corpusReview(t, repo, pr, 900, head, "coderabbit/findings-outside-diff.md")
+	feedback, err := dry.Feedback(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := []string{}
+	for _, finding := range feedback.Findings {
+		if finding.ThreadID == "" {
+			ids = append(ids, finding.ID)
+		}
+	}
+	if len(ids) == 0 {
+		t.Fatal("this test needs a threadless finding to dismiss")
+	}
+	if _, err := dry.Dismiss(f.ctx, repo, pr, ids, "set aside"); err != nil {
+		t.Fatal(err)
+	}
+	if got := logs.String(); !strings.Contains(got, "would dismiss") || strings.Contains(got, "#78 dismissed") {
+		t.Errorf("dry-run log must describe a hypothetical dismissal, got %q", got)
 	}
 }

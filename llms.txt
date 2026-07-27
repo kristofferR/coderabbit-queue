@@ -50,7 +50,7 @@ crq next                      # inside the checkout, the target is inferred
 
 | `.action` | what to do |
 |---|---|
-| `fix` | Fix `.findings[]`, validate locally, then `crq resolve` each addressed `.thread_id` (or `crq decline` with a reason). Call again. |
+| `fix` | Fix `.findings[]`, validate locally, then `crq resolve` each addressed `.thread_id` (or `crq decline` with a reason). A finding with no `.thread_id` clears with `crq dismiss` once judged — except `source: "review_comment"`, which lost its thread ID to a GraphQL fallback and has to wait for crq to read threads again. Call again. |
 | `hold` | Do NOT commit or push: a required reviewer has not answered for this head, and moving the head restarts its review (resolving threads does not). Call again at `.recheck_after`. |
 | `push` | The head is released. Commit and push the accumulated fixes once. Call again. |
 | `wait` | Nothing to do until `.recheck_after`. |
@@ -188,6 +188,13 @@ reappearing until its thread is resolved there):
 crq resolve THREAD_ID [THREAD_ID...]
 ```
 
+After a push, threads from the previous head become outdated and drop out of `findings`, so their
+IDs are no longer available there. List every unresolved thread, outdated included:
+
+```bash
+crq threads REPO PR
+```
+
 Decline a finding you are not addressing. This posts the reason AND resolves the thread — crq reads
 GitHub resolution state, so one left open keeps returning `fix`. A contested bot reply is
 re-surfaced as its own finding, so nothing is buried. Use `--keep-open` to leave it open on purpose:
@@ -201,6 +208,53 @@ re-surfaces that reply as a `source: "review_reply"` finding on the next `feedba
 convergence never hides a rebuttal you have not answered. Address it or decline again with a stronger
 reason; the loop clears it once the bot withdraws (or you stop declining and fix it). Ambiguous bot
 replies surface too — crq errs toward showing a possible rebuttal rather than burying it.
+
+With `CRQ_TIDY=1`, crq removes its own spent `@coderabbitai review` / `@codex review` comments as
+rounds progress. Automatic tidying is opt-in while older binaries may share the state ref. On demand:
+
+```bash
+crq tidy REPO PR [--dry-run]
+```
+
+Only comments crq posted (never one it adopted — that comment is someone else's), only while the
+comment still reads as that one-line command (an edited one is someone's words), only from rounds
+that have progressed, only after the bot answered, only once the comment is too old for crq to adopt
+again — older than the head commit, or than a later force-push (a command crq's own retry replaced is
+spent regardless, and an unreadable head keeps everything),
+and never the bots' own comments. Deletions GitHub refuses are reported in `.failed[]`.
+
+Choose which bots review one project:
+
+```bash
+crq reviewers REPO                                    # effective reviewers + budgets
+crq reviewers set REPO --bots codex --required codex  # Codex is the only required co-reviewer
+crq reviewers clear REPO                              # fleet default again
+```
+
+The primary is fleet-wide: an override chooses the CO-reviewers, so CodeRabbit is still triggered
+and still spends account quota even when it is left out of `--required`. Leaving it out means the
+round does not WAIT for it, not that it is never asked.
+
+`budget: account` means the reviewer is serialized against the shared CodeRabbit allowance;
+`budget: none` means it runs immediately. Stored in the shared state ref, so the daemon and agents
+cannot disagree. The primary reviewer is fleet-wide.
+
+A finding with no `thread_id` — a review body finding, a review-skipped notice, an outside-diff
+remark, an issue-comment finding — has nothing for `resolve` or `decline` to act on, and would otherwise block every future
+round on that PR. Judge it, then record the decision:
+
+```bash
+crq dismiss REPO PR FINDING_ID [FINDING_ID...] --reason "why this is set aside"
+```
+
+`FINDING_ID` is `.findings[].id` — content-derived, not a GitHub node ID, which is why the repo and
+PR are required. The dismissal covers the current head only; after a push the next reviewer must
+report it again. `crq next` and `crq feedback` report `dismissed: N` so a set-aside finding never
+looks lost, and `crq loop` converges on the same filtered list. A finding that HAS a thread is
+refused: resolve or decline it instead, so the decision lands where the bot can answer it.
+
+For a SKIPPED review specifically, the two remedies differ: narrowing the PR addresses why the
+review was skipped, while `crq dismiss` only records that you chose to proceed at this head.
 
 Current feedback without triggering a review:
 
