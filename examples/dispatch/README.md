@@ -19,6 +19,10 @@ agent on macOS), enables lingering so it survives a logout, and starts it. There
 are no files in this directory to copy: the prompt crq installs is embedded in
 the binary, so it cannot drift from the one documented here.
 
+On a host that ran the pre-rename `crq drain install`, it also stops and
+disables the leftover `crq-drain` service — two watchers scanning the same
+fleet would race each other's dispatch claims.
+
 ## Two rules the prompt earned the hard way
 
 **Sessions stay on a detached HEAD and push by ref.** crq's worktrees are backed
