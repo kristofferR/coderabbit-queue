@@ -412,3 +412,77 @@ func TestMirrorMigratesAwayFromMirrorMode(t *testing.T) {
 		t.Errorf("remote.origin.mirror = %q, want it turned off so sessions can push", got)
 	}
 }
+
+// With uncapped dispatch two PRs of one repository call Mirror at the same time.
+// Every `git config` write takes config.lock, so rewriting values that were
+// already correct made the loser fail the whole checkout with "could not lock
+// config file" — a failure the fetch retry does not cover.
+func TestMirrorDoesNotRewriteConfigItAgreesWith(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Somebody else holds the config lock, which is what the loser of that race
+	// sees. Nothing here needs writing, so nothing may try.
+	lock := filepath.Join(mirror, "config.lock")
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(lock)
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Errorf("a checkout failed over configuration it did not need to change: %v", err)
+	}
+}
+
+// The only age-based cleanup runs from a checkout, so pruning just the directory
+// being checked out left a killed watcher's worktree for a PR that has since
+// closed or converged on disk forever, rather than for staleWorkAge.
+func TestCheckoutSweepsAnotherPullRequestsAbandonedWorktree(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	abandoned, err := ws.Checkout(ctx, repo, 5, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * staleWorkAge)
+	if err := filepath.WalkDir(abandoned.Dir, func(path string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(path, old, old)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A checkout for a DIFFERENT pull request of the same repository.
+	if _, err := ws.Checkout(ctx, repo, 6, sha); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(abandoned.Dir); !os.IsNotExist(err) {
+		t.Errorf("pr 5's abandoned worktree is still there (%v); nothing else will ever visit it", err)
+	}
+
+	// A live one is left alone: another worker may be building in it right now.
+	live, err := ws.Checkout(ctx, repo, 7, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Checkout(ctx, repo, 8, sha); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(live.Dir); err != nil {
+		t.Errorf("a live worktree was swept: %v", err)
+	}
+}

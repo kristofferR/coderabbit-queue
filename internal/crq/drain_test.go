@@ -87,7 +87,10 @@ func TestDrainUnitCarriesTheConfigurationTheInstallRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	unit := svc.drainUnit(plan)
-	for _, want := range []string{config, cfg.GateRepo, "CRQ_ISSUE", "CRQ_CAL_PR"} {
+	// The state ref included: without it the service falls back to the default
+	// and reads a queue nobody else is using, which looks exactly like an idle
+	// fleet.
+	for _, want := range []string{config, cfg.GateRepo, "CRQ_ISSUE", "CRQ_CAL_PR", "CRQ_STATE_REF=" + cfg.StateRef} {
 		if !strings.Contains(unit, want) {
 			t.Errorf("the unit does not carry %q; the drain would not find it:\n%s", want, unit)
 		}

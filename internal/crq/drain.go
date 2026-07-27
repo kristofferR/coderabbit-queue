@@ -267,11 +267,15 @@ func (s *Service) drainEnv(plan DrainInstall) map[string]string {
 	if path := ConfigPath(); path != "" {
 		env["CRQ_CONFIG"] = path
 	}
-	// The queue's identity: the repository holding the state ref, the dashboard,
-	// and the PR the account quota is probed on. Without the first, the watcher
-	// cannot even load state.
+	// The queue's identity: the repository holding the state ref, the ref itself,
+	// the dashboard, and the PR the account quota is probed on. Without the first
+	// two, the watcher cannot even load state — or loads a queue nobody else is
+	// using, which looks exactly like an idle fleet.
 	if s.cfg.GateRepo != "" {
 		env["CRQ_REPO"] = s.cfg.GateRepo
+	}
+	if s.cfg.StateRef != "" {
+		env["CRQ_STATE_REF"] = s.cfg.StateRef
 	}
 	if s.cfg.DashboardIssue > 0 {
 		env["CRQ_ISSUE"] = fmt.Sprint(s.cfg.DashboardIssue)

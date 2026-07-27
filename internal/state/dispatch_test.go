@@ -72,6 +72,39 @@ func TestDispatchClaim(t *testing.T) {
 	}
 }
 
+// A round being fixed right now must not also be fired: the session is replacing
+// the code the review would be about, and its push moves the head minutes later.
+// The rest of the queue keeps moving, because the round leaves the queue instead
+// of being refused at the front of it.
+func TestAClaimedRoundLeavesTheFireQueue(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	s := &State{}
+	fixing, err := s.NewRound("o/r", 1, "aaaaaaaa1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := s.NewRound("o/r", 2, "bbbbbbbb2", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.PutRound(*other)
+	if ok, why := fixing.ClaimDispatch("host", "tok", now, 3); !ok {
+		t.Fatalf("setup: %s", why)
+	}
+	s.PutRound(*fixing)
+
+	if fixing.FireEligible(now) {
+		t.Error("a round a fix session holds is fire-eligible; the review would be of a head about to move")
+	}
+	if next := s.NextEligible(now); next == nil || next.PR != 2 {
+		t.Errorf("next eligible = %#v, want the PR nobody is fixing — the queue must keep moving", next)
+	}
+	// A claim nobody heartbeats expires, so this can never park a round for good.
+	if !fixing.FireEligible(now.Add(2 * DispatchTTL)) {
+		t.Error("an expired claim still holds the round out of the queue")
+	}
+}
+
 // A session's own push moves the head, so crq supersedes the round and the fresh
 // one carries no claim. Reading that as "somebody took this round" killed the
 // session between pushing and resolving — every single time it succeeded.

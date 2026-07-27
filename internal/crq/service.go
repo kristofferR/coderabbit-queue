@@ -457,6 +457,12 @@ func (s *Service) recordObservedBlock(ctx context.Context, obs observation, st S
 		}
 		return nil, err
 	}
+	// Like every other writer of this window: the dashboard is where an operator
+	// reads whether the account is available, and the decision that follows this
+	// is usually FireNo — which writes nothing further, leaving the issue claiming
+	// a free account for the whole block while state and `crq status` say
+	// otherwise.
+	s.sync(ctx, updated)
 	if s.log != nil {
 		s.log.Printf("account blocked until %s (observed, not tied to a round)", blk.Until.UTC().Format(time.RFC3339))
 	}
@@ -1578,7 +1584,14 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 		// duplicate-review behaviour this whole system exists to prevent.
 		//
 		// A LONGER window from the probe still wins: that is new information.
-		if prevBlock != nil && prevBlock.After(now) &&
+		//
+		// So does a reply that states reviews are left. That is not "no block
+		// observed", it is the account reporting itself available — restoring the
+		// old window over it would leave state saying both at once and hold every
+		// metered round until a window the bot has just contradicted expires.
+		reviewsLeft := st.Account.Remaining != nil && *st.Account.Remaining > 0 &&
+			st.Account.BlockedUntil == nil && st.Account.CalibAskedAt == nil
+		if !reviewsLeft && prevBlock != nil && prevBlock.After(now) &&
 			(st.Account.BlockedUntil == nil || prevBlock.After(*st.Account.BlockedUntil)) {
 			st.Account.BlockedUntil = prevBlock
 			if st.Account.Remaining == nil {

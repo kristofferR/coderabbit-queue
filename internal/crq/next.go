@@ -183,9 +183,12 @@ func (s *Service) advance(ctx context.Context, repo string, pr int, feedback Fee
 }
 
 // nextFromState derives the instruction from what is already recorded and
-// observable. It writes NOTHING — no enqueue, no pump, no dashboard sync — which
-// is what lets `crq wait` re-evaluate as often as it likes without spending the
-// account's write budget or firing reviews behind the caller's back.
+// observable. It enqueues nothing, pumps nothing and fires nothing, which is what
+// lets `crq wait` re-evaluate as often as it likes without spending the account's
+// write budget or firing reviews behind the caller's back.
+//
+// Its one write is Feedback recording a rate-limit notice it observed: that costs
+// a write per NOTICE, not per poll, and it can only prevent a review.
 //
 // ONE observation drives the whole decision. Feedback already reads the pull, so
 // head, open, per-bot evidence and findings all describe the same instant.

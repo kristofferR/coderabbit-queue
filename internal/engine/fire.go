@@ -136,7 +136,10 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 	}
 	if !r.FireEligible(now) {
 		reason := "round is " + string(r.Phase)
-		if r.Phase == state.PhaseAwaitingRetry && r.RetryAt != nil {
+		switch {
+		case r.DispatchHeld(now):
+			reason = "a fix session is rewriting this head"
+		case r.Phase == state.PhaseAwaitingRetry && r.RetryAt != nil:
 			reason = "cooling down until " + r.RetryAt.UTC().Format(time.RFC3339)
 		}
 		return FireDecision{Verdict: FireNo, Reason: reason}

@@ -3,6 +3,7 @@ package crq
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -154,6 +155,41 @@ func TestDispatchHonoursDryRun(t *testing.T) {
 	}
 	if st.Drain != nil {
 		t.Errorf("a dry run wrote dispatch health: %+v", st.Drain)
+	}
+}
+
+// One repository renamed, deleted, or unreadable by this token used to abort the
+// whole pass. The service restarts into the same list and hits it again, so every
+// healthy repository after it gets no events and no fix sessions — indefinitely.
+func TestWatchPassOutlivesAnUnreadableRepository(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/gone": true, "o/fine": true}
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	gh.listPullErrs = map[string]error{"o/gone": errors.New("404 Not Found")}
+	var p ghapi.Pull
+	p.State = "open"
+	p.Number = 3
+	p.Head.SHA = "aaaaaaaa1"
+	gh.pulls[fakeKey("o/fine", 3)] = p
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	var seen []int
+	if err := svc.watchPass(context.Background(), WatchOptions{}, newDispatchPool(0), func(e WatchEvent) error {
+		seen = append(seen, e.PR)
+		return nil
+	}); err != nil {
+		t.Fatalf("a daemon pass must survive one bad repository: %v", err)
+	}
+	if len(seen) != 1 || seen[0] != 3 {
+		t.Errorf("visited %v, want the healthy repository's PR", seen)
+	}
+
+	// A --once run is somebody's cron job, and reporting success after skipping a
+	// repository it could not read makes a broken scan look like a clean one.
+	err := svc.watchPass(context.Background(), WatchOptions{Once: true}, newDispatchPool(0), nil)
+	if err == nil || !strings.Contains(err.Error(), "o/gone") {
+		t.Errorf("err = %v, want a one-shot run to name the repository it could not check", err)
 	}
 }
 
@@ -447,6 +483,49 @@ func TestClaimDispatchSupersedesAStaleRound(t *testing.T) {
 	}
 }
 
+// A session's own push moves the head, and the next pass enqueues it — which
+// supersedes the round the session is holding and archives its claim. Reading
+// only the current round then answers "nobody is fixing this" about a pull
+// request somebody is still resolving threads on, and a second session starts.
+func TestClaimDispatchSeesAClaimItsOwnPushArchived(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	repo, pr := "owner/thing", 12
+	first := NextReport{
+		Repo: repo, PR: pr, Head: "aaaaaaaa1", Action: "fix",
+		Findings: []dialect.Finding{{ID: "f1", Commit: "aaaaaaaa1"}},
+	}
+	if ok, why, _ := svc.claimDispatch(ctx, first, "tok1", 3); !ok {
+		t.Fatalf("claim refused: %s", why)
+	}
+
+	// That session pushes; the watcher enqueues the new head, which supersedes.
+	if _, err := store.Update(ctx, func(st *State) error {
+		_, err := st.Supersede(repo, pr, "bbbbbbbb2", time.Now().UTC())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	second := NextReport{Repo: repo, PR: pr, Head: "bbbbbbbb2", Action: "fix"}
+	ok, why, byDesign := svc.claimDispatch(ctx, second, "tok2", 3)
+	if ok {
+		t.Fatal("a second session was started against the PR the first is still finishing")
+	}
+	if !byDesign {
+		t.Errorf("reason %q counted as a dispatcher failure; another session holding the PR is the design", why)
+	}
+
+	// And when that session finishes, its archived claim must stop holding the
+	// next one out for the rest of the TTL.
+	svc.releaseDispatch(ctx, first, "tok1", true)
+	if ok, why, _ := svc.claimDispatch(ctx, second, "tok3", 3); !ok {
+		t.Errorf("claim refused after the session released it: %s", why)
+	}
+}
+
 // The attempt bound is crq obeying its own configuration, not fix sessions
 // failing to start. Counted as drain health, a correctly bounded head raised the
 // "fix sessions are not starting" alert after three passes — and every pass
@@ -499,5 +578,42 @@ func TestSessionLogPruneLeavesRoomForTheNewLog(t *testing.T) {
 		if strings.HasPrefix(e.Name(), "7-abcdef123-20260103") {
 			t.Errorf("%s was kept over a newer log", e.Name())
 		}
+	}
+}
+
+// A fork PR's branch lives in the contributor's repository, so the session
+// pushes there — and no branch of `origin` (the base repository this worktree
+// came from) will ever contain that commit. Read as unpushed work, every
+// successful fork fix kept its worktree forever. The base publishes the pushed
+// head as refs/pull/<n>/head, which is the one ref that sees it from here.
+func TestSessionWorkConfirmsAForkPushThroughThePullRef(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	co, err := ws.Checkout(ctx, repo, 42, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := co.Git(ctx, "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+		"commit", "-q", "--allow-empty", "-m", "fix the finding"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Committed and not pushed anywhere: the worktree holds the only copy.
+	if kept, why := sessionWork(ctx, co, sha); !kept {
+		t.Errorf("kept=%v (%s), want the only copy of the fix kept", kept, why)
+	}
+
+	// The contributor's branch is not in the base repository, but the PR ref is:
+	// this is what GitHub publishes once the fork branch moves.
+	if _, err := co.Git(ctx, "push", "origin", "HEAD:refs/pull/42/head"); err != nil {
+		t.Fatal(err)
+	}
+	if kept, why := sessionWork(ctx, co, sha); kept {
+		t.Errorf("kept=%v (%s), want a landed fork push recognised", kept, why)
 	}
 }

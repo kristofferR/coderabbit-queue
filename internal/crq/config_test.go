@@ -447,3 +447,18 @@ func TestSplitArgvKeepsQuotedArgumentsWhole(t *testing.T) {
 		t.Errorf("argv = %q, want the literal words back", argv)
 	}
 }
+
+// The install writes the config path into a service unit, and the service starts
+// in a directory of the service manager's choosing. A relative CRQ_CONFIG that
+// resolved for the installing shell would then name nothing at all, and the
+// drain would load no configuration while the install reported success.
+func TestConfigPathIsAbsolute(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join("relative", "env"))
+	got := ConfigPath()
+	if !filepath.IsAbs(got) {
+		t.Errorf("ConfigPath() = %q, want an absolute path a service can open", got)
+	}
+	if filepath.Base(got) != "env" {
+		t.Errorf("ConfigPath() = %q, want it to still name the file asked for", got)
+	}
+}

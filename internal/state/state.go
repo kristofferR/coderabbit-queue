@@ -491,7 +491,18 @@ func (r *Round) retryEligible(now time.Time) bool {
 }
 
 // FireEligible reports whether Pump may consider this round for firing now.
+//
+// A round a fix session holds is not: that session is replacing the very code a
+// review would be about, and its push moves the head minutes later. Firing there
+// spends the account's metered review on a head nobody will look at again — and
+// the claim is the only record of it, since the round stays queued throughout.
+// Leaving the round OUT of the queue rather than refusing it at the fire gate is
+// what keeps every other PR moving while one is being fixed; a claim nobody
+// heartbeats expires (DispatchTTL), so this can never park a round for good.
 func (r *Round) FireEligible(now time.Time) bool {
+	if r.DispatchHeld(now) {
+		return false
+	}
 	return r.Phase == PhaseQueued || r.retryEligible(now)
 }
 
@@ -640,6 +651,41 @@ type DispatchClaim struct {
 // DispatchHeld reports whether a live claim exists.
 func (r *Round) DispatchHeld(now time.Time) bool {
 	return r.Dispatch != nil && !r.Dispatch.Heartbeat.IsZero() && now.UTC().Sub(r.Dispatch.Heartbeat) < DispatchTTL
+}
+
+// ArchivedDispatchHeld reports whether a round of repo#pr that has already been
+// archived still holds a live dispatch claim.
+//
+// A session's own push is what supersedes the round it was fixing, and the claim
+// is archived with it while the session is still running — resolving threads,
+// declining others. The current round is then a fresh one carrying no claim at
+// all, so asking it alone answers "nobody is fixing this" about a pull request
+// somebody is very much still fixing, and a second session is launched into the
+// same worktree generation's work.
+func (s *State) ArchivedDispatchHeld(repo string, pr int, now time.Time) bool {
+	key := Key(repo, pr)
+	for i := range s.Archive {
+		r := &s.Archive[i]
+		if Key(r.Repo, r.PR) == key && r.DispatchHeld(now) {
+			return true
+		}
+	}
+	return false
+}
+
+// ReleaseArchivedDispatch drops a claim this token owns on an archived round, so
+// a session that has finished stops holding the next one out for the rest of the
+// TTL. It reports whether anything was released.
+func (s *State) ReleaseArchivedDispatch(repo string, pr int, token string) bool {
+	key := Key(repo, pr)
+	released := false
+	for i := range s.Archive {
+		r := &s.Archive[i]
+		if Key(r.Repo, r.PR) == key && r.ReleaseDispatch(token) {
+			released = true
+		}
+	}
+	return released
 }
 
 // ClaimDispatch takes this round's dispatch claim, or reports why it cannot. A

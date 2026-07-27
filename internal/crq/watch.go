@@ -175,7 +175,22 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		}
 		pulls, err := s.gh.ListPulls(ctx, repo, openPullQuery())
 		if err != nil {
-			return err
+			// Throttling is the whole fleet's problem and the caller sleeps it
+			// out. One repository being renamed, deleted, or unreadable by this
+			// token is not: aborting the pass over it means every healthy
+			// repository after it gets no events and no fix sessions, on this pass
+			// and — since the service restarts into the same list — on every pass
+			// after it. Same treatment as an unreadable PR below.
+			if _, throttled := ghapi.ThrottleWait(err); throttled {
+				return err
+			}
+			if s.log != nil {
+				s.log.Printf("watch: %s: %v", repo, err)
+			}
+			if opts.Once {
+				failures = append(failures, fmt.Sprintf("%s: %v", repo, err))
+			}
+			continue
 		}
 		for _, pull := range pulls {
 			candidates = append(candidates, candidate{repo, pull})
@@ -235,7 +250,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		}
 	}
 	if len(failures) > 0 {
-		return fmt.Errorf("%d pull request(s) could not be checked: %s", len(failures), strings.Join(failures, "; "))
+		return fmt.Errorf("%d target(s) could not be checked: %s", len(failures), strings.Join(failures, "; "))
 	}
 	return nil
 }
@@ -330,7 +345,8 @@ func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextRe
 	defer cancel()
 	lost := s.beatDispatch(runCtx, report, token, cancel)
 
-	co, err := s.workspace(runCtx).Checkout(runCtx, report.Repo, report.PR, report.Head)
+	ws := s.workspace(runCtx)
+	co, err := ws.Checkout(runCtx, report.Repo, report.PR, report.Head)
 	if err != nil {
 		// Nothing ran, so the attempt did not happen: a transient clone failure
 		// must not eat the per-head budget and permanently skip the PR.
@@ -370,6 +386,14 @@ func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextRe
 		"CRQ_DISPATCH_HEAD="+report.Head,
 		"CRQ_DISPATCH_FINDINGS="+findingsPath,
 	)
+	// The session's push is a plain `git push`, and git reads no GITHUB_TOKEN of
+	// its own. The mirror carries a credential helper that reads this variable
+	// (configureOrigin), so a daemon authenticated by a token alone can land its
+	// fixes instead of failing at the last step of every one of them. In the
+	// environment, never in the config: the snippet is on disk, the secret is not.
+	if ws.Token != "" {
+		cmd.Env = append(cmd.Env, gitTokenEnv+"="+ws.Token)
+	}
 	if s.log != nil {
 		s.log.Printf("watch: dispatching %s for %s#%d@%s (%d findings) — log: %s",
 			opts.Command[0], report.Repo, report.PR, report.Head, len(report.Findings), logPath)
@@ -444,6 +468,17 @@ func sessionWork(ctx context.Context, co Checkout, head string) (bool, string) {
 	if _, err := co.Git(ctx, "fetch", "origin"); err != nil {
 		return true, "the session committed, and the push could not be confirmed"
 	}
+	// A fork PR's branch lives in the CONTRIBUTOR's repository, which is not
+	// `origin` here — this worktree came from the base repository's mirror, and
+	// the prompt pushes to the head repository by URL. No branch of origin will
+	// ever contain that commit, so every successful fork fix would read as
+	// unpushed work and keep its worktree forever. The base repository publishes
+	// the pushed head as refs/pull/<n>/head, which is the one ref that sees it
+	// from here; best-effort, since failing to fetch it is itself "unconfirmed".
+	if co.PR > 0 {
+		_, _ = co.Git(ctx, "fetch", "origin",
+			fmt.Sprintf("+refs/pull/%d/head:refs/remotes/origin/pr/%d", co.PR, co.PR))
+	}
 	if on, err := co.Git(ctx, "branch", "--remotes", "--contains", local); err != nil || strings.TrimSpace(on) == "" {
 		return true, "the session committed work that is on no remote branch"
 	}
@@ -477,12 +512,18 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 	reason, byDesign := "", false
 	_, err := s.store.Update(ctx, func(st *State) error {
 		round := st.Round(report.Repo, report.PR)
-		if round != nil && round.Head != report.Head && round.DispatchHeld(s.clock()) {
-			// Somebody is fixing an earlier head of this PR right now, and is
-			// entitled to finish: a session's own push moves the head, so this is
-			// what a successful session looks like from the outside. Superseding
-			// its round here would start a second session against the work it is
-			// still landing.
+		// Somebody is fixing an earlier head of this PR right now, and is entitled
+		// to finish: a session's own push moves the head, so this is what a
+		// successful session looks like from the outside. Superseding its round
+		// here would start a second session against the work it is still landing.
+		//
+		// The claim is looked for in the archive too. Next enqueues before this
+		// runs, and enqueueing at a moved head supersedes — which archives the
+		// round the session is holding and leaves a fresh, claim-less one in its
+		// place. Reading only that one saw no session at all, which is exactly the
+		// case this guard exists for.
+		if (round != nil && round.Head != report.Head && round.DispatchHeld(s.clock())) ||
+			st.ArchivedDispatchHeld(report.Repo, report.PR, s.clock()) {
 			reason, byDesign = "another watcher is already fixing this pull request", true
 			return ErrNoChange
 		}
@@ -538,8 +579,15 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 // command that could not start did not use up the per-head budget.
 func (s *Service) releaseDispatch(ctx context.Context, report NextReport, token string, attempted bool) {
 	_, _ = s.store.Update(ctx, func(st *State) error {
+		// This session's own push may have superseded the round it was holding,
+		// archiving the claim with it. Released here too, or a finished session
+		// keeps the next dispatch for this PR out until the claim's TTL expires.
+		archived := st.ReleaseArchivedDispatch(report.Repo, report.PR, token)
 		round := st.Round(report.Repo, report.PR)
 		if round == nil || !round.ReleaseDispatch(token) {
+			if archived {
+				return nil
+			}
 			return ErrNoChange
 		}
 		if !attempted && round.Dispatch != nil && round.Dispatch.Attempts > 0 {

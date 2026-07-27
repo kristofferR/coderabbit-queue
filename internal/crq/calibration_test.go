@@ -75,3 +75,42 @@ func TestCalibrationNeverShortensAStandingBlock(t *testing.T) {
 		t.Errorf("blocked until %v, want the probe's longer window near %s", got.Account.BlockedUntil, longer)
 	}
 }
+
+// Not shortening a block must not become refusing to end one. A reply that
+// states reviews are left is the account reporting itself available — keeping
+// the old window over it leaves state saying "reviews remaining" and "blocked"
+// at once, and every metered round waits out a window the bot has contradicted.
+func TestCalibrationClearsABlockTheReplyContradicts(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CalibrationPR = 77
+	cfg.GateRepo = "o/state"
+	cfg.CalibrationTTL = time.Minute
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	svc.now = func() time.Time { return now }
+
+	reply := ghapi.IssueComment{ID: 5, Body: "auto-generated reply by CodeRabbit\nYou have 3 reviews remaining.",
+		CreatedAt: now.Add(-10 * time.Second), UpdatedAt: now.Add(-10 * time.Second)}
+	reply.User.Login = cfg.Bot
+	gh.comments[fakeKey(cfg.GateRepo, 77)] = []ghapi.IssueComment{reply}
+
+	until := now.Add(40 * time.Minute)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Account.BlockedUntil = &until
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := svc.RefreshQuota(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Account.BlockedUntil != nil {
+		t.Errorf("blocked until %s, want the stale window dropped: the probe read 3 reviews remaining",
+			got.Account.BlockedUntil)
+	}
+}

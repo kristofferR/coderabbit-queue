@@ -30,6 +30,7 @@ type fakeGitHub struct {
 	checkRuns       map[string][]ghapi.CheckRun // key: ref (short or full sha)
 	checkRunErrs    map[string]error
 	postBodyErrs    map[string]error // body → error (selective trigger-post failures)
+	listPullErrs    map[string]error // repo → error (a repository the token cannot read)
 	posted          []string
 	deleted         []int64
 	commentID       int64
@@ -256,6 +257,9 @@ func (f *fakeGitHub) EachOpenPR(_ context.Context, _ string, _ bool, fn func(gha
 func (f *fakeGitHub) ListPulls(_ context.Context, repo string, query url.Values) ([]ghapi.Pull, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.listPullErrs[strings.ToLower(repo)]; err != nil {
+		return nil, err
+	}
 	wantRef := ""
 	if head := query.Get("head"); head != "" {
 		_, wantRef, _ = strings.Cut(head, ":") // "owner:branch"
@@ -2649,5 +2653,56 @@ func TestWaitResolvesSummaryOnlyWithoutTheQueue(t *testing.T) {
 	// The other PR keeps the slot — resolving ours never touched it.
 	if st.FireSlot == nil || st.FireSlot.Key != QueueKey("o/front", 10) {
 		t.Fatalf("the front PR must keep the fire slot, got %#v", st.FireSlot)
+	}
+}
+
+// A rate-limit notice is evidence about the ACCOUNT, and the pump only ever
+// looks at the PR it is about to fire. A notice sitting on a superseded round —
+// or simply on a PR that is not next in the queue — was read here and thrown
+// away, and the next fire went out inside a window the bot had already stated.
+func TestFeedbackRecordsARateLimitNoticeItObserves(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = "a0646f010abcdef0"
+	gh.pulls[fakeKey("o/carrier", 82)] = pull
+	other := ghapi.Pull{State: "open"}
+	other.Head.SHA = "bbbbbbbb2abcdef0"
+	gh.pulls[fakeKey("o/other", 90)] = other
+
+	notice := time.Now().UTC().Add(-time.Minute)
+	rl := ghapi.IssueComment{ID: 501,
+		Body:      "<!-- rate limited by coderabbit.ai -->\n> ## Review limit reached\n> **Next review available in:** **40 minutes**",
+		CreatedAt: notice, UpdatedAt: notice}
+	rl.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/carrier", 82)] = []ghapi.IssueComment{rl}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	// Nobody asked about this PR's round; the notice is simply there to be seen.
+	if _, err := svc.Feedback(ctx, "o/carrier", 82); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Account.BlockedUntil == nil {
+		t.Fatal("the observed notice was thrown away; the next fire would go out inside the window")
+	}
+
+	// And the block is what the queue then decides with.
+	if _, err := svc.Enqueue(ctx, "o/other", 90); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range gh.posted {
+		if strings.HasSuffix(p, ":"+cfg.ReviewCommand) {
+			t.Errorf("a review was requested while the account was blocked: %s", p)
+		}
 	}
 }

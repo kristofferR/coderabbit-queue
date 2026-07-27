@@ -92,6 +92,16 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	if err != nil {
 		return FeedbackReport{}, err
 	}
+	// A rate-limit notice is evidence about the ACCOUNT, and this is the only
+	// place that looks at a PR the queue is not about to fire. Pump records the
+	// notice on the round it selects; a notice sitting on a PR that was
+	// superseded — or is simply not next in the queue — was seen here and thrown
+	// away, and the next fire went out inside a window the bot had already
+	// stated. It is the one write on this path, it happens once per notice rather
+	// than once per poll, and all it can do is stop a review.
+	if _, rerr := s.recordObservedBlock(ctx, obs, st, now); rerr != nil && s.log != nil {
+		s.log.Printf("recording the account block observed on %s: %v", QueueKey(repo, pr), rerr)
+	}
 	pull := obs.pull
 	head := ""
 	if len(pull.Head.SHA) >= 9 {

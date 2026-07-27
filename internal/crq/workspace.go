@@ -53,19 +53,30 @@ func DefaultWorkspaceRoot() (string, error) {
 	return filepath.Join(cache, "crq"), nil
 }
 
+// gitTokenEnv is the variable credentialHelper reads the token from. A fix
+// session's own `git push` resolves credentials through the helper recorded in
+// the mirror, so dispatch puts this in the session's environment.
+const gitTokenEnv = "CRQ_GIT_TOKEN"
+
+// credentialHelper answers git's credential query from the environment.
+//
+// It stays silent when the variable is unset, so recording it in a mirror's
+// config cannot answer with an empty password for a host whose own helper would
+// have supplied a real one.
+const credentialHelper = `!f() { test "$1" = get && test -n "$` + gitTokenEnv + `" && printf 'username=x-access-token\npassword=%s\n' "$` + gitTokenEnv + `"; }; f`
+
 // git runs a git command for this workspace, injecting credentials when a token
 // is configured.
 //
-// The token travels in the ENVIRONMENT, never in argv: the helper below is a
-// shell snippet that reads it, so a process listing, a log line and this
-// package's own error strings all carry the snippet and never the secret.
+// The token travels in the ENVIRONMENT, never in argv: the helper is a shell
+// snippet that reads it, so a process listing, a log line and this package's own
+// error strings all carry the snippet and never the secret.
 func (w Workspace) git(ctx context.Context, dir string, args ...string) (string, error) {
 	if strings.TrimSpace(w.Token) == "" {
 		return gitDir(ctx, dir, args...)
 	}
-	const helper = `!f() { test "$1" = get && printf 'username=x-access-token\npassword=%s\n' "$CRQ_GIT_TOKEN"; }; f`
-	full := append([]string{"-c", "credential.helper=", "-c", "credential.helper=" + helper}, args...)
-	return gitEnv(ctx, dir, []string{"CRQ_GIT_TOKEN=" + w.Token}, full...)
+	full := append([]string{"-c", "credential.helper=", "-c", "credential.helper=" + credentialHelper}, args...)
+	return gitEnv(ctx, dir, []string{gitTokenEnv + "=" + w.Token}, full...)
 }
 
 func (w Workspace) root() (string, error) {
@@ -209,20 +220,41 @@ func (w Workspace) remoteURL(repo string) string {
 const originRefspec = "+refs/heads/*:refs/remotes/origin/*"
 
 // configureOrigin makes the mirror behave like an ordinary remote, on every call
-// rather than only at clone time: a mirror created before either of these rules
-// still carries the old configuration, and both break silently.
+// rather than only at clone time: a mirror created before any of these rules
+// still carries the old configuration, and all of them break silently.
 //
 // `clone --bare` sets remote.origin.mirror, which is not what the fetch refspec
 // above says and not what a fix session needs: with it set, git refuses the
 // documented `git push origin HEAD:refs/heads/<branch>` outright ("--mirror
 // can't be combined with refspecs"). A session could then commit its fixes and
 // never land them.
+//
+// The credential helper is there for the same session. crq's own commands pass
+// it with -c, but the session runs plain `git push`, and git does not read
+// GITHUB_TOKEN by itself — so a daemon authenticated by a token alone would fix
+// every finding and fail at the push. The config records the SNIPPET, never the
+// secret; dispatch supplies the token through the environment.
+//
+// Every value is read before it is written. A `git config` write takes
+// config.lock, so with concurrent dispatch two checkouts of one repository
+// rewriting identical values made the loser fail outright with "could not lock
+// config file" — a failure the fetch retry below never covers, over a change
+// that was not needed at all.
 func (w Workspace) configureOrigin(ctx context.Context, path string) error {
-	if _, err := w.git(ctx, path, "config", "remote.origin.fetch", originRefspec); err != nil {
-		return err
+	want := [][2]string{
+		{"remote.origin.fetch", originRefspec},
+		{"remote.origin.mirror", "false"},
 	}
-	if _, err := w.git(ctx, path, "config", "--bool", "remote.origin.mirror", "false"); err != nil {
-		return err
+	if strings.TrimSpace(w.Token) != "" {
+		want = append(want, [2]string{"credential.helper", credentialHelper})
+	}
+	for _, kv := range want {
+		if got, err := w.git(ctx, path, "config", "--get", kv[0]); err == nil && got == kv[1] {
+			continue
+		}
+		if _, err := w.git(ctx, path, "config", kv[0], kv[1]); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -238,6 +270,9 @@ type Checkout struct {
 	// otherwise share a path, and a deferred Remove on the older handle deletes
 	// the newer one's worktree out from under it.
 	token string
+	// auth is the workspace's credential, so a git command run IN this checkout
+	// reaches the remote the same way the fetch that created it did.
+	auth string
 }
 
 // Checkout creates a worktree of repo at sha, on a detached HEAD.
@@ -273,6 +308,12 @@ func (w Workspace) Checkout(ctx context.Context, repo string, pr int, sha string
 	if err := w.pruneStaleWork(ctx, mirror, prDir); err != nil {
 		return Checkout{}, err
 	}
+	// And the rest of this repository's checkouts, whose PRs may never be
+	// dispatched again: a killed watcher's worktree for a PR that has since
+	// closed or converged is visited by nothing else, so pruning only the
+	// directory being checked out left it on disk forever rather than for the
+	// documented staleWorkAge.
+	w.sweepStaleWork(ctx, mirror, prDir)
 	token := randomToken()
 	dir := filepath.Join(prDir, token)
 	if err := os.MkdirAll(prDir, 0o700); err != nil {
@@ -281,7 +322,7 @@ func (w Workspace) Checkout(ctx context.Context, repo string, pr int, sha string
 	if _, err := w.git(ctx, mirror, "worktree", "add", "--detach", dir, sha); err != nil {
 		return Checkout{}, fmt.Errorf("checking out %s@%s: %w", repo, shortSHA(sha), err)
 	}
-	return Checkout{Dir: dir, Repo: NormalizeRepo(repo), PR: pr, mirror: mirror, token: token}, nil
+	return Checkout{Dir: dir, Repo: NormalizeRepo(repo), PR: pr, mirror: mirror, token: token, auth: w.Token}, nil
 }
 
 // workPath is the directory holding this PR's checkouts. Owner and name stay
@@ -329,6 +370,33 @@ func (w Workspace) pruneStaleWork(ctx context.Context, mirror, prDir string) err
 	return nil
 }
 
+// sweepStaleWork prunes the stale checkouts of every OTHER PR of this
+// repository, and removes a PR directory it empties.
+//
+// Best-effort: this is housekeeping for pull requests nobody asked about, so an
+// undeletable leftover under one of them must not fail the checkout being made
+// for another. The one being checked out is pruned by the caller, which does
+// treat a failure as fatal — there it is in the way.
+func (w Workspace) sweepStaleWork(ctx context.Context, mirror, prDir string) {
+	repoDir := filepath.Dir(prDir)
+	entries, err := os.ReadDir(repoDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		dir := filepath.Join(repoDir, entry.Name())
+		if !entry.IsDir() || dir == prDir {
+			continue
+		}
+		if err := w.pruneStaleWork(ctx, mirror, dir); err != nil {
+			continue
+		}
+		// Only when nothing is left: a non-empty directory still holds a live or
+		// not-yet-stale checkout, and Remove refuses it for us.
+		_ = os.Remove(dir)
+	}
+}
+
 // newestModTime is the most recent modification anywhere under dir.
 func newestModTime(dir string) time.Time {
 	newest := time.Time{}
@@ -370,9 +438,11 @@ func (w Workspace) removeWorktree(ctx context.Context, mirror, dir string) error
 	return nil
 }
 
-// Git runs a git command inside this checkout.
+// Git runs a git command inside this checkout, with the workspace's credentials:
+// confirming a push means fetching, and on a private repository an
+// unauthenticated fetch fails and reads as work that never landed.
 func (c Checkout) Git(ctx context.Context, args ...string) (string, error) {
-	return gitDir(ctx, c.Dir, args...)
+	return Workspace{Token: c.auth}.git(ctx, c.Dir, args...)
 }
 
 // gitDir runs git in dir ("" means the process's own directory) and returns its

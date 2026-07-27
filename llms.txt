@@ -233,8 +233,10 @@ head, with `CRQ_DISPATCH_REPO`, `CRQ_DISPATCH_PR`, `CRQ_DISPATCH_HEAD` and `CRQ_
 arguments in `CRQ_DISPATCH_CMD` are kept whole. Dispatch is bounded per head by
 `CRQ_DISPATCH_MAX_ATTEMPTS` (default 3) and uncapped in parallel unless
 `CRQ_DISPATCH_CONCURRENCY` sets a valve — fixing findings spends no account quota, so it does not
-queue. `--once` exits non-zero if any PR could not be checked, so cron cannot mistake a partial
-scan for a clean one.
+queue. While a session holds a PR its round leaves the fire queue (and no second session is started
+for that PR, even after its own push supersedes the round): the review would be of a head about to
+move. `--once` exits non-zero if any PR or repository could not be checked, so cron cannot mistake a
+partial scan for a clean one; a daemon pass logs the failure and carries on to the rest of the fleet.
 
 Current feedback without triggering a review:
 
