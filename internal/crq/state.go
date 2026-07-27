@@ -111,16 +111,16 @@ func issueBody(st State, cfg Config) (string, error) {
 }
 
 // policy assembles the engine Policy from config.
-func (s *Service) policy() engine.Policy {
+func (c Config) policy() engine.Policy {
 	p := engine.Policy{
-		Bot:                s.cfg.Bot,
-		RequiredBots:       s.cfg.RequiredBots,
-		MinInterval:        s.cfg.MinInterval,
-		InflightTimeout:    s.cfg.InflightTimeout,
-		RateLimitFallback:  s.cfg.RateLimitFallback,
-		RateLimitCoDegrade: s.cfg.RateLimitCoDegrade,
+		Bot:                c.Bot,
+		RequiredBots:       c.RequiredBots,
+		MinInterval:        c.MinInterval,
+		InflightTimeout:    c.InflightTimeout,
+		RateLimitFallback:  c.RateLimitFallback,
+		RateLimitCoDegrade: c.RateLimitCoDegrade,
 	}
-	for _, cb := range s.cfg.CoBots {
+	for _, cb := range c.CoBots {
 		p.CoReviewers = append(p.CoReviewers, engine.CoReviewerPolicy{
 			Login:         cb.Login,
 			Command:       cb.Command,
