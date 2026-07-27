@@ -241,6 +241,30 @@ func TestHoldRejectsTriggerClaimsAlreadyBeingPosted(t *testing.T) {
 	}
 }
 
+func TestHoldRejectsExpiredTriggerClaim(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	svc.now = func() time.Time { return now }
+	repo, pr, head := "o/r", 8, "eeeeeeee1"
+	seedRound(t, store, cfg, repo, pr, head, PhaseQueued, now.Add(-time.Minute), 0)
+	setHoldCapableLeader(t, ctx, store, now)
+	if _, err := store.Update(ctx, func(st *State) error {
+		r := st.Round(repo, pr)
+		r.ClaimCo(dialect.CodexBotLogin, now.Add(-triggerClaimTTL-time.Second))
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.Hold(ctx, repo, pr, "waiting on a decision"); err == nil {
+		t.Fatal("hold succeeded while an expired claim's poster could still resume")
+	}
+}
+
 func TestHoldAndUnholdDryRunDoNotMutateState(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC)

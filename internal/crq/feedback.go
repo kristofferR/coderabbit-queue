@@ -532,7 +532,6 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			s.completeWaitRound(ctx, repo, pr, "")
 		case "held":
 			status = "held"
-			code = 0
 		}
 		// The slot wait timed out (CRQ_WAIT_TIMEOUT) without firing a review. Don't
 		// enter the feedback poll — that would burn another feedback timeout and could

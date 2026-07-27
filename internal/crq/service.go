@@ -129,7 +129,7 @@ func (s *Service) Hold(ctx context.Context, repo string, pr int, reason string) 
 		if st.Leader == nil || !st.Leader.ExpiresAt.After(now) || !st.LeaderHasCapability(leaderCapabilityHolds) {
 			return errors.New("administrative holds require a live hold-capable autoreview leader; start or upgrade the daemon and try again")
 		}
-		if triggerPostClaimed(st.Round(repo, pr), now) {
+		if triggerPostClaimed(st.Round(repo, pr)) {
 			return errors.New("a review trigger is already being posted; wait for it to finish before holding the PR")
 		}
 		st.Hold(repo, pr, reason, s.cfg.Host, now)
@@ -177,7 +177,7 @@ func (s *Service) Unhold(ctx context.Context, repo string, pr int) (HoldResult, 
 // are CAS writes, so checking them in the hold write makes either ordering
 // safe: an existing claim rejects the hold, and an existing hold rejects a
 // later claim.
-func triggerPostClaimed(r *Round, now time.Time) bool {
+func triggerPostClaimed(r *Round) bool {
 	if r == nil {
 		return false
 	}
@@ -185,7 +185,11 @@ func triggerPostClaimed(r *Round, now time.Time) bool {
 		return true
 	}
 	for _, co := range r.CoBots {
-		if co.ClaimedAt != nil && now.Sub(co.ClaimedAt.UTC()) < triggerClaimTTL {
+		// A claim's retry lease may expire while its original poster is still
+		// inside the transport's unbounded network retry. Until a command id is
+		// recorded, that worker can still resume and post, so Hold cannot promise
+		// that the PR is trigger-free.
+		if co.ClaimedAt != nil {
 			return true
 		}
 	}
@@ -365,9 +369,9 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		st = updated
 	}
 
-	// 2b. A PR closed during a cooldown parks invisibly (NextEligible skips
-	//    awaiting_retry until RetryAt): sweep the oldest parked round's PR state
-	//    so closure abandons it now instead of after the window.
+	// 2b. A PR closed during a cooldown or hold parks invisibly (NextEligible
+	//    skips it): sweep one such round's PR state so closure abandons it now
+	//    instead of waiting for the cooldown or an operator to release the hold.
 	if res, handled, err := s.sweepParkedClosed(ctx, st); err != nil {
 		return PumpResult{}, err
 	} else if handled {
@@ -2149,18 +2153,16 @@ func queuedFeedbackCheckEvery(poll time.Duration) time.Duration {
 	return 30 * time.Second
 }
 
-// sweepParkedClosed abandons the oldest awaiting_retry round whose PR has been
-// closed or merged. Parked rounds are invisible to NextEligible until RetryAt,
-// so without this a PR closed during an account-block cooldown stays active and
-// a waiting loop times out instead of returning skipped. One pull read per
+// sweepParkedClosed abandons one non-firable queued round whose PR has been
+// closed or merged. Cooldowns and administrative holds make rounds invisible
+// to NextEligible, so they need this bounded cleanup path. One pull read per
 // pump, ETag-cached.
 func (s *Service) sweepParkedClosed(ctx context.Context, st State) (PumpResult, bool, error) {
-	if s.cfg.DryRun {
-		return PumpResult{}, false, nil
-	}
 	var keys []string
 	for key := range st.Rounds {
-		if st.Rounds[key].Phase == PhaseAwaitingRetry {
+		r := st.Rounds[key]
+		_, held := st.HeldPR(r.Repo, r.PR)
+		if r.Phase == PhaseAwaitingRetry || (r.Phase == PhaseQueued && held) {
 			keys = append(keys, key)
 		}
 	}
@@ -2188,6 +2190,15 @@ func (s *Service) sweepParkedClosed(ctx context.Context, st State) (PumpResult, 
 	}
 	if open {
 		return PumpResult{}, false, nil
+	}
+	if s.cfg.DryRun {
+		return PumpResult{
+			Action: "skipped",
+			Repo:   target.Repo,
+			PR:     target.PR,
+			Head:   target.Head,
+			Reason: "pr closed",
+		}, true, nil
 	}
 	res, err := s.abandonRound(ctx, *target, "pr closed", "skipped")
 	return res, true, err

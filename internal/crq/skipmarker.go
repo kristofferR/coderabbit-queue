@@ -101,27 +101,50 @@ func markdownBlockQuoteContent(line string) (string, int) {
 }
 
 func stripIndentedCode(body string) string {
+	type containerState struct {
+		inParagraph bool
+		listIndents []int
+	}
 	var out strings.Builder
-	inParagraph := false
-	var listIndents []int
+	states := []containerState{{}}
+	currentDepth := 0
 	for _, line := range strings.SplitAfter(body, "\n") {
-		if strings.TrimSpace(line) == "" {
+		content, depth := markdownBlockQuoteContent(line)
+		effectiveDepth := depth
+		if depth < currentDepth && strings.TrimSpace(content) != "" && states[currentDepth].inParagraph {
+			// CommonMark permits a block-quote paragraph to continue lazily
+			// without another `>` marker. Keep processing that line in the
+			// active child container rather than mistaking its indentation for
+			// an outer code block.
+			effectiveDepth = currentDepth
+		}
+		if effectiveDepth > currentDepth {
+			for len(states) <= effectiveDepth {
+				states = append(states, containerState{})
+			}
+			for d := currentDepth + 1; d <= effectiveDepth; d++ {
+				states[d] = containerState{}
+			}
+		}
+		currentDepth = effectiveDepth
+		state := &states[effectiveDepth]
+		if strings.TrimSpace(content) == "" {
 			out.WriteString(line)
-			inParagraph = false
+			state.inParagraph = false
 			continue
 		}
-		indent := markdownIndent(line)
-		for len(listIndents) > 0 && indent < listIndents[len(listIndents)-1] {
-			listIndents = listIndents[:len(listIndents)-1]
+		indent := markdownIndent(content)
+		for len(state.listIndents) > 0 && indent < state.listIndents[len(state.listIndents)-1] {
+			state.listIndents = state.listIndents[:len(state.listIndents)-1]
 		}
 		containerIndent := 0
-		if len(listIndents) > 0 {
-			containerIndent = listIndents[len(listIndents)-1]
+		if len(state.listIndents) > 0 {
+			containerIndent = state.listIndents[len(state.listIndents)-1]
 		}
-		if contentIndent, ok := markdownListContentIndent(line, containerIndent); ok {
-			listIndents = append(listIndents, contentIndent)
+		if contentIndent, ok := markdownListContentIndent(content, containerIndent); ok {
+			state.listIndents = append(state.listIndents, contentIndent)
 			out.WriteString(line)
-			inParagraph = continuesMarkdownParagraph(line)
+			state.inParagraph = continuesMarkdownParagraph(content)
 			continue
 		}
 		relativeIndent := indent - containerIndent
@@ -130,7 +153,7 @@ func stripIndentedCode(body string) string {
 			// preceding blank line this is paragraph continuation, not an
 			// indented code block. Indentation is relative to the active list
 			// container: four absolute spaces can be ordinary list-item content.
-			if inParagraph {
+			if state.inParagraph {
 				out.WriteString(line)
 				continue
 			}
@@ -140,7 +163,7 @@ func stripIndentedCode(body string) string {
 			continue
 		}
 		out.WriteString(line)
-		inParagraph = continuesMarkdownParagraph(line)
+		state.inParagraph = continuesMarkdownParagraph(content)
 	}
 	return out.String()
 }

@@ -1592,7 +1592,7 @@ func TestLoopLeavesHeldInflightRoundOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code != 0 || report.Status != "held" || report.Reason != "held: waiting on a decision" {
+	if code != 2 || report.Status != "held" || report.Reason != "held: waiting on a decision" {
 		t.Fatalf("held in-flight loop result: code=%d report=%#v", code, report)
 	}
 	st, _, err := store.Load(ctx)
@@ -1951,6 +1951,82 @@ func TestPumpDropsClosedPRWhileReviewQuotaIsBlocked(t *testing.T) {
 	}
 	if len(gh.posted) != 0 {
 		t.Fatalf("must not post a review to a merged PR, posted %d", len(gh.posted))
+	}
+}
+
+func TestPumpDropsClosedPRWhileHeld(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	pull := ghapi.Pull{State: "closed", Merged: true}
+	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+
+	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseQueued, time.Now().UTC(), 0)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting on a decision", "operator", time.Now().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "skipped" || pumped.Reason != "pr closed" {
+		t.Fatalf("expected held closed PR cleanup, got %#v", pumped)
+	}
+	if containsActiveRound(store, t, "owner/repo", 12) {
+		t.Fatal("closed PR should not remain active merely because it is held")
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, archived := range st.Archive {
+		if archived.Repo == "owner/repo" && archived.PR == 12 && archived.Phase == PhaseAbandoned {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("closed PR cleanup did not preserve the abandoned round in the archive")
+	}
+}
+
+func TestDryRunReportsClosedHeldPRWithoutMutatingState(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.DryRun = true
+	gh := newFakeGitHub()
+	gh.pulls[fakeKey("owner/repo", 12)] = ghapi.Pull{State: "closed", Merged: true}
+	store := NewMemoryStore(cfg)
+	service := NewService(cfg, gh, store, nil)
+
+	seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseQueued, time.Now().UTC(), 0)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting on a decision", "operator", time.Now().UTC())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pumped, err := service.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pumped.Action != "skipped" || pumped.Reason != "pr closed" {
+		t.Fatalf("dry-run should report held closed PR cleanup, got %#v", pumped)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("owner/repo", 12); round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("dry-run mutated held round: %#v", round)
 	}
 }
 
