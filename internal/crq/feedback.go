@@ -443,12 +443,17 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 			// comment through the REST fallback hashes the same — and filtering on
 			// the ID alone would hide a review thread that is open.
 			if dismissibleSources[finding.Source] && finding.ThreadID == "" && round.IsDismissed(finding.ID) {
-				report.Dismissed++
 				continue
 			}
 			kept = append(kept, finding)
 		}
 		report.Findings = kept
+		// The count is of the DECISIONS this round recorded, not of the findings
+		// that happened to still match one. A bot that edits or deletes the
+		// comment a dismissal was made against leaves nothing to match, and
+		// reporting zero there would make a set-aside finding indistinguishable
+		// from one that was never reported at all.
+		report.Dismissed = len(round.Dismissed)
 	}
 	sort.Slice(report.Findings, func(i, j int) bool {
 		if dialect.RankSeverity(report.Findings[i].Severity) != dialect.RankSeverity(report.Findings[j].Severity) {

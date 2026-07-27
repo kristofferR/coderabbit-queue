@@ -541,6 +541,104 @@ func TestPartialDismissalWillNotSupersedeIntoAQueuedRound(t *testing.T) {
 	}
 }
 
+// The documented fix flow dismisses a threadless finding with the fixes for it
+// still in the working tree, and the round that dismissal leaves behind has
+// asked for nothing yet. Reading it as a review in progress made `crq next`
+// answer `hold` — telling the caller to sit on its own fixes until a review of
+// the code they replace finished.
+func TestDismissalDoesNotHoldTheFixesItWasMadeFor(t *testing.T) {
+	// A required co-reviewer that never answers is what keeps the head gated
+	// once the primary's findings have landed — the case the guard is about.
+	f := newCoReplayFixture(t, time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC), requireBugbot)
+	repo, pr := "owner/repo", 507
+	f.openPull(repo, pr, "aaaaaaaa1")
+	f.setCommitDate("aaaaaaaa1", f.clk.now().Add(-time.Minute))
+	f.setLocalWork(false, "")
+
+	f.next(repo, pr)
+
+	// The deadlock's shape: the head moved and threadless findings for the NEW
+	// head landed before anything enqueued a round for it.
+	f.clk.advance(2 * time.Minute)
+	f.setHead(repo, pr, "bbbbbbbb2")
+	f.setCommitDate("bbbbbbbb2", f.clk.now())
+	f.corpusReview(t, repo, pr, 900, "bbbbbbbb2", "coderabbit/findings-prompt-block.md")
+
+	report := f.next(repo, pr)
+	f.wantAction(report, engine.ActionFix)
+	ids := []string{}
+	for _, finding := range report.Findings {
+		if finding.ThreadID == "" {
+			ids = append(ids, finding.ID)
+		}
+	}
+	if len(ids) == 0 {
+		t.Fatal("this test needs a threadless finding to dismiss")
+	}
+
+	// The caller fixes them locally, then dismisses — the order llms.txt asks
+	// for. The dismissal creates the queued round for this head.
+	f.setLocalWork(true, "uncommitted changes in the working tree")
+	if _, err := f.svc.Dismiss(f.ctx, repo, pr, ids, "fixed locally, not yet pushed"); err != nil {
+		t.Fatal(err)
+	}
+	if round := f.round(repo, pr); round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("the dismissal must leave a queued round for this head, got %+v", round)
+	}
+
+	f.clk.advance(time.Minute)
+	f.wantAction(f.next(repo, pr), engine.ActionPush)
+}
+
+// The dismissed count is of the decisions the round recorded, not of the
+// findings that still match one. A finding ID hashes the text, so a bot editing
+// the review it came from leaves nothing to match — and counting matches instead
+// reported zero, making a finding that was deliberately set aside look like one
+// that was never reported at all.
+func TestDismissedCountSurvivesTheBotEditingItsOwnReview(t *testing.T) {
+	f := newReplayFixture(t, time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC))
+	repo, pr, head := "owner/repo", 508, "aaaaaaaa1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, f.clk.now().Add(-time.Minute))
+	f.setLocalWork(false, "")
+
+	f.next(repo, pr)
+	f.clk.advance(2 * time.Minute)
+	f.corpusReview(t, repo, pr, 900, head, "coderabbit/findings-outside-diff.md")
+
+	report := f.next(repo, pr)
+	f.wantAction(report, engine.ActionFix)
+	id := ""
+	for _, finding := range report.Findings {
+		if finding.ThreadID == "" {
+			id = finding.ID
+			break
+		}
+	}
+	if id == "" {
+		t.Fatal("this test needs a threadless finding to dismiss")
+	}
+	if _, err := f.svc.Dismiss(f.ctx, repo, pr, []string{id}, "handled in an earlier commit"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The bot rewrites the review the finding came from. Its text — and so its
+	// ID — is gone, but the decision about it stands.
+	f.gh.mu.Lock()
+	key := fakeKey(repo, pr)
+	for i := range f.gh.reviews[key] {
+		if f.gh.reviews[key][i].ID == 900 {
+			f.gh.reviews[key][i].Body = "Reviewed the changes."
+		}
+	}
+	f.gh.mu.Unlock()
+
+	f.clk.advance(time.Minute)
+	if after := f.next(repo, pr); after.Dismissed != 1 {
+		t.Errorf("dismissed = %d, want 1 — the record outlives the text it was made against", after.Dismissed)
+	}
+}
+
 // A dry run reports what a real one would do and writes nothing — including the
 // refusals, which is the half a caller cannot see from a blanket success.
 func TestDryRunDismissalReportsWithoutWriting(t *testing.T) {

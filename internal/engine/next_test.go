@@ -159,6 +159,17 @@ func TestNextAction(t *testing.T) {
 			want: ActionPush,
 		},
 		{
+			// A queued round has asked for nothing either — and `crq dismiss`
+			// creates one to record its decision, so the documented fix flow
+			// reaches here holding the very fixes the review would be spent on.
+			name: "a queued round is not a review to hold for",
+			in: NextInput{
+				Round: state.Round{Phase: state.PhaseQueued},
+				Obs:   openObs(), Completion: both(false, false), LocalWork: true,
+			},
+			want: ActionPush,
+		},
+		{
 			name: "all answered with staged work means push",
 			in: NextInput{
 				Obs: openObs(), Completion: both(true, true), LocalWork: true,

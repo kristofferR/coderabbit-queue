@@ -197,11 +197,12 @@ func NextAction(in NextInput, now time.Time) Action {
 		}
 		kind, reason := ActionWait, "awaiting review"
 		if in.LocalWork {
-			// Holding protects a review that is actually happening. With no round
-			// at all, nothing has been requested for this head, so holding would
-			// stall the caller AND spend a review window on code it is about to
-			// replace. Land the work first; the round then covers the real head.
-			if in.Round.Phase == "" {
+			// Holding protects a review that is actually happening. Nothing has
+			// been requested for this head while the round is only queued — or
+			// absent entirely — so holding would stall the caller AND spend a
+			// review window on code it is about to replace. Land the work first;
+			// the round then covers the real head.
+			if !reviewRequested(in.Round) {
 				return Action{
 					Kind:   ActionPush,
 					Reason: "no review has been requested for this head yet; land your work before one is",
@@ -235,6 +236,19 @@ func NextAction(in NextInput, now time.Time) Action {
 // running.
 func (in NextInput) settling(now time.Time) bool {
 	return in.SettleUntil != nil && in.SettleUntil.After(now)
+}
+
+// reviewRequested reports whether a review has actually been asked for at this
+// round's head.
+//
+// A round with no phase does not exist; a queued one is only a place in the
+// fleet's FIFO — no command posted, no quota spent — and a push supersedes it
+// for free. The distinction matters because a round is no longer created only by
+// an enqueue: `crq dismiss` creates one to record the decision, and reading that
+// as "a review is running" made the documented fix flow hold its own fixes until
+// a review of the pre-fix head finished.
+func reviewRequested(r state.Round) bool {
+	return r.Phase != "" && r.Phase != state.PhaseQueued
 }
 
 // waitExpired reports whether this round's own wait deadline has passed while it
