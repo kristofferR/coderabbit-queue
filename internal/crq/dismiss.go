@@ -28,8 +28,8 @@ type DismissResult struct {
 //
 // `crq resolve` and `crq decline` both act on a review thread. A review-body
 // finding, a review-skipped notice or an outside-diff remark has none, so
-// neither command can touch it — and drain-first then blocks every future round
-// on a finding that can never drain. The observed end state was a PR where "no
+// neither command can touch it — and fix-first then blocks every future round
+// on a finding that can never be cleared. The observed end state was a PR where "no
 // review was ever requested" for the current head, four rounds running.
 //
 // A finding must be present at the current head and have no thread. A threaded
@@ -136,7 +136,7 @@ func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string
 			Dismissed: []string{}, Already: clean}, nil
 	}
 
-	// Whether this call drains the head decides if a round may be CREATED here.
+	// Whether this call clears the head decides if a round may be CREATED here.
 	// Creating one while other findings are still open would put a fire-eligible
 	// round in the queue that DecideFire cannot hold back — it sees no findings —
 	// so a pump could spend the primary's quota on code the caller is still

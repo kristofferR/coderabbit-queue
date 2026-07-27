@@ -215,13 +215,13 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	var candidates []candidate
 	gate := NormalizeRepo(s.cfg.GateRepo)
 	// Which repositories may be FIXED is per repository, read once for the pass.
-	// Watching is unaffected: a repository with draining off is still observed
+	// Watching is unaffected: a repository with autofix off is still observed
 	// and still reviewed, so its feedback arrives for a person to act on.
-	drainOff := map[string]bool{}
+	autofixOff := map[string]bool{}
 	if st, _, err := s.store.Load(ctx); err == nil {
 		for _, repo := range repos {
-			if !st.DrainEnabled(repo) {
-				drainOff[NormalizeRepo(repo)] = true
+			if !st.AutofixEnabled(repo) {
+				autofixOff[NormalizeRepo(repo)] = true
 			}
 		}
 	}
@@ -337,8 +337,8 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				Findings: len(report.Findings), At: s.clock().UTC(),
 			}
 			var result <-chan dispatchResult
-			if opts.dispatching() && report.Action == string(engine.ActionFix) && drainOff[NormalizeRepo(repo)] {
-				event.Skipped = "draining is off for this repository (crq drain on " + NormalizeRepo(repo) + ")"
+			if opts.dispatching() && report.Action == string(engine.ActionFix) && autofixOff[NormalizeRepo(repo)] {
+				event.Skipped = "autofix is off for this repository (crq autofix on " + NormalizeRepo(repo) + ")"
 			} else if opts.dispatching() && report.Action == string(engine.ActionFix) && !s.mayDispatch(repo, pull) {
 				event.Skipped = "the head branch is a fork; set CRQ_DISPATCH_FORKS=1 to fix contributor pull requests"
 			} else if opts.dispatching() && report.Action == string(engine.ActionFix) {
@@ -442,23 +442,23 @@ func (s *Service) mayDispatch(repo string, pull ghapi.Pull) bool {
 func (s *Service) noteDispatchHealth(ctx context.Context, started bool, reason string) {
 	var flipped, unhealthy bool
 	state, err := s.store.Update(ctx, func(st *State) error {
-		was := st.Drain.Unhealthy()
+		was := st.Autofix.Unhealthy()
 		st.NoteDispatch(s.cfg.Host, started, reason, s.clock())
-		unhealthy = st.Drain.Unhealthy()
+		unhealthy = st.Autofix.Unhealthy()
 		flipped = unhealthy != was
 		return nil
 	})
 	if err != nil {
 		return
 	}
-	// The dashboard is where this alert is meant to be read, and a drain that has
+	// The dashboard is where this alert is meant to be read, and an autofix service that has
 	// stopped working may produce no other write for hours. Every unhealthy
 	// attempt changes the rendered count, host, or error; recovery removes it.
 	if unhealthy || flipped {
 		s.sync(ctx, state)
 	}
 	if flipped && unhealthy && s.log != nil {
-		s.log.Printf("ALERT: no fix session has started in %d dispatch attempts — %s", DrainUnhealthyAfter, reason)
+		s.log.Printf("ALERT: no fix session has started in %d dispatch attempts — %s", AutofixUnhealthyAfter, reason)
 	}
 }
 
@@ -583,7 +583,7 @@ func (s *Service) dispatchWithStart(
 	token string,
 	started chan<- dispatchResult,
 ) (ok bool, reason string) {
-	// Health means "can this drain START a session", not whether the agent later
+	// Health means "can this watcher START a session", not whether the agent later
 	// succeeds at the work it was given. Record pre-start failures on return;
 	// cmd.Start records recovery immediately, while a healthy long-running
 	// session is still running.
@@ -782,7 +782,7 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 		// The pass-level snapshot is only an optimization. The switch is an
 		// operator safety gate, so enforce it in the same CAS that grants the
 		// claim; a concurrent off or a failed earlier Load must fail closed.
-		if !st.DrainEnabled(report.Repo) {
+		if !st.AutofixEnabled(report.Repo) {
 			reason, byDesign = "fix sessions are disabled for this repository", true
 			return ErrNoChange
 		}
@@ -810,7 +810,7 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 		}
 		if round == nil || round.Head != report.Head {
 			// Findings on a head the queue is not tracking: a review somebody
-			// triggered by hand, feedback that predates the drain, or a head that
+			// triggered by hand, feedback that predates autofix, or a head that
 			// moved on while the previous round still stood. `Next` returns `fix`
 			// before Enqueue in that case — deliberately, so no second review is
 			// bought for a head whose findings are already in hand — so nothing

@@ -657,7 +657,7 @@ func (s *Service) recordDismissal(ctx context.Context, repo string, pr int, head
 			// other findings still open, not about whether a round object
 			// exists. A queued round is just as dangerous as a new one: Pump can
 			// hand it to DecideFire, which sees no findings and cannot enforce
-			// drain-first. A live dispatch claim is the exception: it excludes
+			// fix-first. A live dispatch claim is the exception: it excludes
 			// this exact round from Pump until the session pushes or releases
 			// it, so a session may dismiss one finding at a time. So is a round
 			// on the previous head, because the supersede below would replace it
@@ -672,7 +672,7 @@ func (s *Service) recordDismissal(ctx context.Context, repo string, pr int, head
 			// The ordinary state after a push: the stored round is still on the
 			// PREVIOUS head, because `crq next` returns on a current-head finding
 			// before it enqueues. Refusing here would leave the new head in the
-			// exact drain-first deadlock this command exists to end.
+			// exact fix-first deadlock this command exists to end.
 			var err error
 			if round, err = st.Supersede(repo, pr, head, s.clock()); err != nil {
 				return err

@@ -22,9 +22,9 @@ import (
 //go:embed dispatch/fix-prompt.txt
 var fixPrompt string
 
-// DrainInstall describes what an install would do, so --dry-run can print it and
+// AutofixInstall describes what an install would do, so --dry-run can print it and
 // the result can be reported.
-type DrainInstall struct {
+type AutofixInstall struct {
 	Platform  string `json:"platform"`
 	Prompt    string `json:"prompt"`
 	Wrapper   string `json:"wrapper"`
@@ -42,7 +42,7 @@ type DrainInstall struct {
 	Started    bool     `json:"started,omitempty"`
 }
 
-// InstallDrain sets up the unattended review drain: the prompt, a wrapper, a
+// InstallAutofix sets up unattended autofix: the prompt, a wrapper, a
 // service definition, and whatever the platform needs to keep it running across
 // a logout.
 //
@@ -50,31 +50,31 @@ type DrainInstall struct {
 // files, remember `loginctl enable-linger`, and get the environment right — and
 // a setup people get wrong is a setup that silently does nothing, which is the
 // failure this whole feature is about.
-func (s *Service) InstallDrain(ctx context.Context, agent string, agentArgs []string, repos []string, dryRun bool) (DrainInstall, error) {
+func (s *Service) InstallAutofix(ctx context.Context, agent string, agentArgs []string, repos []string, dryRun bool) (AutofixInstall, error) {
 	effectiveDryRun := dryRun || s.cfg.DryRun
-	plan, err := DrainPlan(s.cfg, agent, agentArgs, repos, effectiveDryRun)
+	plan, err := AutofixPlan(s.cfg, agent, agentArgs, repos, effectiveDryRun)
 	if err != nil || effectiveDryRun {
 		return plan, err
 	}
-	return s.applyDrain(ctx, plan)
+	return s.applyAutofix(ctx, plan)
 }
 
-// DrainPlan computes what an install WOULD write and run, from configuration
+// AutofixPlan computes what an install WOULD write and run, from configuration
 // alone.
 //
-// Separate from applying it because `crq drain install --dry-run` is documented
+// Separate from applying it because `crq autofix install --dry-run` is documented
 // as a preview and must work for somebody who has not authenticated yet: the
 // plan reads no GitHub state, so requiring a token to see it turned the one
 // command for inspecting the setup into another thing to set up first.
-func DrainPlan(cfg Config, agent string, agentArgs []string, repos []string, dryRun bool) (DrainInstall, error) {
+func AutofixPlan(cfg Config, agent string, agentArgs []string, repos []string, dryRun bool) (AutofixInstall, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return DrainInstall{}, err
+		return AutofixInstall{}, err
 	}
 	if agent = strings.TrimSpace(agent); agent == "" {
 		agent, err = exec.LookPath("claude")
 		if err != nil {
-			return DrainInstall{}, fmt.Errorf("no fix agent found: pass --agent <path> (tried \"claude\" on PATH)")
+			return AutofixInstall{}, fmt.Errorf("no fix agent found: pass --agent <path> (tried \"claude\" on PATH)")
 		}
 	} else {
 		// A typo here is not a smaller mistake than a missing default: the install
@@ -82,21 +82,21 @@ func DrainPlan(cfg Config, agent string, agentArgs []string, repos []string, dry
 		// which is the silent nothing this command exists to prevent.
 		resolved, lerr := exec.LookPath(agent)
 		if lerr != nil {
-			return DrainInstall{}, fmt.Errorf("fix agent %q cannot be run: %w", agent, lerr)
+			return AutofixInstall{}, fmt.Errorf("fix agent %q cannot be run: %w", agent, lerr)
 		}
 		agent = resolved
 	}
 	agent, err = filepath.Abs(agent)
 	if err != nil {
-		return DrainInstall{}, fmt.Errorf("resolving fix agent %q: %w", agent, err)
+		return AutofixInstall{}, fmt.Errorf("resolving fix agent %q: %w", agent, err)
 	}
 	if len(repos) == 0 {
-		for repo := range cfg.AllowRepos {
-			repos = append(repos, repo)
-		}
+		// Sorted, because the plan is what --dry-run shows and what the unit
+		// records: map order would make two identical installs disagree.
+		repos = sortedRepoList(cfg.AllowRepos)
 	}
 	if len(repos) == 0 {
-		return DrainInstall{}, fmt.Errorf("no repositories to watch: pass them, or set CRQ_REPOS")
+		return AutofixInstall{}, fmt.Errorf("no repositories to watch: pass them, or set CRQ_REPOS")
 	}
 
 	// The service writes its output here. systemd refuses to start a unit whose
@@ -104,11 +104,11 @@ func DrainPlan(cfg Config, agent string, agentArgs []string, repos []string, dry
 	// exist before the unit does — a service that will not start is exactly the
 	// silent nothing this command exists to prevent.
 	logDir := filepath.Join(home, ".local", "state", "crq")
-	plan := DrainInstall{
+	plan := AutofixInstall{
 		Platform: runtime.GOOS,
 		LogDir:   logDir,
 		Prompt:   filepath.Join(home, ".local", "share", "crq", "fix-prompt.txt"),
-		Wrapper:  filepath.Join(home, ".local", "bin", "crq-drain"),
+		Wrapper:  filepath.Join(home, ".local", "bin", "crq-autofix"),
 		Agent:    agent,
 		Repos:    repos,
 		DryRun:   dryRun,
@@ -116,27 +116,27 @@ func DrainPlan(cfg Config, agent string, agentArgs []string, repos []string, dry
 	if root := strings.TrimSpace(cfg.WorkspaceRoot); root != "" {
 		plan.Workspace, err = filepath.Abs(root)
 		if err != nil {
-			return plan, fmt.Errorf("resolving drain workspace %q: %w", root, err)
+			return plan, fmt.Errorf("resolving autofix workspace %q: %w", root, err)
 		}
 	}
 	switch runtime.GOOS {
 	case "darwin":
-		plan.Unit = filepath.Join(home, "Library", "LaunchAgents", "no.kristofferr.crq-drain.plist")
+		plan.Unit = filepath.Join(home, "Library", "LaunchAgents", "no.kristofferr.crq-autofix.plist")
 		plan.Commands = []string{
-			"launchctl bootout gui/$(id -u)/no.kristofferr.crq-drain",
+			"launchctl bootout gui/$(id -u)/no.kristofferr.crq-autofix",
 			"launchctl bootstrap gui/$(id -u) " + plan.Unit,
 		}
 	default:
-		plan.Unit = filepath.Join(home, ".config", "systemd", "user", "crq-drain.service")
+		plan.Unit = filepath.Join(home, ".config", "systemd", "user", "crq-autofix.service")
 		plan.Commands = []string{
 			"loginctl enable-linger " + os.Getenv("USER"),
 			"systemctl --user daemon-reload",
-			"systemctl --user enable crq-drain",
+			"systemctl --user enable crq-autofix",
 			// restart, not "enable --now": --now does nothing to a unit that is
 			// already running, so reinstalling with a different agent or prompt
 			// silently kept the old one going. An install that appears to succeed
 			// and changes nothing is the worst of both.
-			"systemctl --user restart crq-drain",
+			"systemctl --user restart crq-autofix",
 		}
 	}
 	invocation, err := agentInvocation(agent, plan.Prompt, agentArgs)
@@ -148,14 +148,14 @@ func DrainPlan(cfg Config, agent string, agentArgs []string, repos []string, dry
 	return plan, nil
 }
 
-// applyDrain writes the plan to disk and starts the service.
-func (s *Service) applyDrain(ctx context.Context, plan DrainInstall) (DrainInstall, error) {
+// applyAutofix writes the plan to disk and starts the service.
+func (s *Service) applyAutofix(ctx context.Context, plan AutofixInstall) (AutofixInstall, error) {
 	invocation, logDir := plan.Invocation, plan.LogDir
 	self, err := os.Executable()
 	if err != nil {
 		return plan, err
 	}
-	if err := drainCanAuthenticate(ctx); err != nil {
+	if err := autofixCanAuthenticate(ctx); err != nil {
 		return plan, err
 	}
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -165,7 +165,7 @@ func (s *Service) applyDrain(ctx context.Context, plan DrainInstall) (DrainInsta
 	// Known agents receive their non-interactive flags. Any other executable is
 	// treated as a self-contained prompt-taking wrapper.
 	wrapper := fmt.Sprintf(`#!/usr/bin/env bash
-# Installed by "crq drain install". Runs the review drain: crq decides, and a
+# Installed by "crq autofix install". Runs autofix: crq decides, and a
 # fix session is started for each PR that needs one.
 set -uo pipefail
 exec %s watch -- %s
@@ -178,30 +178,30 @@ exec %s watch -- %s
 	}{
 		{plan.Prompt, fixPrompt, 0o644},
 		{plan.Wrapper, wrapper, 0o755},
-		{plan.Unit, s.drainUnit(plan), 0o644},
+		{plan.Unit, s.autofixUnit(plan), 0o644},
 	} {
 		if err := os.MkdirAll(filepath.Dir(f.path), 0o755); err != nil {
 			return plan, err
 		}
-		if err := writeDrainFile(f.path, f.body, f.mode); err != nil {
+		if err := writeAutofixFile(f.path, f.body, f.mode); err != nil {
 			return plan, err
 		}
 	}
 
 	// The files are the durable part, and a machine without systemd/launchd still
-	// gets something runnable by hand — but a failure here means the drain is not
+	// gets something runnable by hand — but a failure here means the autofix service is not
 	// running, and reporting `started` for that is the same silent nothing this
 	// command exists to prevent. Say which command failed, and let the caller see
 	// the paths that were written.
 	var failed []string
-	commandArgs := drainCommandArgs(plan)
+	commandArgs := autofixCommandArgs(plan)
 	if len(plan.Commands) != len(commandArgs) {
-		return plan, errors.New("drain start commands are incomplete")
+		return plan, errors.New("autofix start commands are incomplete")
 	}
 	for i, line := range plan.Commands {
 		args := commandArgs[i]
 		if len(args) == 0 {
-			return plan, fmt.Errorf("drain start command %q has no executable", line)
+			return plan, fmt.Errorf("autofix start command %q has no executable", line)
 		}
 		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 		output, err := cmd.CombinedOutput()
@@ -214,39 +214,39 @@ exec %s watch -- %s
 				detail += ": " + text
 			}
 			if s.log != nil {
-				s.log.Printf("drain install: %s: %s", line, detail)
+				s.log.Printf("autofix install: %s: %s", line, detail)
 			}
 			failed = append(failed, fmt.Sprintf("%s: %s", line, detail))
 		}
 	}
 	if len(failed) > 0 {
-		return plan, fmt.Errorf("the drain files are installed, but starting it failed — run these by hand: %s",
+		return plan, fmt.Errorf("the autofix files are installed, but starting it failed — run these by hand: %s",
 			strings.Join(failed, "; "))
 	}
 	plan.Started = true
 	return plan, nil
 }
 
-func writeDrainFile(path, body string, mode os.FileMode) error {
+func writeAutofixFile(path, body string, mode os.FileMode) error {
 	if err := os.WriteFile(path, []byte(body), mode); err != nil {
 		return err
 	}
 	return os.Chmod(path, mode)
 }
 
-func drainCommandArgs(plan DrainInstall) [][]string {
+func autofixCommandArgs(plan AutofixInstall) [][]string {
 	if plan.Platform == "darwin" {
 		domain := "gui/" + currentUID()
 		return [][]string{
-			{"launchctl", "bootout", domain + "/no.kristofferr.crq-drain"},
+			{"launchctl", "bootout", domain + "/no.kristofferr.crq-autofix"},
 			{"launchctl", "bootstrap", domain, plan.Unit},
 		}
 	}
 	return [][]string{
 		{"loginctl", "enable-linger", os.Getenv("USER")},
 		{"systemctl", "--user", "daemon-reload"},
-		{"systemctl", "--user", "enable", "crq-drain"},
-		{"systemctl", "--user", "restart", "crq-drain"},
+		{"systemctl", "--user", "enable", "crq-autofix"},
+		{"systemctl", "--user", "restart", "crq-autofix"},
 	}
 }
 
@@ -264,7 +264,7 @@ func launchdJobAbsent(command string, output []byte) bool {
 	return strings.Contains(text, "no such process") || strings.Contains(text, "could not find service")
 }
 
-// drainCanAuthenticate reports whether the SERVICE will find a GitHub
+// autofixCanAuthenticate reports whether the SERVICE will find a GitHub
 // credential — which is not the same question as whether this shell has one.
 //
 // crq resolves a token from GITHUB_TOKEN/GH_TOKEN or `gh auth token`, and the
@@ -274,7 +274,7 @@ func launchdJobAbsent(command string, output []byte) bool {
 // nothing this command exists to prevent. Writing the token into the unit is not
 // the answer — that file is readable by every local user — so the credential has
 // to be one the service can resolve itself.
-func drainCanAuthenticate(ctx context.Context) error {
+func autofixCanAuthenticate(ctx context.Context) error {
 	if path := ConfigPath(); path != "" {
 		values, err := readEnvFile(path)
 		if err == nil {
@@ -292,10 +292,10 @@ func drainCanAuthenticate(ctx context.Context) error {
 	if out, err := cmd.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
 		return nil
 	}
-	return fmt.Errorf("the drain would have no GitHub credential: a service does not inherit this shell's GITHUB_TOKEN/GH_TOKEN. Run 'gh auth login', or put the token in %s, then install again", ConfigPath())
+	return fmt.Errorf("the autofix service would have no GitHub credential: a service does not inherit this shell's GITHUB_TOKEN/GH_TOKEN. Run 'gh auth login', or put the token in %s, then install again", ConfigPath())
 }
 
-// drainPath is the PATH the service runs with: this shell's, plus wherever crq
+// autofixPath is the PATH the service runs with: this shell's, plus wherever crq
 // and the agent were found.
 //
 // A service manager hands a unit its own minimal PATH, which on launchd is four
@@ -303,7 +303,7 @@ func drainCanAuthenticate(ctx context.Context) error {
 // they start shells out to git, gh, go and crq — and a Homebrew or ~/.local/bin
 // install is invisible from there, so every fix would fail at its first command.
 // The installing shell's PATH is the one where those tools were just resolved.
-func drainPath(plan DrainInstall) string {
+func autofixPath(plan AutofixInstall) string {
 	seen := map[string]bool{}
 	var dirs []string
 	add := func(dir string) {
@@ -329,16 +329,16 @@ func drainPath(plan DrainInstall) string {
 	return strings.Join(dirs, string(filepath.ListSeparator))
 }
 
-// drainEnv is the environment the service runs with.
+// autofixEnv is the environment the service runs with.
 //
 // The service manager hands a unit its own environment, not this shell's, and
 // then crq reads the configuration file itself. So the unit has to carry two
 // things: the path of the file the install actually read, and the effective
-// value of every setting the drain cannot work without — those may have come
+// value of every setting autofix cannot work without — those may have come
 // from this shell alone, and there they would be lost. An install that gets this
 // wrong still reports Started, and the watcher then loads a different queue, or
 // none.
-func (s *Service) drainEnv(plan DrainInstall) map[string]string {
+func (s *Service) autofixEnv(plan AutofixInstall) map[string]string {
 	env := map[string]string{
 		"CRQ_REPOS": strings.Join(plan.Repos, ","),
 		// The denylist travels with the allowlist. Carrying one and not the other
@@ -372,7 +372,7 @@ func (s *Service) drainEnv(plan DrainInstall) map[string]string {
 		// configured for every account block it could not parse a window from.
 		"CRQ_CALIBRATE_TTL": s.cfg.CalibrationTTL.String(),
 		"CRQ_RL_FALLBACK":   s.cfg.RateLimitFallback.String(),
-		"PATH":              drainPath(plan),
+		"PATH":              autofixPath(plan),
 	}
 	if s.cfg.RateLimitCoDegrade {
 		env["CRQ_RL_CO_DEGRADE"] = "1"
@@ -423,9 +423,9 @@ func (s *Service) drainEnv(plan DrainInstall) map[string]string {
 	return env
 }
 
-// drainUnit renders the platform's service definition.
-func (s *Service) drainUnit(plan DrainInstall) string {
-	env := s.drainEnv(plan)
+// autofixUnit renders the platform's service definition.
+func (s *Service) autofixUnit(plan AutofixInstall) string {
+	env := s.autofixEnv(plan)
 	// Sorted: the unit is a file on disk that a re-install rewrites, and map order
 	// would make every rewrite a different file for the same configuration.
 	keys := make([]string, 0, len(env))
@@ -443,14 +443,14 @@ func (s *Service) drainUnit(plan DrainInstall) string {
 		return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-	<key>Label</key><string>no.kristofferr.crq-drain</string>
+	<key>Label</key><string>no.kristofferr.crq-autofix</string>
 	<key>ProgramArguments</key><array><string>%s</string></array>
 	<key>EnvironmentVariables</key><dict>
 %s	</dict>
 	<key>RunAtLoad</key><true/>
 	<key>KeepAlive</key><true/>
-	<key>StandardOutPath</key><string>%s/drain.log</string>
-	<key>StandardErrorPath</key><string>%s/drain.err</string>
+	<key>StandardOutPath</key><string>%s/autofix.log</string>
+	<key>StandardErrorPath</key><string>%s/autofix.err</string>
 </dict></plist>
 `, html.EscapeString(plan.Wrapper), entries.String(),
 			html.EscapeString(logDir), html.EscapeString(logDir))
@@ -459,10 +459,14 @@ func (s *Service) drainUnit(plan DrainInstall) string {
 	for _, k := range keys {
 		// Quote the whole assignment. systemd otherwise tokenizes whitespace in
 		// CRQ_CONFIG, PATH, commands, and markers into separate assignments.
-		fmt.Fprintf(&lines, "Environment=%s\n", strconv.Quote(k+"="+env[k]))
+		//
+		// Double '%' first: systemd expands specifiers in Environment= values, so
+		// a '%' in a path or a review command would be eaten or fail to load the
+		// unit. Unlike ExecStart, '$' is NOT expanded here, so it stays literal.
+		fmt.Fprintf(&lines, "Environment=%s\n", strconv.Quote(strings.ReplaceAll(k+"="+env[k], "%", "%%")))
 	}
 	return fmt.Sprintf(`[Unit]
-Description=crq review drain (watch + dispatch fix sessions)
+Description=crq autofix (watch + dispatch fix sessions)
 After=network-online.target
 
 [Service]
@@ -470,8 +474,8 @@ Type=simple
 %sExecStart=%s
 Restart=always
 RestartSec=20
-StandardOutput=append:%s/drain.log
-StandardError=append:%s/drain.err
+StandardOutput=append:%s/autofix.log
+StandardError=append:%s/autofix.err
 
 [Install]
 WantedBy=default.target

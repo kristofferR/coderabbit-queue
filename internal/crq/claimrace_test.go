@@ -131,7 +131,7 @@ func TestTheClaimSurvivesWhatAPassDoesBeforeIt(t *testing.T) {
 	}
 }
 
-// Two writers on one state ref, which is what was actually running: the drain
+// Two writers on one state ref, which is what was actually running: the autofix watcher
 // and the autoreview daemon both drive this repository. A single Service cannot
 // show the interaction, and every in-process reproduction above passes — so this
 // is where the missing refusal has to come from.
@@ -156,12 +156,12 @@ func TestAClaimSurvivesAnotherDaemonDrivingThePR(t *testing.T) {
 		s.now = func() time.Time { return now }
 		return s
 	}
-	drain, daemon := newSvc(), newSvc()
+	watcher, daemon := newSvc(), newSvc()
 
 	repo, pr, head := "o/r", 54, "b417a2161"
 	report := NextReport{Repo: repo, PR: pr, Head: head, Action: "fix",
 		Findings: findingsAtHead(head, 3)}
-	if ok, why, _ := drain.claimDispatch(ctx, report, "session-one", 3); !ok {
+	if ok, why, _ := watcher.claimDispatch(ctx, report, "session-one", 3); !ok {
 		t.Fatalf("first dispatch refused: %s", why)
 	}
 
@@ -181,7 +181,7 @@ func TestAClaimSurvivesAnotherDaemonDrivingThePR(t *testing.T) {
 	if round == nil || round.Dispatch == nil {
 		t.Fatalf("the other daemon dropped the running session's claim: round=%#v", round)
 	}
-	if ok, _, _ := drain.claimDispatch(ctx, report, "session-two", 3); ok {
+	if ok, _, _ := watcher.claimDispatch(ctx, report, "session-two", 3); ok {
 		t.Error("a second session was allowed after the other daemon touched the PR")
 	}
 }
