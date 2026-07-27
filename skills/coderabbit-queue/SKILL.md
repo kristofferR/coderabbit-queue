@@ -171,8 +171,8 @@ finding. Pass `--keep-open` to leave it unresolved deliberately.
 
 ## Findings With No Thread
 
-Review-body findings, review-skipped notices and outside-diff remarks have no
-`thread_id`. `crq resolve` and `crq decline` both act on a thread, so neither can touch them — and a
+Review-body findings, review-skipped notices, outside-diff remarks and issue-comment findings have
+no `thread_id`. `crq resolve` and `crq decline` both act on a thread, so neither can touch them — and a
 finding that can never drain blocks every future round on that PR.
 
 ```bash

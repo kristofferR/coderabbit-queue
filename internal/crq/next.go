@@ -116,6 +116,10 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 		report.Action = string(engine.ActionWait)
 		report.Reason = "the head moved while deciding; re-reading it"
 		report.Findings = []dialect.Finding{}
+		// Dismissals are head-scoped, so the count read for the old head says
+		// nothing about this one — reporting it beside the new head would credit
+		// the new head with decisions never made about it.
+		report.Dismissed = 0
 		at := s.clock().Add(s.waitTick()).UTC()
 		report.RecheckAfter = &at
 		return report, nil

@@ -420,13 +420,13 @@ func TestDismissEndsTheUnresolvableFindingDeadlock(t *testing.T) {
 	// And a round that has moved on is refused rather than superseded back: the
 	// head advanced after the findings were read, so this decision is about a
 	// commit nobody is looking at, and superseding would archive the live round.
-	// A round enqueued AFTER the findings were read means another worker moved
-	// the PR forward, so this decision is about a commit nobody is looking at.
-	// (A round left on the previous head is the ordinary post-push state and is
-	// superseded instead — that is what the deadlock fix depends on.)
-	if _, _, err := f.svc.recordDismissal(f.ctx, repo, pr, "999999999", []string{id}, "stale", true,
-		f.clk.now().Add(-time.Hour)); err == nil {
-		t.Error("a round enqueued after the read must be refused, not superseded")
+	// A round whose Seq is not the one the findings were read against means
+	// another worker moved the PR forward — identity, not a host clock, because
+	// the fleet's clocks cannot be compared. (A round left on the previous head
+	// is the ordinary post-push state and is superseded instead — that is what
+	// the deadlock fix depends on.)
+	if _, _, err := f.svc.recordDismissal(f.ctx, repo, pr, "999999999", []string{id}, "stale", true, 0); err == nil {
+		t.Error("a round created after the read must be refused, not superseded")
 	}
 
 	// It is scoped to this head. A push supersedes the round, and the next
@@ -441,5 +441,87 @@ func TestDismissEndsTheUnresolvableFindingDeadlock(t *testing.T) {
 	}
 	if round := st.Round(repo, pr); round == nil || round.IsDismissed(id) {
 		t.Errorf("the dismissal must not outlive the head it was made for, got %#v", round)
+	}
+}
+
+// A partial dismissal must not queue the new head. The round left behind by a
+// push can be past firing — completed, say — which makes it harmless where it
+// stands but not harmless superseded: superseding replaces it with a FRESH
+// queued round for the new head, and DecideFire never sees findings, so nothing
+// holds that round back while the caller still has work to do.
+func TestPartialDismissalWillNotSupersedeIntoAQueuedRound(t *testing.T) {
+	f := newReplayFixture(t, time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC))
+	repo, pr := "owner/repo", 77
+	old, head := "aaaaaaaa1", "bbbbbbbb2"
+
+	var seq int64
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		r, err := st.NewRound(repo, pr, old, f.clk.now())
+		if err != nil {
+			return err
+		}
+		r.Phase = PhaseCompleted
+		seq = r.Seq
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := f.svc.recordDismissal(f.ctx, repo, pr, head, []string{"f1"}, "one of two", false, seq); err == nil {
+		t.Error("dismissing one finding while others are open must be refused, not superseded into a queued round")
+	}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(repo, pr); round == nil || round.Head != old {
+		t.Fatalf("the stale round must be left as it was, got %#v", round)
+	}
+}
+
+// A dry run reports what a real one would do and writes nothing — including the
+// refusals, which is the half a caller cannot see from a blanket success.
+func TestDryRunDismissalReportsWithoutWriting(t *testing.T) {
+	f := newReplayFixture(t, time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC))
+	repo, pr, head := "owner/repo", 78, "aaaaaaaa1"
+	cfg := f.cfg
+	cfg.DryRun = true
+	dry := NewService(cfg, f.gh, f.store, nil)
+	dry.now = f.clk.now
+
+	var seq int64
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		r, err := st.NewRound(repo, pr, head, f.clk.now())
+		if err != nil {
+			return err
+		}
+		r.Phase = PhaseCompleted
+		seq = r.Seq
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	dismissed, _, err := dry.recordDismissal(f.ctx, repo, pr, head, []string{"f1"}, "set aside", true, seq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dismissed) != 1 {
+		t.Errorf("a dry run must report the ids it would record, got %v", dismissed)
+	}
+	st, _, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(repo, pr); round == nil || round.IsDismissed("f1") {
+		t.Errorf("a dry run must write nothing, got %#v", round)
+	}
+
+	// The head moved under the call: a real run refuses it, so the dry run has
+	// to say so rather than report a dismissal that could never happen.
+	if _, _, err := dry.recordDismissal(f.ctx, repo, pr, "bbbbbbbb2", []string{"f1"}, "set aside", true, seq+1); err == nil {
+		t.Error("a dry run must surface the refusal a real run would hit")
 	}
 }

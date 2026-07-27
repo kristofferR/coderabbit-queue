@@ -201,7 +201,7 @@ reason; the loop clears it once the bot withdraws (or you stop declining and fix
 replies surface too — crq errs toward showing a possible rebuttal rather than burying it.
 
 A finding with no `thread_id` — a review body finding, a review-skipped notice, an outside-diff
-remark — has nothing for `resolve` or `decline` to act on, and would otherwise block every future
+remark, an issue-comment finding — has nothing for `resolve` or `decline` to act on, and would otherwise block every future
 round on that PR. Judge it, then record the decision:
 
 ```bash

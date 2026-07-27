@@ -380,41 +380,43 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 // dismissal is legitimate; this performs it, so the write surface stays in one
 // file with every other one.
 //
-// readAt is when the caller read the findings, which is what separates a round
-// left on the PREVIOUS head — the ordinary state after a push — from one another
-// worker moved forward while this call was deciding.
+// seenSeq is the Seq of the round Dismiss read the findings against (0 for
+// none), which is what separates a round left on the PREVIOUS head — the
+// ordinary state after a push — from one another worker moved forward while
+// this call was deciding. Seq is the state's own counter rather than a
+// timestamp, so the two cannot be confused by a fleet whose hosts disagree
+// about the time.
 //
 // allowCreate says whether a round may be created for this head. It is false
 // when other blocking findings remain, because a fresh round is fire-eligible
 // and DecideFire — which never sees findings — could not hold it back.
 //
-// A round tracking a DIFFERENT head is refused rather than superseded. The head
-// moved after Dismiss read the findings, so this decision is about a commit
-// nobody is looking at any more; superseding would archive the newer round and
-// point the queue back at the stale head.
-func (s *Service) recordDismissal(ctx context.Context, repo string, pr int, head string, ids []string, reason string, allowCreate bool, readAt time.Time) (dismissed, already []string, err error) {
-	if s.cfg.DryRun {
-		return []string{}, nil, nil
-	}
-	state, err := s.store.Update(ctx, func(st *State) error {
+// A round tracking a DIFFERENT head is refused when it is not the one Dismiss
+// read: the head moved after the findings were read, so this decision is about
+// a commit nobody is looking at any more, and superseding would archive the
+// newer round and point the queue back at the stale head.
+func (s *Service) recordDismissal(ctx context.Context, repo string, pr int, head string, ids []string, reason string, allowCreate bool, seenSeq int64) (dismissed, already []string, err error) {
+	mutate := func(st *State) error {
 		round := st.Round(repo, pr)
-		// The guard is about whether a FIRE-ELIGIBLE round would exist with other
-		// findings still open, not about whether a round object exists. A queued
-		// round is just as dangerous as a new one: Pump can hand it to DecideFire,
-		// which sees no findings and cannot enforce drain-first.
 		switch {
-		case !allowCreate && (round == nil || canStillFire(*round)):
+		case round != nil && round.Head != head && round.Seq != seenSeq:
+			// Not the round Dismiss read: something moved the PR forward
+			// underneath this call, so the decision is about a commit nobody is
+			// looking at any more.
+			return fmt.Errorf("%s#%d moved to %s while dismissing; re-read the findings", repo, pr, round.Head)
+		case !allowCreate && (round == nil || round.Head != head || canStillFire(*round)):
+			// The guard is about whether a FIRE-ELIGIBLE round would exist with
+			// other findings still open, not about whether a round object
+			// exists. A queued round is just as dangerous as a new one: Pump can
+			// hand it to DecideFire, which sees no findings and cannot enforce
+			// drain-first. So is a round on the previous head, because the
+			// supersede below would replace it with a fresh queued one.
 			return fmt.Errorf("%s#%d has other unaddressed findings at %s: dismiss or resolve them in the same pass, so no round is queued while work is open", repo, pr, head)
 		case round == nil:
 			var err error
 			if round, err = st.NewRound(repo, pr, head, s.clock()); err != nil {
 				return err
 			}
-		case round.Head != head && round.EnqueuedAt.After(readAt):
-			// Enqueued after the findings were read: something moved the PR
-			// forward underneath this call, so the decision is about a commit
-			// nobody is looking at any more.
-			return fmt.Errorf("%s#%d moved to %s while dismissing; re-read the findings", repo, pr, round.Head)
 		case round.Head != head:
 			// The ordinary state after a push: the stored round is still on the
 			// PREVIOUS head, because `crq next` returns on a current-head finding
@@ -437,7 +439,21 @@ func (s *Service) recordDismissal(ctx context.Context, repo string, pr int, head
 		}
 		st.PutRound(*round)
 		return nil
-	})
+	}
+	// A dry run must report what a real one would do, refusals included. The one
+	// way it cannot drift from the write is to BE the write, run against a
+	// throwaway copy of the state that nothing stores.
+	if s.cfg.DryRun {
+		st, _, err := s.store.Load(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := mutate(&st); err != nil {
+			return nil, nil, err
+		}
+		return dismissed, already, nil
+	}
+	state, err := s.store.Update(ctx, mutate)
 	if err != nil {
 		return nil, nil, err
 	}

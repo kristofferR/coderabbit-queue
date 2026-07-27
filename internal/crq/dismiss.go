@@ -64,7 +64,6 @@ func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string
 	// Read the findings BEFORE writing anything. A dismissal is only meaningful
 	// against a finding that is actually there, and writing first would leave a
 	// round behind whenever validation then failed.
-	readAt := s.clock().UTC()
 	feedback, err := s.Feedback(ctx, repo, pr)
 	if err != nil {
 		return DismissResult{}, err
@@ -81,12 +80,22 @@ func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string
 	// so a retried call would fail validation on its own earlier success. The
 	// command is documented as idempotent, and an interrupted agent repeating
 	// itself is the ordinary case.
+	//
+	// seenSeq identifies the round as this call read it. recordDismissal
+	// compares it to tell the ordinary round left on the PREVIOUS head from one
+	// another worker moved forward while this call was deciding — Seq is the
+	// state's own counter, so that holds across a fleet whose clocks do not
+	// agree.
 	alreadyDone := map[string]bool{}
+	var seenSeq int64
 	if st, _, err := s.store.Load(ctx); err == nil {
-		if round := st.Round(repo, pr); round != nil && round.Head == feedback.Head {
-			for _, id := range clean {
-				if round.IsDismissed(id) {
-					alreadyDone[id] = true
+		if round := st.Round(repo, pr); round != nil {
+			seenSeq = round.Seq
+			if round.Head == feedback.Head {
+				for _, id := range clean {
+					if round.IsDismissed(id) {
+						alreadyDone[id] = true
+					}
 				}
 			}
 		}
@@ -117,6 +126,16 @@ func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string
 		wanted[id] = true
 	}
 
+	// Every ID is already recorded at this head: a replay of a call that
+	// succeeded, writing nothing. It must not be judged by whether a round may
+	// be created, or an interrupted agent repeating itself would be refused the
+	// moment some OTHER finding is still open — the exact case the command
+	// promises is idempotent.
+	if len(wanted) == 0 {
+		return DismissResult{Repo: repo, PR: pr, Head: feedback.Head, Reason: reason,
+			Dismissed: []string{}, Already: clean}, nil
+	}
+
 	// Whether this call drains the head decides if a round may be CREATED here.
 	// Creating one while other findings are still open would put a fire-eligible
 	// round in the queue that DecideFire cannot hold back — it sees no findings —
@@ -141,7 +160,7 @@ func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string
 	}
 
 	out := DismissResult{Repo: repo, PR: pr, Head: feedback.Head, Reason: reason, Dismissed: []string{}}
-	out.Dismissed, out.Already, err = s.recordDismissal(ctx, repo, pr, feedback.Head, clean, reason, remaining == 0, readAt)
+	out.Dismissed, out.Already, err = s.recordDismissal(ctx, repo, pr, feedback.Head, clean, reason, remaining == 0, seenSeq)
 	if err != nil {
 		return DismissResult{}, err
 	}
