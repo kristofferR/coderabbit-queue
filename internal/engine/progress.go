@@ -191,6 +191,21 @@ func primaryAck(r state.Round, obs Observation, p Policy, firedAt time.Time) (st
 	return "", false
 }
 
+// PrimaryAckPending reports whether a round is still holding the fire slot for a
+// command the primary has not acknowledged — the condition Progress waits on
+// above, exported because the LOOP releases that same slot when it completes the
+// round it waited on, and convergence is no more permission to do so there.
+//
+// Only a fired round can be holding it: a co-only one posted no command of its
+// own, and a reviewing one released the slot when the ack it is named for landed.
+func PrimaryAckPending(r state.Round, obs Observation, p Policy) bool {
+	if r.Phase != state.PhaseFired || r.FiredAt == nil || r.CoOnly {
+		return false
+	}
+	_, acked := primaryAck(r, obs, p, r.FiredAt.UTC())
+	return !acked
+}
+
 // resolveBlockWindow ports v2's requeueInflight window logic: reuse the
 // standing block when the SAME edited account-quota comment is re-observed
 // (CodeRabbit edits one comment in place — a re-observation must not extend

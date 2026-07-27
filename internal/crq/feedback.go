@@ -58,6 +58,12 @@ type FeedbackReport struct {
 	// window entirely — it cannot apply to a round that never spends quota.
 	PrimaryUnavailable       bool   `json:"primary_review_unavailable,omitempty"`
 	PrimaryUnavailableReason string `json:"primary_review_unavailable_reason,omitempty"`
+	// PrimaryAckPending reports that the round still holds the fire slot for a
+	// review command the primary has not acknowledged. A required set that omits
+	// the primary converges without it, so the loop must not read convergence as
+	// permission to release the slot. Not serialized: the feedback JSON contract
+	// is frozen.
+	PrimaryAckPending bool `json:"-"`
 }
 
 // CoReviewerStatus is one co-reviewer's observed state for the current head.
@@ -126,6 +132,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	}
 	completion := engine.Completion(completionRound, obs.eng, cfg.policy())
 	report.ReviewedBy = completion.ReviewedBy
+	report.PrimaryAckPending = engine.PrimaryAckPending(completionRound, obs.eng, cfg.policy())
 	// Completion does not always arrive as a review: a clean-summary comment, a
 	// paired completion reply and a co-reviewer check run all satisfy it. Anchor
 	// the settle window on the newest of ANY of them, or a round completed by a
@@ -540,7 +547,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		// timeout so the caller retries later instead. A skipped wait result is
 		// terminal, not retryable, so preserve it as a skipped report.
 		if waitResult.Action == "skipped" {
-			s.completeWaitRound(ctx, repo, pr, "")
+			s.completeWaitRound(ctx, repo, pr, "", false)
 		}
 		return FeedbackReport{Status: status, Repo: NormalizeRepo(repo), PR: pr, Head: waitResult.Head, Reason: waitResult.Reason, ReviewedBy: map[string]bool{}, Findings: []dialect.Finding{}}, code, nil
 	}
@@ -593,7 +600,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			report.Status = "feedback"
 			if allReviewed(report.ReviewedBy) {
 				report.Reason = "all required reviewers finished; address findings, push once, and resolve threads"
-				s.completeWaitRound(ctx, repo, pr, head)
+				s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending)
 			} else if report.CodeRabbitDeferred && engine.DoneExceptWithEvidence(report.ReviewedBy, s.cfg.Bot, dialect.CodexBotLogin) {
 				// Degraded round: every required bot except the rate-limited
 				// CodeRabbit has finished. These findings are this round's work —
@@ -631,7 +638,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			}
 			if s.cfg.SettleWindow <= 0 || s.clock().Sub(settledAt) >= s.cfg.SettleWindow {
 				if report.Converged {
-					s.completeWaitRound(ctx, repo, pr, head)
+					s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending)
 				}
 				return report, 0, nil
 			}
@@ -686,7 +693,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			// A degraded round must not be completed on timeout: marking the head
 			// reviewed would silently cancel the still-owed CodeRabbit review.
 			if !report.CodeRabbitDeferred {
-				s.completeWaitRound(ctx, repo, pr, head)
+				s.completeWaitRound(ctx, repo, pr, head, false)
 			}
 			if len(report.Findings) > 0 {
 				report.Status = "feedback"
@@ -794,7 +801,16 @@ func (s *Service) pushWaitDeadline(ctx context.Context, repo string, pr int, hea
 // completeWaitRound ends the wait by completing the fired/reviewing round. The
 // completed round remains as the "this head was reviewed" dedup marker, so a
 // subsequent enqueue/needsReview at the same head is deduped rather than re-fired.
-func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, head string) {
+//
+// holdUnacked leaves alone a round still holding the fire slot for a review
+// command the primary has not acknowledged: with the primary outside the
+// required set the round converges without it, and completing here would release
+// the slot to the next pull request while this one's metered command is
+// unanswered — the same release Progress now withholds. The round stays fired
+// and any Pump finishes it, on the acknowledgement or on the in-flight timeout.
+// Only the convergence callers pass it; a timed-out or never fired wait must
+// still end.
+func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, head string, holdUnacked bool) {
 	repo = NormalizeRepo(repo)
 	changed := false
 	state, err := s.store.Update(ctx, func(st *State) error {
@@ -804,6 +820,9 @@ func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, he
 			return ErrNoChange
 		}
 		if head != "" && r.Head != head {
+			return ErrNoChange
+		}
+		if holdUnacked && st.FireSlot != nil && st.FireSlot.Key == QueueKey(repo, pr) {
 			return ErrNoChange
 		}
 		if err := r.Complete(); err != nil {

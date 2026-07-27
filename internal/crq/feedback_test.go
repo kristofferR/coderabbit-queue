@@ -2201,3 +2201,42 @@ func TestExcludeSkipNoticeIsTargeted(t *testing.T) {
 // Which occurrences of a stable id count as settled is decided by the head each
 // one names, not by this filter — see
 // TestCoReplayBugbotSiblingSettlementUsesHead, which drives the real threads.
+
+// The loop completes the round it waited on, which releases the fire slot. With
+// the primary outside the required set the round converges without it, so that
+// completion would hand the next pull request a second concurrent metered
+// command while this one's is still unanswered. Holding leaves the round fired
+// for a Pump to finish — on the acknowledgement, or on the in-flight timeout.
+func TestCompleteWaitRoundHoldsAnUnacknowledgedFireSlot(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	now := time.Now().UTC()
+	repo, pr, head := "o/r", 4, "aaaaaaaa1"
+	seedRound(t, store, cfg, repo, pr, head, PhaseFired, now, 12)
+
+	svc.completeWaitRound(ctx, repo, pr, head, true)
+	if got := roundPhase(t, store, repo, pr); got != PhaseFired {
+		t.Fatalf("phase = %s, want the round left fired while the primary is silent", got)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.FireSlot == nil {
+		t.Fatal("the fire slot must stay held until the primary acknowledges")
+	}
+
+	svc.completeWaitRound(ctx, repo, pr, head, false)
+	if got := roundPhase(t, store, repo, pr); got != PhaseCompleted {
+		t.Fatalf("phase = %s, want an acknowledged round completed as before", got)
+	}
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.FireSlot != nil {
+		t.Fatalf("completing the round must release the slot, got %+v", st.FireSlot)
+	}
+}
