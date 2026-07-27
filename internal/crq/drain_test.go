@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -64,6 +65,41 @@ func TestEmbeddedPromptCarriesTheRulesThatCostUs(t *testing.T) {
 		if !strings.Contains(fixPrompt, want) {
 			t.Errorf("the embedded fix prompt no longer mentions %q", want)
 		}
+	}
+}
+
+// The service does not inherit the installing shell, and then crq reads its
+// configuration file. A unit that names neither the file nor the settings that
+// reached the install from the shell alone starts a watcher that loads a
+// different queue — or none — while the install reports Started.
+func TestDrainUnitCarriesTheConfigurationTheInstallRead(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "env")
+	t.Setenv("CRQ_CONFIG", config)
+
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/name": true}
+	cfg.DashboardIssue = 7
+	cfg.CalibrationPR = 1
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	plan, err := svc.InstallDrain(context.Background(), "/bin/echo", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit := svc.drainUnit(plan)
+	for _, want := range []string{config, cfg.GateRepo, "CRQ_ISSUE", "CRQ_CAL_PR"} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("the unit does not carry %q; the drain would not find it:\n%s", want, unit)
+		}
+	}
+	// A secret in a file every local user can read is not the way to hand the
+	// service a credential.
+	if strings.Contains(unit, "GITHUB_TOKEN") || strings.Contains(unit, "GH_TOKEN") {
+		t.Errorf("the unit carries a token:\n%s", unit)
+	}
+	// Rewriting it for the same configuration must produce the same file.
+	if again := svc.drainUnit(plan); again != unit {
+		t.Error("two renderings of one configuration differ; every re-install would rewrite the unit")
 	}
 }
 

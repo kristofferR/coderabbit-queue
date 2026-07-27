@@ -20,8 +20,13 @@ by one mirror shared by every PR in the repository. A session that ran
 fetch it — for *every* PR. One session's branch stopped every dispatch for hours.
 
 ```bash
-git push origin "HEAD:refs/heads/$branch"
+git push "https://github.com/$head_repo.git" "HEAD:refs/heads/$branch"
 ```
+
+The push names the repository the PR's branch lives in rather than `origin`.
+crq's mirror is a clone of the *base* repository, so for a fork PR `origin` is
+the wrong place: the commit would land on a same-named branch there and the PR
+would never see it.
 
 **Threads are resolved after pushing, and the session survives to do it.** A
 push moves the head, which supersedes the round and drops its dispatch claim.

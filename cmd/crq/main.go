@@ -281,9 +281,15 @@ func run(ctx context.Context, args []string) int {
 		opts := crq.WatchOptions{
 			Dispatch: *dispatch, Once: *once,
 			Interval: *interval, MaxAttempts: *attempts,
-			Concurrency: *concurrency,
-			Command:     command,
+			Command: command,
 		}
+		// Only when it was actually passed: `--concurrency 0` means "no cap" and
+		// has to override a configured one, which an unset flag must not do.
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "concurrency" {
+				opts.Concurrency = concurrency
+			}
+		})
 		opts.Repos = fs.Args()
 		enc := json.NewEncoder(os.Stdout)
 		werr := service.Watch(ctx, opts, func(e crq.WatchEvent) error {
@@ -633,6 +639,7 @@ queue exists for the account-metered review and nothing else; fixing findings
 spends none of that allowance, so a PR whose findings are ready gets a session
 now rather than a place in a line. CRQ_DISPATCH_CONCURRENCY (or --concurrency)
 sets a cap if a machine cannot take the load — a resource valve, not a queue.
+--concurrency 0 turns a configured cap off for one run.
 
 The decisions themselves stay serial, because that is what keeps the metered
 review in one queue.

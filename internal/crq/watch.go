@@ -35,11 +35,15 @@ type WatchOptions struct {
 	Command []string
 	// MaxAttempts bounds dispatches per head. 0 means the configured default.
 	MaxAttempts int
-	// Concurrency caps how many fix sessions run at once. 0 means no cap, which
-	// is the default: fixing findings spends no CodeRabbit quota, so it has no
-	// reason to queue. It exists only as a resource valve for a machine that
-	// cannot take the load.
-	Concurrency int
+	// Concurrency caps how many fix sessions run at once. nil takes the
+	// configured cap; 0 means no cap, which is the default: fixing findings
+	// spends no CodeRabbit quota, so it has no reason to queue. It exists only as
+	// a resource valve for a machine that cannot take the load.
+	//
+	// A pointer because 0 is a real instruction here, not an unset int: passing
+	// `--concurrency 0` is how one run overrides a cap set in
+	// CRQ_DISPATCH_CONCURRENCY, and an int cannot tell that from no flag at all.
+	Concurrency *int
 }
 
 // WatchEvent is one PR's state at a pass, and what the watcher did about it.
@@ -75,9 +79,6 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 	if opts.MaxAttempts <= 0 {
 		opts.MaxAttempts = s.cfg.DispatchMaxAttempts
 	}
-	if opts.Concurrency <= 0 {
-		opts.Concurrency = s.cfg.DispatchConcurrency
-	}
 	if opts.Dispatch && len(opts.Command) == 0 {
 		opts.Command = s.cfg.DispatchCommand
 	}
@@ -96,10 +97,14 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 	// deciding one PR at a time is what keeps the metered review in one queue.
 	// Only the sessions overlap.
 	//
-	// Built AFTER the fallbacks above: sizing it from the raw option ignored the
-	// cap an operator set in CRQ_DISPATCH_CONCURRENCY unless --concurrency was
-	// also passed, which is precisely the machine that cannot take the load.
-	pool := newDispatchPool(opts.Concurrency)
+	// The configured cap applies unless this run states one: sizing the pool from
+	// an unset option ignored the cap an operator set in CRQ_DISPATCH_CONCURRENCY,
+	// which is precisely the machine that cannot take the load.
+	concurrency := s.cfg.DispatchConcurrency
+	if opts.Concurrency != nil {
+		concurrency = *opts.Concurrency
+	}
+	pool := newDispatchPool(concurrency)
 	defer pool.wait()
 	for {
 		wait := opts.Interval
@@ -281,11 +286,15 @@ func (s *Service) startDispatch(ctx context.Context, opts WatchOptions, pool *di
 		return false, why
 	}
 	token := randomToken()
-	claimed, why := s.claimDispatch(ctx, report, token, opts.MaxAttempts)
+	claimed, why, byDesign := s.claimDispatch(ctx, report, token, opts.MaxAttempts)
 	if !claimed {
 		pool.release()
-		// A round another watcher already holds is not this dispatcher failing.
-		if !strings.Contains(why, "already fixing") {
+		// A round another watcher already holds, or one that has spent its
+		// per-head attempts, is the bound doing its job — not this dispatcher
+		// failing. Counting it would raise "fix sessions are not starting" after
+		// three passes over a watcher that is obeying its own configuration, and
+		// an exhausted head refuses again on every pass forever.
+		if !byDesign {
 			s.noteDispatchHealth(ctx, false, why)
 			if s.log != nil {
 				s.log.Printf("watch: %s#%d not fixed: %s", report.Repo, report.PR, why)
@@ -459,47 +468,69 @@ func (s *Service) writeFindings(report NextReport) (string, error) {
 	return file.Name(), nil
 }
 
-func (s *Service) claimDispatch(ctx context.Context, report NextReport, token string, maxAttempts int) (bool, string) {
-	reason := ""
+// claimDispatch claims this PR's round for the session about to run.
+//
+// The third return says a refusal is the queue working as designed — a session
+// already running for this PR, or a head that has spent its attempt budget —
+// rather than evidence about whether fix sessions can start at all.
+func (s *Service) claimDispatch(ctx context.Context, report NextReport, token string, maxAttempts int) (bool, string, bool) {
+	reason, byDesign := "", false
 	_, err := s.store.Update(ctx, func(st *State) error {
 		round := st.Round(report.Repo, report.PR)
-		if round == nil {
-			// Findings on a head crq never queued: a review somebody triggered by
-			// hand, or feedback that predates the drain. `Next` returns `fix`
+		if round != nil && round.Head != report.Head && round.DispatchHeld(s.clock()) {
+			// Somebody is fixing an earlier head of this PR right now, and is
+			// entitled to finish: a session's own push moves the head, so this is
+			// what a successful session looks like from the outside. Superseding
+			// its round here would start a second session against the work it is
+			// still landing.
+			reason, byDesign = "another watcher is already fixing this pull request", true
+			return ErrNoChange
+		}
+		if round == nil || round.Head != report.Head {
+			// Findings on a head the queue is not tracking: a review somebody
+			// triggered by hand, feedback that predates the drain, or a head that
+			// moved on while the previous round still stood. `Next` returns `fix`
 			// before Enqueue in that case — deliberately, so no second review is
-			// bought for a head whose findings are already in hand — which left
-			// the claim nowhere to live and refused these dispatches forever.
-			//
-			// Record the head as reviewed, which it demonstrably is: these
-			// findings are about it. That is the "this head was reviewed" marker,
-			// so the round is NOT fire-eligible and no review is bought here
-			// either.
+			// bought for a head whose findings are already in hand — so nothing
+			// else supersedes the stale round either, and every pass took the same
+			// path and refused these dispatches forever.
 			var err error
-			round, err = st.NewRound(report.Repo, report.PR, report.Head, s.clock())
+			if round == nil {
+				round, err = st.NewRound(report.Repo, report.PR, report.Head, s.clock())
+			} else {
+				round, err = st.Supersede(report.Repo, report.PR, report.Head, s.clock())
+			}
 			if err != nil {
 				return err
 			}
-			if err := round.Dedupe(s.clock()); err != nil {
-				return err
+			// Record the head as reviewed only when these findings are about it —
+			// then it demonstrably was. That is the "this head was reviewed"
+			// marker, so the round is NOT fire-eligible and no review is bought
+			// here either. Feedback CARRIED from an older commit proves nothing
+			// about this head: marking it reviewed would leave a completed round
+			// no reviewer ever looked at, which dedups the review away while the
+			// caller waits for one that can no longer be requested.
+			if len(engine.FindingsOnHead(report.Findings, report.Head)) > 0 {
+				if err := round.Dedupe(s.clock()); err != nil {
+					return err
+				}
+				round.Note = "reviewed outside the queue; adopted to fix its findings"
+			} else {
+				round.Note = "adopted to fix feedback carried from an earlier head"
 			}
-			round.Note = "reviewed outside the queue; adopted to fix its findings"
-		}
-		if round.Head != report.Head {
-			reason = "no round for this head"
-			return ErrNoChange
 		}
 		ok, why := round.ClaimDispatch(s.cfg.Host, token, s.clock(), maxAttempts)
 		if !ok {
-			reason = why
+			reason, byDesign = why, true
 			return ErrNoChange
 		}
 		st.PutRound(*round)
 		return nil
 	})
 	if err != nil {
-		return false, err.Error()
+		return false, err.Error(), false
 	}
-	return reason == "", reason
+	return reason == "", reason, byDesign
 }
 
 // releaseDispatch frees the round. attempted=false also gives the attempt back,

@@ -101,15 +101,26 @@ type Config struct {
 	RateLimitCoDegrade bool
 }
 
+// ConfigPath is the file crq reads its settings from: CRQ_CONFIG, or
+// ~/.config/crq/env. Empty when neither can be resolved.
+//
+// Exported because a service unit has to be pointed at the SAME file the install
+// read. A drain that loads a different configuration is one that watches nothing
+// while reporting itself started.
+func ConfigPath() string {
+	if path := strings.TrimSpace(os.Getenv("CRQ_CONFIG")); path != "" {
+		return path
+	}
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config", "crq", "env")
+}
+
 func LoadConfig() (Config, error) {
 	env := map[string]string{}
-	configPath := os.Getenv("CRQ_CONFIG")
-	if configPath == "" {
-		home, _ := os.UserHomeDir()
-		if home != "" {
-			configPath = filepath.Join(home, ".config", "crq", "env")
-		}
-	}
+	configPath := ConfigPath()
 	if configPath != "" {
 		values, err := readEnvFile(configPath)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -117,6 +128,15 @@ func LoadConfig() (Config, error) {
 		}
 		for k, v := range values {
 			env[k] = v
+		}
+		// The GitHub credential is resolved from the PROCESS environment
+		// (internal/gh, and `git` through it), not from this map — so a token
+		// configured here would authenticate nothing. Exporting it is what lets a
+		// service unit carry no secret of its own: point it at this file.
+		for _, key := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
+			if v := strings.TrimSpace(values[key]); v != "" && os.Getenv(key) == "" {
+				os.Setenv(key, v)
+			}
 		}
 	}
 	for _, e := range os.Environ() {

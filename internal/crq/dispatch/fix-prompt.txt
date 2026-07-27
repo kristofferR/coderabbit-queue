@@ -11,16 +11,24 @@ check out a branch here. The checkout is backed by a mirror shared with every
 other PR, and a branch checked out in one worktree makes git refuse to fetch it
 for all of them, which stops every other dispatch.
 
-Commit on the detached HEAD and push it to the PR's branch by name:
+Commit on the detached HEAD and push it to the PR's branch by name, in the
+repository that branch lives in. For a fork PR that is NOT `origin`: this
+worktree was cloned from the base repository, so pushing to `origin` would put
+the commit on a same-named branch there and leave the PR untouched.
   branch=$(gh pr view "$CRQ_DISPATCH_PR" --repo "$CRQ_DISPATCH_REPO" --json headRefName --jq .headRefName)
-  git push origin "HEAD:refs/heads/$branch"
+  head_repo=$(gh pr view "$CRQ_DISPATCH_PR" --repo "$CRQ_DISPATCH_REPO" \
+    --json headRepositoryOwner,headRepository \
+    --jq '.headRepositoryOwner.login + "/" + .headRepository.name')
+  git push "https://github.com/$head_repo.git" "HEAD:refs/heads/$branch"
 
 Then:
 1. Read the findings file. Verify EACH finding against the code as it is now.
    Some will already be fixed, or be wrong — say so rather than changing code to
    satisfy them.
 2. Fix the genuine ones. Minimal changes, in the style of the surrounding code.
-3. gofmt -l . && go vet ./... && go test ./... -count=1 must all pass.
+3. Run this repository's own checks and make them pass — the ones its AGENTS.md /
+   CLAUDE.md, CI workflow or build file documents. In a Go module that is
+   `gofmt -l . && go vet ./... && go test ./... -count=1`.
 4. Commit, then push as above. Never force-push. No AI attribution in the
    commit message or anywhere else.
 5. For each finding you addressed that has a thread_id:

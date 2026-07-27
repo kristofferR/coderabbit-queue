@@ -58,6 +58,41 @@ func TestObservedAccountBlockIgnoresAnEditedNotice(t *testing.T) {
 	}
 }
 
+// A notice is spent when crq has accounted for THAT NOTICE, which is not what a
+// calibration timestamp says: Account.CheckedAt is advanced by a probe still
+// awaiting its reply, and by one whose reply had no parseable reset in it.
+// Neither is evidence the account is clear, and both used to discard a notice
+// crq had never seen — after which the eligible round fires inside the block the
+// bot had just reported.
+func TestObservedAccountBlockOutlivesAnInconclusiveCalibration(t *testing.T) {
+	now := time.Date(2026, 7, 27, 1, 7, 0, 0, time.UTC)
+	p := Policy{Bot: "coderabbitai[bot]", RateLimitFallback: 15 * time.Minute}
+	checked := now.Add(-time.Minute) // the probe ran after the notice was posted
+
+	// No window parsed out of it, so only the watermark decides.
+	q := state.AccountQuota{CheckedAt: &checked}
+	obs := Observation{Events: []dialect.BotEvent{{
+		Kind: dialect.EvRateLimited, Bot: "coderabbitai[bot]",
+		CommentID: 900, UpdatedAt: now.Add(-4 * time.Minute),
+	}}}
+
+	blk := ObservedAccountBlock(obs, p, q, now)
+	if blk == nil {
+		t.Fatal("a notice crq never accounted for was discarded; the round fires inside the block")
+	}
+	if !blk.Until.Equal(now.Add(p.rateLimitFallback())) {
+		t.Errorf("until = %s, want the fallback window", blk.Until)
+	}
+
+	// Once accounted for, the same notice is spent — otherwise every observation
+	// of it starts another fallback window and the block never ends.
+	seen := blk.CommentUpdated
+	q = state.AccountQuota{CheckedAt: &checked, RLCommentID: 900, RLCommentUpdated: &seen}
+	if blk := ObservedAccountBlock(obs, p, q, now); blk != nil {
+		t.Errorf("an accounted notice blocked again until %s", blk.Until)
+	}
+}
+
 // Only the configured primary meters the account; a co-reviewer saying it is
 // busy is not an account block.
 func TestObservedAccountBlockIgnoresOtherBots(t *testing.T) {

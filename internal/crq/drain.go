@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -106,6 +107,9 @@ func (s *Service) InstallDrain(ctx context.Context, agent string, repos []string
 	if dryRun {
 		return plan, nil
 	}
+	if err := drainCanAuthenticate(ctx); err != nil {
+		return plan, err
+	}
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return plan, err
 	}
@@ -178,6 +182,37 @@ exec %q watch --dispatch -- \
 
 func currentUID() string { return fmt.Sprint(os.Getuid()) }
 
+// drainCanAuthenticate reports whether the SERVICE will find a GitHub
+// credential — which is not the same question as whether this shell has one.
+//
+// crq resolves a token from GITHUB_TOKEN/GH_TOKEN or `gh auth token`, and the
+// unit inherits none of this shell's variables. A token exported in a profile
+// therefore authenticates the install and nothing afterwards: every pass fails
+// to read a pull request while the install reports Started, which is the silent
+// nothing this command exists to prevent. Writing the token into the unit is not
+// the answer — that file is readable by every local user — so the credential has
+// to be one the service can resolve itself.
+func drainCanAuthenticate(ctx context.Context) error {
+	if path := ConfigPath(); path != "" {
+		values, err := readEnvFile(path)
+		if err == nil {
+			for _, key := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
+				if strings.TrimSpace(values[key]) != "" {
+					return nil
+				}
+			}
+		}
+	}
+	cmd := exec.CommandContext(ctx, "gh", "auth", "token")
+	// Cleared, because gh reads them too: this shell's token would answer for the
+	// service and hide the very gap being checked.
+	cmd.Env = append(os.Environ(), "GITHUB_TOKEN=", "GH_TOKEN=")
+	if out, err := cmd.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
+		return nil
+	}
+	return fmt.Errorf("the drain would have no GitHub credential: a service does not inherit this shell's GITHUB_TOKEN/GH_TOKEN. Run 'gh auth login', or put the token in %s, then install again", ConfigPath())
+}
+
 // drainPath is the PATH the service runs with: this shell's, plus wherever crq
 // and the agent were found.
 //
@@ -212,8 +247,16 @@ func drainPath(plan DrainInstall) string {
 	return strings.Join(dirs, string(filepath.ListSeparator))
 }
 
-// drainUnit renders the platform's service definition.
-func (s *Service) drainUnit(plan DrainInstall) string {
+// drainEnv is the environment the service runs with.
+//
+// The service manager hands a unit its own environment, not this shell's, and
+// then crq reads the configuration file itself. So the unit has to carry two
+// things: the path of the file the install actually read, and the effective
+// value of every setting the drain cannot work without — those may have come
+// from this shell alone, and there they would be lost. An install that gets this
+// wrong still reports Started, and the watcher then loads a different queue, or
+// none.
+func (s *Service) drainEnv(plan DrainInstall) map[string]string {
 	env := map[string]string{
 		"CRQ_REPOS":                 strings.Join(plan.Repos, ","),
 		"CRQ_WATCH_INTERVAL":        s.cfg.WatchInterval.String(),
@@ -221,11 +264,39 @@ func (s *Service) drainUnit(plan DrainInstall) string {
 		"CRQ_DISPATCH_CONCURRENCY":  fmt.Sprint(s.cfg.DispatchConcurrency),
 		"PATH":                      drainPath(plan),
 	}
+	if path := ConfigPath(); path != "" {
+		env["CRQ_CONFIG"] = path
+	}
+	// The queue's identity: the repository holding the state ref, the dashboard,
+	// and the PR the account quota is probed on. Without the first, the watcher
+	// cannot even load state.
+	if s.cfg.GateRepo != "" {
+		env["CRQ_REPO"] = s.cfg.GateRepo
+	}
+	if s.cfg.DashboardIssue > 0 {
+		env["CRQ_ISSUE"] = fmt.Sprint(s.cfg.DashboardIssue)
+	}
+	if s.cfg.CalibrationPR > 0 {
+		env["CRQ_CAL_PR"] = fmt.Sprint(s.cfg.CalibrationPR)
+	}
+	return env
+}
+
+// drainUnit renders the platform's service definition.
+func (s *Service) drainUnit(plan DrainInstall) string {
+	env := s.drainEnv(plan)
+	// Sorted: the unit is a file on disk that a re-install rewrites, and map order
+	// would make every rewrite a different file for the same configuration.
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 	logDir := plan.LogDir
 	if plan.Platform == "darwin" {
 		var entries strings.Builder
-		for k, v := range env {
-			fmt.Fprintf(&entries, "\t\t<key>%s</key><string>%s</string>\n", k, v)
+		for _, k := range keys {
+			fmt.Fprintf(&entries, "\t\t<key>%s</key><string>%s</string>\n", k, env[k])
 		}
 		return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -242,8 +313,8 @@ func (s *Service) drainUnit(plan DrainInstall) string {
 `, plan.Wrapper, entries.String(), logDir, logDir)
 	}
 	var lines strings.Builder
-	for k, v := range env {
-		fmt.Fprintf(&lines, "Environment=%s=%s\n", k, v)
+	for _, k := range keys {
+		fmt.Fprintf(&lines, "Environment=%s=%s\n", k, env[k])
 	}
 	return fmt.Sprintf(`[Unit]
 Description=crq review drain (watch + dispatch fix sessions)

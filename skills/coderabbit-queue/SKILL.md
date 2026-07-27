@@ -181,11 +181,13 @@ one queue.
 
 One command sets it up — `crq drain install` writes the prompt, a wrapper and this platform's
 service (systemd user unit, or a launchd agent on macOS), makes it survive a logout, and starts it;
-`--dry-run` prints the paths first. Two rules the prompt earned the hard
-way — a session must stay on a detached HEAD and push by ref (`git push origin HEAD:refs/heads/…`),
-because the worktrees share one mirror and a branch checked out in one of them makes git refuse to
-fetch for every PR; and it resolves threads AFTER pushing, which crq now allows by distinguishing a
-superseded round from a stolen one.
+`--dry-run` prints the paths first. The service inherits none of your shell, so the unit names the
+config file the install read and the credential must be one the service can resolve itself
+(`gh auth login`, or a token in that file). Two rules the prompt earned the hard
+way — a session must stay on a detached HEAD and push by ref (`git push <head repo> HEAD:refs/heads/…`,
+which for a fork PR is not `origin`), because the worktrees share one mirror and a branch checked out
+in one of them makes git refuse to fetch for every PR; and it resolves threads AFTER pushing, which
+crq now allows by distinguishing a superseded round from a stolen one.
 
 Each session's output is written to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log`
 (last five per PR). Three dispatch attempts in a row that start nothing put `dispatch failing` on the dashboard

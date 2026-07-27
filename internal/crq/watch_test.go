@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
@@ -355,9 +356,12 @@ func TestClaimDispatchAdoptsAHeadTheQueueNeverSaw(t *testing.T) {
 	cfg := firingConfig()
 	store := NewMemoryStore(cfg)
 	svc := NewService(cfg, newFakeGitHub(), store, nil)
-	report := NextReport{Repo: "owner/thing", PR: 12, Head: "aaaaaaaa1", Action: "fix"}
+	report := NextReport{
+		Repo: "owner/thing", PR: 12, Head: "aaaaaaaa1", Action: "fix",
+		Findings: []dialect.Finding{{ID: "f1", Commit: "aaaaaaaa1"}},
+	}
 
-	if ok, why := svc.claimDispatch(context.Background(), report, "tok", 3); !ok {
+	if ok, why, _ := svc.claimDispatch(context.Background(), report, "tok", 3); !ok {
 		t.Fatalf("claim refused: %s — these findings can never be drained", why)
 	}
 	st, _, err := store.Load(context.Background())
@@ -374,6 +378,101 @@ func TestClaimDispatchAdoptsAHeadTheQueueNeverSaw(t *testing.T) {
 	}
 	if !round.DispatchHeld(time.Now().UTC()) {
 		t.Errorf("dispatch = %#v, want the claim held", round.Dispatch)
+	}
+}
+
+// Feedback carried from an older commit is not evidence that anybody reviewed
+// the current head. Marking it reviewed to hold the claim left a completed round
+// for a head no reviewer had looked at: the review is deduped away and the
+// caller waits for one that can no longer be requested.
+func TestClaimDispatchDoesNotMarkACarriedHeadReviewed(t *testing.T) {
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	report := NextReport{
+		Repo: "owner/thing", PR: 12, Head: "bbbbbbbb2", Action: "fix",
+		Findings: []dialect.Finding{{ID: "f1", Commit: "aaaaaaaa1", ThreadID: "PRRT_1"}},
+	}
+
+	if ok, why, _ := svc.claimDispatch(context.Background(), report, "tok", 3); !ok {
+		t.Fatalf("claim refused: %s", why)
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(report.Repo, report.PR)
+	if round == nil || round.Phase == PhaseCompleted {
+		t.Fatalf("round = %#v, want one that still needs a review of this head", round)
+	}
+	if !round.DispatchHeld(time.Now().UTC()) {
+		t.Errorf("dispatch = %#v, want the claim held", round.Dispatch)
+	}
+}
+
+// A head that moved on while its previous round still stood: `Next` reports fix
+// without enqueueing, so nothing else supersedes the stale round. Refusing the
+// claim over the mismatch left the new head's findings undispatchable on every
+// pass — and counted each refusal as the dispatcher failing.
+func TestClaimDispatchSupersedesAStaleRound(t *testing.T) {
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	seedRound(t, store, cfg, "owner/thing", 12, "aaaaaaaa1", PhaseCompleted, time.Now().UTC(), 0)
+	report := NextReport{
+		Repo: "owner/thing", PR: 12, Head: "bbbbbbbb2", Action: "fix",
+		Findings: []dialect.Finding{{ID: "f1", Commit: "bbbbbbbb2"}},
+	}
+
+	ok, why, _ := svc.claimDispatch(context.Background(), report, "tok", 3)
+	if !ok {
+		t.Fatalf("claim refused: %s — the new head's findings can never be drained", why)
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(report.Repo, report.PR)
+	if round == nil || round.Head != report.Head {
+		t.Fatalf("round = %#v, want the stale one superseded by the observed head", round)
+	}
+
+	// A session already running for an earlier head keeps the PR to itself: its
+	// own push is what moved the head, and it is still landing that work.
+	live := NextReport{Repo: report.Repo, PR: report.PR, Head: "cccccccc3", Action: "fix"}
+	if ok, why, byDesign := svc.claimDispatch(context.Background(), live, "tok2", 3); ok {
+		t.Error("a second session was started against a PR somebody is already fixing")
+	} else if !byDesign {
+		t.Errorf("reason %q counted as a dispatcher failure", why)
+	}
+}
+
+// The attempt bound is crq obeying its own configuration, not fix sessions
+// failing to start. Counted as drain health, a correctly bounded head raised the
+// "fix sessions are not starting" alert after three passes — and every pass
+// after that, forever.
+func TestExhaustedAttemptsAreNotADispatcherFailure(t *testing.T) {
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	report := NextReport{
+		Repo: "owner/thing", PR: 12, Head: "aaaaaaaa1", Action: "fix",
+		Findings: []dialect.Finding{{ID: "f1", Commit: "aaaaaaaa1"}},
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		ok, why, _ := svc.claimDispatch(context.Background(), report, fmt.Sprintf("tok%d", attempt), 2)
+		if !ok {
+			t.Fatalf("attempt %d refused: %s", attempt, why)
+		}
+		svc.releaseDispatch(context.Background(), report, fmt.Sprintf("tok%d", attempt), true)
+	}
+	ok, why, byDesign := svc.claimDispatch(context.Background(), report, "tok3", 2)
+	if ok {
+		t.Fatal("the attempt bound let a third dispatch through")
+	}
+	if !byDesign {
+		t.Errorf("reason %q counted as a dispatcher failure; the bound is the point", why)
 	}
 }
 

@@ -212,6 +212,12 @@ crq drain install            # prompt + wrapper + service, started; --dry-run to
 Session output goes to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log`. Three dispatch attempts in a
 row that start nothing put `dispatch failing` on the dashboard and the status line.
 
+The service does not inherit your shell. The unit names the config file the install read
+(`CRQ_CONFIG`, or `~/.config/crq/env`) and the queue's identity, and the credential has to be one
+the service can resolve itself — `gh auth login`, or `GITHUB_TOKEN`/`GH_TOKEN` in that file. A token
+exported only in a shell profile makes the install refuse rather than start a watcher that cannot
+authenticate.
+
 `crq drain install` runs `crq watch --dispatch`, which you can also run yourself:
 
 ```bash
