@@ -2247,13 +2247,19 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 				return PumpResult{}, 1, err
 			}
 			if result.Held {
+				// Code 0, not 2. The loop's exit codes are frozen — 0 converged
+				// or skipped, 10 findings, 2 TIMEOUT — and a hold is none of the
+				// last: it is indefinite and ends when a person says so, while 2
+				// tells every caller scripted against that contract to retry. It
+				// is the same shape as "skipped": terminal for this run, and the
+				// status field is what says which.
 				return PumpResult{
 					Action: "held",
 					Repo:   repo,
 					PR:     pr,
 					Head:   result.Head,
 					Reason: result.Reason,
-				}, 2, nil
+				}, 0, nil
 			}
 			enqueued = result.Queued || result.AlreadyQueued
 			if result.Deduped {
@@ -2364,6 +2370,7 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 			return PumpResult{}, 1, err
 		}
 		if hold, held := state.HeldPR(repo, pr); held {
+			// Terminal with code 0, as above: a hold is not an elapsed wait.
 			head := ""
 			if round := state.Round(repo, pr); round != nil {
 				head = round.Head
@@ -2374,7 +2381,7 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 				PR:     pr,
 				Head:   head,
 				Reason: "held: " + hold.Reason,
-			}, 2, nil
+			}, 0, nil
 		}
 		if r := state.Round(repo, pr); r != nil && (r.Phase == PhaseFired || r.Phase == PhaseReviewing) {
 			// A reviewing round is in flight (a fired ack, or a bounded co-review

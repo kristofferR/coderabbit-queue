@@ -38,6 +38,8 @@ func TestSkipMarkerHasToBeUsedNotMentioned(t *testing.T) {
 		{"mentioned in a long code span", "Use `` ` <!-- crq:skip-autoreview --> ` `` to document it.", false},
 		{"documented and then used", "Use `<!-- crq:skip-autoreview -->`.\n\n<!-- crq:skip-autoreview -->", true},
 		{"absent", "An ordinary description.", false},
+		{"documented in a fence inside a list item", "- Example\n\n    ~~~md\n    <!-- crq:skip-autoreview -->\n    ~~~\n", false},
+		{"a span closed by a backtick after a backslash", "Use `foo\\` and <!-- crq:skip-autoreview --> `bar`", true},
 		{"escaped mention", `\<!-- crq:skip-autoreview -->`, false},
 		{"even backslashes leave the comment unescaped", `\\<!-- crq:skip-autoreview -->`, true},
 		{"escaped mention before a used marker", "\\<!-- crq:skip-autoreview -->\n\n<!-- crq:skip-autoreview -->", true},

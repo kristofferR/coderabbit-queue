@@ -1,0 +1,59 @@
+package state
+
+import (
+	"strings"
+	"testing"
+	"time"
+)
+
+// Holding an untracked PR is the ordinary case — Enqueue deliberately refuses to
+// create a round for one — so a view built from rounds showed nothing, and the
+// dashboard said "Idle" immediately after a hold succeeded.
+func TestHeldViewShowsAHoldWithNoRound(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	st := New()
+	st.Hold("Owner/Repo", 12, "waiting on a decision", "cachyos", now)
+
+	held := heldRounds(st)
+	if len(held) != 1 {
+		t.Fatalf("heldRounds = %+v, want the standalone hold", held)
+	}
+	if held[0].PR != 12 || held[0].Repo != "owner/repo" {
+		t.Errorf("entry = %s#%d, want owner/repo#12", held[0].Repo, held[0].PR)
+	}
+
+	body := RenderDashboard(st, StoreConfig{})
+	if !strings.Contains(body, "Held — 1") {
+		t.Error("the dashboard does not count a hold with no round")
+	}
+	if !strings.Contains(body, "owner/repo#12") {
+		t.Error("the dashboard does not name the held PR")
+	}
+}
+
+// A hold reason is whatever an operator typed. A pipe ends the column early and
+// a newline ends the row, so the table rewrites itself around the text.
+func TestHoldReasonCannotRewriteTheTable(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	st := New()
+	st.Hold("owner/repo", 3, "waiting on API | security decision\nand more", "host|name", now)
+
+	body := RenderDashboard(st, StoreConfig{})
+	var row string
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, "owner/repo#3") {
+			row = line
+			break
+		}
+	}
+	if row == "" {
+		t.Fatal("the held row is missing")
+	}
+	// Six columns means seven pipes; an unescaped one in the reason adds more.
+	if got := strings.Count(row, "|") - strings.Count(row, `\|`); got != 7 {
+		t.Errorf("row has %d structural pipes, want 7: %s", got, row)
+	}
+	if !strings.Contains(row, "and more") {
+		t.Errorf("the reason was truncated instead of flattened: %s", row)
+	}
+}

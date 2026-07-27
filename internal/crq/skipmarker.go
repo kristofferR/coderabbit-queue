@@ -66,9 +66,19 @@ func stripFencedCode(body string) string {
 	var fence byte
 	fenceLen := 0
 	fenceQuoteDepth := 0
+	// A fence is measured from its CONTAINER, not from the left edge. Inside a
+	// list item the content column is already indented, so a documented block
+	// written under "- Example" sits four or more absolute columns in and was
+	// rejected as an opener — while the indented-code pass kept it, because
+	// relative to the list it is not indented at all. The marker inside then
+	// survived both passes and opted the pull request out of review.
+	var listIndents []int
 	for _, line := range strings.SplitAfter(body, "\n") {
 		content, quoteDepth := markdownBlockQuoteContent(line)
-		delimiter, run, tail, ok := markdownFence(content)
+		if fence == 0 {
+			listIndents = trackListContainer(content, listIndents)
+		}
+		delimiter, run, tail, ok := markdownFence(dedent(content, containerIndentOf(listIndents)))
 		if fence == 0 {
 			if ok && (delimiter != '`' || !strings.Contains(tail, "`")) {
 				fence, fenceLen = delimiter, run
@@ -357,9 +367,16 @@ func stripCodeSpans(text string) string {
 	return out.String()
 }
 
+// matchingBacktickRun finds the run that CLOSES a span opened at start.
+//
+// Escaping is deliberately not consulted here. CommonMark does not process
+// backslash escapes inside a code span, so `foo\` is closed by the backtick
+// after the backslash — treating that one as escaped paired the opener with the
+// NEXT span's opener instead, swallowing the real skip marker between them and
+// letting a review fire on a pull request that had opted out.
 func matchingBacktickRun(text string, start, want int) int {
 	for i := start; i < len(text); {
-		if text[i] != '`' || backtickEscaped(text, i) {
+		if text[i] != '`' {
 			i++
 			continue
 		}
@@ -382,4 +399,49 @@ func backtickEscaped(text string, at int) bool {
 		at--
 	}
 	return backslashes%2 == 1
+}
+
+// trackListContainer maintains the stack of list-item content columns, so a
+// fence can be recognised relative to the innermost one.
+func trackListContainer(content string, indents []int) []int {
+	if strings.TrimSpace(content) == "" {
+		return indents
+	}
+	indent := markdownIndent(content)
+	for len(indents) > 0 && indent < indents[len(indents)-1] {
+		indents = indents[:len(indents)-1]
+	}
+	if at, ok := markdownListContentIndent(content, containerIndentOf(indents)); ok {
+		return append(indents, at)
+	}
+	return indents
+}
+
+func containerIndentOf(indents []int) int {
+	if len(indents) == 0 {
+		return 0
+	}
+	return indents[len(indents)-1]
+}
+
+// dedent removes up to columns of leading whitespace, leaving the rest for the
+// fence rules to judge. Anything shallower than the container is returned whole:
+// it has left the list, and the caller's stack unwinds on the next line.
+func dedent(line string, columns int) string {
+	if columns <= 0 {
+		return line
+	}
+	seen, at := 0, 0
+	for at < len(line) && seen < columns {
+		switch line[at] {
+		case ' ':
+			seen++
+		case '\t':
+			seen += 4 - seen%4
+		default:
+			return line
+		}
+		at++
+	}
+	return line[at:]
 }

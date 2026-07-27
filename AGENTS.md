@@ -124,7 +124,9 @@ Daemon `Pump` = Progress on the slot round + DecideFire on the next eligible.
 `crq loop` (Wait + Feedback) = the same DecideFire to fire, then `Completion` +
 findings filters to converge. The wait IS the round: a fired/reviewing round with
 a `WaitDeadline` is the in-flight wait. Loop exit codes are frozen: 0 converged/
-skipped, 10 findings, 2 timeout.
+skipped/held, 10 findings, 2 timeout. A hold is terminal for the run and ends
+only when a person lifts it, so it is never 2 — that code means the wait
+elapsed, and a caller scripted against it would retry for ever.
 
 ## Adding a new bot-message format
 

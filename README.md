@@ -424,9 +424,10 @@ crq help [command]        # help, optionally for one command
 ```
 
 `<repo>` is `owner/name`; `<pr>` is the number. **`crq next` always exits 0** — read `.action`, not
-the exit code. **`crq loop` exit codes:** `0` converged or no
-actionable findings, `10` actionable findings returned in `.findings[]`, `2` timed out waiting for
-feedback. crq keys resolution off GitHub's own thread state, so a finding keeps reappearing in
+the exit code. **`crq loop` exit codes:** `0` converged, no
+actionable findings, or the PR is held (`.status` says which), `10` actionable findings returned in
+`.findings[]`, `2` timed out waiting for feedback. A hold is never `2`: that code means the wait
+elapsed and is worth retrying, and a hold ends only when somebody lifts it. crq keys resolution off GitHub's own thread state, so a finding keeps reappearing in
 `feedback`/`loop` until its thread is resolved (or declined-and-resolved) on GitHub.
 
 Use `crq hold` for an administrative pause: the hold survives autoreview passes and prevents both

@@ -1637,8 +1637,10 @@ func TestWaitReturnsWhenPRIsHeld(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code != 2 || result.Action != "held" || result.Reason != "held: waiting on a decision" {
-		t.Fatalf("held PR should terminate the legacy wait, code=%d result=%#v", code, result)
+	// Code 0, not 2: the loop's codes are frozen with 2 meaning an elapsed wait,
+	// and a hold is indefinite. Terminal like "skipped", named by the status.
+	if code != 0 || result.Action != "held" || result.Reason != "held: waiting on a decision" {
+		t.Fatalf("held PR should terminate the legacy wait without claiming a timeout, code=%d result=%#v", code, result)
 	}
 	st, _, err := store.Load(ctx)
 	if err != nil {
@@ -1668,7 +1670,7 @@ func TestWaitReturnsWhenPRIsHeldAfterEnqueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code != 2 || result.Action != "held" || result.Reason != "held: waiting on a decision" {
+	if code != 0 || result.Action != "held" || result.Reason != "held: waiting on a decision" {
 		t.Fatalf("hold created after enqueue should terminate the wait, code=%d result=%#v", code, result)
 	}
 	if len(gh.posted) != 0 {
@@ -1699,7 +1701,9 @@ func TestLoopLeavesHeldInflightRoundOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code != 2 || report.Status != "held" || report.Reason != "held: waiting on a decision" {
+	// Code 0, not 2: 2 is frozen as the elapsed-wait result, and a hold ends
+	// only when a person lifts it. The status is what names the outcome.
+	if code != 0 || report.Status != "held" || report.Reason != "held: waiting on a decision" {
 		t.Fatalf("held in-flight loop result: code=%d report=%#v", code, report)
 	}
 	st, _, err := store.Load(ctx)

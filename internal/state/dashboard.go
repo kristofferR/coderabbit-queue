@@ -96,21 +96,48 @@ type heldRound struct {
 	Hold Hold
 }
 
-// heldRounds returns queued work intentionally excluded from firing. Held work
-// is not part of Queue because it is not waiting its turn, but it remains active
-// and must stay visible to operators.
+// heldRounds returns work intentionally excluded from firing. Held work is not
+// part of Queue because it is not waiting its turn, but it remains a decision
+// somebody made and must stay visible.
+//
+// Built from the HOLDS, not from the rounds. Holding an untracked PR is the
+// ordinary case — Enqueue deliberately refuses to create a round for one — so
+// walking rounds showed nothing, and the dashboard said "Idle" immediately
+// after a hold succeeded. A round's details are attached when there is one.
 func heldRounds(st State) []heldRound {
-	var out []heldRound
-	for _, r := range st.Rounds {
-		if r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry {
+	out := make([]heldRound, 0, len(st.Holds))
+	for key, hold := range st.Holds {
+		repo, pr, ok := splitHoldKey(key)
+		if !ok {
 			continue
 		}
-		if hold, ok := st.HeldPR(r.Repo, r.PR); ok {
-			out = append(out, heldRound{Round: r, Hold: hold})
+		entry := heldRound{Hold: hold, Round: Round{Repo: repo, PR: pr}}
+		if r := st.Round(repo, pr); r != nil {
+			entry.Round = *r
 		}
+		out = append(out, entry)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Repo != out[j].Repo {
+			return out[i].Repo < out[j].Repo
+		}
+		return out[i].PR < out[j].PR
+	})
 	return out
+}
+
+// splitHoldKey reverses holdKey. A key it cannot read is skipped rather than
+// rendered as a row pointing at a pull request that does not exist.
+func splitHoldKey(key string) (repo string, pr int, ok bool) {
+	repo, num, found := strings.Cut(key, "#")
+	if !found || repo == "" {
+		return "", 0, false
+	}
+	pr, err := strconv.Atoi(num)
+	if err != nil || pr <= 0 {
+		return "", 0, false
+	}
+	return repo, pr, true
 }
 
 // firedAtOf is when a round entered its in-flight life, for ordering the in-flight
@@ -357,8 +384,8 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 		fmt.Fprintf(&b, "| PR | commit | phase | reason | held by | since |\n|---|---|---|---|---|---|\n")
 		for _, e := range held {
 			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | `%s` | %s |\n",
-				e.Repo, e.PR, e.Repo, e.PR, e.Head, e.Phase, dash(e.Hold.Reason),
-				e.Hold.By, fmtStamp(&e.Hold.At, loc))
+				e.Repo, e.PR, e.Repo, e.PR, dash(e.Head), dash(string(e.Phase)), cell(dash(e.Hold.Reason)),
+				cell(e.Hold.By), fmtStamp(&e.Hold.At, loc))
 		}
 	}
 
@@ -418,4 +445,15 @@ func IssueBody(st State, cfg StoreConfig) (string, error) {
 func hashString(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
+}
+
+// cell makes a free-form value safe to put in a Markdown table. A hold reason is
+// whatever an operator typed: a pipe ends the column early and a newline ends
+// the row, so a reason like "waiting on API | security decision" rewrites the
+// table around it.
+func cell(v string) string {
+	v = strings.ReplaceAll(v, "\r\n", " ")
+	v = strings.ReplaceAll(v, "\n", " ")
+	v = strings.ReplaceAll(v, "\r", " ")
+	return strings.ReplaceAll(v, "|", "\\|")
 }

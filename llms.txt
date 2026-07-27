@@ -152,7 +152,9 @@ Exit codes (`crq loop` only — `crq next` always exits 0 and answers in `.actio
   and all non-CodeRabbit required reviewers are true: those are Codex-only findings during a
   CodeRabbit rate-limit window, so fix, push, and loop again (each Codex round takes minutes;
   several fit inside one CodeRabbit window).
-- `2`: timed out waiting for feedback; do not push a stale-feedback round.
+- `2`: timed out waiting for feedback; do not push a stale-feedback round. A HELD pull request is
+  not this — it exits `0` with `.status: "held"`, because a hold ends only when somebody lifts it
+  and retrying on `2` would spin for ever.
 
 Rate-limit degrade: when CodeRabbit is rate-limited ("Review limit reached … Next review available
 in: NN minutes") and Codex demonstrably reviews the PR, the loop degrades to Codex-only rounds

@@ -579,6 +579,21 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 	if err != nil {
 		return FeedbackReport{}, 1, err
 	}
+	// A hold ends the loop wherever it is reported. It is administrative and
+	// indefinite: entering the feedback poll would wait out a whole second
+	// timeout for a review that will not be requested until a person lifts it.
+	//
+	// Code 0, not 2. The exit codes are frozen with 2 meaning an ELAPSED wait,
+	// so returning it for a hold tells a caller scripted against that contract
+	// to retry something only a person ends. Terminal like "skipped"; the status
+	// is what tells them which.
+	if waitResult.Action == "held" {
+		return FeedbackReport{
+			Status: "held", Repo: NormalizeRepo(repo), PR: pr,
+			Head: waitResult.Head, Reason: waitResult.Reason,
+			ReviewedBy: map[string]bool{}, Findings: []dialect.Finding{},
+		}, 0, nil
+	}
 	if waitCode == 2 {
 		status := "timeout"
 		code := 2
@@ -587,8 +602,6 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			status = "skipped"
 			code = 0
 			s.completeWaitRound(ctx, repo, pr, "", false, nil)
-		case "held":
-			status = "held"
 		}
 		// The slot wait timed out (CRQ_WAIT_TIMEOUT) without firing a review. Don't
 		// enter the feedback poll — that would burn another feedback timeout and could
