@@ -27,6 +27,9 @@ type (
 	StoreConfig   = crqstate.StoreConfig
 
 	LeaderCapabilityLease = crqstate.LeaderCapabilityLease
+
+	// RepoDrainSwitch is one repository's answer to whether crq may fix it.
+	RepoDrainSwitch = crqstate.RepoDrainSwitch
 )
 
 const (
@@ -39,6 +42,10 @@ const (
 	PhaseCompleted     = crqstate.PhaseCompleted
 	PhaseAbandoned     = crqstate.PhaseAbandoned
 
+	// DispatchTTL is how long a watcher's fix claim survives without a heartbeat.
+	DispatchTTL = crqstate.DispatchTTL
+	// DrainUnhealthyAfter is how many passes may fail to dispatch before crq says so.
+	DrainUnhealthyAfter = crqstate.DrainUnhealthyAfter
 	// CapsRepoOverrides is the binary capability per-repo reviewer overrides need.
 	CapsRepoOverrides = crqstate.CapsRepoOverrides
 )

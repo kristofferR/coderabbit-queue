@@ -5,6 +5,28 @@ import (
 	"testing"
 )
 
+func TestWatchDispatchOptionHonorsFalse(t *testing.T) {
+	if got := watchDispatchOption(true, false); got != nil {
+		t.Errorf("default dispatch = %v, want the configured default", *got)
+	}
+	for _, tc := range []struct {
+		name                 string
+		dispatch, noDispatch bool
+	}{
+		{name: "standard false form", dispatch: false},
+		{name: "observer alias", dispatch: true, noDispatch: true},
+		{name: "false plus observer alias", dispatch: false, noDispatch: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := watchDispatchOption(tc.dispatch, tc.noDispatch)
+			if got == nil || *got {
+				t.Fatalf("watchDispatchOption(%t, %t) = %v, want explicit false",
+					tc.dispatch, tc.noDispatch, got)
+			}
+		})
+	}
+}
+
 // The thread commands take IDs bare so a caller can clear a whole round in one
 // process. The transcripts that motivated this were full of shell loops running
 // one `crq resolve` subprocess per thread, every round.

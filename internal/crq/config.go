@@ -54,6 +54,20 @@ type Config struct {
 	// Bot / RequiredBots / FeedbackBots / CoBots above are DERIVED from it and
 	// kept only so existing consumers keep compiling; new code should read this.
 	Reviewers []Reviewer
+	// WatchInterval paces `crq watch`; DispatchCommand is the fix session it
+	// runs with --dispatch, argv-style; DispatchMaxAttempts bounds dispatches per
+	// head so a fix that keeps not working stops.
+	WatchInterval       time.Duration
+	DispatchCommand     []string
+	DispatchMaxAttempts int
+	// DispatchForks allows fix sessions on pull requests whose head branch lives
+	// in another repository. Off by default: a session runs an agent over that
+	// branch's code with approvals bypassed and a write token in reach.
+	DispatchForks bool
+	// DispatchConcurrency caps concurrent fix sessions. 0 (the default) means no
+	// cap: fixing findings spends no account quota, so it does not belong in a
+	// queue. It is a resource valve for a machine that cannot take the load.
+	DispatchConcurrency int
 	// WorkspaceRoot holds crq's own mirrors and worktrees. Read here rather than
 	// from the process environment, so a value in ~/.config/crq/env — the
 	// documented place for crq settings — is actually used.
@@ -109,15 +123,34 @@ type Config struct {
 	RateLimitCoDegrade bool
 }
 
+// ConfigPath is the file crq reads its settings from: CRQ_CONFIG, or
+// ~/.config/crq/env. Empty when neither can be resolved.
+//
+// Exported because a service unit has to be pointed at the SAME file the install
+// read. A drain that loads a different configuration is one that watches nothing
+// while reporting itself started.
+//
+// Absolute, always: a relative CRQ_CONFIG resolves against the invoking shell's
+// directory, and the service starts somewhere else entirely — so the install
+// would read the file, write that relative string into the unit, and the drain
+// would load no configuration at all.
+func ConfigPath() string {
+	if path := strings.TrimSpace(os.Getenv("CRQ_CONFIG")); path != "" {
+		if abs, err := filepath.Abs(path); err == nil {
+			return abs
+		}
+		return path
+	}
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config", "crq", "env")
+}
+
 func LoadConfig() (Config, error) {
 	env := map[string]string{}
-	configPath := os.Getenv("CRQ_CONFIG")
-	if configPath == "" {
-		home, _ := os.UserHomeDir()
-		if home != "" {
-			configPath = filepath.Join(home, ".config", "crq", "env")
-		}
-	}
+	configPath := ConfigPath()
 	if configPath != "" {
 		values, err := readEnvFile(configPath)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -125,6 +158,21 @@ func LoadConfig() (Config, error) {
 		}
 		for k, v := range values {
 			env[k] = v
+		}
+		// The GitHub credential is resolved from the PROCESS environment
+		// (internal/gh, and `git` through it), not from this map — so a token
+		// configured here would authenticate nothing. Exporting it is what lets a
+		// service unit carry no secret of its own: point it at this file.
+		// gh treats these as aliases, with GITHUB_TOKEN taking precedence. Treat
+		// them as one setting here too: exporting a file GITHUB_TOKEN when the
+		// process supplied GH_TOKEN would silently replace the caller's explicit
+		// credential with the file's account.
+		if os.Getenv("GITHUB_TOKEN") == "" && os.Getenv("GH_TOKEN") == "" {
+			for _, key := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
+				if v := strings.TrimSpace(values[key]); v != "" {
+					os.Setenv(key, v)
+				}
+			}
 		}
 	}
 	for _, e := range os.Environ() {
@@ -199,6 +247,11 @@ func LoadConfig() (Config, error) {
 		AutoReviewMaxScan:   intEnv(env, "CRQ_AUTOREVIEW_MAX_SCAN", 400),
 		LeaderTTL:           durationEnv(env, "CRQ_LEADER_TTL", 3*time.Minute),
 		FiredMax:            intEnv(env, "CRQ_FIRED_MAX", 500),
+		WatchInterval:       durationEnv(env, "CRQ_WATCH_INTERVAL", 2*time.Minute),
+		DispatchCommand:     SplitArgv(env["CRQ_DISPATCH_CMD"]),
+		DispatchMaxAttempts: positiveIntEnv(env, "CRQ_DISPATCH_MAX_ATTEMPTS", 3),
+		DispatchForks:       boolEnv(env, "CRQ_DISPATCH_FORKS", false),
+		DispatchConcurrency: intEnv(env, "CRQ_DISPATCH_CONCURRENCY", 0),
 		WorkspaceRoot:       env["CRQ_WORKSPACE"],
 		Tidy:                stringEnv(env, "CRQ_TIDY", "0") == "1",
 		NoOpen:              env["CRQ_NO_OPEN"] != "",
@@ -305,6 +358,14 @@ func intEnv(env map[string]string, key string, fallback int) int {
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func positiveIntEnv(env map[string]string, key string, fallback int) int {
+	n := intEnv(env, key, fallback)
+	if n <= 0 {
 		return fallback
 	}
 	return n
@@ -554,6 +615,42 @@ func authorSet(value string) map[string]bool {
 func ownerOf(repo string) string {
 	owner, _, _ := strings.Cut(repo, "/")
 	return owner
+}
+
+// SplitArgv splits a configured command into argv on whitespace, keeping
+// quoted runs together: 'claude -p "fix these findings"' is three arguments,
+// not five with stray quote characters in them.
+//
+// Quoting is ALL it understands. It is deliberately not a shell: a dispatch
+// command runs directly, so nothing here expands a variable, a glob, or a pipe
+// that the operator did not write. Both quote styles behave the same way, and
+// an unclosed quote simply runs to the end rather than failing a config load
+// over it.
+func SplitArgv(value string) []string {
+	var argv []string
+	var arg strings.Builder
+	quote := rune(0)
+	quoted := false // "" is an argument, even though it contributes no characters
+	for _, r := range value {
+		switch {
+		case quote != 0 && r == quote:
+			quote = 0
+		case quote == 0 && (r == '"' || r == '\''):
+			quote, quoted = r, true
+		case quote == 0 && (r == ' ' || r == '\t' || r == '\n' || r == '\r'):
+			if arg.Len() > 0 || quoted {
+				argv = append(argv, arg.String())
+				arg.Reset()
+				quoted = false
+			}
+		default:
+			arg.WriteRune(r)
+		}
+	}
+	if arg.Len() > 0 || quoted {
+		argv = append(argv, arg.String())
+	}
+	return argv
 }
 
 // processRun distinguishes this RUN of crq from an earlier one that happened to

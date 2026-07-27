@@ -1,0 +1,1091 @@
+package crq
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
+	"github.com/kristofferR/coderabbit-queue/internal/workspace"
+)
+
+// Dispatch is the one place crq starts something that writes code, so what it
+// hands the session has to be right: the PR's own worktree at the head the
+// findings are about, and the findings themselves.
+func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.AllowRepos = map[string]bool{repo: true}
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Number = 4
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey(repo, 4)] = pull
+
+	// A record of what the session was given, written by the "session" itself.
+	record := filepath.Join(t.TempDir(), "record.json")
+	script := filepath.Join(t.TempDir(), "session.sh")
+	body := "#!/bin/sh\n" +
+		"printf '{\"repo\":\"%s\",\"pr\":\"%s\",\"head\":\"%s\",\"cwd\":\"%s\",\"findings\":\"%s\"}' " +
+		"\"$CRQ_DISPATCH_REPO\" \"$CRQ_DISPATCH_PR\" \"$CRQ_DISPATCH_HEAD\" \"$(pwd)\" \"$CRQ_DISPATCH_FINDINGS\" > " + record + "\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	report := NextReport{Repo: repo, PR: 4, Head: sha, Action: "fix"}
+	seedRound(t, store, cfg, repo, 4, sha, PhaseQueued, time.Now().UTC(), 0)
+
+	pool := newDispatchPool(0)
+	ok, why := svc.startDispatch(context.Background(), WatchOptions{
+		Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 3,
+	}, pool, report)
+	if !ok {
+		t.Fatalf("dispatch did not run: %s", why)
+	}
+	pool.wait()
+
+	var got struct{ Repo, PR, Head, Cwd, Findings string }
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("the session did not run: %v", err)
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Repo != repo || got.PR != "4" || got.Head != sha {
+		t.Errorf("session context = %+v, want %s#4@%s", got, repo, sha)
+	}
+	// It ran in a checkout of the PR, not in whatever directory crq was started
+	// from — the entire reason the workspace exists.
+	if !strings.HasPrefix(got.Cwd, cfg.WorkspaceRoot) {
+		t.Errorf("session ran in %q, want a worktree under %q", got.Cwd, cfg.WorkspaceRoot)
+	}
+	if got.Findings == "" {
+		t.Fatal("the session was given no findings file")
+	}
+	// OUTSIDE the worktree: at the repository root it is an untracked file, and
+	// a session following the documented `git add -A` push would commit crq's
+	// review payload into the PR.
+	if strings.HasPrefix(got.Findings, got.Cwd) {
+		t.Errorf("findings at %q are inside the worktree %q", got.Findings, got.Cwd)
+	}
+
+	// The claim is released afterwards, so the next round is not blocked by a
+	// session that already finished.
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(repo, 4)
+	if round == nil || round.DispatchHeld(time.Now().UTC()) {
+		t.Errorf("claim still held after the session finished: %#v", round.Dispatch)
+	}
+	if round.Dispatch == nil || round.Dispatch.Attempts != 1 {
+		t.Errorf("attempts = %#v, want 1 recorded", round.Dispatch)
+	}
+	// And the worktree is cleaned up rather than left to accumulate. Empty
+	// parent directories are fine; a checkout still holding a repository is not.
+	_ = filepath.WalkDir(filepath.Join(cfg.WorkspaceRoot, "work"), func(path string, d os.DirEntry, err error) error {
+		if err == nil && d.Name() == ".git" {
+			t.Errorf("a worktree was left behind at %s", filepath.Dir(path))
+		}
+		return nil
+	})
+}
+
+// Dispatching is the default, so a machine with no fix agent configured must
+// still be able to watch: refusing to start would make the default setting
+// break the plain command. It observes instead — and says so, because a drain
+// that quietly does nothing is the failure this whole area is about.
+func TestWatchObservesWhenNoFixCommandIsConfigured(t *testing.T) {
+	cfg := firingConfig()
+	cfg.DispatchCommand = nil
+	cfg.AllowRepos = map[string]bool{"owner/thing": true}
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", 3, "aaaaaaaa1"
+	gh.pulls[fakeKey("owner/thing", 3)] = pull
+	said := &recordingLogger{}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), said)
+
+	var events []WatchEvent
+	err := svc.Watch(context.Background(), WatchOptions{Once: true}, func(e WatchEvent) error {
+		events = append(events, e)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("watch refused to observe without a fix command: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("nothing was observed")
+	}
+	for _, e := range events {
+		if e.Dispatched {
+			t.Errorf("a session was dispatched with no command configured: %+v", e)
+		}
+	}
+	if !said.contains("observing only") {
+		t.Errorf("the watcher did not say it was observing only: %q", said.lines)
+	}
+}
+
+// recordingLogger keeps what the service said, so a test can assert on the one
+// line that explains a silent-looking mode.
+type recordingLogger struct{ lines []string }
+
+func (r *recordingLogger) Printf(format string, args ...any) {
+	r.lines = append(r.lines, fmt.Sprintf(format, args...))
+}
+
+func (r *recordingLogger) contains(want string) bool {
+	for _, line := range r.lines {
+		if strings.Contains(line, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestWatchEmitsAnEventForASkipMarkedPullRequest(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/r": true}
+	cfg.SkipMarker = "<!-- crq:skip-autoreview -->"
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Number = 9
+	pull.Body = cfg.SkipMarker
+	gh.pulls[fakeKey("o/r", 9)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	var events []WatchEvent
+	if err := svc.watchPass(context.Background(), WatchOptions{}, newDispatchPool(0), func(event WatchEvent) error {
+		events = append(events, event)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Action != "skipped" || events[0].Reason == "" {
+		t.Fatalf("events = %#v, want one explained skip", events)
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Round("o/r", 9) != nil {
+		t.Fatal("skip-marked PR was passed to the mutating Next oracle")
+	}
+}
+
+func TestOneShotDispatchPoolWaitsForCapacity(t *testing.T) {
+	pool := newDispatchPool(1)
+	if ok, why := pool.acquire(); !ok {
+		t.Fatal(why)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result := make(chan bool)
+	go func() {
+		ok, _ := pool.acquireContext(ctx)
+		result <- ok
+	}()
+	select {
+	case <-result:
+		t.Fatal("one-shot acquisition did not wait for the occupied slot")
+	case <-time.After(20 * time.Millisecond):
+	}
+	pool.release()
+	if ok := <-result; !ok {
+		t.Fatal("one-shot acquisition did not take capacity when it became available")
+	}
+	pool.release()
+
+	if ok, why := pool.acquire(); !ok {
+		t.Fatal(why)
+	}
+	cancelled, cancelNow := context.WithCancel(context.Background())
+	cancelNow()
+	if ok, why := pool.acquireContext(cancelled); ok || !strings.Contains(why, context.Canceled.Error()) {
+		t.Fatalf("cancelled acquisition = ok %v reason %q", ok, why)
+	}
+	pool.release()
+}
+
+// DryRun means crq writes nothing and posts nothing. Claiming shared state and
+// running a code-writing command is the largest possible violation of that.
+func TestDispatchHonoursDryRun(t *testing.T) {
+	cfg := firingConfig()
+	cfg.DryRun = true
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	ran := filepath.Join(t.TempDir(), "ran")
+	script := filepath.Join(t.TempDir(), "s.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch "+ran+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pool := newDispatchPool(0)
+	ok, why := svc.startDispatch(context.Background(), WatchOptions{Dispatch: dispatchOn(), Command: []string{script}},
+		pool, NextReport{Repo: "o/r", PR: 1, Head: "aaaaaaaa1", Action: "fix"})
+	pool.wait()
+	if ok {
+		t.Error("a dry run dispatched a session")
+	}
+	if !strings.Contains(why, "dry run") {
+		t.Errorf("reason = %q, want it to say why", why)
+	}
+	if _, err := os.Stat(ran); !os.IsNotExist(err) {
+		t.Error("the fix command ran under a dry run")
+	}
+	// Health is a shared CAS write like any other, so a dry run must not record
+	// one — let alone raise a dispatcher alarm nothing caused.
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Drain != nil {
+		t.Errorf("a dry run wrote dispatch health: %+v", st.Drain)
+	}
+}
+
+func TestWatchClaimsCarriedFeedbackBeforeAdvancingTheQueue(t *testing.T) {
+	base := t.TempDir()
+	repo, pr := "owner/thing", 12
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{repo: true}
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", pr, sha
+	gh.pulls[fakeKey(repo, pr)] = pull
+	created := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	gh.graphQL = func(query string, _ map[string]any, out any) error {
+		if strings.Contains(query, "reviewThreads") {
+			payload := `{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},` +
+				`"nodes":[{"id":"THREAD1","isResolved":false,"isOutdated":false,"path":"a.go","line":1,` +
+				`"comments":{"nodes":[{"databaseId":55,"body":"Carried-over finding","url":"http://x","path":"a.go","line":1,` +
+				`"createdAt":"` + created + `","author":{"login":"coderabbitai[bot]"},"commit":{"oid":"oldhead123456"}}]}}]}}}}`
+			return json.Unmarshal([]byte(payload), out)
+		}
+		return noForcePush(query, nil, out)
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	script := filepath.Join(t.TempDir(), "session.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.Watch(context.Background(), WatchOptions{
+		Repos: []string{repo}, Once: true, Dispatch: dispatchOn(),
+		Command: []string{script}, MaxAttempts: 3,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("watch fired a review before claiming the carried-feedback fix: %v", gh.posted)
+	}
+}
+
+func TestOneShotWatchReportsDispatchFailure(t *testing.T) {
+	base := t.TempDir()
+	repo, pr := "owner/thing", 13
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{repo: true}
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", pr, sha
+	gh.pulls[fakeKey(repo, pr)] = pull
+	created := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	gh.graphQL = func(query string, _ map[string]any, out any) error {
+		if strings.Contains(query, "reviewThreads") {
+			payload := `{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},` +
+				`"nodes":[{"id":"THREAD1","isResolved":false,"isOutdated":false,"path":"a.go","line":1,` +
+				`"comments":{"nodes":[{"databaseId":55,"body":"Finding","url":"http://x","path":"a.go","line":1,` +
+				`"createdAt":"` + created + `","author":{"login":"coderabbitai[bot]"},"commit":{"oid":"oldhead123456"}}]}}]}}}}`
+			return json.Unmarshal([]byte(payload), out)
+		}
+		return noForcePush(query, nil, out)
+	}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+	script := filepath.Join(t.TempDir(), "session.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 17\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var events []WatchEvent
+	err := svc.Watch(context.Background(), WatchOptions{
+		Repos: []string{repo}, Once: true, Dispatch: dispatchOn(),
+		Command: []string{script}, MaxAttempts: 3,
+	}, func(event WatchEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "fix session failed") {
+		t.Fatalf("Watch error = %v, want the asynchronous dispatch failure", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %#v, want the PR's actual dispatch result", events)
+	}
+	if events[0].Dispatched || !strings.Contains(events[0].Skipped, "fix session failed") {
+		t.Errorf("event = %#v, want dispatched=false with the session failure", events[0])
+	}
+}
+
+func TestDispatchReportsAZeroExitSessionWithUnlandedWork(t *testing.T) {
+	base := t.TempDir()
+	repo, pr := "owner/thing", 13
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	report := NextReport{
+		Repo: repo, PR: pr, Head: sha, Action: "fix",
+		Findings: []dialect.Finding{{ID: "f1", Commit: sha}},
+	}
+	token := "dispatch-token"
+	if ok, why, _ := svc.claimDispatch(context.Background(), report, token, 3); !ok {
+		t.Fatalf("claimDispatch refused: %s", why)
+	}
+	script := filepath.Join(t.TempDir(), "session.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch unfinished.go\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, why := svc.dispatch(context.Background(), WatchOptions{Command: []string{script}}, report, token)
+	if ok || why != "the session left uncommitted work" {
+		t.Fatalf("dispatch = (%t, %q), want an unlanded-work failure", ok, why)
+	}
+}
+
+// One repository renamed, deleted, or unreadable by this token used to abort the
+// whole pass. The service restarts into the same list and hits it again, so every
+// healthy repository after it gets no events and no fix sessions — indefinitely.
+func TestWatchPassOutlivesAnUnreadableRepository(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/gone": true, "o/fine": true}
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	gh.listPullErrs = map[string]error{"o/gone": errors.New("404 Not Found")}
+	var p ghapi.Pull
+	p.State = "open"
+	p.Number = 3
+	p.Head.SHA = "aaaaaaaa1"
+	gh.pulls[fakeKey("o/fine", 3)] = p
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	var seen []int
+	if err := svc.watchPass(context.Background(), WatchOptions{}, newDispatchPool(0), func(e WatchEvent) error {
+		seen = append(seen, e.PR)
+		return nil
+	}); err != nil {
+		t.Fatalf("a daemon pass must survive one bad repository: %v", err)
+	}
+	if len(seen) != 1 || seen[0] != 3 {
+		t.Errorf("visited %v, want the healthy repository's PR", seen)
+	}
+
+	// A --once run is somebody's cron job, and reporting success after skipping a
+	// repository it could not read makes a broken scan look like a clean one.
+	err := svc.watchPass(context.Background(), WatchOptions{Once: true}, newDispatchPool(0), nil)
+	if err == nil || !strings.Contains(err.Error(), "o/gone") {
+		t.Errorf("err = %v, want a one-shot run to name the repository it could not check", err)
+	}
+}
+
+// A session that fixes files without pushing must not have that work deleted:
+// removing the worktree discards fixes that were made but not landed.
+func TestDispatchKeepsAWorktreeWithUnpushedWork(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey(repo, 8)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, repo, 8, sha, PhaseQueued, time.Now().UTC(), 0)
+
+	// A session that edits a file and stops there, which is the ordinary shape.
+	script := filepath.Join(t.TempDir(), "fix.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho fixed >> README.md\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pool := newDispatchPool(0)
+	ok, why := svc.startDispatch(context.Background(), WatchOptions{Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 3},
+		pool, NextReport{Repo: repo, PR: 8, Head: sha, Action: "fix"})
+	if !ok {
+		t.Fatalf("dispatch failed: %s", why)
+	}
+	pool.wait()
+	found := false
+	_ = filepath.WalkDir(filepath.Join(cfg.WorkspaceRoot, "work"), func(path string, d os.DirEntry, err error) error {
+		if err == nil && d.Name() == "README.md" {
+			if body, rerr := os.ReadFile(path); rerr == nil && strings.Contains(string(body), "fixed") {
+				found = true
+			}
+		}
+		return nil
+	})
+	if !found {
+		t.Error("the session's uncommitted fix was deleted with the worktree")
+	}
+}
+
+// With three dispatch slots and four PRs needing fixes, a fixed pass order gives
+// the same three the slots every time and tells the fourth "at dispatch
+// capacity" forever. One PR sat five hours that way while its findings grew from
+// 15 to 25, so every PR has to reach the front eventually.
+func TestWatchPassRotatesSoNoPRIsStarved(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/r": true}
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	for _, pr := range []int{1, 2, 3, 4} {
+		var p ghapi.Pull
+		p.State = "open"
+		p.Number = pr
+		p.Head.SHA = "aaaaaaaa1"
+		gh.pulls[fakeKey("o/r", pr)] = p
+	}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	// Record the order each pass visits PRs in. Only the ORDER matters here, so
+	// the pool takes every candidate.
+	seen := map[int]int{}
+	firstOf := []int{}
+	for pass := 0; pass < 4; pass++ {
+		var order []int
+		err := svc.watchPass(context.Background(), WatchOptions{}, newDispatchPool(4), func(e WatchEvent) error {
+			order = append(order, e.PR)
+			seen[e.PR]++
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("pass %d: %v", pass, err)
+		}
+		if len(order) == 0 {
+			t.Fatalf("pass %d visited nothing", pass)
+		}
+		firstOf = append(firstOf, order[0])
+	}
+
+	// Every PR was looked at every pass...
+	for pr, n := range seen {
+		if n != 4 {
+			t.Errorf("pr %d seen %d times, want every pass", pr, n)
+		}
+	}
+	// ...and the front of the queue moved, so the tail is not starved of slots.
+	distinct := map[int]bool{}
+	for _, pr := range firstOf {
+		distinct[pr] = true
+	}
+	if len(distinct) < 2 {
+		t.Errorf("the same PR led every pass (%v); the tail can never get a dispatch slot", firstOf)
+	}
+}
+
+// A session that commits its fixes but does not push them leaves a clean working
+// tree, and deleting that worktree destroys the only copy of the fix.
+func TestDispatchKeepsACommittedButUnpushedFix(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey(repo, 11)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, repo, 11, sha, PhaseQueued, time.Now().UTC(), 0)
+
+	script := filepath.Join(t.TempDir(), "fix.sh")
+	body := "#!/bin/sh\necho fixed >> README.md\n" +
+		"git -c user.email=t@example.invalid -c user.name=t commit -qam 'fix the finding'\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := newDispatchPool(0)
+	ok, why := svc.startDispatch(context.Background(), WatchOptions{Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 3},
+		pool, NextReport{Repo: repo, PR: 11, Head: sha, Action: "fix"})
+	if !ok {
+		t.Fatalf("dispatch failed: %s", why)
+	}
+	pool.wait()
+
+	found := false
+	_ = filepath.WalkDir(filepath.Join(cfg.WorkspaceRoot, "work"), func(path string, d os.DirEntry, err error) error {
+		if err == nil && d.Name() == "README.md" {
+			if content, rerr := os.ReadFile(path); rerr == nil && strings.Contains(string(content), "fixed") {
+				found = true
+			}
+		}
+		return nil
+	})
+	if !found {
+		t.Error("the session's committed but unpushed fix was deleted with the worktree")
+	}
+}
+
+// A command that never reached a process did not use up the per-head budget: a
+// mistyped fix agent would otherwise spend every attempt without a session ever
+// running, and correcting it would come too late for that head.
+func TestDispatchRefundsTheAttemptWhenTheCommandCannotStart(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey(repo, 6)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, repo, 6, sha, PhaseQueued, time.Now().UTC(), 0)
+
+	pool := newDispatchPool(0)
+	missing := filepath.Join(t.TempDir(), "no-such-agent")
+	if ok, why := svc.startDispatch(context.Background(),
+		WatchOptions{Dispatch: dispatchOn(), Command: []string{missing}, MaxAttempts: 3},
+		pool, NextReport{Repo: repo, PR: 6, Head: sha, Action: "fix"}); ok {
+		t.Fatal("a command that never started was reported as dispatched")
+	} else if !strings.Contains(why, "could not start") {
+		t.Fatalf("dispatch refusal = %q, want the startup failure", why)
+	}
+	pool.wait()
+
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(repo, 6)
+	if round == nil || round.Dispatch == nil {
+		t.Fatalf("round = %#v, want the claim released", round)
+	}
+	if round.Dispatch.Attempts != 0 {
+		t.Errorf("attempts = %d, want the budget intact for a session that never started", round.Dispatch.Attempts)
+	}
+}
+
+func TestWatchQueuesCheckoutWithoutBlockingThePass(t *testing.T) {
+	bin := t.TempDir()
+	git := filepath.Join(bin, "git")
+	if err := os.WriteFile(git, []byte("#!/bin/sh\nexec /bin/sleep 5\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("CRQ_REMOTE_BASE", t.TempDir())
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	report := NextReport{Repo: "owner/thing", PR: 16, Head: "aaaaaaaa1", Action: "fix"}
+	seedRound(t, store, cfg, report.Repo, report.PR, report.Head, PhaseQueued, time.Now().UTC(), 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	pool := newDispatchPool(0)
+	before := time.Now()
+	queued, why, result := svc.queueDispatchResult(ctx, WatchOptions{
+		Dispatch: dispatchOn(), Command: []string{"/bin/true"}, MaxAttempts: 3,
+	}, pool, report)
+	if elapsed := time.Since(before); elapsed > time.Second {
+		t.Fatalf("queueing waited %s for checkout; the serial pass would be blocked", elapsed)
+	}
+	if !queued {
+		t.Fatalf("dispatch was not queued: %s", why)
+	}
+
+	cancel()
+	pool.wait()
+	if outcome := <-result; outcome.ok || !strings.Contains(outcome.reason, "checkout failed") {
+		t.Fatalf("canceled queued dispatch = %+v, want checkout cancellation", outcome)
+	}
+}
+
+func TestDispatchHealthRecordsProcessStartBeforeItsExit(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	seedRound(t, store, cfg, repo, 15, sha, PhaseQueued, time.Now().UTC(), 0)
+	script := filepath.Join(t.TempDir(), "agent.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 17\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := newDispatchPool(0)
+	report := NextReport{Repo: repo, PR: 15, Head: sha, Action: "fix"}
+	if ok, why := svc.startDispatch(context.Background(), WatchOptions{
+		Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 3,
+	}, pool, report); !ok {
+		t.Fatalf("dispatch was not claimed: %s", why)
+	}
+	pool.wait()
+
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Drain == nil || st.Drain.LastSuccessAt == nil || st.Drain.ConsecutiveFailures != 0 {
+		t.Errorf("a process that started but exited nonzero was recorded as a start failure: %+v", st.Drain)
+	}
+}
+
+type dashboardCountingStore struct {
+	StateStore
+	syncs []State
+}
+
+func (s *dashboardCountingStore) SyncDashboard(_ context.Context, state State) error {
+	s.syncs = append(s.syncs, cloneState(state))
+	return nil
+}
+
+func TestDispatchHealthSyncsEveryVisibleAlertChange(t *testing.T) {
+	cfg := firingConfig()
+	cfg.DashboardIssue = 1
+	store := &dashboardCountingStore{StateStore: NewMemoryStore(cfg)}
+	svc := NewService(cfg, newFakeGitHub(), store, &recordingLogger{})
+	ctx := context.Background()
+
+	for i := 1; i <= DrainUnhealthyAfter+1; i++ {
+		svc.noteDispatchHealth(ctx, false, fmt.Sprintf("failure %d", i))
+	}
+	if got := len(store.syncs); got != 2 {
+		t.Fatalf("dashboard syncs = %d, want threshold and later unhealthy update", got)
+	}
+	last := store.syncs[len(store.syncs)-1].Drain
+	if last == nil || last.ConsecutiveFailures != DrainUnhealthyAfter+1 || last.LastError != "failure 4" {
+		t.Fatalf("last synced health = %+v", last)
+	}
+
+	svc.noteDispatchHealth(ctx, true, "")
+	if got := len(store.syncs); got != 3 {
+		t.Fatalf("dashboard syncs after recovery = %d, want alert removal synced", got)
+	}
+}
+
+// Findings on a head crq never queued — a review somebody triggered by hand, or
+// feedback that predates the drain — used to be undispatchable forever, because
+// `Next` returns fix before enqueueing and the claim had nowhere to live.
+func TestClaimDispatchAdoptsAHeadTheQueueNeverSaw(t *testing.T) {
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	report := NextReport{
+		Repo: "owner/thing", PR: 12, Head: "aaaaaaaa1", Action: "fix",
+		Findings: []dialect.Finding{{ID: "f1", Commit: "aaaaaaaa1"}},
+	}
+
+	if ok, why, _ := svc.claimDispatch(context.Background(), report, "tok", 3); !ok {
+		t.Fatalf("claim refused: %s — these findings can never be drained", why)
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(report.Repo, report.PR)
+	if round == nil || round.Head != report.Head {
+		t.Fatalf("round = %#v, want one tracking the observed head", round)
+	}
+	// Adopting the head must not buy a review: the findings are already in hand.
+	if round.FireEligible(time.Now().UTC()) {
+		t.Error("the adopted round is fire-eligible; dispatching would cost an account-metered review")
+	}
+	if !round.DispatchHeld(time.Now().UTC()) {
+		t.Errorf("dispatch = %#v, want the claim held", round.Dispatch)
+	}
+}
+
+// Feedback carried from an older commit is not evidence that anybody reviewed
+// the current head. Marking it reviewed to hold the claim left a completed round
+// for a head no reviewer had looked at: the review is deduped away and the
+// caller waits for one that can no longer be requested.
+func TestClaimDispatchDoesNotMarkACarriedHeadReviewed(t *testing.T) {
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	report := NextReport{
+		Repo: "owner/thing", PR: 12, Head: "bbbbbbbb2", Action: "fix",
+		Findings: []dialect.Finding{{ID: "f1", Commit: "aaaaaaaa1", ThreadID: "PRRT_1"}},
+	}
+
+	if ok, why, _ := svc.claimDispatch(context.Background(), report, "tok", 3); !ok {
+		t.Fatalf("claim refused: %s", why)
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(report.Repo, report.PR)
+	if round == nil || round.Phase == PhaseCompleted {
+		t.Fatalf("round = %#v, want one that still needs a review of this head", round)
+	}
+	if !round.DispatchHeld(time.Now().UTC()) {
+		t.Errorf("dispatch = %#v, want the claim held", round.Dispatch)
+	}
+}
+
+func TestClaimDispatchRechecksRepositoryDrainSwitch(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	report := NextReport{
+		Repo: "owner/thing", PR: 12, Head: "aaaaaaaa1", Action: "fix",
+		Findings: []dialect.Finding{{ID: "f1", Commit: "aaaaaaaa1"}},
+	}
+	if _, err := svc.SetDrainEnabled(ctx, report.Repo, false, "operator stop"); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, why, byDesign := svc.claimDispatch(ctx, report, "tok", 3)
+	if ok {
+		t.Fatal("claim bypassed a repository drain switch that was turned off after the pass snapshot")
+	}
+	if !byDesign {
+		t.Errorf("drain refusal %q counted as a dispatcher failure", why)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(report.Repo, report.PR); round != nil && round.Dispatch != nil {
+		t.Errorf("refused claim mutated the round: %+v", round)
+	}
+}
+
+// A head that moved on while its previous round still stood: `Next` reports fix
+// without enqueueing, so nothing else supersedes the stale round. Refusing the
+// claim over the mismatch left the new head's findings undispatchable on every
+// pass — and counted each refusal as the dispatcher failing.
+func TestClaimDispatchSupersedesAStaleRound(t *testing.T) {
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	seedRound(t, store, cfg, "owner/thing", 12, "aaaaaaaa1", PhaseCompleted, time.Now().UTC(), 0)
+	report := NextReport{
+		Repo: "owner/thing", PR: 12, Head: "bbbbbbbb2", Action: "fix",
+		Findings: []dialect.Finding{{ID: "f1", Commit: "bbbbbbbb2"}},
+	}
+
+	ok, why, _ := svc.claimDispatch(context.Background(), report, "tok", 3)
+	if !ok {
+		t.Fatalf("claim refused: %s — the new head's findings can never be drained", why)
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(report.Repo, report.PR)
+	if round == nil || round.Head != report.Head {
+		t.Fatalf("round = %#v, want the stale one superseded by the observed head", round)
+	}
+
+	// A session already running for an earlier head keeps the PR to itself: its
+	// own push is what moved the head, and it is still landing that work.
+	live := NextReport{Repo: report.Repo, PR: report.PR, Head: "cccccccc3", Action: "fix"}
+	if ok, why, byDesign := svc.claimDispatch(context.Background(), live, "tok2", 3); ok {
+		t.Error("a second session was started against a PR somebody is already fixing")
+	} else if !byDesign {
+		t.Errorf("reason %q counted as a dispatcher failure", why)
+	}
+}
+
+// A session's own push moves the head, and the next pass enqueues it — which
+// supersedes the round the session is holding and archives its claim. Reading
+// only the current round then answers "nobody is fixing this" about a pull
+// request somebody is still resolving threads on, and a second session starts.
+func TestClaimDispatchSeesAClaimItsOwnPushArchived(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	repo, pr := "owner/thing", 12
+	first := NextReport{
+		Repo: repo, PR: pr, Head: "aaaaaaaa1", Action: "fix",
+		Findings: []dialect.Finding{{ID: "f1", Commit: "aaaaaaaa1"}},
+	}
+	if ok, why, _ := svc.claimDispatch(ctx, first, "tok1", 3); !ok {
+		t.Fatalf("claim refused: %s", why)
+	}
+
+	// That session pushes; the watcher enqueues the new head, which supersedes.
+	if _, err := store.Update(ctx, func(st *State) error {
+		_, err := st.Supersede(repo, pr, "bbbbbbbb2", time.Now().UTC())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	second := NextReport{Repo: repo, PR: pr, Head: "bbbbbbbb2", Action: "fix"}
+	ok, why, byDesign := svc.claimDispatch(ctx, second, "tok2", 3)
+	if ok {
+		t.Fatal("a second session was started against the PR the first is still finishing")
+	}
+	if !byDesign {
+		t.Errorf("reason %q counted as a dispatcher failure; another session holding the PR is the design", why)
+	}
+
+	// And when that session finishes, its archived claim must stop holding the
+	// next one out for the rest of the TTL.
+	svc.releaseDispatch(ctx, first, "tok1", true)
+	if ok, why, _ := svc.claimDispatch(ctx, second, "tok3", 3); !ok {
+		t.Errorf("claim refused after the session released it: %s", why)
+	}
+}
+
+// The attempt bound is crq obeying its own configuration, not fix sessions
+// failing to start. Counted as drain health, a correctly bounded head raised the
+// "fix sessions are not starting" alert after three passes — and every pass
+// after that, forever.
+func TestExhaustedAttemptsAreNotADispatcherFailure(t *testing.T) {
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	report := NextReport{
+		Repo: "owner/thing", PR: 12, Head: "aaaaaaaa1", Action: "fix",
+		Findings: []dialect.Finding{{ID: "f1", Commit: "aaaaaaaa1"}},
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		ok, why, _ := svc.claimDispatch(context.Background(), report, fmt.Sprintf("tok%d", attempt), 2)
+		if !ok {
+			t.Fatalf("attempt %d refused: %s", attempt, why)
+		}
+		svc.releaseDispatch(context.Background(), report, fmt.Sprintf("tok%d", attempt), true)
+	}
+	ok, why, byDesign := svc.claimDispatch(context.Background(), report, "tok3", 2)
+	if ok {
+		t.Fatal("the attempt bound let a third dispatch through")
+	}
+	if !byDesign {
+		t.Errorf("reason %q counted as a dispatcher failure; the bound is the point", why)
+	}
+}
+
+// The prune runs before the new log is created, so it has to leave room for it —
+// otherwise the steady state is one file per PR above the bound.
+func TestSessionLogPruneLeavesRoomForTheNewLog(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 8; i++ {
+		// Heads deliberately sort opposite to timestamps: pruning the whole
+		// filename would retain the oldest four.
+		name := fmt.Sprintf("7-%09d-202601%02dT000000.log", 999999999-i, i+1)
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pruneSessionLogs(dir, 7)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 4 {
+		t.Errorf("kept %d logs, want 4 so the one about to be written makes 5", len(entries))
+	}
+	// The ones kept are the newest.
+	for _, e := range entries {
+		if stamp := sessionLogTimestamp(e.Name()); stamp < "20260105T000000" {
+			t.Errorf("%s was kept over a newer log", e.Name())
+		}
+	}
+}
+
+// A fork PR's branch lives in the contributor's repository, so the session
+// pushes there — and no branch of `origin` (the base repository this worktree
+// came from) will ever contain that commit. Read as unpushed work, every
+// successful fork fix kept its worktree forever. The base publishes the pushed
+// head as refs/pull/<n>/head, which is the one ref that sees it from here.
+func TestSessionWorkConfirmsAForkPushThroughThePullRef(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := workspace.Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	co, err := ws.Checkout(ctx, repo, 42, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := co.Git(ctx, "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+		"commit", "-q", "--allow-empty", "-m", "fix the finding"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Committed and not pushed anywhere: the worktree holds the only copy.
+	if kept, why := sessionWork(ctx, co, sha); !kept {
+		t.Errorf("kept=%v (%s), want the only copy of the fix kept", kept, why)
+	}
+
+	// Reaching any other branch in the base repository does not mean the pull
+	// request moved. The checkout is still the only safe recovery point.
+	if _, err := co.Git(ctx, "push", "origin", "HEAD:refs/heads/wrong-branch"); err != nil {
+		t.Fatal(err)
+	}
+	if kept, why := sessionWork(ctx, co, sha); !kept {
+		t.Errorf("kept=%v (%s), want a commit absent from the PR kept", kept, why)
+	}
+
+	// The contributor's branch is not in the base repository, but the PR ref is:
+	// this is what GitHub publishes once the fork branch moves.
+	if _, err := co.Git(ctx, "push", "origin", "HEAD:refs/pull/42/head"); err != nil {
+		t.Fatal(err)
+	}
+	if kept, why := sessionWork(ctx, co, sha); kept {
+		t.Errorf("kept=%v (%s), want a landed fork push recognised", kept, why)
+	}
+}
+
+// A fix session checks the head out and runs an agent over it with approvals
+// bypassed, holding a token that can write to the repository. On a fork PR that
+// code belongs to a stranger, so it is not run unless the operator says so.
+func TestDispatchSkipsAForkUnlessAllowed(t *testing.T) {
+	cfg := firingConfig()
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	var own, fork ghapi.Pull
+	own.Head.Repo.FullName = "Owner/Thing" // case differs; the repository does not
+	fork.Head.Repo.FullName = "contributor/thing"
+
+	if !svc.mayDispatch("owner/thing", own) {
+		t.Error("a branch in the repository itself must be dispatchable")
+	}
+	if svc.mayDispatch("owner/thing", fork) {
+		t.Error("a fork was dispatched without CRQ_DISPATCH_FORKS")
+	}
+	// A deleted fork answers with no repository at all. Reading that as "ours"
+	// would grant exactly the untrusted case the permission it lacks.
+	if svc.mayDispatch("owner/thing", ghapi.Pull{}) {
+		t.Error("an unreadable head repository was treated as our own")
+	}
+
+	allowed := cfg
+	allowed.DispatchForks = true
+	if !NewService(allowed, newFakeGitHub(), NewMemoryStore(allowed), nil).mayDispatch("owner/thing", fork) {
+		t.Error("CRQ_DISPATCH_FORKS did not allow a fork")
+	}
+}
+
+// The watcher must not write into the caller's slices.
+//
+// `crq watch -- <cmd>` splits argv at "--": the flag half is args[:i] and the
+// command half is args[i+1:], so the flag half keeps CAPACITY reaching into the
+// command. fs.Args() is a sub-slice of it, and filling an empty repo list with
+// append then overwrote the fix command in place — every dispatch tried to exec
+// a repository slug ("fork/exec kristofferr/coderabbit-queue: no such file or
+// directory") and no pull request in the fleet was fixed.
+func TestWatchDoesNotOverwriteTheCommandItWasGiven(t *testing.T) {
+	argv := []string{"--dispatch", "--", "/bin/true", "exec"}
+	flagArgs, command := argv[:1], argv[2:]
+	repos := flagArgs[1:] // what fs.Args() hands back: empty, but aliasing command
+
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/one": true, "owner/two": true, "owner/three": true}
+	gh := newFakeGitHub()
+	gh.listPullErrs = map[string]error{
+		"owner/one": errors.New("unreadable"), "owner/two": errors.New("unreadable"),
+		"owner/three": errors.New("unreadable"),
+	}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	_ = svc.watchPass(context.Background(), WatchOptions{
+		Repos: repos, Command: command, Dispatch: dispatchOn(),
+	}, newDispatchPool(0), nil)
+
+	if command[0] != "/bin/true" || command[1] != "exec" {
+		t.Fatalf("the fix command was overwritten: %q", command)
+	}
+}
+
+// dispatchOn is the explicit "yes" a test needs now that WatchOptions.Dispatch
+// distinguishes unset (default on) from an answer.
+func dispatchOn() *bool {
+	on := true
+	return &on
+}
+
+// CRQ_EXCLUDE means "crq does not go here", to every path that acts on a
+// repository. autoReviewPass has always honoured it; the watcher did not, so
+// the one setting that reads like a fleet-wide opt-out covered only half of
+// what crq does — reviews stopped and the watcher carried on.
+func TestWatchHonoursTheExcludedRepositories(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/kept": true, "owner/gone": true}
+	cfg.ExcludeRepos = map[string]bool{"owner/gone": true}
+	gh := newFakeGitHub()
+	for _, repo := range []string{"owner/kept", "owner/gone"} {
+		var pull ghapi.Pull
+		pull.State, pull.Number, pull.Head.SHA = "open", 1, "aaaaaaaa1"
+		gh.pulls[fakeKey(repo, 1)] = pull
+	}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	var seen []string
+	if err := svc.watchPass(context.Background(), WatchOptions{}, newDispatchPool(0),
+		func(e WatchEvent) error { seen = append(seen, e.Repo); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	for _, repo := range seen {
+		if NormalizeRepo(repo) == "owner/gone" {
+			t.Errorf("an excluded repository was watched: %v", seen)
+		}
+	}
+	if len(seen) == 0 {
+		t.Error("excluding one repository stopped the rest being watched")
+	}
+}

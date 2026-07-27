@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -70,6 +71,32 @@ func TestFeedbackBoundsIssueCommentsToHead(t *testing.T) {
 	}
 	if len(rep.Findings) != 1 || !strings.Contains(rep.Findings[0].Body, "Current finding") {
 		t.Fatalf("expected only the post-head issue comment as a finding, got %#v", rep.Findings)
+	}
+}
+
+func TestFeedbackReturnsObservedAccountBlockPersistenceFailure(t *testing.T) {
+	cfg := firingConfig()
+	now := time.Now().UTC()
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("o/repo", 3)] = pull
+	notice := ghapi.IssueComment{
+		ID: 17, Body: "You are rate limited by coderabbit.ai. Reviews available in 3 minutes.",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	notice.User.Login = cfg.Bot
+	gh.comments[fakeKey("o/repo", 3)] = []ghapi.IssueComment{notice}
+
+	writeErr := errors.New("transient state write failure")
+	inner := NewMemoryStore(cfg)
+	store := &failNthUpdateStore{StateStore: inner, n: 1, err: writeErr}
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+
+	if _, err := svc.Feedback(context.Background(), "o/repo", 3); !errors.Is(err, writeErr) {
+		t.Fatalf("Feedback error = %v, want the account-block persistence failure", err)
 	}
 }
 

@@ -599,8 +599,8 @@ func TestReplay448DaySequenceFiresThreeTimes(t *testing.T) {
 	f.clk.advance(time.Minute) // base+1m
 	f.pump()
 	if r := f.round(repo, pr); r == nil || r.Phase != PhaseAwaitingRetry ||
-		r.RetryAt == nil || !r.RetryAt.Equal(base.Add(16*time.Minute)) {
-		t.Fatalf("an unparseable rate limit must park with the 15m fallback (base+16m), got %#v", r)
+		r.RetryAt == nil || !r.RetryAt.Equal(base.Add(15*time.Minute)) {
+		t.Fatalf("an unparseable rate limit must park for 15m from the notice (base+15m), got %#v", r)
 	}
 	if f.reviewsPosted(repo, pr) != 1 {
 		t.Fatalf("still one command after the first rate limit, got %d", f.reviewsPosted(repo, pr))

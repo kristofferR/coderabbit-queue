@@ -182,6 +182,30 @@ thread left open keeps its finding actionable and `crq next` would repeat `fix` 
 disagreement is not lost: if the bot contests the decline, crq re-surfaces that reply as its own
 finding. Pass `--keep-open` to leave it unresolved deliberately.
 
+## Unattended Drain
+
+`crq watch` starts a fix session for every PR whose action is `fix` — that is the default — in a worktree crq
+checked out at that head. Sessions run concurrently and off the decision loop, with **no cap by default** — fixing findings
+spends no account quota, so it does not belong in a queue. `CRQ_DISPATCH_CONCURRENCY` sets one if the
+machine cannot take the load. The decisions stay serial, which is what keeps the metered review in
+one queue.
+
+One command sets it up — `crq drain install` writes the prompt, a wrapper and this platform's
+service (systemd user unit, or a launchd agent on macOS), makes it survive a logout, and starts it;
+`--dry-run` prints the paths and the exact invocation first. `--agent claude|codex` picks the fix
+agent, and `--agent-args` carries its model and reasoning settings — crq knows how to call each
+agent and nothing about which model it should use. The service inherits none of your shell, so the unit names the
+config file the install read and the credential must be one the service can resolve itself
+(`gh auth login`, or a token in that file). Two rules the prompt earned the hard
+way — a session must stay on a detached HEAD and push by ref (`git push <head repo> HEAD:refs/heads/…`,
+which for a fork PR is not `origin`), because the worktrees share one mirror and a branch checked out
+in one of them makes git refuse to fetch for every PR. A session resolves or declines its current
+threads before calling `crq next --wait`; only that guarded wait can issue the `push` action once
+every required reviewer has answered.
+
+Each session's output is written to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log`
+(last five per PR). Three dispatch attempts in a row that start nothing put `dispatch failing` on the dashboard
+and the status line.
 ## Holding a PR
 
 To stop crq reviewing a PR — a draft you are still shaping, a branch waiting on a decision:

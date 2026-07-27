@@ -130,6 +130,21 @@ func (w Workspace) mirrorPath(repo string) (string, error) {
 	return filepath.Join(root, "mirrors", owner, name+".git"), nil
 }
 
+// LogDir is where a caller may keep per-repository logs inside the workspace.
+// The layout of the cache root belongs to this package, so a caller asks for
+// the directory rather than joining paths into somebody else's tree.
+func (w Workspace) LogDir(repo string) (string, error) {
+	root, err := w.root()
+	if err != nil {
+		return "", err
+	}
+	owner, name, ok := splitRepo(repo)
+	if !ok {
+		return "", fmt.Errorf("repo must be owner/name, got %q", repo)
+	}
+	return filepath.Join(root, "logs", owner, name), nil
+}
+
 // splitRepo splits owner/name, rejecting anything that could traverse a path.
 func splitRepo(repo string) (owner, name string, ok bool) {
 	owner, name, ok = strings.Cut(normalizeRepo(repo), "/")

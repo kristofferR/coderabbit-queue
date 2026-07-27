@@ -307,6 +307,34 @@ func TestRemoteMatchesRepo(t *testing.T) {
 	}
 }
 
+func TestCurrentDispatchAllowsDetachedLocalWork(t *testing.T) {
+	t.Setenv("CRQ_DISPATCH_REPO", "owner/repo")
+	t.Setenv("CRQ_DISPATCH_HEAD", "aaaaaaaa1")
+
+	if !isCurrentDispatch([]string{"owner/repo"}, "aaaaaaaa111111111") {
+		t.Fatal("matching dispatch was not recognized")
+	}
+	if isCurrentDispatch([]string{"owner/other"}, "aaaaaaaa111111111") {
+		t.Fatal("dispatch for another repository was recognized")
+	}
+	if isCurrentDispatch([]string{"owner/repo"}, "bbbbbbbb22222222") {
+		t.Fatal("stale dispatch head was recognized")
+	}
+
+	detached := func(args ...string) (string, bool) {
+		if strings.Join(args, " ") == "rev-parse --abbrev-ref HEAD" {
+			return "HEAD", true
+		}
+		return "", false
+	}
+	if got := branchMismatch(detached, "feature", true); got != "" {
+		t.Errorf("matching detached dispatch = %q, want no mismatch", got)
+	}
+	if got := branchMismatch(detached, "feature", false); !strings.Contains(got, "detached") {
+		t.Errorf("ordinary detached checkout = %q, want a mismatch", got)
+	}
+}
+
 // The queue exists to serialize ONE thing: CodeRabbit's account-wide review
 // limit. A round that will never spend that quota is not a queue citizen, so
 // neither an account block nor another PR holding the fire slot may delay it.
@@ -608,6 +636,40 @@ func TestPartialDismissalWillNotSupersedeIntoAQueuedRound(t *testing.T) {
 	}
 	if round := st.Round(repo, pr); round == nil || round.Head != old {
 		t.Fatalf("the stale round must be left as it was, got %#v", round)
+	}
+}
+
+func TestPartialDismissalAllowedWhileDispatchHoldsTheRound(t *testing.T) {
+	f := newReplayFixture(t, time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC))
+	repo, pr, head := "owner/repo", 79, "aaaaaaaa1"
+
+	var seq int64
+	if _, err := f.store.Update(f.ctx, func(st *State) error {
+		r, err := st.NewRound(repo, pr, head, f.clk.now())
+		if err != nil {
+			return err
+		}
+		if ok, why := r.ClaimDispatch("host", "token", f.clk.now(), 3); !ok {
+			return fmt.Errorf("claim dispatch: %s", why)
+		}
+		seq = r.Seq
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	dismissed, _, err := f.svc.recordDismissal(
+		f.ctx, repo, pr, head, []string{"threadless"}, "handled locally", false, seq,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dismissed) != 1 {
+		t.Fatalf("dismissed = %v, want the threadless finding recorded", dismissed)
+	}
+	if round := f.round(repo, pr); round == nil || !round.DispatchHeld(f.clk.now()) {
+		t.Fatalf("dismissal disturbed the dispatch hold: %+v", round)
 	}
 }
 

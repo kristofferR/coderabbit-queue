@@ -56,6 +56,10 @@ type Service struct {
 	// lastParkedSweep rotates sweepParkedClosed's candidate across pumps (see
 	// there); in-memory only, single-writer (the pump caller).
 	lastParkedSweep string
+	// watchOffset rotates where a watch pass starts, so a PR at the tail is not
+	// starved of dispatch slots forever by the ones ahead of it; in-memory only,
+	// single-writer (the watch caller).
+	watchOffset int
 	// scanOffset rotates the bounded quota-free rescue scan's window so a round
 	// past the first few is not starved forever; in-memory only, same writer.
 	scanOffset int
@@ -431,6 +435,15 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if err != nil {
 		return PumpResult{}, err
 	}
+	// Record a rate-limit notice before deciding, whichever round it answered.
+	// A session's push supersedes the round that asked, and the reply used to be
+	// archived unread — so crq believed the account was free and posted the
+	// command again minutes after being told to wait.
+	if updated, err := s.recordObservedBlock(ctx, obs, st, now); err != nil {
+		return PumpResult{}, err
+	} else if updated != nil {
+		st = *updated
+	}
 	global := s.global(st, now)
 	decision := engine.DecideFire(global, *next, obs.eng, now, cfg.policy())
 	result, err := s.applyFire(ctx, cfg, *next, obs.eng, decision, now)
@@ -550,6 +563,65 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 	return res, true, nil
 }
 
+// recordObservedBlock folds any rate-limit notice in this observation into the
+// shared account quota, independent of which round it answered.
+//
+// Progress only derives the window for a round that still exists and fired
+// before the notice. Neither survives a fix session's push: the head moves, the
+// round is superseded, and the reply it was waiting for is archived unread. The
+// allowance is not a property of a round, so any current notice from the primary
+// counts here. AcceptAccountBlock still decides whether it replaces the standing
+// window, and never shortens it.
+func (s *Service) recordObservedBlock(ctx context.Context, obs observation, st State, now time.Time) (*State, error) {
+	blk := engine.ObservedAccountBlock(obs.eng, s.cfg.policy(), st.Account, now)
+	if blk == nil || s.cfg.DryRun || !observedAccountBlockChanges(st.Account, blk) {
+		return nil, nil
+	}
+	updated, err := s.store.Update(ctx, func(w *State) error {
+		if !observedAccountBlockChanges(w.Account, blk) {
+			return ErrNoChange
+		}
+		applyAccountBlock(w, blk, now)
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrNoChange) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	// Like every other writer of this window: the dashboard is where an operator
+	// reads whether the account is available, and the decision that follows this
+	// is usually FireNo — which writes nothing further, leaving the issue claiming
+	// a free account for the whole block while state and `crq status` say
+	// otherwise.
+	s.sync(ctx, updated)
+	if s.log != nil {
+		s.log.Printf("account blocked until %s (observed, not tied to a round)", blk.Until.UTC().Format(time.RFC3339))
+	}
+	return &updated, nil
+}
+
+// observedAccountBlockChanges accepts a longer window, or a distinct notice
+// whose shorter window the engine has already clamped to the standing block.
+// The latter still has to advance the notice watermark so it cannot become a
+// fresh fallback block when the standing window expires.
+func observedAccountBlockChanges(q AccountQuota, blk *engine.AccountBlock) bool {
+	if engine.AcceptAccountBlock(q.BlockedUntil, blk.Until) {
+		return true
+	}
+	if q.BlockedUntil == nil || !blk.Until.Equal(*q.BlockedUntil) || blk.CommentID == 0 {
+		return false
+	}
+	if q.RLCommentUpdated != nil && !blk.CommentUpdated.After(*q.RLCommentUpdated) {
+		return false
+	}
+	if blk.CommentID != q.RLCommentID || q.RLCommentUpdated == nil {
+		return true
+	}
+	return true
+}
+
 // recordDismissal is the effects executor for `crq dismiss`: the CAS write that
 // records which findings a round has accounted for. Dismiss decides WHETHER a
 // dismissal is legitimate; this performs it, so the write surface stays in one
@@ -579,13 +651,17 @@ func (s *Service) recordDismissal(ctx context.Context, repo string, pr int, head
 			// underneath this call, so the decision is about a commit nobody is
 			// looking at any more.
 			return fmt.Errorf("%s#%d moved to %s while dismissing; re-read the findings", repo, pr, round.Head)
-		case !allowCreate && (round == nil || round.Head != head || engine.CanStillFire(*round)):
+		case !allowCreate && (round == nil || round.Head != head ||
+			(engine.CanStillFire(*round) && !round.DispatchHeld(s.clock()))):
 			// The guard is about whether a FIRE-ELIGIBLE round would exist with
 			// other findings still open, not about whether a round object
 			// exists. A queued round is just as dangerous as a new one: Pump can
 			// hand it to DecideFire, which sees no findings and cannot enforce
-			// drain-first. So is a round on the previous head, because the
-			// supersede below would replace it with a fresh queued one.
+			// drain-first. A live dispatch claim is the exception: it excludes
+			// this exact round from Pump until the session pushes or releases
+			// it, so a session may dismiss one finding at a time. So is a round
+			// on the previous head, because the supersede below would replace it
+			// with a fresh queued one.
 			return fmt.Errorf("%s#%d has other unaddressed findings at %s: dismiss or resolve them in the same pass, so no round is queued while work is open", repo, pr, head)
 		case round == nil:
 			var err error
@@ -830,7 +906,8 @@ func applyAccountBlock(st *State, blk *engine.AccountBlock, now time.Time) {
 	st.Account.Remaining = &zero
 	st.Account.Source = "warning"
 	st.Account.CheckedAt = &now
-	if blk.CommentID != 0 {
+	if blk.CommentID != 0 &&
+		(st.Account.RLCommentUpdated == nil || blk.CommentUpdated.After(*st.Account.RLCommentUpdated)) {
 		st.Account.RLCommentID = blk.CommentID
 		u := blk.CommentUpdated.UTC()
 		st.Account.RLCommentUpdated = &u
@@ -1821,15 +1898,39 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 			st.Account.RLCommentID = rlID
 			st.Account.RLCommentUpdated = rlUpdated
 		}
-		// An inconclusive probe (still awaiting a calibration reply) carries no
-		// BlockedUntil, but it is not evidence the account is clear. Preserve a
-		// still-active block until a conclusive reply lands — otherwise the block
-		// vanishes after CalibrationTTL and Pump fires queued reviews inside the
-		// original window, recreating the duplicate attempts this whole system
-		// exists to prevent.
-		if quota.CalibAskedAt != nil && prevBlock != nil && prevBlock.After(now) {
+		// A calibration reading must not SHORTEN a standing block, which is the
+		// rule every other writer follows (engine.AcceptAccountBlock) and the one
+		// place that bypassed it.
+		//
+		// Two ways a probe reports no block: it is still awaiting a reply, or its
+		// reply carried no parseable reset. Neither is evidence the account is
+		// clear, and both used to erase a window a PR's own rate-limit notice had
+		// stated — after which Pump fires inside that window, which is the
+		// duplicate-review behaviour this whole system exists to prevent.
+		//
+		// A LONGER window from the probe still wins: that is new information.
+		//
+		// So does a reply that states reviews are left. That is not "no block
+		// observed", it is the account reporting itself available — restoring the
+		// old window over it would leave state saying both at once and hold every
+		// metered round until a window the bot has just contradicted expires.
+		reviewsLeft := st.Account.Remaining != nil && *st.Account.Remaining > 0 &&
+			st.Account.BlockedUntil == nil && st.Account.CalibAskedAt == nil
+		if reviewsLeft {
+			// The reading ends the old window, but the notice watermark must
+			// survive. Otherwise an unchanged, windowless historical notice looks
+			// new on the next observation and recreates a fallback block forever.
+			// Reuse is still visible because CodeRabbit advances UpdatedAt when it
+			// edits the comment for a later fire.
+			st.Account.RLCommentID = rlID
+			st.Account.RLCommentUpdated = rlUpdated
+		}
+		if !reviewsLeft && prevBlock != nil && prevBlock.After(now) &&
+			(st.Account.BlockedUntil == nil || prevBlock.After(*st.Account.BlockedUntil)) {
 			st.Account.BlockedUntil = prevBlock
-			st.Account.Remaining = prevRemaining
+			if st.Account.Remaining == nil {
+				st.Account.Remaining = prevRemaining
+			}
 		}
 		if st.Warn == warnRateLimited && (st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.After(now)) {
 			st.Warn = ""

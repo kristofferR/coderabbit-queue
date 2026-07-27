@@ -65,6 +65,11 @@ func TestNextAction(t *testing.T) {
 		return completionOf(map[string]bool{nextPrimary: cr, "chatgpt-codex-connector[bot]": codex})
 	}
 	deferredUntil := t0.Add(30 * time.Minute)
+	coPendingRound := state.Round{
+		Phase:    state.PhaseCompleted,
+		Dispatch: &state.DispatchClaim{Heartbeat: t0},
+	}
+	coPendingRound.SetCoCommand(nextCoBot, 42, t0.Add(-time.Minute))
 
 	cases := []struct {
 		name    string
@@ -88,6 +93,49 @@ func TestNextAction(t *testing.T) {
 			in: NextInput{
 				Obs: openObs(), Completion: both(true, true),
 				Findings: []dialect.Finding{finding(nextHead)}, LocalWork: true,
+			},
+			want: ActionFix,
+		},
+		{
+			name: "live fix session holds findings while a reviewer is reading",
+			in: NextInput{
+				Round: state.Round{
+					Phase:    state.PhaseReviewing,
+					Dispatch: &state.DispatchClaim{Heartbeat: t0},
+				},
+				Obs: openObs(), Completion: both(false, true), LocalWork: true,
+				Findings: []dialect.Finding{finding(nextHead)}, MinDelay: time.Minute,
+				Primary: nextPrimary,
+			},
+			want: ActionHold, wantAt: t0.Add(time.Minute),
+			pending: []string{nextPrimary},
+		},
+		{
+			name: "live fix session holds findings while a co-reviewer is reading",
+			in: NextInput{
+				Round: coPendingRound,
+				Obs:   openObs(),
+				Completion: completionOf(map[string]bool{
+					nextPrimary: true, "chatgpt-codex-connector[bot]": true, nextCoBot: false,
+				}),
+				LocalWork: true, Findings: []dialect.Finding{finding(nextHead)},
+				Deferred: true, DeferredUntil: &deferredUntil,
+				MinDelay: time.Minute, Primary: nextPrimary,
+			},
+			want: ActionHold, wantAt: t0.Add(time.Minute),
+			pending: []string{nextCoBot},
+		},
+		{
+			name: "live fix session may replace a queued review that nobody is reading",
+			in: NextInput{
+				Round: state.Round{
+					Phase:             state.PhaseAwaitingRetry,
+					DispatchHoldPhase: state.PhaseQueued,
+					Dispatch:          &state.DispatchClaim{Heartbeat: t0},
+				},
+				Obs: openObs(), Completion: both(false, true), LocalWork: true,
+				Findings: []dialect.Finding{finding(nextHead)}, MinDelay: time.Minute,
+				Primary: nextPrimary,
 			},
 			want: ActionFix,
 		},
@@ -444,5 +492,38 @@ func TestNextActionHoldsConvergenceThroughTheSettleWindow(t *testing.T) {
 		SettleUntil: &passed,
 	}, t0); got.Kind != ActionDone {
 		t.Fatalf("NextAction = %q (%s), want %q once settled", got.Kind, got.Reason, ActionDone)
+	}
+}
+
+// A session that is holding a round must not be told to hold for a reviewer.
+//
+// ClaimDispatch mirrors a queued round into awaiting_retry so older binaries
+// honour the exclusion, and reviewRequested read that as "a review was
+// requested for this head". The session was then told `hold`, waited for a
+// review nobody could ask for — the claim makes the round ineligible to fire —
+// and its own heartbeat extended the window it was waiting on. It ended by
+// exiting with a commit it never pushed.
+func TestADispatchHoldIsNotAReviewRequest(t *testing.T) {
+	now := time.Date(2026, 7, 27, 11, 0, 0, 0, time.UTC)
+	retry := now.Add(10 * time.Minute)
+	for _, heldPhase := range []state.Phase{state.PhaseQueued, state.PhaseAwaitingRetry} {
+		round := state.Round{
+			Repo: "o/r", PR: 1, Head: "aaaaaaaa1",
+			Phase:             state.PhaseAwaitingRetry,
+			DispatchHoldPhase: heldPhase,
+			RetryAt:           &retry,
+			EnqueuedAt:        now.Add(-time.Minute),
+		}
+
+		got := NextAction(NextInput{
+			Round:      round,
+			Obs:        Observation{Head: "aaaaaaaa1", Open: true},
+			Completion: CompletionStatus{ReviewedBy: map[string]bool{"coderabbitai[bot]": false}},
+			Primary:    "coderabbitai[bot]",
+			LocalWork:  true,
+		}, now)
+		if got.Kind != ActionPush {
+			t.Errorf("held phase %s: action = %s (%s), want push: no review is active for this head", heldPhase, got.Kind, got.Reason)
+		}
 	}
 }

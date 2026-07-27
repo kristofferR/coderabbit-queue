@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"os"
 	"strings"
 	"time"
 
@@ -211,9 +212,12 @@ func (s *Service) advance(ctx context.Context, repo string, pr int, feedback Fee
 }
 
 // nextFromState derives the instruction from what is already recorded and
-// observable. It writes NOTHING — no enqueue, no pump, no dashboard sync — which
-// is what lets `crq wait` re-evaluate as often as it likes without spending the
-// account's write budget or firing reviews behind the caller's back.
+// observable. It enqueues nothing, pumps nothing and fires nothing, which is what
+// lets `crq wait` re-evaluate as often as it likes without spending the account's
+// write budget or firing reviews behind the caller's back.
+//
+// Its one write is Feedback recording a rate-limit notice it observed: that costs
+// a write per NOTICE, not per poll, and it can only prevent a review.
 //
 // ONE observation drives the whole decision. Feedback already reads the pull, so
 // head, open, per-bot evidence and findings all describe the same instant.
@@ -324,7 +328,27 @@ func (s *Service) checkLocalWork(ctx context.Context, repos []string, head, head
 	if s.localWorkFn != nil {
 		return s.localWorkFn(ctx, head)
 	}
-	return localWork(ctx, s.cfg.WorkDir, repos, head, headRef)
+	return localWork(ctx, s.cfg.WorkDir, repos, head, headRef, isCurrentDispatch(repos, head))
+}
+
+// isCurrentDispatch recognizes the detached checkout made by `crq watch
+// --dispatch`. Its prompt pushes HEAD to an explicit ref, so unlike an ordinary
+// detached checkout it does not need a local branch. Both values must still
+// describe this observation: stale dispatch variables must not make another
+// checkout look safe to push.
+func isCurrentDispatch(repos []string, head string) bool {
+	dispatchRepo := NormalizeRepo(os.Getenv("CRQ_DISPATCH_REPO"))
+	dispatchHead := strings.TrimSpace(os.Getenv("CRQ_DISPATCH_HEAD"))
+	if dispatchRepo == "" || dispatchHead == "" || head == "" ||
+		!strings.HasPrefix(head, dispatchHead) {
+		return false
+	}
+	for _, repo := range repos {
+		if NormalizeRepo(repo) == dispatchRepo {
+			return true
+		}
+	}
+	return false
 }
 
 // localWork reports whether the working copy holds changes the PR head does not
@@ -346,7 +370,7 @@ func (s *Service) checkLocalWork(ctx context.Context, repos []string, head, head
 // call, while a spurious `hold` would stall the loop.
 // dir is the checkout to inspect; "" means the process's own directory,
 // which is what an agent running crq from its working copy means.
-func localWork(ctx context.Context, dir string, repos []string, head, headRef string) (bool, string) {
+func localWork(ctx context.Context, dir string, repos []string, head, headRef string, detachedDispatch bool) (bool, string) {
 	git := func(args ...string) (string, bool) {
 		out, err := gitDir(ctx, dir, args...)
 		if err != nil {
@@ -378,10 +402,10 @@ func localWork(ctx context.Context, dir string, repos []string, head, headRef st
 
 	// Sitting exactly on the PR head: only an uncommitted change is new work —
 	// but the caller still has to be able to push it. A detached checkout at the
-	// PR SHA has no branch, so the prescribed push fails and the next call, now
-	// ahead of the head, reports no local work and can converge over the fix.
+	// PR SHA is accepted only for a matching dispatch, whose prompt pushes HEAD
+	// to the PR's explicit ref.
 	if head == "" || strings.HasPrefix(local, head) {
-		if why := branchMismatch(git, headRef); why != "" {
+		if why := branchMismatch(git, headRef, detachedDispatch); why != "" {
 			return false, why
 		}
 		if status, ok := git("status", "--porcelain"); ok && status != "" {
@@ -402,19 +426,23 @@ func localWork(ctx context.Context, dir string, repos []string, head, headRef st
 	// Descending from the PR head is not the same as being the PR branch: a
 	// feature branch forked off it also descends, and reporting its commits as
 	// this PR's work invites a push that updates something else entirely.
-	if why := branchMismatch(git, headRef); why != "" {
+	if why := branchMismatch(git, headRef, detachedDispatch); why != "" {
 		return false, why
 	}
 	return true, "local HEAD " + shortSHA(local) + " is ahead of the pr head " + head
 }
 
 // branchMismatch explains why this checkout is not the PR's branch, or "" when
-// it is. A detached checkout counts as a mismatch: there is nothing to push to.
-func branchMismatch(git func(...string) (string, bool), headRef string) string {
+// it is. A detached dispatch checkout is the one exception: its prompt pushes
+// HEAD to an explicit ref instead of relying on a local branch.
+func branchMismatch(git func(...string) (string, bool), headRef string, detachedDispatch bool) string {
 	if headRef == "" {
 		return ""
 	}
 	branch, ok := git("rev-parse", "--abbrev-ref", "HEAD")
+	if ok && branch == "HEAD" && detachedDispatch {
+		return ""
+	}
 	if !ok || branch == "HEAD" {
 		return "this checkout is detached, so there is no branch to push to " + headRef
 	}

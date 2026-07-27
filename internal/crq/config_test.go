@@ -132,6 +132,29 @@ func TestLoadConfigPreservesEmptyCompletionMarkerFromFile(t *testing.T) {
 	}
 }
 
+func TestLoadConfigProcessTokenWinsAcrossAliases(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "env")
+	if err := os.WriteFile(path, []byte("GITHUB_TOKEN=file-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRQ_CONFIG", path)
+	t.Setenv("GH_TOKEN", "process-token")
+	t.Setenv("GITHUB_TOKEN", "")
+	if err := os.Unsetenv("GITHUB_TOKEN"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("GITHUB_TOKEN"); got != "" {
+		t.Fatalf("file GITHUB_TOKEN %q overrode the process GH_TOKEN alias", got)
+	}
+	if got := os.Getenv("GH_TOKEN"); got != "process-token" {
+		t.Fatalf("GH_TOKEN = %q, want the process credential", got)
+	}
+}
+
 func TestUnionBotsDedupesAndPreservesOrder(t *testing.T) {
 	got := unionBots([]string{"coderabbitai[bot]", ""}, []string{"coderabbitai", "chatgpt-codex-connector[bot]"})
 	want := []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}
@@ -216,6 +239,22 @@ func TestLoadConfigEmptyAutoReviewSkipMarkerDisablesOptOut(t *testing.T) {
 	}
 }
 
+func TestLoadConfigDispatchMaxAttemptsStaysBounded(t *testing.T) {
+	for _, value := range []string{"0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+			t.Setenv("CRQ_DISPATCH_MAX_ATTEMPTS", value)
+
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.DispatchMaxAttempts != 3 {
+				t.Errorf("DispatchMaxAttempts = %d, want the bounded default 3", cfg.DispatchMaxAttempts)
+			}
+		})
+	}
+}
 func TestLoadConfigTidyIsOptIn(t *testing.T) {
 	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
 	t.Setenv("CRQ_TIDY", "restore-after-test")
@@ -451,5 +490,62 @@ func TestLoadConfigRejectsUnknownCoBot(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "buugbot") || !strings.Contains(err.Error(), "bugbot") {
 		t.Fatalf("the error must name the typo and the known bots, got %v", err)
+	}
+}
+
+// CRQ_DISPATCH_CMD is one line of configuration that has to survive a multiword
+// argument: splitting inside the quotes hands the fix agent three prompt
+// fragments instead of one prompt.
+func TestSplitArgvKeepsQuotedArgumentsWhole(t *testing.T) {
+	got := SplitArgv(`claude -p "fix these findings" --dir '/tmp/with space'`)
+	want := []string{"claude", "-p", "fix these findings", "--dir", "/tmp/with space"}
+	if len(got) != len(want) {
+		t.Fatalf("argv = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("argv[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	// Still not a shell: nothing here expands what the operator did not write.
+	if argv := SplitArgv(`echo $HOME *.go`); len(argv) != 3 || argv[1] != "$HOME" || argv[2] != "*.go" {
+		t.Errorf("argv = %q, want the literal words back", argv)
+	}
+}
+
+func TestLoadConfigParsesDispatchForksAsABoolean(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_DISPATCH_FORKS", "false")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DispatchForks {
+		t.Fatal("CRQ_DISPATCH_FORKS=false enabled unattended dispatch on forks")
+	}
+
+	t.Setenv("CRQ_DISPATCH_FORKS", "true")
+	cfg, err = LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.DispatchForks {
+		t.Fatal("CRQ_DISPATCH_FORKS=true did not enable fork dispatch")
+	}
+}
+
+// The install writes the config path into a service unit, and the service starts
+// in a directory of the service manager's choosing. A relative CRQ_CONFIG that
+// resolved for the installing shell would then name nothing at all, and the
+// drain would load no configuration while the install reported success.
+func TestConfigPathIsAbsolute(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join("relative", "env"))
+	got := ConfigPath()
+	if !filepath.IsAbs(got) {
+		t.Errorf("ConfigPath() = %q, want an absolute path a service can open", got)
+	}
+	if filepath.Base(got) != "env" {
+		t.Errorf("ConfigPath() = %q, want it to still name the file asked for", got)
 	}
 }

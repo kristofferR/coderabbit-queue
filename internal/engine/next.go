@@ -43,7 +43,8 @@ type Action struct {
 	// Pending lists the required bots with no review evidence for this head,
 	// in the caller's configured order.
 	Pending []string
-	// Findings carries the actionable feedback for ActionFix.
+	// Findings carries actionable feedback for ActionFix, and remains visible
+	// when a live dispatch must temporarily hold its fixes for a reviewer.
 	Findings []dialect.Finding
 }
 
@@ -114,6 +115,13 @@ func NextAction(in NextInput, now time.Time) Action {
 	// 1. Findings first. An agent that starts a new review round on top of
 	//    unresolved feedback burns account quota to be told the same thing.
 	//
+	//    One caller already knows it handled the findings even though GitHub
+	//    cannot know yet: the live dispatch session must push before resolving
+	//    its threads. If that session holds local work while another required
+	//    reviewer is already reading this head, the safe next action is the hold,
+	//    not another copy of the same findings. This is deliberately tied to the
+	//    dispatch claim; ordinary dirty worktrees must still see every finding.
+	//
 	//    A threadless finding has no lever the caller can pull — nothing clears
 	//    it but a push whose review supersedes it — so it can repeat. Suppressing
 	//    it once the tree is dirty was tried and is WORSE: any unrelated dirty
@@ -123,6 +131,16 @@ func NextAction(in NextInput, now time.Time) Action {
 	//    deliberately errs toward repeating. Clearing them properly needs an
 	//    explicit dismissal, not an inference from local state.
 	if blocking := BlockingFindings(in.Findings, in.Obs.Head); len(blocking) > 0 {
+		if in.LocalWork && in.Round.DispatchHeld(now) &&
+			pendingReviewRequested(in, pending) {
+			return Action{
+				Kind:     ActionHold,
+				Reason:   "do not push: a required reviewer has not answered for this head",
+				At:       in.nextCheck(now, nil, pending),
+				Pending:  pending,
+				Findings: blocking,
+			}
+		}
 		return Action{
 			Kind:     ActionFix,
 			Reason:   "actionable findings for this head",
@@ -232,6 +250,26 @@ func NextAction(in NextInput, now time.Time) Action {
 	return Action{Kind: ActionDone, Reason: "converged: no findings and every required reviewer answered"}
 }
 
+func pendingReviewRequested(in NextInput, pending []string) bool {
+	for _, login := range pending {
+		if sameBot(login, in.Primary) {
+			if reviewRequested(in.Round) {
+				return true
+			}
+			continue
+		}
+		co := in.Round.Co(login)
+		if co.CommandedAt != nil || co.ClaimedAt != nil {
+			return true
+		}
+		if dialect.IsCodexBot(login) &&
+			(in.Round.CodexCommandedAt != nil || in.Round.CodexClaimedAt != nil) {
+			return true
+		}
+	}
+	return false
+}
+
 // settling reports whether the quiet period after the last evidence is still
 // running.
 func (in NextInput) settling(now time.Time) bool {
@@ -248,7 +286,27 @@ func (in NextInput) settling(now time.Time) bool {
 // as "a review is running" made the documented fix flow hold its own fixes until
 // a review of the pre-fix head finished.
 func reviewRequested(r state.Round) bool {
-	return r.Phase != "" && r.Phase != state.PhaseQueued
+	// Read THROUGH a dispatch hold. While a fix session holds a round, crq
+	// mirrors it into awaiting_retry so binaries that do not understand the
+	// claim still refuse to fire — but that is crq holding the round FOR the
+	// session, not a review anybody requested.
+	//
+	// Counting it as one deadlocked the session that caused it: told to hold, it
+	// waited for a reviewer that could not be asked — the claim makes the round
+	// ineligible to fire — while its own heartbeat extended the window it was
+	// waiting on. DispatchHoldPhase is what the round was before the hold, which
+	// is the phase this question is about.
+	phase := r.Phase
+	if r.DispatchHoldPhase != "" {
+		phase = r.DispatchHoldPhase
+		// A retry records a request that was rejected, not one a reviewer is
+		// currently reading. The dispatch claim prevents that retry from firing,
+		// so the owning session must be allowed to land its replacement head.
+		if phase == state.PhaseAwaitingRetry {
+			return false
+		}
+	}
+	return phase != "" && phase != state.PhaseQueued
 }
 
 // CanStillFire reports whether a round will ask for a review at some point.

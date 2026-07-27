@@ -32,6 +32,7 @@ type fakeGitHub struct {
 	checkRuns       map[string][]ghapi.CheckRun // key: ref (short or full sha)
 	checkRunErrs    map[string]error
 	postBodyErrs    map[string]error // body → error (selective trigger-post failures)
+	listPullErrs    map[string]error // repo → error (a repository the token cannot read)
 	deleteErrs      map[int64]error  // comment id → error (GitHub refuses the delete)
 	deleteAfterErrs map[int64]error  // comment id → error after GitHub applies the delete
 	posted          []string
@@ -287,6 +288,9 @@ func (f *fakeGitHub) EachOpenPR(_ context.Context, _ string, _ bool, fn func(gha
 func (f *fakeGitHub) ListPulls(_ context.Context, repo string, query url.Values) ([]ghapi.Pull, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.listPullErrs[strings.ToLower(repo)]; err != nil {
+		return nil, err
+	}
 	wantRef := ""
 	if head := query.Get("head"); head != "" {
 		_, wantRef, _ = strings.Cut(head, ":") // "owner:branch"
@@ -298,6 +302,12 @@ func (f *fakeGitHub) ListPulls(_ context.Context, repo string, query url.Values)
 		}
 		if wantRef != "" && p.Head.Ref != wantRef {
 			continue
+		}
+		// GitHub always names the head's repository, and dispatch reads it to
+		// tell a fork from a branch of this repository. A fake that left it
+		// empty would make every test PR look like an unreadable fork.
+		if p.Head.Repo.FullName == "" {
+			p.Head.Repo.FullName = repo
 		}
 		out = append(out, p)
 	}
@@ -2396,10 +2406,11 @@ func TestLoopDegradesToCodexOnlyOnRateLimit(t *testing.T) {
 	}
 }
 
-// TestFeedbackDefersCleanAutoCodexWithDefaultRequiredBots covers the default
-// feedback-only Codex setup: its SHA-bound clean verdict is sufficient evidence
-// even though Completion.ReviewedBy contains only the pending CodeRabbit key.
-func TestFeedbackDefersCleanAutoCodexWithDefaultRequiredBots(t *testing.T) {
+// A rate-limit notice observed by this Feedback call must affect the same
+// report. The default feedback-only Codex setup supplies a SHA-bound clean
+// verdict even though Completion.ReviewedBy contains only the pending
+// CodeRabbit key.
+func TestFeedbackUsesNewAccountBlockToDeferCleanAutoCodex(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	cfg.RateLimitCoDegrade = true
@@ -2414,16 +2425,14 @@ func TestFeedbackDefersCleanAutoCodexWithDefaultRequiredBots(t *testing.T) {
 		Body:      "Codex Review: Didn't find any major issues. :tada:\n\n**Reviewed commit:** `abcdef1234`",
 		CreatedAt: cleanAt, UpdatedAt: cleanAt}
 	clean.User.Login = "chatgpt-codex-connector[bot]"
-	gh.comments[fakeKey("o/carrier", 93)] = []ghapi.IssueComment{clean}
+	rateLimitedAt := cleanAt.Add(time.Second)
+	rateLimited := ghapi.IssueComment{ID: 702,
+		Body:      "<!-- rate limited by coderabbit.ai -->\n> ## Review limit reached\n> **Next review available in:** **30 minutes**",
+		CreatedAt: rateLimitedAt, UpdatedAt: rateLimitedAt}
+	rateLimited.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/carrier", 93)] = []ghapi.IssueComment{clean, rateLimited}
 	store := NewMemoryStore(cfg)
 	seedRound(t, store, cfg, "o/carrier", 93, "abcdef123", PhaseQueued, cleanAt.Add(-time.Minute), 0)
-	blockedUntil := time.Now().UTC().Add(30 * time.Minute)
-	if _, err := store.Update(ctx, func(st *State) error {
-		st.Account.BlockedUntil = &blockedUntil
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
 
 	svc := NewService(cfg, gh, store, nil)
 	report, err := svc.Feedback(ctx, "o/carrier", 93)
@@ -3038,5 +3047,113 @@ func TestWaitResolvesSummaryOnlyWithoutTheQueue(t *testing.T) {
 	// The other PR keeps the slot — resolving ours never touched it.
 	if st.FireSlot == nil || st.FireSlot.Key != QueueKey("o/front", 10) {
 		t.Fatalf("the front PR must keep the fire slot, got %#v", st.FireSlot)
+	}
+}
+
+// A rate-limit notice is evidence about the ACCOUNT, and the pump only ever
+// looks at the PR it is about to fire. A notice sitting on a superseded round —
+// or simply on a PR that is not next in the queue — was read here and thrown
+// away, and the next fire went out inside a window the bot had already stated.
+func TestFeedbackRecordsARateLimitNoticeItObserves(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = "a0646f010abcdef0"
+	gh.pulls[fakeKey("o/carrier", 82)] = pull
+	other := ghapi.Pull{State: "open"}
+	other.Head.SHA = "bbbbbbbb2abcdef0"
+	gh.pulls[fakeKey("o/other", 90)] = other
+
+	notice := time.Now().UTC().Add(-time.Minute)
+	rl := ghapi.IssueComment{ID: 501,
+		Body:      "<!-- rate limited by coderabbit.ai -->\n> ## Review limit reached\n> **Next review available in:** **40 minutes**",
+		CreatedAt: notice, UpdatedAt: notice}
+	rl.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/carrier", 82)] = []ghapi.IssueComment{rl}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	// Nobody asked about this PR's round; the notice is simply there to be seen.
+	if _, err := svc.Feedback(ctx, "o/carrier", 82); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Account.BlockedUntil == nil {
+		t.Fatal("the observed notice was thrown away; the next fire would go out inside the window")
+	}
+
+	// And the block is what the queue then decides with.
+	if _, err := svc.Enqueue(ctx, "o/other", 90); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Pump(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range gh.posted {
+		if strings.HasSuffix(p, ":"+cfg.ReviewCommand) {
+			t.Errorf("a review was requested while the account was blocked: %s", p)
+		}
+	}
+}
+
+func TestObservedAccountBlockPersistsANewerNoticeAtTheStandingWindow(t *testing.T) {
+	now := time.Date(2026, 7, 27, 8, 0, 0, 0, time.UTC)
+	standing := now.Add(time.Hour)
+	oldNotice := now.Add(-2 * time.Minute)
+	newNotice := now.Add(-time.Minute)
+	q := AccountQuota{
+		BlockedUntil:     &standing,
+		RLCommentID:      100,
+		RLCommentUpdated: &oldNotice,
+	}
+	blk := &engine.AccountBlock{
+		Until: standing, CommentID: 101, CommentUpdated: newNotice,
+	}
+	if !observedAccountBlockChanges(q, blk) {
+		t.Fatal("a distinct shorter notice was not accepted for watermarking")
+	}
+	st := State{Account: q}
+	applyAccountBlock(&st, blk, now)
+	if st.Account.RLCommentID != 101 || !st.Account.RLCommentUpdated.Equal(newNotice) {
+		t.Fatalf("notice watermark = id %d updated %v, want id 101 at %s",
+			st.Account.RLCommentID, st.Account.RLCommentUpdated, newNotice)
+	}
+}
+
+func TestObservedAccountBlockDoesNotRollTheNoticeWatermarkBackward(t *testing.T) {
+	now := time.Date(2026, 7, 27, 8, 0, 0, 0, time.UTC)
+	standing := now.Add(time.Hour)
+	watermark := now.Add(-time.Minute)
+	older := now.Add(-2 * time.Minute)
+	q := AccountQuota{
+		BlockedUntil:     &standing,
+		RLCommentID:      100,
+		RLCommentUpdated: &watermark,
+	}
+	blk := &engine.AccountBlock{
+		Until: standing, CommentID: 101, CommentUpdated: older,
+	}
+	if observedAccountBlockChanges(q, blk) {
+		t.Fatal("an older notice from a different comment rolled the watermark backward")
+	}
+
+	later := standing.Add(time.Hour)
+	blk.Until = later
+	if !observedAccountBlockChanges(q, blk) {
+		t.Fatal("an older notice's longer block window was discarded")
+	}
+	st := State{Account: q}
+	applyAccountBlock(&st, blk, now)
+	if !st.Account.BlockedUntil.Equal(later) {
+		t.Fatalf("blocked until %s, want extension to %s", st.Account.BlockedUntil, later)
+	}
+	if st.Account.RLCommentID != q.RLCommentID || !st.Account.RLCommentUpdated.Equal(watermark) {
+		t.Fatalf("older notice replaced watermark with id %d at %v",
+			st.Account.RLCommentID, st.Account.RLCommentUpdated)
 	}
 }

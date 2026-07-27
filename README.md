@@ -397,6 +397,9 @@ crq feedback <repo> <pr>  # current normalized findings as JSON, WITHOUT trigger
 crq threads <repo> <pr>                                     # every unresolved thread, outdated included
 crq resolve <thread-id> [<thread-id>...]                    # resolve addressed review threads
 crq decline <thread-id> [...] --reason "<why>" [--resolve]  # record why a finding is declined
+crq drain install         # ⭐ unattended: watch every PR and fix what needs fixing
+crq watch                 #    what the drain runs: drive open PRs through crq next, one JSON
+                          #    line each (--dispatch starts a fix session; --once for cron)
 crq hold <repo> <pr> --reason "<why>"                       # persistently stop reviews for a PR
 crq unhold <repo> <pr>                                      # resume reviews for a held PR
 crq hold                                                    # list held PRs
@@ -486,7 +489,7 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_SCOPE` | owner of `CRQ_REPO` | which owners/orgs share this quota (comma-separated) |
 | `CRQ_STATE_REF` | `crq-state-v3` | git ref that stores the typed CAS state |
 | `CRQ_REPOS` | _(all in scope)_ | `autoreview` allowlist — only these `owner/name` repos (comma-separated) |
-| `CRQ_EXCLUDE` | _(none)_ | `autoreview` denylist — never these `owner/name` repos (comma-separated) |
+| `CRQ_EXCLUDE` | _(none)_ | denylist — crq never reviews, watches or fixes these `owner/name` repos (comma-separated) |
 | `CRQ_AUTOREVIEW_SKIP_AUTHORS` | `dependabot[bot]` | PR authors `autoreview` never enqueues (comma-separated; case and `[bot]` suffix don't matter) — set to empty to auto-review bot PRs too; manual `crq review` is unaffected |
 | `CRQ_AUTOREVIEW_SKIP_MARKER` | `<!-- crq:skip-autoreview -->` | exact PR-body marker that suppresses fleet auto-review; set empty to disable; manual `crq loop` is unaffected |
 | `CRQ_TIDY` | `0` | set to `1` to delete crq's own spent review-trigger comments as rounds progress (`crq tidy` by hand is unaffected) |
