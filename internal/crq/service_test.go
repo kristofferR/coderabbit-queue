@@ -73,6 +73,7 @@ func newFakeGitHub() *fakeGitHub {
 		issueReactions:  map[string][]ghapi.Reaction{},
 		reactions:       map[int64][]ghapi.Reaction{},
 		reactionErrs:    map[int64]error{},
+		listPullErrs:    map[string]error{},
 		deleteErrs:      map[int64]error{},
 		deleteAfterErrs: map[int64]error{},
 	}
@@ -264,8 +265,12 @@ func (f *fakeGitHub) SearchOpenPRs(context.Context, string, bool, int) ([]ghapi.
 	return nil, nil
 }
 
-func (f *fakeGitHub) EachOpenPR(_ context.Context, _ string, _ bool, fn func(ghapi.SearchPR) (bool, error)) error {
+func (f *fakeGitHub) EachOpenPR(_ context.Context, target string, _ bool, fn func(ghapi.SearchPR) (bool, error)) error {
 	f.mu.Lock()
+	if err := f.listPullErrs[strings.ToLower(target)]; err != nil {
+		f.mu.Unlock()
+		return err
+	}
 	prs := append([]ghapi.SearchPR(nil), f.searchPRs...)
 	f.mu.Unlock()
 	for _, pr := range prs {
@@ -417,7 +422,7 @@ func (s retryNoChangeStore) Update(_ context.Context, mutate func(*State) error)
 	return second, nil
 }
 
-func (retryNoChangeStore) SyncDashboard(context.Context, State) error { return nil }
+func (retryNoChangeStore) SyncDashboard(context.Context, State, StoreConfig) error { return nil }
 
 // adoptionRaceStore loads a queued round with an adoptable command, but every
 // Update simulates another worker already holding the fire slot.
@@ -453,7 +458,7 @@ func (s *adoptionRaceStore) Update(_ context.Context, mutate func(*State) error)
 	return state, nil
 }
 
-func (s *adoptionRaceStore) SyncDashboard(context.Context, State) error { return nil }
+func (s *adoptionRaceStore) SyncDashboard(context.Context, State, StoreConfig) error { return nil }
 
 // --- test helpers ---
 
@@ -678,7 +683,7 @@ func TestEnqueueBatchAppendsOncePerPR(t *testing.T) {
 		{Repo: "o/b", PR: 2, Head: "bbbbbbbb2"},
 		{Repo: "o/a", PR: 1, Head: "aaaaaaaa1"},
 	}
-	if err := svc.enqueueBatch(ctx, items); err != nil {
+	if err := svc.enqueueBatch(ctx, items, svc.fleetCfg(DefaultState(cfg)).FleetRevision); err != nil {
 		t.Fatal(err)
 	}
 	st, _, _ := svc.store.Load(ctx)
@@ -689,7 +694,7 @@ func TestEnqueueBatchAppendsOncePerPR(t *testing.T) {
 	if queued[0].Seq == queued[1].Seq || queued[0].Seq == 0 {
 		t.Fatalf("expected distinct non-zero seqs, got %d and %d", queued[0].Seq, queued[1].Seq)
 	}
-	if err := svc.enqueueBatch(ctx, items); err != nil {
+	if err := svc.enqueueBatch(ctx, items, svc.fleetCfg(DefaultState(cfg)).FleetRevision); err != nil {
 		t.Fatal(err)
 	}
 	st2, _, _ := svc.store.Load(ctx)
@@ -715,7 +720,7 @@ func TestEnqueueBatchSkipsHeldPRsUnderCAS(t *testing.T) {
 		{Repo: "o/held", PR: 1, Head: "aaaaaaaa1"},
 		{Repo: "o/ready", PR: 2, Head: "bbbbbbbb2"},
 	}
-	if err := svc.enqueueBatch(ctx, items); err != nil {
+	if err := svc.enqueueBatch(ctx, items, svc.fleetCfg(DefaultState(cfg)).FleetRevision); err != nil {
 		t.Fatal(err)
 	}
 	st, _, err := store.Load(ctx)
@@ -727,6 +732,60 @@ func TestEnqueueBatchSkipsHeldPRsUnderCAS(t *testing.T) {
 	}
 	if got := st.Round("o/ready", 2); got == nil || got.Seq != 1 {
 		t.Fatalf("ready PR should receive the first queue position, got %+v", got)
+	}
+}
+
+func TestEnqueueBatchRejectsCandidatesSelectedUnderStaleFleetPolicy(t *testing.T) {
+	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, Host: "h"}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	ctx := context.Background()
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectedRevision := svc.fleetCfg(st).FleetRevision
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("repos", "o/elsewhere")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.enqueueBatch(ctx, []queueCandidate{
+		{Repo: "o/obsolete", PR: 1, Head: "aaaaaaaa1"},
+	}, selectedRevision); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("o/obsolete", 1); round != nil {
+		t.Fatalf("stale fleet discovery enqueued a round: %+v", round)
+	}
+}
+
+func TestEnqueueBatchDoesNotWriteInDryRun(t *testing.T) {
+	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, Host: "h", DryRun: true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	ctx := context.Background()
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.enqueueBatch(ctx, []queueCandidate{
+		{Repo: "o/repo", PR: 1, Head: "aaaaaaaa1"},
+	}, svc.fleetCfg(st).FleetRevision); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("o/repo", 1); round != nil {
+		t.Fatalf("dry-run batch wrote a round: %+v", round)
 	}
 }
 
@@ -2358,6 +2417,59 @@ func TestRefreshQuotaPreservesBlockOnInconclusiveProbe(t *testing.T) {
 	}
 	if updated.Account.BlockedUntil == nil || !updated.Account.BlockedUntil.Equal(block) {
 		t.Fatalf("an inconclusive probe must preserve the live block %v, got %v", block, updated.Account.BlockedUntil)
+	}
+}
+
+func TestRefreshQuotaRejectsAReadingFromAnObsoleteFleetScope(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo: "owner/gate", StateRef: "crq-state-v3", CalibrationPR: 1,
+		CalibrationMarker: "auto-generated reply by CodeRabbit",
+		RateLimitCommand:  "@coderabbitai rate limit",
+		CalibrationTTL:    2 * time.Minute, Scope: []string{"old-owner"},
+	}
+	gh := newFakeGitHub()
+	inner := NewMemoryStore(cfg)
+	store := &hookedStore{StateStore: inner}
+	svc := NewService(cfg, gh, store, nil)
+	store.hook = func() {
+		if _, err := inner.Update(ctx, func(st *State) error {
+			st.SetFleetValue("scope", "new-owner")
+			st.Account = AccountQuota{Scope: "new-owner", Source: "fleet scope changed"}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	updated, err := svc.RefreshQuota(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Account.Scope != "new-owner" || updated.Account.CalibAskedAt != nil || updated.Account.CheckedAt != nil {
+		t.Fatalf("obsolete calibration reading overwrote the new scope reset: %+v", updated.Account)
+	}
+}
+
+func TestRefreshQuotaDoesNotProbeOrWriteInDryRun(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo: "owner/gate", CalibrationPR: 1, DryRun: true,
+		CalibrationTTL: 2 * time.Minute, Scope: []string{"owner"},
+	}
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	updated, err := svc.RefreshQuota(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("dry-run calibration posted comments: %v", gh.posted)
+	}
+	if updated.Account.CalibAskedAt != nil || updated.Account.CheckedAt != nil {
+		t.Fatalf("dry-run calibration changed quota state: %+v", updated.Account)
 	}
 }
 

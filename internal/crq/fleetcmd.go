@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 // FleetSetting is one policy as `crq config` reports it: what the fleet
@@ -19,7 +22,7 @@ type FleetSetting struct {
 	// HostValue is what this machine's own environment says, reported only when
 	// it differs from what is in force. It is the divergence an operator needs
 	// to see: a setting they changed on this box that the fleet is overriding.
-	HostValue string `json:"host_value,omitempty"`
+	HostValue *string `json:"host_value,omitempty"`
 	// Error is why a recorded value was not applied, when this binary could not
 	// read it.
 	Error string `json:"error,omitempty"`
@@ -50,7 +53,7 @@ func (s *Service) FleetConfig(ctx context.Context) ([]FleetSetting, error) {
 			}
 		}
 		if host := setting.Show(s.cfg); host != item.Value {
-			item.HostValue = host
+			item.HostValue = &host
 		}
 		out = append(out, item)
 	}
@@ -189,9 +192,9 @@ func (s *Service) FleetDivergence(ctx context.Context) ([]string, error) {
 		case item.Error != "":
 			out = append(out, fmt.Sprintf("%s: the fleet's value is one this crq cannot read (%s); using this host's %q",
 				item.Key, item.Error, item.Value))
-		case item.HostValue != "" && s.cfg.ExplicitFleetEnv[item.Env]:
+		case item.HostValue != nil && s.cfg.ExplicitFleetEnv[item.Env]:
 			out = append(out, fmt.Sprintf("%s is %q for the fleet, but %s is set to %q on this host; remove it or run crq config set %s",
-				item.Key, item.Value, item.Env, item.HostValue, item.Key))
+				item.Key, item.Value, item.Env, *item.HostValue, item.Key))
 		}
 	}
 	return out, nil
@@ -224,11 +227,32 @@ func (s *Service) openFleetPRs(ctx context.Context, st State) (map[string]map[in
 	for repo := range repos {
 		pulls, err := s.openPRs(ctx, repo)
 		if err != nil {
-			return nil, err
+			if !inaccessibleRepoLookup(err) {
+				return nil, err
+			}
+			// Completed rounds are permanent dedup markers, so repositories that
+			// were deleted or became inaccessible remain in state indefinitely.
+			// Treat their PRs as closed for this reconciliation: the rounds are
+			// marked and will reopen if a later enqueue proves the PR is live.
+			if s.log != nil {
+				s.log.Printf("warning: reviewer change could not inspect historical repository %s: %v", repo, err)
+			}
+			continue
 		}
 		open[repo] = pulls
 	}
 	return open, nil
+}
+
+func inaccessibleRepoLookup(err error) bool {
+	if ghapi.IsThrottled(err) {
+		return false
+	}
+	if errors.Is(err, ghapi.ErrNotFound) {
+		return true
+	}
+	var apiErr *ghapi.APIError
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusForbidden
 }
 
 func (s *Service) reconcileFleetChange(st *State, before, after Config, open map[string]map[int]bool) {

@@ -100,6 +100,45 @@ func TestFeedbackReturnsObservedAccountBlockPersistenceFailure(t *testing.T) {
 	}
 }
 
+func TestFeedbackUsesTheFleetFallbackForAWindowlessAccountBlock(t *testing.T) {
+	cfg := firingConfig()
+	cfg.RateLimitFallback = 5 * time.Minute
+	now := time.Now().UTC()
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("o/repo", 3)] = pull
+	notice := ghapi.IssueComment{
+		ID: 17, Body: "You are rate limited by coderabbit.ai. Please wait before requesting another review.",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	notice.User.Login = cfg.Bot
+	gh.comments[fakeKey("o/repo", 3)] = []ghapi.IssueComment{notice}
+
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.SetFleetValue("rate-limit-fallback", "45m")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+
+	if _, err := svc.Feedback(context.Background(), "o/repo", 3); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := now.Add(45 * time.Minute)
+	if st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.Equal(want) {
+		t.Fatalf("blocked until = %v, want fleet fallback %s", st.Account.BlockedUntil, want)
+	}
+}
+
 func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 	// A re-review with nothing new to say produces no review object: CodeRabbit
 	// only replies "Review finished" to the command. That reply must satisfy

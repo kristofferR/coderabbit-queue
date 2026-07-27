@@ -98,7 +98,7 @@ func TestSyncDashboardWritesOnlyOnChange(t *testing.T) {
 
 	st := syncTestState(t)
 	for i := 0; i < 4; i++ {
-		if err := store.SyncDashboard(ctx, st); err != nil {
+		if err := store.SyncDashboard(ctx, st, cfg); err != nil {
 			t.Fatalf("sync %d: %v", i, err)
 		}
 	}
@@ -120,7 +120,7 @@ func TestSyncDashboardWritesOnlyOnChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	st.Normalize(t0)
-	if err := store.SyncDashboard(ctx, st); err != nil {
+	if err := store.SyncDashboard(ctx, st, cfg); err != nil {
 		t.Fatal(err)
 	}
 	srv.mu.Lock()
@@ -142,7 +142,7 @@ func TestSyncDashboardSkipsWriteWhenTheIssueAlreadyMatches(t *testing.T) {
 	st := syncTestState(t)
 
 	// One process (think: the daemon) publishes the dashboard.
-	if err := NewGitStateStore(cfg, client, nil).SyncDashboard(ctx, st); err != nil {
+	if err := NewGitStateStore(cfg, client, nil).SyncDashboard(ctx, st, cfg); err != nil {
 		t.Fatal(err)
 	}
 	srv.mu.Lock()
@@ -155,7 +155,7 @@ func TestSyncDashboardSkipsWriteWhenTheIssueAlreadyMatches(t *testing.T) {
 	// A genuinely cold second process against the same issue: its own client, so
 	// it shares no ETag cache with the first.
 	cold := NewGitStateStore(cfg, gh.NewTestClient(httpSrv.URL, httpSrv.Client()), nil)
-	if err := cold.SyncDashboard(ctx, st); err != nil {
+	if err := cold.SyncDashboard(ctx, st, cfg); err != nil {
 		t.Fatal(err)
 	}
 	srv.mu.Lock()
@@ -165,5 +165,26 @@ func TestSyncDashboardSkipsWriteWhenTheIssueAlreadyMatches(t *testing.T) {
 	}
 	if srv.gets == 0 {
 		t.Fatal("the cross-process check must actually read the issue")
+	}
+}
+
+func TestSyncDashboardUsesTheSuppliedEffectiveRenderingConfig(t *testing.T) {
+	srv := &issueServer{}
+	_, client := srv.start(t)
+	startup := StoreConfig{
+		GateRepo: "owner/state", StateRef: "crq-state-v3", DashboardIssue: 1,
+		Scope: []string{"owner"}, CoReviewers: "codex (selfheal)",
+	}
+	effective := startup
+	effective.CoReviewers = "codex (required, always)"
+	st := syncTestState(t)
+
+	if err := NewGitStateStore(startup, client, nil).SyncDashboard(context.Background(), st, effective); err != nil {
+		t.Fatal(err)
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if !strings.Contains(srv.body, effective.CoReviewers) || strings.Contains(srv.body, startup.CoReviewers) {
+		t.Fatalf("dashboard body did not use the effective reviewer summary:\n%s", srv.body)
 	}
 }

@@ -309,7 +309,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 		}
 	}
 	// One batched write for the whole pass instead of N (#2).
-	return s.enqueueBatch(ctx, candidates)
+	return s.enqueueBatch(ctx, candidates, cfg.FleetRevision)
 }
 
 // needsReview reports whether an open PR should be enqueued for review, and its

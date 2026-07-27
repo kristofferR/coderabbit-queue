@@ -48,7 +48,7 @@ func Init(ctx context.Context, cfg Config, gh *ghapi.GitHub, store StateStore) (
 			return InitResult{}, err
 		}
 		cfg.DashboardIssue = issue.Number
-	} else if err := store.SyncDashboard(ctx, state); err != nil {
+	} else if err := store.SyncDashboard(ctx, state, cfg.storeConfig()); err != nil {
 		return InitResult{}, err
 	}
 	return InitResult{

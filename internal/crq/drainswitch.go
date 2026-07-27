@@ -81,8 +81,9 @@ func (s *Service) DrainSettings(ctx context.Context) ([]DrainSetting, error) {
 		}
 		out = append(out, setting)
 	}
-	watched := make([]string, 0, len(s.cfg.AllowRepos))
-	for repo := range s.cfg.AllowRepos {
+	effective := s.fleetCfg(st)
+	watched := make([]string, 0, len(effective.AllowRepos))
+	for repo := range effective.AllowRepos {
 		watched = append(watched, repo)
 	}
 	sort.Strings(watched)

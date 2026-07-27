@@ -55,6 +55,28 @@ func TestDrainIsOnUnlessARepositorySaysOtherwise(t *testing.T) {
 	}
 }
 
+func TestDrainSettingsListsTheFleetRepositoryAllowlist(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/host-only": true}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("repos", "owner/fleet-only")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	settings, err := svc.DrainSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settings) != 1 || settings[0].Repo != "owner/fleet-only" {
+		t.Fatalf("settings = %+v, want the effective fleet repository", settings)
+	}
+}
+
 func TestDrainSwitchRejectsMalformedRepositoryNames(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()

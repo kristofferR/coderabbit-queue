@@ -689,7 +689,7 @@ type dashboardCountingStore struct {
 	syncs []State
 }
 
-func (s *dashboardCountingStore) SyncDashboard(_ context.Context, state State) error {
+func (s *dashboardCountingStore) SyncDashboard(_ context.Context, state State, _ StoreConfig) error {
 	s.syncs = append(s.syncs, cloneState(state))
 	return nil
 }

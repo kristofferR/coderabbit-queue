@@ -694,7 +694,7 @@ func TestAReopenedPRPicksUpRequirementsChangedWhileItWasClosed(t *testing.T) {
 	if !need || gotHead != head {
 		t.Fatalf("needsReview = %v %q, want the reopened PR enqueued at %q", need, gotHead, head)
 	}
-	if err := svc.enqueueBatch(ctx, []queueCandidate{{Repo: repo, PR: auto, Head: gotHead}}); err != nil {
+	if err := svc.enqueueBatch(ctx, []queueCandidate{{Repo: repo, PR: auto, Head: gotHead}}, svc.fleetCfg(st).FleetRevision); err != nil {
 		t.Fatal(err)
 	}
 

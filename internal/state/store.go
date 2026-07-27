@@ -81,7 +81,7 @@ type Revision struct {
 type StateStore interface {
 	Load(context.Context) (State, Revision, error)
 	Update(context.Context, func(*State) error) (State, error)
-	SyncDashboard(context.Context, State) error
+	SyncDashboard(context.Context, State, StoreConfig) error
 }
 
 // GitStateStore persists v5 state as state.json in a git ref, with the same
@@ -290,15 +290,15 @@ func (s *GitStateStore) compareAndSwap(ctx context.Context, st *State, rev Revis
 //
 // A read failure is never fatal: fall through and PATCH, which is the old
 // behavior.
-func (s *GitStateStore) SyncDashboard(ctx context.Context, st State) error {
+func (s *GitStateStore) SyncDashboard(ctx context.Context, st State, renderCfg StoreConfig) error {
 	if err := s.cfg.requireDashboard(); err != nil {
 		return err
 	}
-	body, err := IssueBody(st, s.cfg)
+	body, err := IssueBody(st, renderCfg)
 	if err != nil {
 		return err
 	}
-	title := RenderTitle(st, s.cfg)
+	title := RenderTitle(st, renderCfg)
 
 	// Held across read-then-write so two concurrent syncs cannot both observe a
 	// stale issue and both write it.
@@ -356,7 +356,7 @@ func (m *MemoryStore) Update(_ context.Context, mutate func(*State) error) (Stat
 	return st, nil
 }
 
-func (m *MemoryStore) SyncDashboard(context.Context, State) error { return nil }
+func (m *MemoryStore) SyncDashboard(context.Context, State, StoreConfig) error { return nil }
 
 // Clone deep-copies a State via its JSON representation, so a mutate closure
 // can never scribble on the store's retained copy.

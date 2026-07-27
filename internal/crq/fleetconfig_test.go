@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -275,6 +276,27 @@ func TestFleetDivergenceIncludesConfigFileValues(t *testing.T) {
 	}
 }
 
+func TestFleetDivergenceIncludesAnExplicitlyEmptyHostValue(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.ExcludeRepos = map[string]bool{}
+	cfg.ExplicitFleetEnv = map[string]bool{"CRQ_EXCLUDE": true}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("exclude", "owner/repo")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := NewService(cfg, newFakeGitHub(), store, nil).FleetDivergence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || !strings.Contains(got[0], `CRQ_EXCLUDE is set to ""`) {
+		t.Fatalf("divergence = %v, want the explicitly empty host value", got)
+	}
+}
+
 func TestFleetRevisionInvalidatesAStaleDecision(t *testing.T) {
 	cfg := firingConfig()
 	st := DefaultState(cfg)
@@ -283,6 +305,42 @@ func TestFleetRevisionInvalidatesAStaleDecision(t *testing.T) {
 	st.SetFleetValue("min-interval", "5m")
 	if !overrideChanged(&st, "owner/repo", snapshot) {
 		t.Error("a fleet policy change did not invalidate the earlier decision")
+	}
+}
+
+type dashboardConfigStore struct {
+	StateStore
+	render StoreConfig
+}
+
+func (s *dashboardConfigStore) SyncDashboard(_ context.Context, _ State, cfg StoreConfig) error {
+	s.render = cfg
+	return nil
+}
+
+func TestDashboardSyncReceivesTheEffectiveFleetReviewers(t *testing.T) {
+	ctx := context.Background()
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":        "codex",
+		"CRQ_REQUIRED_BOTS": "coderabbitai[bot]",
+	})
+	cfg.DashboardIssue = 1
+	inner := NewMemoryStore(cfg)
+	store := &dashboardConfigStore{StateStore: inner}
+	if _, err := inner.Update(ctx, func(st *State) error {
+		st.SetFleetValue("required-bots", "coderabbitai[bot],"+dialect.CodexBotLogin)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := inner.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, &recordingLogger{})
+	svc.sync(ctx, st)
+	if !strings.Contains(store.render.CoReviewers, "codex (required") {
+		t.Fatalf("dashboard co-reviewers = %q, want fleet-required codex", store.render.CoReviewers)
 	}
 }
 
@@ -342,5 +400,81 @@ func TestFleetReviewerChangeReopensCompletedRounds(t *testing.T) {
 	st, _, _ := store.Load(ctx)
 	if round := st.Round(repo, pr); round == nil || round.Phase != PhaseQueued {
 		t.Fatalf("round = %+v, want completed round reopened", round)
+	}
+}
+
+func TestFleetReviewerChangeDoesNotFailOnAnInaccessibleHistoricalRepository(t *testing.T) {
+	ctx := context.Background()
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":        "codex",
+		"CRQ_REQUIRED_BOTS": "coderabbitai[bot]",
+	})
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: "owner/live", Number: 7}}
+	gh.listPullErrs["owner/gone"] = &ghapi.APIError{Status: http.StatusForbidden, Body: "resource not accessible"}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.PutRound(Round{Repo: "owner/gone", PR: 6, Head: "aaaaaaa11", Phase: PhaseCompleted})
+		st.PutRound(Round{Repo: "owner/live", PR: 7, Head: "bbbbbbb22", Phase: PhaseCompleted})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+	if err := svc.SetFleetConfig(ctx, "required-bots", "coderabbitai[bot],"+dialect.CodexBotLogin); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("owner/live", 7); round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("live round = %+v, want it reopened", round)
+	}
+	if round := st.Round("owner/gone", 6); round == nil || !round.ReviewersChanged || round.Phase != PhaseCompleted {
+		t.Fatalf("inaccessible historical round = %+v, want a marked completed round", round)
+	}
+}
+
+func TestFleetReviewerChangePropagatesGitHubThrottling(t *testing.T) {
+	ctx := context.Background()
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":        "codex",
+		"CRQ_REQUIRED_BOTS": "coderabbitai[bot]",
+	})
+	gh := newFakeGitHub()
+	gh.listPullErrs["owner/repo"] = &ghapi.RateLimitError{Kind: "secondary"}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.PutRound(Round{Repo: "owner/repo", PR: 7, Head: "bbbbbbb22", Phase: PhaseCompleted})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+	err := svc.SetFleetConfig(ctx, "required-bots", "coderabbitai[bot],"+dialect.CodexBotLogin)
+	if !ghapi.IsThrottled(err) {
+		t.Fatalf("reviewer change error = %v, want GitHub throttling propagated", err)
+	}
+}
+
+func TestInaccessibleRepoLookupClassification(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "not found", err: ghapi.ErrNotFound, want: true},
+		{name: "forbidden", err: &ghapi.APIError{Status: http.StatusForbidden}, want: true},
+		{name: "unprocessable", err: &ghapi.APIError{Status: http.StatusUnprocessableEntity}, want: false},
+		{name: "primary throttle", err: &ghapi.RateLimitError{Kind: "primary"}, want: false},
+		{name: "secondary throttle", err: &ghapi.RateLimitError{Kind: "secondary"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := inaccessibleRepoLookup(tt.err); got != tt.want {
+				t.Fatalf("inaccessibleRepoLookup(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }

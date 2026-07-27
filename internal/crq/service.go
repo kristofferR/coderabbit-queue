@@ -302,13 +302,16 @@ type queueCandidate struct {
 // dashboard sync, so a large autoreview pass doesn't produce N separate state
 // writes / issue edits. A PR already tracked at the same head is skipped; a
 // stale head is superseded. The DecideFire dedup still backstops at pump time.
-func (s *Service) enqueueBatch(ctx context.Context, items []queueCandidate) error {
-	if len(items) == 0 {
+func (s *Service) enqueueBatch(ctx context.Context, items []queueCandidate, expectedFleetRevision string) error {
+	if len(items) == 0 || s.cfg.DryRun {
 		return nil
 	}
 	state, err := s.store.Update(ctx, func(st *State) error {
 		now := s.clock()
 		cfg := s.fleetCfg(*st)
+		if cfg.FleetRevision != expectedFleetRevision {
+			return ErrNoChange
+		}
 		added := 0
 		for _, it := range items {
 			repo := NormalizeRepo(it.Repo)
@@ -588,11 +591,15 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 // counts here. AcceptAccountBlock still decides whether it replaces the standing
 // window, and never shortens it.
 func (s *Service) recordObservedBlock(ctx context.Context, obs observation, st State, now time.Time) (*State, error) {
-	blk := engine.ObservedAccountBlock(obs.eng, s.cfg.policy(), st.Account, now)
+	cfg := s.fleetCfg(st)
+	blk := engine.ObservedAccountBlock(obs.eng, cfg.policy(), st.Account, now)
 	if blk == nil || s.cfg.DryRun || !observedAccountBlockChanges(st.Account, blk) {
 		return nil, nil
 	}
 	updated, err := s.store.Update(ctx, func(w *State) error {
+		if fleetRevision(*w) != cfg.FleetRevision {
+			return ErrNoChange
+		}
 		if !observedAccountBlockChanges(w.Account, blk) {
 			return ErrNoChange
 		}
@@ -1898,6 +1905,9 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 	if err != nil {
 		return State{}, err
 	}
+	if s.cfg.DryRun {
+		return state, nil
+	}
 	cfg := s.fleetCfg(state)
 	if cfg.CalibrationPR <= 0 {
 		return state, nil
@@ -1914,7 +1924,11 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 		return state, err
 	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
-		currentTTL := s.fleetCfg(*st).CalibrationTTL
+		current := s.fleetCfg(*st)
+		if current.FleetRevision != cfg.FleetRevision {
+			return ErrNoChange
+		}
+		currentTTL := current.CalibrationTTL
 		if st.Account.CalibAskedAt == nil && st.Account.CheckedAt != nil && now.Sub(*st.Account.CheckedAt) < currentTTL {
 			return ErrNoChange
 		}
@@ -2215,7 +2229,7 @@ func (s *Service) sync(ctx context.Context, state State) {
 	if s.log == nil || s.cfg.DashboardIssue <= 0 {
 		return
 	}
-	if err := s.store.SyncDashboard(ctx, state); err != nil {
+	if err := s.store.SyncDashboard(ctx, state, s.fleetCfg(state).storeConfig()); err != nil {
 		s.log.Printf("warning: dashboard sync failed: %v", err)
 	}
 }
