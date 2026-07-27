@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
@@ -58,6 +59,11 @@ type Service struct {
 	// scanOffset rotates the bounded quota-free rescue scan's window so a round
 	// past the first few is not starved forever; in-memory only, same writer.
 	scanOffset int
+	// fleetWarned guards fleetWarnedOf, which remembers the fleet-configuration
+	// complaints already logged. Passes read the fleet policy concurrently with
+	// dispatched sessions, so this one is genuinely shared.
+	fleetWarned   sync.Mutex
+	fleetWarnedOf map[string]bool
 	// now overrides the wall clock for the scheduling DECISIONS in the
 	// pump/enqueue/sweep/wait paths (see clock). nil in production; the replay
 	// suite injects a controllable fake so an incident can be re-enacted

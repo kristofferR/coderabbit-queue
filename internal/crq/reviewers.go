@@ -321,16 +321,47 @@ func containsBot(logins []string, login string) bool {
 	return false
 }
 
-// cfgFor is the configuration crq should use for one repository: the fleet
-// default with that repository's override applied.
+// cfgFor is the configuration crq should use for one repository: this host's
+// own settings, then the fleet's recorded policy, then that repository's
+// override. Each layer is narrower than the one before it.
 func (s *Service) cfgFor(st State, repo string) Config {
+	base := s.fleetCfg(st)
 	ov, ok := st.RepoOverride(repo)
 	if !ok {
-		return s.cfg
+		return base
 	}
-	out := s.cfg.ForRepo(ov)
+	out := base.ForRepo(ov)
 	out.OverrideAt = ov.UpdatedAt
 	return out
+}
+
+// fleetCfg is this host's configuration with the fleet's policy applied. It is
+// the base every other decision starts from, and the reason a setting only has
+// to be changed in one place for every machine to follow it.
+func (s *Service) fleetCfg(st State) Config {
+	if len(st.FleetConfig) == 0 {
+		return s.cfg
+	}
+	return applyFleet(s.cfg, st.FleetConfig, s.warnOnce)
+}
+
+// warnOnce logs a fleet-configuration complaint at most once per process. The
+// same unreadable setting is met on every pass, and a daemon repeating it every
+// two minutes for a week is how a log stops being read.
+func (s *Service) warnOnce(msg string) {
+	if s.log == nil {
+		return
+	}
+	s.fleetWarned.Lock()
+	defer s.fleetWarned.Unlock()
+	if s.fleetWarnedOf == nil {
+		s.fleetWarnedOf = map[string]bool{}
+	}
+	if s.fleetWarnedOf[msg] {
+		return
+	}
+	s.fleetWarnedOf[msg] = true
+	s.log.Printf("config: %s", msg)
 }
 
 // overrideChanged reports whether repo's reviewer override differs from the one

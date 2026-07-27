@@ -3,6 +3,7 @@ package crq
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -203,24 +204,30 @@ func (s *Service) renewLeader(ctx context.Context, owner, token string) (State, 
 }
 
 func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, token string) error {
-	targets := s.cfg.Scope
-	byRepo := false
-	if len(s.cfg.AllowRepos) > 0 {
-		targets = make([]string, 0, len(s.cfg.AllowRepos))
-		for repo := range s.cfg.AllowRepos {
-			targets = append(targets, repo)
-		}
-		byRepo = true
-	}
 	// Load the queue snapshot once per pass and reuse it across candidates: a
 	// git-backed Load is GetRef+GetCommit+GetTree+GetBlob, so reloading it per PR
 	// would burn the shared REST quota on a large scan. The heartbeat refreshes it,
 	// and enqueueBatch re-checks Contains under CAS, so a slightly stale snapshot
 	// during collection is safe.
+	//
+	// It is loaded BEFORE the targets are chosen, because the state ref is where
+	// the fleet records which repositories those are. Reading this host's own
+	// list first is what let one machine scan a repository another had excluded.
 	state, _, err := s.store.Load(ctx)
 	if err != nil {
 		return err
 	}
+	cfg := s.fleetCfg(state)
+	targets := cfg.Scope
+	byRepo := false
+	if len(cfg.AllowRepos) > 0 {
+		targets = make([]string, 0, len(cfg.AllowRepos))
+		for repo := range cfg.AllowRepos {
+			targets = append(targets, repo)
+		}
+		byRepo = true
+	}
+	sort.Strings(targets) // stable: a pass must not depend on map iteration
 	var candidates []queueCandidate
 	lastBeat := time.Now()
 	for _, target := range targets {
@@ -235,16 +242,16 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 				return true, nil
 			}
 			repo := NormalizeRepo(pr.Repo)
-			if repo == NormalizeRepo(s.cfg.GateRepo) || s.cfg.ExcludeRepos[repo] {
+			if repo == NormalizeRepo(s.cfg.GateRepo) || cfg.ExcludeRepos[repo] {
 				return false, nil
 			}
-			if len(s.cfg.AllowRepos) > 0 && !s.cfg.AllowRepos[repo] {
+			if len(cfg.AllowRepos) > 0 && !cfg.AllowRepos[repo] {
 				return false, nil
 			}
 			if s.cfg.SkipAuthors[dialect.NormalizeBotName(strings.ToLower(pr.Author))] {
 				return false, nil
 			}
-			if s.cfg.SkipMarker != "" && strings.Contains(pr.Body, s.cfg.SkipMarker) {
+			if cfg.SkipMarker != "" && strings.Contains(pr.Body, cfg.SkipMarker) {
 				return false, nil
 			}
 			scanned++

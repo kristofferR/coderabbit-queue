@@ -452,6 +452,30 @@ clears it. Ambiguous replies surface too — crq never buries a possible rebutta
 
 Set these in `~/.config/crq/env` (sourced automatically) or as environment variables:
 
+### One configuration for the fleet, not one per machine
+
+These settings belong to the whole fleet and live in the state ref, not in the table below:
+`scope`, `repos`, `exclude`, `required-bots`, `min-interval`, `rate-limit-fallback`,
+`calibrate-ttl`, `settle`, `skip-marker`.
+
+```bash
+crq config                      # what is in force, and where it came from
+crq config set exclude owner/paused-repo
+crq config unset exclude
+crq config seed                 # adopt this host's current answers as the fleet's
+```
+
+Per-host files diverge the moment somebody edits one — a repository excluded on the laptop and
+reviewed by the server — and nothing says so, because each host is behaving correctly according to
+what it can see. A recorded setting wins over the matching environment variable, so you can adopt
+this one machine at a time, and `crq doctor` names any variable still set locally that the fleet
+overrides.
+
+What stays per host: where the state lives (`CRQ_REPO`, `CRQ_ISSUE`, `CRQ_STATE_REF`), credentials,
+and what the machine can physically do (`CRQ_DISPATCH_CMD`, `CRQ_WORKSPACE`,
+`CRQ_DISPATCH_CONCURRENCY`).
+
+
 | Variable | Default | What it does |
 |----------|---------|--------------|
 | `CRQ_REPO` | *(required)* | the gate repo (`owner/name`) holding the state ref, dashboard, calibration PR |

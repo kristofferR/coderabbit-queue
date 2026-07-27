@@ -338,6 +338,12 @@ type State struct {
 	// read this ref, so both cannot disagree about it.
 	Repos map[string]RepoReviewers `json:"repos,omitempty"`
 
+	// FleetConfig is the policy every host shares — which repositories are in
+	// scope, who reviews, and the timings the queue paces itself by. Same
+	// argument as Repos above, one level up: hosts that each carry their own
+	// answer diverge silently. See fleet.go.
+	FleetConfig Fleet `json:"fleet,omitempty"`
+
 	// Archive keeps recently finished rounds (superseded, closed, cancelled)
 	// for the dashboard and debugging. Bounded by ArchiveMax.
 	Archive []Round `json:"archive,omitempty"`

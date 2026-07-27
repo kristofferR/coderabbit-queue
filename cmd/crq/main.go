@@ -49,6 +49,14 @@ func run(ctx context.Context, args []string) int {
 		return 0
 	case "doctor":
 		report := doctor(ctx)
+		// The fleet's own view needs the state ref, which needs credentials, so
+		// it is asked for only when the rest of the report says that will work.
+		// A doctor that cannot answer the basics has more urgent things to say.
+		if report.Ready {
+			if diverged := fleetDivergence(ctx); len(diverged) > 0 {
+				report.Recommendations = append(report.Recommendations, diverged...)
+			}
+		}
 		printJSON(report)
 		if report.Ready {
 			return 0
@@ -263,6 +271,55 @@ func run(ctx context.Context, args []string) int {
 		}
 		printJSON(map[string]any{"status": "cancelled", "repo": crq.NormalizeRepo(repo), "pr": pr})
 		return 0
+	case "config":
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		rest := args[1:]
+		switch {
+		case len(rest) == 0 || rest[0] == "show":
+			settings, cerr := service.FleetConfig(ctx)
+			if cerr != nil {
+				fatal(cerr)
+				return 1
+			}
+			printJSON(settings)
+			return 0
+		case rest[0] == "set":
+			if len(rest) != 3 {
+				fatal(errors.New("usage: crq config set <setting> <value>"))
+				return 1
+			}
+			if err := service.SetFleetConfig(ctx, rest[1], rest[2]); err != nil {
+				fatal(err)
+				return 1
+			}
+			printJSON(map[string]any{"setting": rest[1], "value": rest[2], "scope": "fleet"})
+			return 0
+		case rest[0] == "unset":
+			if len(rest) != 2 {
+				fatal(errors.New("usage: crq config unset <setting>"))
+				return 1
+			}
+			dropped, uerr := service.UnsetFleetConfig(ctx, rest[1])
+			if uerr != nil {
+				fatal(uerr)
+				return 1
+			}
+			printJSON(map[string]any{"setting": rest[1], "cleared": dropped})
+			return 0
+		case rest[0] == "seed":
+			seeded, serr := service.SeedFleetConfig(ctx)
+			if serr != nil {
+				fatal(serr)
+				return 1
+			}
+			printJSON(map[string]any{"seeded": seeded})
+			return 0
+		}
+		fatal(fmt.Errorf("unknown config subcommand %q (try: crq config, crq config set|unset <setting> [value], crq config seed)", rest[0]))
+		return 1
 	case "debug":
 		return debug(ctx, service, store, cfg, args[1:])
 	default:
@@ -370,6 +427,8 @@ USAGE
                                    keep open PRs reviewed, rate-coordinated
   crq preflight [--type all|committed|uncommitted] [--base <branch>]
                                    local CodeRabbit CLI pre-push review as JSON
+  crq config [set|unset <setting> [value]] | seed
+                                   fleet-wide policy, shared by every host
   crq doctor                       emit JSON readiness report for agents and humans
   crq status [--line]              print the dashboard, or one line for a status bar
   crq cancel [<repo> <pr>]         remove queued/in-flight state for a PR
@@ -603,6 +662,40 @@ Typical setup:
   crq init
 
 Save the printed exports to ~/.config/crq/env on every machine or agent host.
+`)
+	case "config":
+		fmt.Print(`crq config
+crq config set <setting> <value>
+crq config unset <setting>
+crq config seed
+
+The policy every host shares, kept in the state ref rather than in each
+machine's environment.
+
+Per-host configuration files diverge the moment somebody edits one — a
+repository excluded on the laptop and reviewed by the server, a rate-limit
+window one host respects and another does not — and nothing says so, because
+each host is behaving correctly according to what it can see. These settings
+have one answer for the fleet:
+
+  scope, repos, exclude, required-bots, min-interval, rate-limit-fallback,
+  calibrate-ttl, settle, skip-marker
+
+Three kinds of setting deliberately stay local: where the state lives
+(CRQ_REPO, CRQ_ISSUE, CRQ_STATE_REF — a host cannot read fleet policy until it
+knows where to look), credentials, and what a machine can physically do (which
+fix agent is installed, where its disk is, how many sessions it can take).
+
+A recorded setting wins over the environment variable it replaces, so adopting
+this is one machine at a time: until something is recorded, every host keeps
+using its own. "crq config seed" writes this host's current answers for
+everything the fleet has not decided yet — run it once, on the machine whose
+configuration is the one you mean.
+
+A value this crq cannot read is refused at "set", and one that arrives anyway
+from a newer binary leaves the host on its own value rather than acting on half
+a policy. "crq doctor" reports both that and any variable still set here that
+the fleet overrides.
 `)
 	case "doctor":
 		fmt.Print(`crq doctor
@@ -1200,4 +1293,25 @@ func configPath() string {
 		return "~/.config/crq/env"
 	}
 	return home + "/.config/crq/env"
+}
+
+// fleetDivergence asks the state ref what the fleet's policy is and reports
+// where this host disagrees. Errors are swallowed: doctor is a report, and one
+// that fails because the network was down would be worse than one missing a
+// section.
+func fleetDivergence(ctx context.Context) []string {
+	cfg, err := crq.LoadConfig()
+	if err != nil || cfg.RequireState() != nil {
+		return nil
+	}
+	gh, err := ghapi.NewGitHub(ctx)
+	if err != nil {
+		return nil
+	}
+	store := crq.NewGitStateStore(cfg, gh, nil)
+	diverged, err := crq.NewService(cfg, gh, store, nil).FleetDivergence(ctx)
+	if err != nil {
+		return nil
+	}
+	return diverged
 }
