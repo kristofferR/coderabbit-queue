@@ -30,6 +30,7 @@ type fakeGitHub struct {
 	checkRuns       map[string][]ghapi.CheckRun // key: ref (short or full sha)
 	checkRunErrs    map[string]error
 	postBodyErrs    map[string]error // body → error (selective trigger-post failures)
+	deleteErrs      map[int64]error  // comment id → error (GitHub refuses the delete)
 	posted          []string
 	deleted         []int64
 	commentID       int64
@@ -66,6 +67,7 @@ func newFakeGitHub() *fakeGitHub {
 		reviewComments: map[string][]ghapi.ReviewComment{},
 		issueReactions: map[string][]ghapi.Reaction{},
 		reactions:      map[int64][]ghapi.Reaction{},
+		deleteErrs:     map[int64]error{},
 	}
 }
 
@@ -216,6 +218,9 @@ func (f *fakeGitHub) ListIssueCommentsPage(_ context.Context, repo string, pr, p
 func (f *fakeGitHub) DeleteIssueComment(_ context.Context, repo string, id int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.deleteErrs[id]; err != nil {
+		return err
+	}
 	for key, list := range f.comments {
 		for i, c := range list {
 			if c.ID == id {

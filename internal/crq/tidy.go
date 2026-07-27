@@ -3,6 +3,7 @@ package crq
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
@@ -17,9 +18,19 @@ type TidyResult struct {
 	// Deleted are the comment IDs removed; Kept explains, per remaining
 	// candidate, why it stayed — so a pass that deletes nothing says why rather
 	// than looking broken.
-	Deleted []int64  `json:"deleted"`
-	Kept    []string `json:"kept,omitempty"`
-	DryRun  bool     `json:"dry_run,omitempty"`
+	Deleted []int64 `json:"deleted"`
+	// Failed are the deletions GitHub refused. Without them an empty Deleted
+	// reads as "nothing was spent" when it may mean "the token may not delete",
+	// and the caller has no way to tell the two apart.
+	Failed []TidyFailure `json:"failed,omitempty"`
+	Kept   []string      `json:"kept,omitempty"`
+	DryRun bool          `json:"dry_run,omitempty"`
+}
+
+// TidyFailure is one comment a pass decided to remove and could not.
+type TidyFailure struct {
+	ID    int64  `json:"id"`
+	Error string `json:"error"`
 }
 
 // Tidy removes the review-trigger comments crq posted that nothing needs any
@@ -29,13 +40,18 @@ type TidyResult struct {
 // comments and a dozen acknowledgements, which buries the conversation a human
 // came to read. This deletes crq's own half of that.
 //
-// It is deliberately narrow in two ways.
+// It is deliberately narrow in three ways.
 //
 // Only comments CRQ POSTED. A human's "@coderabbitai review" is someone's
 // decision to ask, and not crq's to erase; the candidate list is built from the
 // comments each round recorded WRITING (Round.PostedCommands), not by matching
 // text and not from the round's CommandID — a round records an adopted command
 // there too, and adoption is exactly how a person's request gets into it.
+//
+// Only comments that STILL READ as a trigger. A recorded ID says crq wrote that
+// comment, not that it is still the one-line command crq wrote: anyone with
+// write access can edit it into an explanatory note, and deleting that destroys
+// someone's words rather than a spent request.
 //
 // Only crq's, not the bot's. An auto-generated reply can be a rate-limit notice
 // or a skipped-review notice, which crq classifies as evidence and surfaces as
@@ -77,15 +93,26 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 
 	// A deleted comment stays on its round for ever, so without this every later
 	// pass would DELETE it again and read the 404 as a fresh removal.
-	present := map[int64]bool{}
+	present := map[int64]string{}
 	for _, comment := range obs.comments {
-		present[comment.ID] = true
+		present[comment.ID] = comment.Body
 	}
+	triggers := s.triggerBodies()
 	var commands []engine.CommandComment
+	edited := 0
 	for _, cmd := range posted.commands {
-		if present[cmd.ID] {
-			commands = append(commands, cmd)
+		body, onPR := present[cmd.ID]
+		if !onPR {
+			continue
 		}
+		if !isTriggerBody(triggers, cmd.Bot, body) {
+			edited++
+			continue
+		}
+		commands = append(commands, cmd)
+	}
+	if edited > 0 {
+		result.Kept = append(result.Kept, "a trigger comment crq posted no longer reads as one; someone edited it")
 	}
 	if len(commands) == 0 {
 		result.Kept = append(result.Kept, "every trigger comment crq posted is already gone")
@@ -97,7 +124,7 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 		Live:       posted.live,
 		Superseded: posted.superseded,
 		HeadAt:     obs.eng.HeadAt,
-		AnsweredAt: answeredAt(obs, s.cfg),
+		AnsweredAt: s.answered(ctx, repo, obs, commands, posted.live),
 	}
 	stale := engine.StaleCommands(in)
 	if len(stale) == 0 {
@@ -118,7 +145,10 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 			// comments, and a person may tidy by hand.
 			result.Deleted = append(result.Deleted, id)
 		default:
-			// One write failing must not abandon the rest.
+			// One write failing must not abandon the rest — but it is reported,
+			// not just logged: a caller reading the result is the only one who can
+			// act on "the token cannot delete these".
+			result.Failed = append(result.Failed, TidyFailure{ID: id, Error: err.Error()})
 			if s.log != nil {
 				s.log.Printf("tidy: %s#%d comment %d: %v", repo, pr, id, err)
 			}
@@ -185,10 +215,85 @@ func collectPosted(st State, repo string, pr int) postedCommands {
 	return out
 }
 
+// triggerBodies maps each reviewer (normalized login) to the comment bodies
+// that count as its trigger: the configured review command for the primary, the
+// command plus registry aliases for each enabled co-reviewer.
+func (s *Service) triggerBodies() map[string][]string {
+	out := s.coCommandBodies()
+	if command := strings.TrimSpace(s.cfg.ReviewCommand); command != "" {
+		key := dialect.NormalizeBotName(s.cfg.Bot)
+		out[key] = append(out[key], command)
+	}
+	return out
+}
+
+// isTriggerBody reports whether body is still one of bot's trigger commands.
+//
+// The author is no help here — crq posts as the operator's own account, so
+// crq's comment and that person's are written by the same login. The body is
+// the only thing that distinguishes a spent one-line command from a comment
+// someone has since edited into something they meant to keep.
+//
+// Unrecognised keeps the comment, which is also what happens when the trigger
+// was reconfigured or its co-reviewer disabled after the comment went out: an
+// unevaluable guard is not permission to delete.
+func isTriggerBody(triggers map[string][]string, bot, body string) bool {
+	body = strings.TrimSpace(body)
+	for _, want := range triggers[dialect.NormalizeBotName(bot)] {
+		if body == want {
+			return true
+		}
+	}
+	return false
+}
+
+// answered is answeredAt plus the evidence only a reaction carries.
+//
+// Codex can answer a trigger with nothing but a thumbs-up on the comment
+// itself, and that reaction alone satisfies its gate and completes the round —
+// so a round that ended that way leaves no review, event or check for
+// answeredAt to find, and its "@codex review" comment would be kept for ever.
+// observe() fetches reactions only for a round that has fired, and tidying
+// observes with no round at all, so they are read here, once per candidate that
+// nothing else has answered.
+func (s *Service) answered(ctx context.Context, repo string, obs observation, commands []engine.CommandComment, live map[int64]bool) map[string]time.Time {
+	out := answeredAt(obs)
+	for _, cmd := range commands {
+		if live[cmd.ID] || !dialect.IsCodexBot(cmd.Bot) {
+			continue
+		}
+		if at, ok := out[cmd.Bot]; ok && !at.Before(cmd.CreatedAt) {
+			continue
+		}
+		reactions, err := s.gh.ListCommentReactions(ctx, repo, cmd.ID)
+		if err != nil {
+			// Housekeeping: an unreadable reaction keeps the comment, and the
+			// next pass tries again.
+			if s.log != nil {
+				s.log.Printf("tidy: %s reactions on comment %d: %v", repo, cmd.ID, err)
+			}
+			continue
+		}
+		for _, reaction := range reactions {
+			if !isCurrentCodexThumbsUp(reaction, cmd.CreatedAt) {
+				continue
+			}
+			at := reaction.CreatedAt
+			if at.IsZero() {
+				at = cmd.CreatedAt
+			}
+			if at.After(out[cmd.Bot]) {
+				out[cmd.Bot] = at
+			}
+		}
+	}
+	return out
+}
+
 // answeredAt is the newest moment each reviewer demonstrably acted on this PR.
 // A command with nothing after it was never read, and only what has been read is
 // removed.
-func answeredAt(obs observation, cfg Config) map[string]time.Time {
+func answeredAt(obs observation) map[string]time.Time {
 	out := map[string]time.Time{}
 	note := func(bot string, at time.Time) {
 		key := dialect.NormalizeBotName(bot)

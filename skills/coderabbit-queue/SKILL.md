@@ -183,7 +183,9 @@ crq tidy "$REPO" "$PR" [--dry-run]
 
 It only ever removes comments **crq posted** — candidates come from the comments each round recorded
 writing, never from matching text, and never one the round merely adopted (a person's request to
-review is not crq's to erase). A candidate also has to predate the current head, because a newer
+review is not crq's to erase). A candidate must also still read as that one-line command: crq posts
+under your own account, so a recorded comment someone has since edited into a note is their words and
+it stays. A candidate also has to predate the current head, because a newer
 command is one crq would adopt instead of posting again; a request crq's own retry replaced is spent
 either way, and an unreadable head keeps everything. Never the bots' own comments, because an
 auto-generated reply can be a rate-limit or skipped-review notice that crq reads as evidence.

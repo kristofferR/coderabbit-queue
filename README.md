@@ -213,6 +213,14 @@ reviewed. The two flags mirror CodeRabbit's own toggles: default = *Automatic + 
 commit it requested a review for, so the same commit is never reviewed twice. One process is the
 leader at a time (a lease in the shared state), so running the daemon on several machines is safe.
 
+As each round progresses the daemon also **deletes crq's own spent trigger comments** — the
+`@coderabbitai review` / `@codex review` one-liners it posted, which otherwise bury the conversation a
+human came to read. It removes a comment only when crq wrote it (never one it adopted from a person,
+never a bot's own comment, and never one edited into something else), only from a round that has moved
+on, only after the bot answered it, and only once it predates the current head. Set `CRQ_TIDY=0` to
+keep every comment, or run a pass by hand with `crq tidy <repo> <pr>` (`--dry-run` reports what it
+would remove).
+
 <details>
 <summary>Run it persistently (macOS launchd / Linux systemd)</summary>
 
@@ -385,6 +393,7 @@ crq loop <repo> <pr>      # blocking one-shot round: fire + wait + emit JSON fin
 crq feedback <repo> <pr>  # current normalized findings as JSON, WITHOUT triggering a review
 crq resolve <thread-id> [<thread-id>...]                    # resolve addressed review threads
 crq decline <thread-id> [...] --reason "<why>" [--resolve]  # record why a finding is declined
+crq tidy <repo> <pr>      # delete crq's own spent review-trigger comments (--dry-run previews)
 crq autoreview            # ⭐ review ALL open PRs automatically, rate-coordinated
                           #    (--no-incremental = first review only; --once = single pass for cron)
 crq status                # show the dashboard: queue, in-flight, quota, next slot
@@ -460,6 +469,7 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 | `CRQ_EXCLUDE` | _(none)_ | `autoreview` denylist — never these `owner/name` repos (comma-separated) |
 | `CRQ_AUTOREVIEW_SKIP_AUTHORS` | `dependabot[bot]` | PR authors `autoreview` never enqueues (comma-separated; case and `[bot]` suffix don't matter) — set to empty to auto-review bot PRs too; manual `crq review` is unaffected |
 | `CRQ_AUTOREVIEW_SKIP_MARKER` | `<!-- crq:skip-autoreview -->` | exact PR-body marker that suppresses fleet auto-review; set empty to disable; manual `crq loop` is unaffected |
+| `CRQ_TIDY` | `1` | delete crq's own spent review-trigger comments as rounds progress; `0` leaves every comment on the PR (`crq tidy` by hand is unaffected) |
 | `CRQ_REQUIRED_BOTS` | `coderabbitai[bot]` | bots that must review the head for convergence (crq waits for all of them) |
 | `CRQ_COBOTS` | `codex,bugbot,macroscope` | co-reviewers crq surfaces and (optionally) triggers; set empty to disable all |
 | `CRQ_COBOT_<NAME>_REQUIRED` | `0` | make that co-reviewer gate convergence (folds it into `CRQ_REQUIRED_BOTS`); `<NAME>` ∈ `CODEX`, `BUGBOT`, `MACROSCOPE` |

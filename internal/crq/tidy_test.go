@@ -2,9 +2,11 @@ package crq
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
@@ -225,6 +227,177 @@ func TestTidySkipsCommandsAlreadyGone(t *testing.T) {
 	if len(gh.deleted) != 0 {
 		t.Errorf("issued %d delete(s) for a comment that is not on the pr", len(gh.deleted))
 	}
+}
+
+// A recorded ID proves crq wrote the comment, not that it is still the one-line
+// command crq wrote. crq posts as the operator's own account, so anyone who can
+// edit that comment can turn it into something they meant to keep — and the body
+// is the only thing that still says which it is.
+func TestTidyKeepsATriggerCommentEditedIntoSomethingElse(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+	repo, pr := "o/r", 15
+
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "bbbbbbbb2"
+	gh.pulls[fakeKey(repo, pr)] = pull
+	gh.commits["bbbbbbbb2"] = commitAt(now.Add(-10 * time.Minute))
+
+	c := ghapi.IssueComment{ID: 100, Body: "Asked for a re-review here because the auth change needs a second pair of eyes.", CreatedAt: now.Add(-2 * time.Hour)}
+	c.User.Login = "kristofferR"
+	gh.comments[fakeKey(repo, pr)] = []ghapi.IssueComment{c}
+	review := ghapi.Review{ID: 900, CommitID: "bbbbbbbb2", SubmittedAt: now.Add(-90 * time.Minute), State: "COMMENTED"}
+	review.User.Login = cfg.Bot
+	gh.reviews[fakeKey(repo, pr)] = []ghapi.Review{review}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		return completedRound(st, repo, pr, now, func(r *Round) error {
+			if err := r.Fire(100, now.Add(-2*time.Hour)); err != nil {
+				return err
+			}
+			r.RecordPosted(cfg.Bot, 100, now.Add(-2*time.Hour))
+			return nil
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.Tidy(ctx, repo, pr, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Deleted) != 0 || len(gh.deleted) != 0 {
+		t.Fatalf("deleted %v: an edited comment is someone's words, not a spent request", result.Deleted)
+	}
+}
+
+// A delete GitHub refuses must reach the caller. An empty Deleted otherwise
+// reads as "nothing was spent" when it means "the token may not delete".
+func TestTidyReportsDeletionFailures(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	gh.deleteErrs[100] = errors.New("resource not accessible by integration")
+	now := time.Now().UTC()
+	repo, pr := "o/r", 16
+
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "bbbbbbbb2"
+	gh.pulls[fakeKey(repo, pr)] = pull
+	gh.commits["bbbbbbbb2"] = commitAt(now.Add(-10 * time.Minute))
+
+	c := ghapi.IssueComment{ID: 100, Body: cfg.ReviewCommand, CreatedAt: now.Add(-2 * time.Hour)}
+	c.User.Login = "kristofferR"
+	gh.comments[fakeKey(repo, pr)] = []ghapi.IssueComment{c}
+	review := ghapi.Review{ID: 900, CommitID: "bbbbbbbb2", SubmittedAt: now.Add(-90 * time.Minute), State: "COMMENTED"}
+	review.User.Login = cfg.Bot
+	gh.reviews[fakeKey(repo, pr)] = []ghapi.Review{review}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		return completedRound(st, repo, pr, now, func(r *Round) error {
+			if err := r.Fire(100, now.Add(-2*time.Hour)); err != nil {
+				return err
+			}
+			r.RecordPosted(cfg.Bot, 100, now.Add(-2*time.Hour))
+			return nil
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.Tidy(ctx, repo, pr, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Deleted) != 0 {
+		t.Fatalf("deleted = %v, want nothing: the delete was refused", result.Deleted)
+	}
+	if len(result.Failed) != 1 || result.Failed[0].ID != 100 || result.Failed[0].Error == "" {
+		t.Fatalf("failed = %+v, want the refused comment and why", result.Failed)
+	}
+}
+
+// Codex can answer a trigger with nothing but its thumbs-up, and that reaction
+// alone completes the round — so it is the only evidence that trigger was ever
+// read, and without it the comment would be kept for ever.
+func TestTidyCountsCodexThumbsUpAsTheAnswer(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = []CoBotConfig{{Login: dialect.CodexBotLogin, Name: "codex", Command: "@codex review"}}
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+	repo, pr := "o/r", 17
+
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "bbbbbbbb2"
+	gh.pulls[fakeKey(repo, pr)] = pull
+	gh.commits["bbbbbbbb2"] = commitAt(now.Add(-10 * time.Minute))
+
+	c := ghapi.IssueComment{ID: 100, Body: "@codex review", CreatedAt: now.Add(-2 * time.Hour)}
+	c.User.Login = "kristofferR"
+	gh.comments[fakeKey(repo, pr)] = []ghapi.IssueComment{c}
+	// The whole answer: a +1 on the trigger, no review, comment or check run.
+	thumb := ghapi.Reaction{ID: 1, Content: "+1", CreatedAt: now.Add(-100 * time.Minute)}
+	thumb.User.Login = dialect.CodexBotLogin
+	gh.reactions[100] = []ghapi.Reaction{thumb}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	// A co-only round, which is how a Codex trigger becomes a round's own
+	// command: the comment anchors the round and is recorded against Codex.
+	if _, err := store.Update(ctx, func(st *State) error {
+		return completedRound(st, repo, pr, now, func(r *Round) error {
+			if err := r.Fire(100, now.Add(-2*time.Hour)); err != nil {
+				return err
+			}
+			r.CoOnly = true
+			r.SetCoCommand(dialect.CodexBotLogin, 100, now.Add(-2*time.Hour))
+			r.RecordPosted(dialect.CodexBotLogin, 100, now.Add(-2*time.Hour))
+			return nil
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.Tidy(ctx, repo, pr, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Deleted) != 1 || result.Deleted[0] != 100 {
+		t.Fatalf("deleted = %v (kept: %v), want the thumbed-up trigger removed", result.Deleted, result.Kept)
+	}
+}
+
+// completedRound builds a round that fired (via fire) and then completed, which
+// is the "has progressed" precondition every tidy candidate needs.
+func completedRound(st *State, repo string, pr int, now time.Time, fire func(*Round) error) error {
+	r, err := st.NewRound(repo, pr, "aaaaaaaa1", now.Add(-3*time.Hour))
+	if err != nil {
+		return err
+	}
+	if err := r.Reserve("t", "h", now.Add(-3*time.Hour)); err != nil {
+		return err
+	}
+	if err := fire(r); err != nil {
+		return err
+	}
+	if err := r.Complete(); err != nil {
+		return err
+	}
+	st.PutRound(*r)
+	return nil
 }
 
 // commitAt is a commit object with a committer date, which is the cutoff

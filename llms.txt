@@ -209,10 +209,11 @@ crq removes its own spent `@coderabbitai review` / `@codex review` comments as r
 crq tidy REPO PR [--dry-run]
 ```
 
-Only comments crq posted (never one it adopted — that comment is someone else's), only from rounds
+Only comments crq posted (never one it adopted — that comment is someone else's), only while the
+comment still reads as that one-line command (an edited one is someone's words), only from rounds
 that have progressed, only after the bot answered, only once the comment predates the current head
 (a command crq's own retry replaced is spent regardless, and an unreadable head keeps everything),
-and never the bots' own comments.
+and never the bots' own comments. Deletions GitHub refuses are reported in `.failed[]`.
 
 Current feedback without triggering a review:
 

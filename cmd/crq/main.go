@@ -542,9 +542,11 @@ which buries the conversation a human came to read.
 
 A comment is removed only when all three hold:
 
-  * crq WROTE it — the candidates are the comments each round recorded posting,
-    not anything matching the text and not one the round adopted. A person's
-    "@coderabbitai review" is their decision to ask and not crq's to erase.
+  * crq WROTE it, and it still READS as that one-line command. The candidates
+    are the comments each round recorded posting, not anything matching the text
+    and not one the round adopted: a person's "@coderabbitai review" is their
+    decision to ask and not crq's to erase. crq posts under your own account, so
+    a recorded comment someone has since edited is their words, and it stays.
   * the round that asked has PROGRESSED. A live round keeps its command, because
     that is the comment crq adopts instead of posting another one.
   * the bot answered it, and it predates the current head. Adoption only ever
