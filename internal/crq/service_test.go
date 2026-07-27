@@ -328,6 +328,26 @@ func (s *failNthUpdateStore) Update(ctx context.Context, mutate func(*State) err
 	return s.StateStore.Update(ctx, mutate)
 }
 
+type holdAfterEnqueueStore struct {
+	StateStore
+	held bool
+}
+
+func (s *holdAfterEnqueueStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {
+	state, err := s.StateStore.Update(ctx, mutate)
+	if err != nil || s.held {
+		return state, err
+	}
+	s.held = true
+	if _, err := s.StateStore.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting on a decision", "operator", time.Now())
+		return nil
+	}); err != nil {
+		return State{}, err
+	}
+	return state, nil
+}
+
 // retryNoChangeStore invokes the mutate closure twice within one Update: first
 // against a state whose round holds the fire slot, then a fresh state with no
 // round. It verifies recordFire resets its `recorded` flag between attempts.
@@ -1519,6 +1539,30 @@ func TestWaitReturnsWhenPRIsHeld(t *testing.T) {
 	}
 	if got := st.Round("owner/repo", 12); got != nil {
 		t.Fatalf("held PR enqueued a round: %+v", got)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("held PR posted %d review commands", len(gh.posted))
+	}
+}
+
+func TestWaitReturnsWhenPRIsHeldAfterEnqueue(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.WaitTimeout = 100 * time.Millisecond
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls["owner/repo#12"] = pull
+	store := &holdAfterEnqueueStore{StateStore: NewMemoryStore(cfg)}
+	service := NewService(cfg, gh, store, nil)
+
+	result, code, err := service.Wait(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 2 || result.Action != "held" || result.Reason != "held: waiting on a decision" {
+		t.Fatalf("hold created after enqueue should terminate the wait, code=%d result=%#v", code, result)
 	}
 	if len(gh.posted) != 0 {
 		t.Fatalf("held PR posted %d review commands", len(gh.posted))

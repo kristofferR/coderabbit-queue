@@ -2058,6 +2058,19 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 		if err != nil {
 			return PumpResult{}, 1, err
 		}
+		if hold, held := state.HeldPR(repo, pr); held {
+			head := ""
+			if round := state.Round(repo, pr); round != nil {
+				head = round.Head
+			}
+			return PumpResult{
+				Action: "held",
+				Repo:   repo,
+				PR:     pr,
+				Head:   head,
+				Reason: "held: " + hold.Reason,
+			}, 2, nil
+		}
 		if r := state.Round(repo, pr); r != nil && (r.Phase == PhaseFired || r.Phase == PhaseReviewing) {
 			// A reviewing round is in flight (a fired ack, or a bounded co-review
 			// wait): advance from the slot wait into feedback polling, which the

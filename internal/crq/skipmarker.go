@@ -138,7 +138,8 @@ func markdownListContentIndent(line string, containerIndent int) (int, bool) {
 	for at < len(line) && (line[at] == ' ' || line[at] == '\t') {
 		next := padding + 1
 		if line[at] == '\t' {
-			next = padding + 4 - padding%4
+			currentColumn := column + markerWidth + padding
+			next = padding + 4 - currentColumn%4
 		}
 		if next > 4 {
 			break
@@ -238,7 +239,7 @@ func markdownFence(line string) (delimiter byte, run int, tail string, ok bool) 
 func stripCodeSpans(text string) string {
 	var out strings.Builder
 	for i := 0; i < len(text); {
-		if text[i] != '`' {
+		if text[i] != '`' || backtickEscaped(text, i) {
 			out.WriteByte(text[i])
 			i++
 			continue
@@ -263,7 +264,7 @@ func stripCodeSpans(text string) string {
 
 func matchingBacktickRun(text string, start, want int) int {
 	for i := start; i < len(text); {
-		if text[i] != '`' {
+		if text[i] != '`' || backtickEscaped(text, i) {
 			i++
 			continue
 		}
@@ -277,4 +278,13 @@ func matchingBacktickRun(text string, start, want int) int {
 		i = end
 	}
 	return -1
+}
+
+func backtickEscaped(text string, at int) bool {
+	backslashes := 0
+	for at > 0 && text[at-1] == '\\' {
+		backslashes++
+		at--
+	}
+	return backslashes%2 == 1
 }
