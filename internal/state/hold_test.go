@@ -47,7 +47,7 @@ func TestHeldRoundsAreNeverChosenToFire(t *testing.T) {
 	// round showing there tells the reader it is waiting its turn when nothing
 	// will ever take it.
 	for _, e := range st.Queue(now, 0) {
-		if e.Round.PR == 1 {
+		if e.PR == 1 {
 			t.Error("a held round appears in the dashboard queue")
 		}
 	}

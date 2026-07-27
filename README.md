@@ -385,12 +385,15 @@ crq loop <repo> <pr>      # blocking one-shot round: fire + wait + emit JSON fin
 crq feedback <repo> <pr>  # current normalized findings as JSON, WITHOUT triggering a review
 crq resolve <thread-id> [<thread-id>...]                    # resolve addressed review threads
 crq decline <thread-id> [...] --reason "<why>" [--resolve]  # record why a finding is declined
+crq hold <repo> <pr> --reason "<why>"                       # persistently stop reviews for a PR
+crq unhold <repo> <pr>                                      # resume reviews for a held PR
+crq hold                                                    # list held PRs
 crq autoreview            # ⭐ review ALL open PRs automatically, rate-coordinated
                           #    (--no-incremental = first review only; --once = single pass for cron)
 crq status                # show the dashboard: queue, in-flight, quota, next slot
 crq doctor                # JSON readiness report (gh/auth/config/CLI) — never writes to GitHub
 crq preflight [...]       # run the local CodeRabbit CLI pre-push and normalize its JSON
-crq cancel <repo> <pr>    # take a PR out of the line
+crq cancel <repo> <pr>    # abandon the current round; autoreview may enqueue it again
 crq init                  # first-time setup of the gate repo
 crq debug <enqueue|pump|refresh|state>   # diagnosis only — review loops should use crq next
 crq version               # print the version
@@ -402,6 +405,10 @@ the exit code. **`crq loop` exit codes:** `0` converged or no
 actionable findings, `10` actionable findings returned in `.findings[]`, `2` timed out waiting for
 feedback. crq keys resolution off GitHub's own thread state, so a finding keeps reappearing in
 `feedback`/`loop` until its thread is resolved (or declined-and-resolved) on GitHub.
+
+Use `crq hold` for an administrative pause: the hold survives autoreview passes and prevents both
+primary and co-reviewer triggers until `crq unhold`. `crq cancel` only abandons the current round,
+so fleet autoreview may discover the still-open PR and enqueue it again.
 
 <details>
 <summary>Feedback JSON shape</summary>

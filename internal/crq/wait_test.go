@@ -246,3 +246,37 @@ func TestWaitDrivesAnUntrackedHeadEvenUnderALiveLeader(t *testing.T) {
 		t.Errorf("the untracked head must get its review requested, posted %d", got)
 	}
 }
+
+// A hold is itself the reason no round or live leader is advancing the PR.
+// Driving Next in that state cannot change anything, but it repeats full
+// feedback work every tick; park on the conditional state-ref watch instead.
+func TestWaitParksAnAdministrativelyHeldPR(t *testing.T) {
+	base := time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC)
+	f := newReplayFixture(t, base)
+	repo, pr := "owner/repo", 702
+	head := "bbbbbbbb1"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Minute))
+	f.setLocalWork(false, "")
+	if _, err := f.svc.Hold(f.ctx, repo, pr, "waiting on a decision"); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(f.ctx)
+	f.svc.sleepFn = func(context.Context, time.Duration) error {
+		cancel()
+		return context.Canceled
+	}
+	if _, err := f.svc.WaitForAction(ctx, repo, pr); err == nil {
+		t.Fatal("expected cancellation to stop the parked waiter")
+	}
+	if got := f.gh.reviewPolls(); got != 1 {
+		t.Fatalf("held waiter performed %d full feedback reads before parking, want 1", got)
+	}
+	if r := f.round(repo, pr); r != nil {
+		t.Fatalf("held waiter enqueued a round: %+v", r)
+	}
+	if got := f.reviewsPosted(repo, pr); got != 0 {
+		t.Fatalf("held waiter posted %d reviews", got)
+	}
+}

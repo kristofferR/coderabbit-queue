@@ -260,10 +260,21 @@ type AccountQuota struct {
 }
 
 type LeaderLease struct {
-	Owner     string    `json:"owner"`
-	Token     string    `json:"token"`
-	ExpiresAt time.Time `json:"expires_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Owner        string    `json:"owner"`
+	Token        string    `json:"token"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Capabilities []string  `json:"capabilities,omitempty"`
+}
+
+// HasCapability reports whether the active daemon understands a state feature.
+func (l LeaderLease) HasCapability(want string) bool {
+	for _, capability := range l.Capabilities {
+		if capability == want {
+			return true
+		}
+	}
+	return false
 }
 
 // State is schema v3. It persists as state.json in the git state ref exactly

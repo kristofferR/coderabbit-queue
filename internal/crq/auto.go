@@ -191,7 +191,13 @@ func (s *Service) renewLeader(ctx context.Context, owner, token string) (State, 
 			held = false
 			return ErrNoChange
 		}
-		st.Leader = &LeaderLease{Owner: owner, Token: token, ExpiresAt: expires, UpdatedAt: now}
+		st.Leader = &LeaderLease{
+			Owner:        owner,
+			Token:        token,
+			ExpiresAt:    expires,
+			UpdatedAt:    now,
+			Capabilities: []string{leaderCapabilityHolds},
+		}
 		held = true
 		return nil
 	})

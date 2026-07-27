@@ -100,6 +100,67 @@ func (s *Service) clock() time.Time {
 // dialect constant) and is surfaced via AccountQuota, not the sticky Warn field.
 const warnRateLimited = dialect.ReasonRateLimited
 
+const leaderCapabilityHolds = "administrative-holds"
+
+// Hold takes a PR out of the review queue in one write.
+//
+// Holding used to need two commands that could not be one: the skip marker
+// stops fleet auto-review from enqueueing, `crq cancel` stops the pump, and
+// between the two a daemon fired anyway. A hold is one fact, recorded where
+// every firing path already looks, so there is no window between the halves.
+//
+// It does not cancel a round already in flight: that review is bought and its
+// findings are still worth having. It stops the next one.
+func (s *Service) Hold(ctx context.Context, repo string, pr int, reason string) (HoldResult, error) {
+	repo = NormalizeRepo(repo)
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return HoldResult{}, errors.New("a hold needs a reason: it is a note to whoever finds the PR stopped")
+	}
+	now := s.clock().UTC()
+	state, err := s.store.Update(ctx, func(st *State) error {
+		// An older daemon preserves Holds as unknown JSON but cannot enforce it.
+		// Refuse success while one owns the fleet lease; once a capable leader
+		// owns the lease, CAS keeps the old daemon from firing during rollout.
+		if st.Leader != nil && st.Leader.ExpiresAt.After(now) && !st.Leader.HasCapability(leaderCapabilityHolds) {
+			return errors.New("the active autoreview leader does not support administrative holds; upgrade it or wait for its lease to expire")
+		}
+		st.Hold(repo, pr, reason, s.cfg.Host, now)
+		return nil
+	})
+	if err != nil {
+		return HoldResult{}, err
+	}
+	s.sync(ctx, state)
+	if s.log != nil {
+		s.log.Printf("%s#%d held: %s", repo, pr, reason)
+	}
+	return HoldResult{Repo: repo, PR: pr, Held: true, Reason: reason, By: s.cfg.Host, At: &now}, nil
+}
+
+// Unhold puts a PR back in the queue.
+func (s *Service) Unhold(ctx context.Context, repo string, pr int) (HoldResult, error) {
+	repo = NormalizeRepo(repo)
+	released := false
+	state, err := s.store.Update(ctx, func(st *State) error {
+		if !st.Unhold(repo, pr) {
+			return ErrNoChange
+		}
+		released = true
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrNoChange) {
+		return HoldResult{}, err
+	}
+	if released {
+		s.sync(ctx, state)
+		if s.log != nil {
+			s.log.Printf("%s#%d released", repo, pr)
+		}
+	}
+	return HoldResult{Repo: repo, PR: pr, Held: false}, nil
+}
+
 type EnqueueResult struct {
 	Repo          string `json:"repo"`
 	PR            int    `json:"pr"`
@@ -410,6 +471,9 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 	}
 	round := st.Round(repo, pr)
 	if round == nil || !round.FireEligible(now) {
+		return PumpResult{}, false, nil
+	}
+	if _, held := st.HeldPR(repo, pr); held {
 		return PumpResult{}, false, nil
 	}
 	obs, err := s.observe(ctx, repo, pr, round, now)
@@ -1007,7 +1071,7 @@ func (s *Service) fireCoOnly(ctx context.Context, round Round, logins []string, 
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		claimed = claimed[:0]
 		r := st.Round(round.Repo, round.PR)
-		if !sameRound(r, round) || !r.FireEligible(now) {
+		if !sameRound(r, round) || !firable(st, r, now) {
 			return ErrNoChange
 		}
 		for _, login := range logins {
@@ -1200,7 +1264,7 @@ func (s *Service) fireCoReviewWait(ctx context.Context, round Round, obs engine.
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		changed = false
 		r := st.Round(round.Repo, round.PR)
-		if !sameRound(r, round) || !r.FireEligible(now) {
+		if !sameRound(r, round) || !firable(st, r, now) {
 			return ErrNoChange
 		}
 		deadline := now.Add(s.cfg.FeedbackWaitTimeout)
@@ -1376,6 +1440,9 @@ func (s *Service) fireCoDeferred(ctx context.Context, round Round, d engine.Fire
 		adopted, claimed = 0, claimed[:0]
 		r := st.Round(round.Repo, round.PR)
 		if !sameRound(r, round) || (r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry) {
+			return ErrNoChange
+		}
+		if _, held := st.HeldPR(round.Repo, round.PR); held {
 			return ErrNoChange
 		}
 		changed := false
