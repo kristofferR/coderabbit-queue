@@ -848,7 +848,7 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 		recorded := false
 		updated, err := s.store.Update(ctx, func(st *State) error {
 			recorded = false
-			if st.FireSlot != nil {
+			if st.SlotHeld(now) {
 				return ErrNoChange
 			}
 			r := st.Round(round.Repo, round.PR)
@@ -914,7 +914,7 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 	// commit point — nothing is posted before it — so it is where the reviewer
 	// configuration the decision used is revalidated.
 	reserved, err := s.store.Update(ctx, func(st *State) error {
-		if st.FireSlot != nil {
+		if st.SlotHeld(now) {
 			return ErrNoChange
 		}
 		r := st.Round(round.Repo, round.PR)

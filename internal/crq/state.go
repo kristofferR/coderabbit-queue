@@ -127,6 +127,12 @@ func (c Config) policy() engine.Policy {
 		RateLimitCoDegrade: c.RateLimitCoDegrade,
 	}
 	for _, cb := range c.CoBots {
+		// A registry-backed primary keeps a silenced CoBots entry so observation
+		// can use that registry's wording and check hooks. It is still the
+		// primary, not a dynamic co-reviewer convergence gate.
+		if sameBot(cb.Login, c.Bot) {
+			continue
+		}
 		p.CoReviewers = append(p.CoReviewers, engine.CoReviewerPolicy{
 			Login:         cb.Login,
 			Command:       cb.Command,

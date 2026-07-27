@@ -126,7 +126,16 @@ func TestOverrideKeepsTheSilencedPrimaryEntry(t *testing.T) {
 		t.Errorf("%s: CoBots = %+v lost the primary's registry entry", when, cfg.CoBots)
 	}
 	primaryPresent(fleet, "fleet default")
-	primaryPresent(fleet.ForRepo(RepoReviewers{CoBots: []string{"codex"}, SetCoBots: true}), "override naming only codex")
+	got := fleet.ForRepo(RepoReviewers{
+		CoBots: []string{"codex"}, SetCoBots: true,
+		Required: []string{dialect.CodexBotLogin}, SetRequired: true,
+	})
+	primaryPresent(got, "override naming only codex")
+	for _, cp := range got.policy().CoReviewerPolicies() {
+		if sameBot(cp.Login, got.Bot) {
+			t.Errorf("primary %q leaked into the dynamic co-review policies", got.Bot)
+		}
+	}
 }
 
 // Four defects that all end the same way: a round waiting on a reviewer crq
@@ -208,6 +217,45 @@ func TestOverrideNeverGatesOnAReviewerItCannotTrigger(t *testing.T) {
 			if decision.Verdict != engine.FireCoOnly || len(decision.PostCo) != 1 ||
 				!sameBot(decision.PostCo[0], cb.Login) {
 				t.Errorf("decision = %+v, want one immediate bugbot trigger", decision)
+			}
+			return
+		}
+		t.Fatalf("CoBots = %+v, want bugbot enabled", got.CoBots)
+	})
+
+	t.Run("a newly enabled optional self-heal bot gets an immediate trigger", func(t *testing.T) {
+		fleet := isolatedConfig(t, map[string]string{
+			"CRQ_COBOTS":                    "",
+			"CRQ_COBOT_CODEX_REQUIRED":      "false",
+			"CRQ_COBOT_BUGBOT_REQUIRED":     "false",
+			"CRQ_COBOT_MACROSCOPE_REQUIRED": "false",
+		})
+		got := fleet.ForRepo(RepoReviewers{CoBots: []string{"bugbot"}, SetCoBots: true})
+		for _, cb := range got.CoBots {
+			if cb.Name != "bugbot" {
+				continue
+			}
+			if cb.Required {
+				t.Fatalf("bugbot = %+v, want an optional reviewer", cb)
+			}
+			forced := forcedCoReviewers(nil, fleet, got)
+			if len(forced) != 1 || !sameBot(forced[0], cb.Login) {
+				t.Fatalf("forced reviewers = %v, want newly enabled bugbot", forced)
+			}
+			round := Round{
+				Repo: "o/r", PR: 4, Head: "aaaaaaaa1", Phase: PhaseQueued,
+				ForceCoReviewers: forced,
+			}
+			obs := engine.Observation{
+				Head: "aaaaaaaa1", Open: true,
+				Reviews: []engine.ReviewSeen{{
+					Bot: got.Bot, Commit: "aaaaaaaa1",
+				}},
+			}
+			decision := engine.DecideFire(engine.Global{SlotFree: true}, round, obs, time.Now().UTC(), got.policy())
+			if decision.Verdict != engine.FireCoOnly || len(decision.PostCo) != 1 ||
+				!sameBot(decision.PostCo[0], cb.Login) {
+				t.Errorf("decision = %+v, want one immediate optional bugbot trigger", decision)
 			}
 			return
 		}

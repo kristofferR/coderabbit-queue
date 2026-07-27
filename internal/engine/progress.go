@@ -122,6 +122,9 @@ func Progress(r state.Round, q state.AccountQuota, obs Observation, now time.Tim
 	// treated this as a normal bot comment and released the slot with the wait
 	// still pending; parking with a bounded cooldown retries it instead.
 	if r.Phase == state.PhaseFired && stateSince(obs, p, firedAt, dialect.EvFailed) {
+		if completion.Done {
+			return Transition{Outcome: OutComplete, Reason: "feedback complete; optional primary review failed"}
+		}
 		return Transition{Outcome: OutRetry, Reason: "review failed", RetryAt: now.Add(p.retryBackoff())}
 	}
 

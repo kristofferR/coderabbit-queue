@@ -312,20 +312,31 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 }
 
 // forcedCoReviewers carries the one exceptional trigger a completed-head reopen
-// needs. A newly required self-heal bot has no activity on that old head, so its
-// normal mode cannot decide it missed anything; force it once without changing
-// the repository's steady-state trigger policy.
+// needs. A newly enabled or required self-heal bot has no activity on that old
+// head, so its normal mode cannot decide it missed anything; force it once
+// without changing the repository's steady-state trigger policy.
 func forcedCoReviewers(existing []string, before, after Config) []string {
 	var out []string
 	for _, cb := range after.CoBots {
-		if !cb.Required || cb.Trigger != engine.TriggerSelfHeal || cb.Command == "" {
+		if cb.Trigger != engine.TriggerSelfHeal || cb.Command == "" {
 			continue
 		}
-		if containsBot(existing, cb.Login) || !containsBot(before.RequiredBots, cb.Login) {
+		newlyEnabled := !containsCoBot(before.CoBots, cb.Login)
+		newlyRequired := cb.Required && !containsBot(before.RequiredBots, cb.Login)
+		if containsBot(existing, cb.Login) || newlyEnabled || newlyRequired {
 			out = append(out, cb.Login)
 		}
 	}
 	return out
+}
+
+func containsCoBot(bots []CoBotConfig, login string) bool {
+	for _, cb := range bots {
+		if sameBot(cb.Login, login) {
+			return true
+		}
+	}
+	return false
 }
 
 // requeueIfReviewersChanged reopens a completed round that a reviewer change

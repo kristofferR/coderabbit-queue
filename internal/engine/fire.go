@@ -311,7 +311,7 @@ func coAwareDedupe(r state.Round, obs Observation, p Policy, now time.Time, prim
 	anchor := selfHealAnchor(r, obs, primaryUnavailable)
 	for _, cp := range p.coReviewers() {
 		co := obs.co(cp.Login)
-		gates := requiredBot(p, cp.Login) || co.AutoActive || primaryUnavailable
+		gates := requiredBot(p, cp.Login) || co.AutoActive || primaryUnavailable || r.ForceCoReviewer(cp.Login)
 		if !gates || coReviewedHead(obs, cp.Login) {
 			continue
 		}

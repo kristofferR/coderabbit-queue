@@ -373,7 +373,16 @@ func (s *adoptionRaceStore) Load(context.Context) (State, Revision, error) {
 
 func (s *adoptionRaceStore) Update(_ context.Context, mutate func(*State) error) (State, error) {
 	state := cloneState(s.loadState)
-	state.FireSlot = &FireSlot{Key: "owner/repo#99", Token: "other", Since: time.Now().UTC()}
+	now := time.Now().UTC()
+	other, err := state.NewRound("owner/repo", 99, "999999999", now)
+	if err != nil {
+		return State{}, err
+	}
+	if err := other.Reserve("other", "other-host", now); err != nil {
+		return State{}, err
+	}
+	state.PutRound(*other)
+	state.FireSlot = &FireSlot{Key: "owner/repo#99", Token: "other", Since: now}
 	if err := mutate(&state); err != nil {
 		if errors.Is(err, ErrNoChange) {
 			return state, nil
@@ -1418,6 +1427,46 @@ func TestPumpTreatsExistingReviewAdoptionRaceAsLostRace(t *testing.T) {
 	}
 	if len(gh.posted) != 0 {
 		t.Fatalf("adoption race must not post another review command, posted=%d", len(gh.posted))
+	}
+}
+
+func TestFireRoundRechecksOrphanedSlotHold(t *testing.T) {
+	for _, post := range []bool{false, true} {
+		name := "adopt"
+		if post {
+			name = "post"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			cfg := firingConfig()
+			gh := newFakeGitHub()
+			store := NewMemoryStore(cfg)
+			now := time.Now().UTC()
+			seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseQueued, now, 0)
+			if _, err := store.Update(ctx, func(st *State) error {
+				until := now.Add(cfg.InflightTimeout)
+				st.FireSlotHoldUntil = &until
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			st, _, err := store.Load(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			round := *st.Round("owner/repo", 12)
+			svc := NewService(cfg, gh, store, nil)
+			got, err := svc.fireRound(ctx, cfg, round, engine.Observation{}, post, 77, now.Add(-time.Minute), "test", nil, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Action != "lost_race" {
+				t.Fatalf("action = %q, want lost_race while an orphaned hold is active", got.Action)
+			}
+			if len(gh.posted) != 0 {
+				t.Fatalf("posted %d review commands while an orphaned hold is active", len(gh.posted))
+			}
+		})
 	}
 }
 

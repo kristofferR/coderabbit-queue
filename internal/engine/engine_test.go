@@ -150,6 +150,30 @@ func TestFailedSummaryParksTheRound(t *testing.T) {
 	}
 }
 
+func TestFailedOptionalPrimaryCompletesConvergedRound(t *testing.T) {
+	r := firedRound(t, "abcdef123")
+	now := t0.Add(time.Minute)
+	p := withCodex(policy, "@codex review")
+	p.RequiredBots = []string{dialect.CodexBotLogin}
+	obs := Observation{
+		Head: "abcdef123", Open: true,
+		Reviews: []ReviewSeen{{
+			Bot: dialect.CodexBotLogin, ReviewID: 4,
+			Commit: "abcdef1234567890", SubmittedAt: t0.Add(30 * time.Second),
+		}},
+		Events: []dialect.BotEvent{{
+			Kind: dialect.EvFailed, Bot: "coderabbitai[bot]", CommentID: 900,
+			CreatedAt: t0.Add(-time.Hour), UpdatedAt: t0.Add(9 * time.Second),
+		}},
+	}
+	if got := Completion(r, obs, p); !got.Done {
+		t.Fatalf("the only required reviewer answered; want convergence, got %+v", got)
+	}
+	if tr := Progress(r, state.AccountQuota{}, obs, now, p); tr.Outcome != OutComplete {
+		t.Fatalf("an optional primary failure must finish a converged round, got %+v", tr)
+	}
+}
+
 func TestReviewAtHeadCompletesRound(t *testing.T) {
 	r := firedRound(t, "abcdef123")
 	obs := Observation{Head: "abcdef123", Open: true,
