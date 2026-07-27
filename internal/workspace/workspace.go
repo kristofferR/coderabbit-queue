@@ -1,17 +1,18 @@
-package crq
+package workspace
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
-
-	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 // Workspace is crq's own place on disk for a repository.
@@ -40,6 +41,10 @@ type Workspace struct {
 	// developer machine; a daemon configured with GITHUB_TOKEN alone has no
 	// helper, and git does not read that variable by itself.
 	Token string
+	// TokenSource resolves credentials immediately before each Git command.
+	// Long-lived checkouts use this instead of retaining the token that happened
+	// to be current when they were created.
+	TokenSource func(context.Context) string
 }
 
 // DefaultWorkspaceRoot is $XDG_CACHE_HOME/crq (or ~/.cache/crq).
@@ -61,11 +66,15 @@ func DefaultWorkspaceRoot() (string, error) {
 // snippet that reads it, so a process listing, a log line and this package's own
 // error strings all carry the snippet and never the secret.
 func (w Workspace) git(ctx context.Context, dir string, args ...string) (string, error) {
-	if strings.TrimSpace(w.Token) == "" {
+	token := strings.TrimSpace(w.Token)
+	if w.TokenSource != nil {
+		token = strings.TrimSpace(w.TokenSource(ctx))
+	}
+	if token == "" {
 		return gitDir(ctx, dir, args...)
 	}
 	full := append([]string{"-c", "credential.helper=", "-c", "credential.helper=" + credentialHelper}, args...)
-	return gitEnv(ctx, dir, []string{"CRQ_GIT_TOKEN=" + w.Token}, full...)
+	return gitEnv(ctx, dir, []string{"CRQ_GIT_TOKEN=" + token}, full...)
 }
 
 // credentialHelper answers for https://github.com and nothing else.
@@ -114,7 +123,7 @@ func (w Workspace) mirrorPath(repo string) (string, error) {
 
 // splitRepo splits owner/name, rejecting anything that could traverse a path.
 func splitRepo(repo string) (owner, name string, ok bool) {
-	owner, name, ok = strings.Cut(NormalizeRepo(repo), "/")
+	owner, name, ok = strings.Cut(normalizeRepo(repo), "/")
 	if !ok || owner == "" || name == "" {
 		return "", "", false
 	}
@@ -189,7 +198,7 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 	if _, err := w.git(ctx, pending, "config", "remote.origin.fetch", originRefspec); err != nil {
 		return "", fmt.Errorf("configuring %s: %w", repo, err)
 	}
-	if _, err := w.git(ctx, pending, "fetch", "--prune", "origin"); err != nil {
+	if _, err := w.git(ctx, pending, "fetch", "--prune", "origin", originRefspec, tagRefspec); err != nil {
 		return "", fmt.Errorf("cloning %s: %w", repo, err)
 	}
 	if err := os.Rename(pending, path); err != nil {
@@ -207,15 +216,19 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 func (w Workspace) remoteURL(repo string) string {
 	base := strings.TrimSpace(os.Getenv("CRQ_REMOTE_BASE"))
 	if base == "" {
-		return "https://github.com/" + NormalizeRepo(repo) + ".git"
+		return "https://github.com/" + normalizeRepo(repo) + ".git"
 	}
-	return strings.TrimRight(base, "/") + "/" + NormalizeRepo(repo)
+	return strings.TrimRight(base, "/") + "/" + normalizeRepo(repo)
 }
 
 // originRefspec keeps fetched refs out of refs/heads, which belongs to the
 // worktrees: a session's branch there must survive a fetch, and a branch checked
 // out in a worktree makes any fetch that would update it fail outright.
 const originRefspec = "+refs/heads/*:refs/remotes/origin/*"
+
+// tagRefspec is explicit so --prune removes deleted tags, and forced so a
+// release tag moved on the remote is refreshed instead of rejected as stale.
+const tagRefspec = "+refs/tags/*:refs/tags/*"
 
 // migrateMirror brings a mirror an older crq left behind up to the rules this
 // one depends on, and is a no-op on a mirror that already follows them.
@@ -241,7 +254,7 @@ func (w Workspace) fetchMirror(ctx context.Context, path string) error {
 	// current. Retry briefly rather than failing a dispatch over that.
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
-		if _, err = w.git(ctx, path, "fetch", "--prune", "origin"); err == nil {
+		if _, err = w.git(ctx, path, "fetch", "--prune", "origin", originRefspec, tagRefspec); err == nil {
 			return nil
 		}
 		// Only contention is somebody else's success. Expired credentials, an
@@ -273,11 +286,12 @@ func (w Workspace) fetchMirror(ctx context.Context, path string) error {
 //
 // Three guards, because a session's own branch lives in refs/heads too, and
 // deleting that one loses the commits it is the only ref for: never a name a
-// worktree has checked out (`git update-ref -d` deletes a checked-out branch
-// without a word of complaint), only names origin actually has, and only when
-// origin already has the commits. The last is what makes a deletion lossless
-// rather than merely likely to be: checkout status alone would drop a session's
-// branch the moment it detached HEAD to look at another commit.
+// worktree has checked out, only names origin actually has, and only when origin
+// already has the commits. The last is what makes a deletion lossless rather
+// than merely likely to be: checkout status alone would drop a session's branch
+// the moment it detached HEAD to look at another commit. Deletion itself uses
+// git branch rather than update-ref, so Git rechecks worktree occupancy after
+// our snapshot and refuses a branch a session attached in the meantime.
 func (w Workspace) dropFetchedHeads(ctx context.Context, path string) error {
 	heads, err := gitDir(ctx, path, "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads")
 	if err != nil {
@@ -306,9 +320,22 @@ func (w Workspace) dropFetchedHeads(ctx context.Context, path string) error {
 		if _, err := gitDir(ctx, path, "merge-base", "--is-ancestor", "refs/heads/"+name, "refs/remotes/origin/"+name); err != nil {
 			continue
 		}
-		if _, err := gitDir(ctx, path, "update-ref", "-d", "refs/heads/"+name); err != nil {
+		if err := deleteFetchedHead(ctx, path, name); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func deleteFetchedHead(ctx context.Context, path, name string) error {
+	// Unlike update-ref, branch refuses to delete a branch that became checked
+	// out after dropFetchedHeads took its occupancy snapshot.
+	if _, err := gitDir(ctx, path, "branch", "-D", "--", name); err != nil {
+		live, lerr := checkedOutBranches(ctx, path)
+		if lerr == nil && live[name] {
+			return nil
+		}
+		return err
 	}
 	return nil
 }
@@ -485,7 +512,7 @@ func (w Workspace) Checkout(ctx context.Context, repo string, pr int, sha string
 	// got before: a checkout that ages out of the workspace on its own.
 	alive, stop := context.WithCancel(ctx)
 	go keepAlive(alive, dir, heartbeatInterval)
-	return Checkout{Dir: dir, Repo: NormalizeRepo(repo), PR: pr, mirror: mirror, ws: w, token: token, stop: stop}, nil
+	return Checkout{Dir: dir, Repo: normalizeRepo(repo), PR: pr, mirror: mirror, ws: w, token: token, stop: stop}, nil
 }
 
 // fetchPullRef fetches refs/pull/<pr>/head when sha is not in the mirror yet.
@@ -576,11 +603,14 @@ func pruneStaleWork(ctx context.Context, mirror, repoDir string) error {
 		}
 		for _, entry := range entries {
 			dir := filepath.Join(repoDir, prDir.Name(), entry.Name())
-			// The NEWEST file in the checkout, not the directory's own timestamp:
-			// editing a file or running a build inside leaves the root's mtime
-			// untouched, so a busy session would read as abandoned. An idle one
-			// keeps that root fresh itself (keepAlive).
-			if touched := newestModTime(dir); time.Since(touched) < staleWorkAge {
+			// A fresh root is the checkout's heartbeat, so it proves the session
+			// is live without recursively statting a potentially huge generated
+			// tree. Only stale roots need the deeper scan for recent edits.
+			now := time.Now()
+			if rootHeartbeatFresh(dir, now) {
+				continue
+			}
+			if touched := newestModTimeAt(dir, now); now.Sub(touched) < staleWorkAge {
 				continue
 			}
 			if err := removeWorktree(ctx, mirror, dir); err != nil {
@@ -589,6 +619,11 @@ func pruneStaleWork(ctx context.Context, mirror, repoDir string) error {
 		}
 	}
 	return nil
+}
+
+func rootHeartbeatFresh(dir string, now time.Time) bool {
+	info, err := os.Stat(dir)
+	return err == nil && !info.ModTime().After(now) && now.Sub(info.ModTime()) < staleWorkAge
 }
 
 // newestModTime is the most recent modification anywhere under dir that is not
@@ -606,7 +641,10 @@ func pruneStaleWork(ctx context.Context, mirror, repoDir string) error {
 // is the honest answer — and a live session's own beat (keepAlive) is always one
 // of those.
 func newestModTime(dir string) time.Time {
-	now := time.Now()
+	return newestModTimeAt(dir, time.Now())
+}
+
+func newestModTimeAt(dir string, now time.Time) time.Time {
 	newest := time.Time{}
 	_ = filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -666,6 +704,11 @@ func gitDir(ctx context.Context, dir string, args ...string) (string, error) {
 	return gitEnv(ctx, dir, nil, args...)
 }
 
+// Git runs git in dir ("" means the process's own directory).
+func Git(ctx context.Context, dir string, args ...string) (string, error) {
+	return gitDir(ctx, dir, args...)
+}
+
 // gitEnv is gitDir with extra environment entries.
 func gitEnv(ctx context.Context, dir string, env []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
@@ -685,22 +728,6 @@ func gitEnv(ctx context.Context, dir string, env []string, args ...string) (stri
 	return strings.TrimSpace(string(out)), nil
 }
 
-// workspace is crq's workspace as this configuration describes it: the root from
-// the config file (not just the process environment) and the token crq already
-// resolved for the API, so a daemon with GITHUB_TOKEN alone can still clone.
-func (s *Service) workspace(ctx context.Context) Workspace {
-	return Workspace{Root: s.cfg.WorkspaceRoot, Token: gitToken(ctx)}
-}
-
-// gitToken is the token to authenticate git with, or "" to leave git to the
-// host's own credential helper.
-//
-// It uses the SAME resolution the API client does, including `gh auth token`.
-// Reading only the environment meant the documented `gh auth login` setup — API
-// calls working fine — still produced unauthenticated clones, so every private
-// checkout failed at dispatch's first real act.
-func gitToken(ctx context.Context) string { return ghapi.LookupToken(ctx) }
-
 // sleepCtx waits, or returns early when the context ends.
 func sleepCtx(ctx context.Context, d time.Duration) error {
 	timer := time.NewTimer(d)
@@ -711,4 +738,25 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+func normalizeRepo(repo string) string {
+	repo = strings.TrimSpace(repo)
+	repo = strings.TrimSuffix(repo, ".git")
+	return strings.ToLower(repo)
+}
+
+func randomToken() string {
+	var buf [16]byte
+	if _, err := io.ReadFull(rand.Reader, buf[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return hex.EncodeToString(buf[:])
+}
+
+func shortSHA(sha string) string {
+	if len(sha) > 9 {
+		return sha[:9]
+	}
+	return sha
 }

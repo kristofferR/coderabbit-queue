@@ -1,4 +1,4 @@
-package crq
+package workspace
 
 import (
 	"context"
@@ -96,22 +96,6 @@ func TestWorkspaceChecksOutAHeadWithoutACheckout(t *testing.T) {
 	}
 	if err := co.Remove(ctx); err != nil {
 		t.Errorf("removing an already-removed worktree must be harmless, got %v", err)
-	}
-}
-
-// The daemon's workspace has to come from the config file, not the process
-// environment, and its token from the same resolution the API client uses:
-// reading only the environment meant a documented `gh auth login` setup made API
-// calls work while every private clone came back unauthenticated.
-func TestServiceWorkspaceUsesTheConfiguredRootAndToken(t *testing.T) {
-	t.Setenv("GITHUB_TOKEN", "ghp_from_the_environment")
-	s := &Service{cfg: Config{WorkspaceRoot: "/tmp/crq-configured-root"}}
-	ws := s.workspace(context.Background())
-	if ws.Root != "/tmp/crq-configured-root" {
-		t.Errorf("workspace root = %q, want the configured one", ws.Root)
-	}
-	if ws.Token != "ghp_from_the_environment" {
-		t.Errorf("workspace token = %q, want the one the API client resolves", ws.Token)
 	}
 }
 
@@ -873,4 +857,134 @@ func TestALiveCheckoutKeepsItselfFromBeingPruned(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Error("an idle checkout still read as abandoned while its process was alive")
+}
+
+func TestCheckoutGitRefreshesRotatedCredentials(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	token := "ghp_first"
+	ws := Workspace{
+		Root: t.TempDir(),
+		TokenSource: func(context.Context) string {
+			return token
+		},
+	}
+	co, err := ws.Checkout(context.Background(), repo, 13, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	token = "ghp_rotated"
+	out, err := co.Git(
+		context.Background(),
+		"-c", `alias.current-token=!f() { printf '%s' "$CRQ_GIT_TOKEN"; }; f`,
+		"current-token",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != token {
+		t.Errorf("checkout used token %q after rotation, want %q", out, token)
+	}
+}
+
+func TestMirrorPrunesDeletedTagsAndRefreshesMovedTags(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	origin := filepath.Join(base, repo)
+	first := originRepo(t, origin)
+	ctx := context.Background()
+	if _, err := gitDir(ctx, origin, "tag", "deleted"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(ctx, origin, "tag", "release"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := gitDir(ctx, origin, "tag", "-d", "deleted"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(origin, "README.md"), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "README.md"}, {"commit", "-m", "second"}} {
+		if _, err := gitDir(ctx, origin, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	second, err := gitDir(ctx, origin, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(ctx, origin, "tag", "-f", "release", second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := gitDir(ctx, mirror, "show-ref", "--verify", "--quiet", "refs/tags/deleted"); err == nil {
+		t.Error("deleted remote tag survived in the reused mirror")
+	}
+	if got, err := gitDir(ctx, mirror, "rev-parse", "refs/tags/release"); err != nil || got != second {
+		t.Errorf("release tag = %q err=%v, want moved tag %q (was %q)", got, err, second, first)
+	}
+}
+
+func TestFetchedHeadDeletionRechecksWorktreeOccupancy(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	origin := filepath.Join(base, repo)
+	sha := originRepo(t, origin)
+	if _, err := gitDir(context.Background(), origin, "branch", "feature"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(ctx, mirror, "update-ref", "refs/heads/feature", sha); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "work")
+	if _, err := gitDir(ctx, mirror, "worktree", "add", "--", dir, "feature"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := deleteFetchedHead(ctx, mirror, "feature"); err != nil {
+		t.Fatalf("worktree-aware deletion rejected a branch a session attached: %v", err)
+	}
+	if got, err := gitDir(ctx, mirror, "rev-parse", "refs/heads/feature"); err != nil || got != sha {
+		t.Errorf("checked-out branch = %q err=%v, want it preserved at %q", got, err, sha)
+	}
+}
+
+func TestFreshHeartbeatAvoidsDeepPruningDecision(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Now().Add(-2 * staleWorkAge)
+	file := filepath.Join(dir, "generated.bin")
+	if err := os.WriteFile(file, []byte("large tree stand-in"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(file, old, old); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := os.Chtimes(dir, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if !rootHeartbeatFresh(dir, now.Add(time.Second)) {
+		t.Fatal("fresh checkout root did not take the heartbeat fast path")
+	}
 }
