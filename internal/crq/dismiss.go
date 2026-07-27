@@ -165,7 +165,11 @@ func (s *Service) Dismiss(ctx context.Context, repo string, pr int, ids []string
 		return DismissResult{}, err
 	}
 	if s.log != nil && len(out.Dismissed) > 0 {
-		s.log.Printf("%s#%d dismissed %d finding(s) at %s: %s", repo, pr, len(out.Dismissed), out.Head, reason)
+		verb := "dismissed"
+		if s.cfg.DryRun {
+			verb = "would dismiss"
+		}
+		s.log.Printf("%s#%d %s %d finding(s) at %s: %s", repo, pr, verb, len(out.Dismissed), out.Head, reason)
 	}
 	return out, nil
 }

@@ -1,9 +1,11 @@
 package crq
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -483,7 +485,7 @@ func TestReplayedDismissalIsNotRefusedByOtherOpenFindings(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := f.round(repo, pr)
-	if before == nil || before.Head != "bbbbbbbb2" || !canStillFire(*before) {
+	if before == nil || before.Head != "bbbbbbbb2" || !engine.CanStillFire(*before) {
 		t.Fatalf("the dismissal must leave a fire-eligible round for the new head, got %+v", before)
 	}
 
@@ -646,7 +648,8 @@ func TestDryRunDismissalReportsWithoutWriting(t *testing.T) {
 	repo, pr, head := "owner/repo", 78, "aaaaaaaa1"
 	cfg := f.cfg
 	cfg.DryRun = true
-	dry := NewService(cfg, f.gh, f.store, nil)
+	var logs bytes.Buffer
+	dry := NewService(cfg, f.gh, f.store, log.New(&logs, "", 0))
 	dry.now = f.clk.now
 
 	var seq int64
@@ -682,5 +685,30 @@ func TestDryRunDismissalReportsWithoutWriting(t *testing.T) {
 	// to say so rather than report a dismissal that could never happen.
 	if _, _, err := dry.recordDismissal(f.ctx, repo, pr, "bbbbbbbb2", []string{"f1"}, "set aside", true, seq+1); err == nil {
 		t.Error("a dry run must surface the refusal a real run would hit")
+	}
+
+	// The public operation logs the simulated result as hypothetical, rather
+	// than claiming the throwaway mutation was persisted.
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, f.clk.now())
+	f.corpusReview(t, repo, pr, 900, head, "coderabbit/findings-outside-diff.md")
+	feedback, err := dry.Feedback(f.ctx, repo, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := []string{}
+	for _, finding := range feedback.Findings {
+		if finding.ThreadID == "" {
+			ids = append(ids, finding.ID)
+		}
+	}
+	if len(ids) == 0 {
+		t.Fatal("this test needs a threadless finding to dismiss")
+	}
+	if _, err := dry.Dismiss(f.ctx, repo, pr, ids, "set aside"); err != nil {
+		t.Fatal(err)
+	}
+	if got := logs.String(); !strings.Contains(got, "would dismiss") || strings.Contains(got, "#78 dismissed") {
+		t.Errorf("dry-run log must describe a hypothetical dismissal, got %q", got)
 	}
 }

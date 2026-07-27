@@ -25,7 +25,7 @@ crq next "$REPO" "$PR"
 
 | `.action` | what to do |
 |---|---|
-| `fix` | Fix `.findings[]`, validate locally, then `crq resolve` each addressed `.thread_id` (or `crq decline` with a reason). A finding with no `.thread_id` is cleared with `crq dismiss` once judged — at this head nothing else can. Call again. |
+| `fix` | Fix `.findings[]`, validate locally, then `crq resolve` each addressed `.thread_id` (or `crq decline` with a reason). A finding with no `.thread_id` is cleared with `crq dismiss` once judged, except `source: "review_comment"`: retry it because thread lookup failed. Call again. |
 | `hold` | Do NOT commit or push — a required reviewer has not answered for this head, and moving the head restarts its review (resolving threads does not). Call again at `.recheck_after`. |
 | `push` | The head is released. Commit and push the accumulated fixes once. Call again. |
 | `wait` | Nothing to do until `.recheck_after`. |

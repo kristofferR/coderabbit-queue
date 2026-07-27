@@ -404,7 +404,7 @@ func (s *Service) recordDismissal(ctx context.Context, repo string, pr int, head
 			// underneath this call, so the decision is about a commit nobody is
 			// looking at any more.
 			return fmt.Errorf("%s#%d moved to %s while dismissing; re-read the findings", repo, pr, round.Head)
-		case !allowCreate && (round == nil || round.Head != head || canStillFire(*round)):
+		case !allowCreate && (round == nil || round.Head != head || engine.CanStillFire(*round)):
 			// The guard is about whether a FIRE-ELIGIBLE round would exist with
 			// other findings still open, not about whether a round object
 			// exists. A queued round is just as dangerous as a new one: Pump can
@@ -605,20 +605,6 @@ func releaseSlot(st *State, key string) {
 	if st.FireSlot != nil && st.FireSlot.Key == key {
 		st.FireSlot = nil
 	}
-}
-
-// canStillFire reports whether a round will ask for a review at some point.
-//
-// FireEligible answers "right now", which is the wrong question here: a round
-// cooling in awaiting_retry is not eligible this second and becomes eligible the
-// moment its RetryAt passes. Letting a partial dismissal through on that
-// technicality just defers the problem to the cooldown expiring.
-func canStillFire(r Round) bool {
-	switch r.Phase {
-	case PhaseQueued, PhaseReserved, PhaseAwaitingRetry:
-		return true
-	}
-	return false
 }
 
 // sameRound reports whether the stored round r is still the one that was

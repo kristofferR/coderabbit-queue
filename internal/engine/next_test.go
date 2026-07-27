@@ -30,6 +30,34 @@ func finding(commit string) dialect.Finding {
 	return dialect.Finding{Bot: "coderabbitai[bot]", Title: "nil deref", Commit: commit, ThreadID: "T1"}
 }
 
+func TestRoundPhaseRules(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		phase           state.Phase
+		reviewRequested bool
+		canStillFire    bool
+	}{
+		{"missing", "", false, false},
+		{"queued", state.PhaseQueued, false, true},
+		{"reserved", state.PhaseReserved, true, true},
+		{"fired", state.PhaseFired, true, false},
+		{"reviewing", state.PhaseReviewing, true, false},
+		{"awaiting retry", state.PhaseAwaitingRetry, true, true},
+		{"completed", state.PhaseCompleted, true, false},
+		{"abandoned", state.PhaseAbandoned, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			round := state.Round{Phase: tc.phase}
+			if got := reviewRequested(round); got != tc.reviewRequested {
+				t.Errorf("reviewRequested(%q) = %t, want %t", tc.phase, got, tc.reviewRequested)
+			}
+			if got := CanStillFire(round); got != tc.canStillFire {
+				t.Errorf("CanStillFire(%q) = %t, want %t", tc.phase, got, tc.canStillFire)
+			}
+		})
+	}
+}
+
 // The action table. Each row is a claim about what a caller must do next, and
 // together they are the whole contract `crq next` exposes.
 func TestNextAction(t *testing.T) {

@@ -251,6 +251,19 @@ func reviewRequested(r state.Round) bool {
 	return r.Phase != "" && r.Phase != state.PhaseQueued
 }
 
+// CanStillFire reports whether a round will ask for a review at some point.
+//
+// FireEligible answers "right now", which is the wrong question for callers
+// guarding future work: a round cooling in awaiting_retry becomes eligible the
+// moment its RetryAt passes.
+func CanStillFire(r state.Round) bool {
+	switch r.Phase {
+	case state.PhaseQueued, state.PhaseReserved, state.PhaseAwaitingRetry:
+		return true
+	}
+	return false
+}
+
 // waitExpired reports whether this round's own wait deadline has passed while it
 // is still under review.
 //
