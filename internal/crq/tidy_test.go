@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -377,6 +378,156 @@ func TestTidyCountsCodexThumbsUpAsTheAnswer(t *testing.T) {
 	}
 	if len(result.Deleted) != 1 || result.Deleted[0] != 100 {
 		t.Fatalf("deleted = %v (kept: %v), want the thumbed-up trigger removed", result.Deleted, result.Kept)
+	}
+}
+
+// A force-push can point the PR at a commit object OLDER than the command it
+// answered, and adoption knows it: its cutoff is the force-push, not the commit
+// date. Tidying reads the same rule backwards, so it must use the same cutoff —
+// or a command no round can adopt again is kept for ever.
+func TestTidyUsesTheForcePushCutoffNotJustTheCommitDate(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	now := time.Now().UTC()
+	repo, pr := "o/r", 18
+	forcePushAt := now.Add(-time.Hour)
+	gh.graphQL = func(_ string, _ map[string]any, out any) error {
+		payload := `{"repository":{"pullRequest":{"timelineItems":{"nodes":[{"createdAt":"` + forcePushAt.Format(time.RFC3339) + `"}]}}}}`
+		return json.Unmarshal([]byte(payload), out)
+	}
+
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "bbbbbbbb2"
+	gh.pulls[fakeKey(repo, pr)] = pull
+	// The head was force-pushed to a commit made before the command.
+	gh.commits["bbbbbbbb2"] = commitAt(now.Add(-3 * time.Hour))
+
+	c := ghapi.IssueComment{ID: 100, Body: cfg.ReviewCommand, CreatedAt: now.Add(-2 * time.Hour)}
+	c.User.Login = "kristofferR"
+	gh.comments[fakeKey(repo, pr)] = []ghapi.IssueComment{c}
+	review := ghapi.Review{ID: 900, CommitID: "bbbbbbbb2", State: "COMMENTED", Body: "looks fine", SubmittedAt: now.Add(-90 * time.Minute)}
+	review.User.Login = cfg.Bot
+	gh.reviews[fakeKey(repo, pr)] = []ghapi.Review{review}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		return completedRound(st, repo, pr, now, func(r *Round) error {
+			if err := r.Fire(100, now.Add(-2*time.Hour)); err != nil {
+				return err
+			}
+			r.RecordPosted(cfg.Bot, 100, now.Add(-2*time.Hour))
+			return nil
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.Tidy(ctx, repo, pr, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Deleted) != 1 || result.Deleted[0] != 100 {
+		t.Fatalf("deleted = %v (kept: %v), want the command the force-push put out of adoption's reach", result.Deleted, result.Kept)
+	}
+}
+
+// Codex answers a command in the PR description by reacting to the PR itself,
+// and observe() accepts that as the round's completion — so tidying has to read
+// the same source, or the trigger it completed is kept for ever.
+func TestTidyCountsACodexThumbsUpOnThePR(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = []CoBotConfig{{Login: dialect.CodexBotLogin, Name: "codex", Command: "@codex review"}}
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+	repo, pr := "o/r", 19
+
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "bbbbbbbb2"
+	gh.pulls[fakeKey(repo, pr)] = pull
+	gh.commits["bbbbbbbb2"] = commitAt(now.Add(-10 * time.Minute))
+
+	c := ghapi.IssueComment{ID: 100, Body: "@codex review", CreatedAt: now.Add(-2 * time.Hour)}
+	c.User.Login = "kristofferR"
+	gh.comments[fakeKey(repo, pr)] = []ghapi.IssueComment{c}
+	// The whole answer, and it is nowhere near the trigger comment.
+	thumb := ghapi.Reaction{ID: 1, Content: "+1", CreatedAt: now.Add(-100 * time.Minute)}
+	thumb.User.Login = dialect.CodexBotLogin
+	gh.issueReactions[fakeKey(repo, pr)] = []ghapi.Reaction{thumb}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		return completedRound(st, repo, pr, now, func(r *Round) error {
+			if err := r.Fire(100, now.Add(-2*time.Hour)); err != nil {
+				return err
+			}
+			r.CoOnly = true
+			r.SetCoCommand(dialect.CodexBotLogin, 100, now.Add(-2*time.Hour))
+			r.RecordPosted(dialect.CodexBotLogin, 100, now.Add(-2*time.Hour))
+			return nil
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.Tidy(ctx, repo, pr, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Deleted) != 1 || result.Deleted[0] != 100 {
+		t.Fatalf("deleted = %v (kept: %v), want the trigger the PR reaction answered", result.Deleted, result.Kept)
+	}
+}
+
+// A pump that changed nothing must not buy a second observation of the PR it
+// just observed: a long review is polled for hours, and housekeeping that
+// re-reads it every poll spends the REST quota the queue runs on.
+func TestTidyAfterPumpSkipsAPumpThatChangedNothing(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.Tidy = true
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+	repo, pr := "o/r", 20
+
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "bbbbbbbb2"
+	gh.pulls[fakeKey(repo, pr)] = pull
+	gh.commits["bbbbbbbb2"] = commitAt(now.Add(-10 * time.Minute))
+	c := ghapi.IssueComment{ID: 100, Body: cfg.ReviewCommand, CreatedAt: now.Add(-2 * time.Hour)}
+	c.User.Login = "kristofferR"
+	gh.comments[fakeKey(repo, pr)] = []ghapi.IssueComment{c}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		return completedRound(st, repo, pr, now, func(r *Round) error {
+			if err := r.Fire(100, now.Add(-2*time.Hour)); err != nil {
+				return err
+			}
+			r.RecordPosted(cfg.Bot, 100, now.Add(-2*time.Hour))
+			return nil
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	svc.tidyAfterPump(ctx, PumpResult{Action: "waiting", Repo: repo, PR: pr, Reason: "review in progress"})
+	if reads := gh.reviewPolls(); reads != 0 {
+		t.Fatalf("a no-progress pump observed the pr %d time(s); the pump had just read it", reads)
+	}
+	// The same PR, once something actually moved.
+	svc.tidyAfterPump(ctx, PumpResult{Action: "cleared", Repo: repo, PR: pr})
+	if gh.reviewPolls() == 0 {
+		t.Fatal("a round that progressed was never tidied")
 	}
 }
 

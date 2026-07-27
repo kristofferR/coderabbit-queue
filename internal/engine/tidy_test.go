@@ -21,18 +21,18 @@ func TestStaleCommands(t *testing.T) {
 		{
 			name: "answered, old, and no round depends on it",
 			in: TidyInput{
-				HeadAt:     head,
-				AnsweredAt: answered,
-				Commands:   []CommandComment{{ID: 1, Bot: "coderabbitai", CreatedAt: base}},
+				AdoptableFrom: head,
+				AnsweredAt:    answered,
+				Commands:      []CommandComment{{ID: 1, Bot: "coderabbitai", CreatedAt: base}},
 			},
 			want: []int64{1},
 		},
 		{
 			name: "a round that has not progressed keeps its command",
 			in: TidyInput{
-				HeadAt:     head,
-				AnsweredAt: answered,
-				Live:       map[int64]bool{1: true, 2: true},
+				AdoptableFrom: head,
+				AnsweredAt:    answered,
+				Live:          map[int64]bool{1: true, 2: true},
 				Commands: []CommandComment{
 					{ID: 1, Bot: "coderabbitai", CreatedAt: base},
 					{ID: 2, Bot: "codex", CreatedAt: base},
@@ -42,17 +42,17 @@ func TestStaleCommands(t *testing.T) {
 		{
 			name: "no evidence this bot ever acted",
 			in: TidyInput{
-				HeadAt:     head,
-				AnsweredAt: answered,
-				Commands:   []CommandComment{{ID: 6, Bot: "codex", CreatedAt: base}},
+				AdoptableFrom: head,
+				AnsweredAt:    answered,
+				Commands:      []CommandComment{{ID: 6, Bot: "codex", CreatedAt: base}},
 			},
 		},
 		{
 			name: "newer than the head: still adoptable",
 			in: TidyInput{
-				HeadAt:     head,
-				AnsweredAt: map[string]time.Time{"coderabbitai": head.Add(2 * time.Minute)},
-				Commands:   []CommandComment{{ID: 7, Bot: "coderabbitai", CreatedAt: head.Add(time.Minute)}},
+				AdoptableFrom: head,
+				AnsweredAt:    map[string]time.Time{"coderabbitai": head.Add(2 * time.Minute)},
+				Commands:      []CommandComment{{ID: 7, Bot: "coderabbitai", CreatedAt: head.Add(time.Minute)}},
 			},
 		},
 		{
@@ -61,10 +61,10 @@ func TestStaleCommands(t *testing.T) {
 			// newer than the head too, so the adoption guard alone never clears it.
 			name: "a retry the round replaced is spent despite the head",
 			in: TidyInput{
-				HeadAt:     head,
-				AnsweredAt: map[string]time.Time{"coderabbitai": head.Add(2 * time.Minute)},
-				Superseded: map[int64]bool{8: true},
-				Commands:   []CommandComment{{ID: 8, Bot: "coderabbitai", CreatedAt: head.Add(time.Minute)}},
+				AdoptableFrom: head,
+				AnsweredAt:    map[string]time.Time{"coderabbitai": head.Add(2 * time.Minute)},
+				Superseded:    map[int64]bool{8: true},
+				Commands:      []CommandComment{{ID: 8, Bot: "coderabbitai", CreatedAt: head.Add(time.Minute)}},
 			},
 			want: []int64{8},
 		},

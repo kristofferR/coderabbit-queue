@@ -120,15 +120,15 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 	}
 
 	in := engine.TidyInput{
-		Commands:   commands,
-		Live:       posted.live,
-		Superseded: posted.superseded,
-		HeadAt:     obs.eng.HeadAt,
-		AnsweredAt: s.answered(ctx, repo, obs, commands, posted.live),
+		Commands:      commands,
+		Live:          posted.live,
+		Superseded:    posted.superseded,
+		AdoptableFrom: s.adoptableFrom(ctx, repo, pr, obs.eng.HeadAt),
+		AnsweredAt:    s.answered(ctx, repo, pr, obs, commands, posted.live),
 	}
 	stale := engine.StaleCommands(in)
 	if len(stale) == 0 {
-		result.Kept = append(result.Kept, "every trigger comment is still live, unanswered, or not yet past the current head")
+		result.Kept = append(result.Kept, "every trigger comment is still live, unanswered, or still adoptable")
 		return result, nil
 	}
 	if dryRun || s.cfg.DryRun {
@@ -247,22 +247,51 @@ func isTriggerBody(triggers map[string][]string, bot, body string) bool {
 	return false
 }
 
+// adoptableFrom is the moment a command stops being adoptable, which is what
+// tidying may delete below: the head commit date raised to the last force-push.
+//
+// Adoption uses the later of the two on purpose — a force-push can point the PR
+// at a commit object whose date predates commands made for an earlier head — so
+// a tidy pass reading the commit date alone keeps an already-answered trigger
+// that no round can ever adopt again, for ever once the PR merges. A zero headAt
+// is the unevaluable guard that keeps every comment, and needs no lookup; a
+// failed lookup falls back to the commit date, which only ever keeps more.
+func (s *Service) adoptableFrom(ctx context.Context, repo string, pr int, headAt time.Time) time.Time {
+	if headAt.IsZero() {
+		return headAt
+	}
+	fp, err := s.headForcePushCutoff(ctx, repo, pr)
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("tidy: %s#%d force-push lookup: %v", repo, pr, err)
+		}
+		return headAt
+	}
+	if fp.After(headAt) {
+		return fp
+	}
+	return headAt
+}
+
 // answered is answeredAt plus the evidence only a reaction carries.
 //
-// Codex can answer a trigger with nothing but a thumbs-up on the comment
-// itself, and that reaction alone satisfies its gate and completes the round —
-// so a round that ended that way leaves no review, event or check for
-// answeredAt to find, and its "@codex review" comment would be kept for ever.
-// observe() fetches reactions only for a round that has fired, and tidying
-// observes with no round at all, so they are read here, once per candidate that
-// nothing else has answered.
-func (s *Service) answered(ctx context.Context, repo string, obs observation, commands []engine.CommandComment, live map[int64]bool) map[string]time.Time {
+// Codex can answer a trigger with nothing but a thumbs-up, and that reaction
+// alone satisfies its gate and completes the round — so a round that ended that
+// way leaves no review, event or check for answeredAt to find, and its
+// "@codex review" comment would be kept for ever. observe() fetches reactions
+// only for a round that has fired, and tidying observes with no round at all, so
+// they are read here.
+//
+// Both of observe's sources count, because either completes the round: the
+// trigger comment itself, read once per candidate nothing else has answered, and
+// the PR — Codex answers a command in the PR description by reacting there —
+// read at most once per pass, and only when a candidate is still unanswered.
+func (s *Service) answered(ctx context.Context, repo string, pr int, obs observation, commands []engine.CommandComment, live map[int64]bool) map[string]time.Time {
 	out := answeredAt(obs)
+	var onPR []ghapi.Reaction
+	readPR := false
 	for _, cmd := range commands {
-		if live[cmd.ID] || !dialect.IsCodexBot(cmd.Bot) {
-			continue
-		}
-		if at, ok := out[cmd.Bot]; ok && !at.Before(cmd.CreatedAt) {
+		if live[cmd.ID] || !dialect.IsCodexBot(cmd.Bot) || answeredSince(out, cmd) {
 			continue
 		}
 		reactions, err := s.gh.ListCommentReactions(ctx, repo, cmd.ID)
@@ -274,20 +303,45 @@ func (s *Service) answered(ctx context.Context, repo string, obs observation, co
 			}
 			continue
 		}
-		for _, reaction := range reactions {
-			if !isCurrentCodexThumbsUp(reaction, cmd.CreatedAt) {
-				continue
-			}
-			at := reaction.CreatedAt
-			if at.IsZero() {
-				at = cmd.CreatedAt
-			}
-			if at.After(out[cmd.Bot]) {
-				out[cmd.Bot] = at
+		noteThumbsUp(out, cmd, reactions)
+		if answeredSince(out, cmd) {
+			continue
+		}
+		if !readPR {
+			readPR = true
+			if onPR, err = s.gh.ListIssueReactions(ctx, repo, pr); err != nil {
+				if s.log != nil {
+					s.log.Printf("tidy: %s#%d reactions: %v", repo, pr, err)
+				}
+				onPR = nil
 			}
 		}
+		noteThumbsUp(out, cmd, onPR)
 	}
 	return out
+}
+
+// answeredSince reports whether cmd's bot has demonstrably acted since cmd was
+// posted, which is the evidence tidying needs before removing it.
+func answeredSince(answered map[string]time.Time, cmd engine.CommandComment) bool {
+	at, ok := answered[cmd.Bot]
+	return ok && !at.Before(cmd.CreatedAt)
+}
+
+// noteThumbsUp records a Codex +1 among reactions as cmd's bot having acted.
+func noteThumbsUp(answered map[string]time.Time, cmd engine.CommandComment, reactions []ghapi.Reaction) {
+	for _, reaction := range reactions {
+		if !isCurrentCodexThumbsUp(reaction, cmd.CreatedAt) {
+			continue
+		}
+		at := reaction.CreatedAt
+		if at.IsZero() {
+			at = cmd.CreatedAt
+		}
+		if at.After(answered[cmd.Bot]) {
+			answered[cmd.Bot] = at
+		}
+	}
 }
 
 // answeredAt is the newest moment each reviewer demonstrably acted on this PR.
@@ -335,12 +389,21 @@ func (s *Service) tidyAfterPump(ctx context.Context, res PumpResult) {
 		return
 	}
 	switch res.Action {
-	case "cleared", "deduped", "waiting", "requeued", "skipped":
+	case "cleared", "deduped", "requeued", "skipped":
 		// The round reached a state where its earlier commands are answered and
 		// spent. "cleared" is the ordinary one — the round holding the slot
 		// completed or was acknowledged — and leaving it out meant the common
 		// successful round was never tidied at all. "fired" is not here: that
 		// round is live and owns its command.
+		//
+		// Neither is "waiting", which is what a pump that changed NOTHING reports:
+		// every poll of a long-running review would then re-observe the PR the
+		// pump just observed — pull, commit, paginated reviews/comments, check
+		// runs — so housekeeping would spend REST quota the queue needs, over and
+		// over, for a PR whose comments are exactly as spent as they were last
+		// poll. The one "waiting" that does move a round (a co-review wait) parks
+		// it with its commands still live, so it has nothing of its own to remove;
+		// anything older waits for the pass that clears it.
 	default:
 		return
 	}

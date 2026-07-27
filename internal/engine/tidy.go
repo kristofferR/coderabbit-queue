@@ -20,12 +20,13 @@ type TidyInput struct {
 	// Live are the command IDs a round that has NOT progressed still depends on:
 	// the open round's own command and its co-reviewer triggers.
 	Live map[int64]bool
-	// HeadAt is when the current head was committed. A command at or after it is
-	// still adoptable, so removing it would make crq post a duplicate — unless
-	// the round itself has already replaced it (Superseded). Zero when the head
+	// AdoptableFrom is the cutoff adoption itself uses: the head commit date,
+	// raised to the last force-push. A command at or after it is still
+	// adoptable, so removing it would make crq post a duplicate — unless the
+	// round itself has already replaced it (Superseded). Zero when the head
 	// commit could not be read, which is not permission to delete: the guard is
 	// simply unevaluable, and an unevaluable guard keeps the comment.
-	HeadAt time.Time
+	AdoptableFrom time.Time
 	// Superseded are commands the round explicitly moved past by posting a newer
 	// one. They are exempt from the head check: crq's own record that it has
 	// replaced a command is stronger evidence than any timestamp.
@@ -41,11 +42,11 @@ type TidyInput struct {
 //   - it belongs to no live round — the user's rule, and the one that matters:
 //     only rounds that have already progressed;
 //   - the bot acted after it, so it was actually read rather than merely old;
-//   - it predates the current head, because adoption only ever considers
-//     commands newer than the head commit. Delete one of those and the next
-//     pump sees no command, posts another, and buys a second review. An
-//     unreadable head means the guard cannot be evaluated, and the command
-//     stays: it may well be adoptable again once the read recovers.
+//   - it predates the adoption cutoff, because adoption only ever considers
+//     commands newer than that. Delete one of those and the next pump sees no
+//     command, posts another, and buys a second review. An unreadable head
+//     means the guard cannot be evaluated, and the command stays: it may well
+//     be adoptable again once the read recovers.
 //
 // Only a command the round itself replaced (Superseded) skips the head check —
 // crq's own record that it posted a successor outranks any timestamp.
@@ -62,7 +63,7 @@ func StaleCommands(in TidyInput) []int64 {
 		if !ok || answered.Before(cmd.CreatedAt) {
 			continue
 		}
-		if !in.Superseded[cmd.ID] && (in.HeadAt.IsZero() || !cmd.CreatedAt.Before(in.HeadAt)) {
+		if !in.Superseded[cmd.ID] && (in.AdoptableFrom.IsZero() || !cmd.CreatedAt.Before(in.AdoptableFrom)) {
 			continue
 		}
 		stale = append(stale, cmd.ID)
