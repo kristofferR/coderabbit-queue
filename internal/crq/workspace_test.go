@@ -98,6 +98,22 @@ func TestWorkspaceChecksOutAHeadWithoutACheckout(t *testing.T) {
 	}
 }
 
+// The daemon's workspace has to come from the config file, not the process
+// environment, and its token from the same resolution the API client uses:
+// reading only the environment meant a documented `gh auth login` setup made API
+// calls work while every private clone came back unauthenticated.
+func TestServiceWorkspaceUsesTheConfiguredRootAndToken(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "ghp_from_the_environment")
+	s := &Service{cfg: Config{WorkspaceRoot: "/tmp/crq-configured-root"}}
+	ws := s.workspace(context.Background())
+	if ws.Root != "/tmp/crq-configured-root" {
+		t.Errorf("workspace root = %q, want the configured one", ws.Root)
+	}
+	if ws.Token != "ghp_from_the_environment" {
+		t.Errorf("workspace token = %q, want the one the API client resolves", ws.Token)
+	}
+}
+
 // A repo name is turned into path segments, so anything that could climb out of
 // the workspace root has to be refused rather than joined.
 func TestWorkspaceRefusesRepoNamesThatEscape(t *testing.T) {
@@ -316,6 +332,195 @@ func TestPruningMeasuresTheNewestFileNotTheDirectory(t *testing.T) {
 	}
 	if since := time.Since(newestModTime(dir)); since > time.Minute {
 		t.Errorf("newest modification read as %s ago; a live session would be pruned", since)
+	}
+}
+
+// `clone --bare` copies the remote's branch heads straight into refs/heads, and
+// a refspec set afterwards only governs later fetches. A session could then not
+// create its branch — the name is taken — or would land on the commit the clone
+// froze there.
+func TestANewMirrorLeavesRefsHeadsToTheSessions(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	if _, err := gitDir(context.Background(), filepath.Join(base, repo), "branch", "feature"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if heads, err := gitDir(ctx, mirror, "for-each-ref", "refs/heads"); err != nil || heads != "" {
+		t.Errorf("refs/heads = %q err=%v, want it empty and left to the sessions", heads, err)
+	}
+	if remotes, err := gitDir(ctx, mirror, "for-each-ref", "--format=%(refname)", "refs/remotes/origin"); err != nil || !strings.Contains(remotes, "refs/remotes/origin/feature") {
+		t.Errorf("remote refs = %q err=%v, want the branches fetched under origin", remotes, err)
+	}
+
+	// The name a remote branch occupies is therefore free for a session.
+	co, err := ws.Checkout(ctx, repo, 8, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := co.Git(ctx, "checkout", "-b", "feature"); err != nil {
+		t.Errorf("a session could not create its branch: %v", err)
+	}
+}
+
+// A mirror cloned by an older crq also has remote.origin.mirror=true, which the
+// refspec does not clear: a plain push from a session's worktree would mirror
+// every local ref, publishing internal refs and deleting remote branches.
+func TestMirrorMigrationClearsThePushMirrorFlag(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(ctx, mirror, "config", "remote.origin.mirror", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := gitDir(ctx, mirror, "config", "--get", "remote.origin.mirror"); err == nil {
+		t.Errorf("remote.origin.mirror = %q, want it unset", got)
+	}
+}
+
+// The mirror's HEAD exists because the mirror exists, so testing for it after a
+// failed fetch declared every failure contention: expired credentials and an
+// unreachable remote came back as success with stale refs, and the caller met
+// them later as an unreadable commit instead.
+func TestMirrorReportsAFetchFailureThatIsNotContention(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	// The remote goes away, the way an expired token or a network outage does.
+	if err := os.RemoveAll(filepath.Join(base, repo)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Mirror(ctx, repo); err == nil {
+		t.Error("a failed fetch was reported as a current mirror")
+	}
+}
+
+// A PR opened from a fork has its head on no branch of the base repository, so
+// the mirror's refspec never brings it down; GitHub publishes it as
+// refs/pull/<pr>/head.
+func TestCheckoutFetchesAForkHeadFromThePullRef(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	origin := filepath.Join(base, repo)
+	originRepo(t, origin)
+	ctx := context.Background()
+	run := func(args ...string) string {
+		t.Helper()
+		out, err := gitDir(ctx, origin, args...)
+		if err != nil {
+			t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+		}
+		return out
+	}
+	// A commit reachable from the pull ref alone, exactly like a fork's head.
+	run("checkout", "-q", "-b", "from-a-fork")
+	if err := os.WriteFile(filepath.Join(origin, "fork.txt"), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "fork.txt")
+	run("commit", "-m", "fork work")
+	forkSHA := run("rev-parse", "HEAD")
+	run("update-ref", "refs/pull/11/head", forkSHA)
+	run("checkout", "-q", "main")
+	run("branch", "-qD", "from-a-fork")
+
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	co, err := Workspace{Root: t.TempDir()}.Checkout(ctx, repo, 11, forkSHA)
+	if err != nil {
+		t.Fatalf("checking out a fork head: %v", err)
+	}
+	if head, err := co.Git(ctx, "rev-parse", "HEAD"); err != nil || head != forkSHA {
+		t.Errorf("checked out %q err=%v, want the fork head %q", head, err, forkSHA)
+	}
+}
+
+// Pruning ran only under the PR being checked out, so a generation left by a
+// killed process was collected only if that same PR was dispatched again — never,
+// once it was merged or closed.
+func TestPruningCollectsAnAbandonedCheckoutOfAnotherPR(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	abandoned, err := ws.workPath(repo, 21)
+	if err != nil {
+		t.Fatal(err)
+	}
+	abandoned = filepath.Join(abandoned, "leftover")
+	if err := os.MkdirAll(abandoned, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(abandoned, "stale.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * staleWorkAge)
+	for _, p := range []string{file, abandoned} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A dispatch of a different PR is the only visitor this repository gets.
+	if _, err := ws.Checkout(ctx, repo, 22, sha); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(abandoned); !os.IsNotExist(err) {
+		t.Errorf("an abandoned checkout of another PR survived: %v", err)
+	}
+}
+
+// A daemon holding only GITHUB_TOKEN has no credential helper, so a push from a
+// session's checkout could not authenticate even though the clone did.
+func TestCheckoutGitCarriesTheWorkspaceCredentials(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ctx := context.Background()
+
+	co, err := Workspace{Root: t.TempDir(), Token: "ghp_secret_value"}.Checkout(ctx, repo, 12, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper, err := co.Git(ctx, "config", "--get-all", "credential.helper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(helper, "CRQ_GIT_TOKEN") {
+		t.Errorf("credential.helper = %q, want the workspace's helper", helper)
+	}
+	if strings.Contains(helper, "ghp_secret_value") {
+		t.Errorf("the token itself reached git's configuration: %q", helper)
 	}
 }
 

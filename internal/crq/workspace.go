@@ -138,6 +138,12 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 		if _, cerr := w.git(ctx, path, "config", "remote.origin.fetch", originRefspec); cerr != nil {
 			return "", fmt.Errorf("configuring %s: %w", repo, cerr)
 		}
+		// A mirror cloned with --mirror also carries remote.origin.mirror=true,
+		// which the refspec does not clear: a plain `git push` from a session's
+		// worktree would then mirror the whole local ref namespace, publishing
+		// internal refs and deleting remote branches this repository has never
+		// heard of. Not being set is the normal case, and git calls that an error.
+		_, _ = w.git(ctx, path, "config", "--unset-all", "remote.origin.mirror")
 		// Two workers fetching one mirror race on git's ref locks, and the loser
 		// reports "cannot lock ref" even though the winner has just made the
 		// mirror current. Retry briefly, then accept the mirror as it stands
@@ -147,17 +153,21 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 			if _, ferr = w.git(ctx, path, "fetch", "--prune", "origin"); ferr == nil {
 				return path, nil
 			}
+			// Only contention is somebody else's success. Expired credentials, an
+			// unreachable remote or a corrupt mirror are this caller's problem, and
+			// swallowing them hands back stale refs — which surfaces later as an
+			// unreadable commit rather than the fetch error that explains it.
+			if !isRefLockContention(ferr) {
+				return "", fmt.Errorf("fetching %s: %w", repo, ferr)
+			}
 			if err := sleepCtx(ctx, time.Duration(attempt+1)*200*time.Millisecond); err != nil {
 				return "", err
 			}
 		}
-		// Still contended. The mirror exists and another worker is updating it,
-		// so returning an error here fails a dispatch over somebody else's
-		// success — the case concurrent dispatch is supposed to survive.
-		if _, statErr := os.Stat(filepath.Join(path, "HEAD")); statErr == nil {
-			return path, nil
-		}
-		return path, fmt.Errorf("fetching %s: %w", repo, ferr)
+		// Still contended. Another worker is updating the mirror right now, so
+		// returning an error here fails a dispatch over somebody else's success —
+		// the case concurrent dispatch is supposed to survive.
+		return path, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
@@ -173,15 +183,23 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 	}
 	defer os.RemoveAll(staging)
 	pending := filepath.Join(staging, "mirror.git")
-	// --bare, not --mirror. A mirror's refspec is +refs/*:refs/*, so `fetch
-	// --prune` reaches into refs/heads and deletes any branch a fix session
-	// created in a worktree — the documented way to make changes. Remote refs
-	// live under refs/remotes/origin/*, leaving refs/heads to the sessions.
-	if _, err := w.git(ctx, "", "clone", "--bare", w.remoteURL(repo), pending); err != nil {
-		return "", fmt.Errorf("cloning %s: %w", repo, err)
+	// Init and fetch, not `clone --bare`: a bare clone copies the remote's branch
+	// heads straight into refs/heads, and the refspec set afterwards only governs
+	// later fetches. refs/heads belongs to the sessions — a branch already sitting
+	// there is one a session cannot create, and a stale commit it could land on.
+	// Fetching into an empty repository leaves that namespace to them, and never
+	// sets the remote.origin.mirror that `clone --mirror` did.
+	if _, err := w.git(ctx, "", "init", "--bare", "--quiet", pending); err != nil {
+		return "", fmt.Errorf("creating mirror of %s: %w", repo, err)
+	}
+	if _, err := w.git(ctx, pending, "remote", "add", "origin", w.remoteURL(repo)); err != nil {
+		return "", fmt.Errorf("configuring %s: %w", repo, err)
 	}
 	if _, err := w.git(ctx, pending, "config", "remote.origin.fetch", originRefspec); err != nil {
 		return "", fmt.Errorf("configuring %s: %w", repo, err)
+	}
+	if _, err := w.git(ctx, pending, "fetch", "--prune", "origin"); err != nil {
+		return "", fmt.Errorf("cloning %s: %w", repo, err)
 	}
 	if err := os.Rename(pending, path); err != nil {
 		if _, statErr := os.Stat(filepath.Join(path, "HEAD")); statErr == nil {
@@ -208,6 +226,24 @@ func (w Workspace) remoteURL(repo string) string {
 // out in a worktree makes any fetch that would update it fail outright.
 const originRefspec = "+refs/heads/*:refs/remotes/origin/*"
 
+// isRefLockContention reports whether a fetch failed because another process
+// held the locks — the one failure that is somebody else's success, and so the
+// only one worth retrying and then ignoring. Everything else (a bad token, an
+// unreachable remote, a broken mirror) has to reach the caller.
+func isRefLockContention(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "cannot lock ref"),
+		strings.Contains(msg, "another git process"),
+		strings.Contains(msg, ".lock") && strings.Contains(msg, "file exists"):
+		return true
+	}
+	return false
+}
+
 // Checkout is a worktree at one commit, and the directory git commands for that
 // PR run in.
 type Checkout struct {
@@ -215,6 +251,11 @@ type Checkout struct {
 	Repo   string
 	PR     int
 	mirror string
+	// ws is the workspace that made this checkout, kept so the git commands run
+	// inside it authenticate the same way the clone did. A session's push is a
+	// network command like any other, and a daemon holding only GITHUB_TOKEN has
+	// no credential helper to fall back on.
+	ws Workspace
 	// token makes this handle's directory its own. Two checkouts of one PR
 	// otherwise share a path, and a deferred Remove on the older handle deletes
 	// the newer one's worktree out from under it.
@@ -241,18 +282,40 @@ func (w Workspace) Checkout(ctx context.Context, repo string, pr int, sha string
 	// be building in one right now, and force-removing it would pull the ground
 	// out from under a live session. Each handle removes its own on the way out;
 	// this only collects what a killed process left behind.
-	if err := w.pruneStaleWork(ctx, mirror, prDir); err != nil {
+	if err := pruneStaleWork(ctx, mirror, filepath.Dir(prDir)); err != nil {
 		return Checkout{}, err
 	}
+	w.fetchPullRef(ctx, mirror, pr, sha)
 	token := randomToken()
 	dir := filepath.Join(prDir, token)
 	if err := os.MkdirAll(prDir, 0o700); err != nil {
 		return Checkout{}, err
 	}
-	if _, err := w.git(ctx, mirror, "worktree", "add", "--detach", dir, sha); err != nil {
+	// `--` before the positional arguments: a commit-ish beginning with a dash
+	// would otherwise be read as an option, which is the shape behind a long line
+	// of clone-and-checkout CVEs.
+	if _, err := w.git(ctx, mirror, "worktree", "add", "--detach", "--", dir, sha); err != nil {
 		return Checkout{}, fmt.Errorf("checking out %s@%s: %w", repo, shortSHA(sha), err)
 	}
-	return Checkout{Dir: dir, Repo: NormalizeRepo(repo), PR: pr, mirror: mirror, token: token}, nil
+	return Checkout{Dir: dir, Repo: NormalizeRepo(repo), PR: pr, mirror: mirror, ws: w, token: token}, nil
+}
+
+// fetchPullRef fetches refs/pull/<pr>/head when sha is not in the mirror yet.
+//
+// A PR opened from a fork has its head on no branch of the base repository, so
+// the mirror's refspec never brings it down and the worktree would fail at an
+// unknown commit. GitHub publishes it as refs/pull/<pr>/head. Best effort on
+// purpose: the checkout that follows is the real check, and its error names the
+// commit that could not be found.
+func (w Workspace) fetchPullRef(ctx context.Context, mirror string, pr int, sha string) {
+	if pr <= 0 {
+		return
+	}
+	if _, err := gitDir(ctx, mirror, "cat-file", "-e", sha+"^{commit}"); err == nil {
+		return
+	}
+	ref := fmt.Sprintf("+refs/pull/%d/head:refs/remotes/origin/pull/%d", pr, pr)
+	_, _ = w.git(ctx, mirror, "fetch", "origin", ref)
 }
 
 // workPath is the directory holding this PR's checkouts. Owner and name stay
@@ -275,26 +338,37 @@ func (w Workspace) workPath(repo string, pr int) (string, error) {
 // disk filling up.
 const staleWorkAge = 12 * time.Hour
 
-// pruneStaleWork removes checkouts under prDir that nothing has touched for
-// staleWorkAge, leaving live ones alone.
-func (w Workspace) pruneStaleWork(ctx context.Context, mirror, prDir string) error {
-	entries, err := os.ReadDir(prDir)
+// pruneStaleWork removes checkouts anywhere under repoDir that nothing has
+// touched for staleWorkAge, leaving live ones alone.
+//
+// Every PR of the repository, not only the one being checked out: a process
+// killed mid-dispatch leaves a generation behind, and if that PR is then merged,
+// closed or simply never dispatched again, nothing would ever come back to
+// collect it. Sweeping the repository means any dispatch of any PR does.
+func pruneStaleWork(ctx context.Context, mirror, repoDir string) error {
+	prDirs, err := os.ReadDir(repoDir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	for _, entry := range entries {
-		dir := filepath.Join(prDir, entry.Name())
-		// The NEWEST file in the checkout, not the directory's own timestamp:
-		// editing a file or running a build inside leaves the root's mtime
-		// untouched, so a busy session would read as abandoned.
-		if touched := newestModTime(dir); time.Since(touched) < staleWorkAge {
+	for _, prDir := range prDirs {
+		entries, err := os.ReadDir(filepath.Join(repoDir, prDir.Name()))
+		if err != nil {
 			continue
 		}
-		if err := w.removeWorktree(ctx, mirror, dir); err != nil {
-			return err
+		for _, entry := range entries {
+			dir := filepath.Join(repoDir, prDir.Name(), entry.Name())
+			// The NEWEST file in the checkout, not the directory's own timestamp:
+			// editing a file or running a build inside leaves the root's mtime
+			// untouched, so a busy session would read as abandoned.
+			if touched := newestModTime(dir); time.Since(touched) < staleWorkAge {
+				continue
+			}
+			if err := removeWorktree(ctx, mirror, dir); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -322,10 +396,10 @@ func (c Checkout) Remove(ctx context.Context) error {
 		// it would delete a worktree somebody else is using.
 		return nil
 	}
-	return Workspace{}.removeWorktree(ctx, c.mirror, c.Dir)
+	return removeWorktree(ctx, c.mirror, c.Dir)
 }
 
-func (w Workspace) removeWorktree(ctx context.Context, mirror, dir string) error {
+func removeWorktree(ctx context.Context, mirror, dir string) error {
 	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
 		// Still prune: git may hold a record of a directory somebody deleted.
 		_, _ = gitDir(ctx, mirror, "worktree", "prune")
@@ -341,9 +415,10 @@ func (w Workspace) removeWorktree(ctx context.Context, mirror, dir string) error
 	return nil
 }
 
-// Git runs a git command inside this checkout.
+// Git runs a git command inside this checkout, with the same credentials the
+// mirror was cloned with — a session's push is a network command too.
 func (c Checkout) Git(ctx context.Context, args ...string) (string, error) {
-	return gitDir(ctx, c.Dir, args...)
+	return c.ws.git(ctx, c.Dir, args...)
 }
 
 // gitDir runs git in dir ("" means the process's own directory) and returns its
