@@ -135,17 +135,14 @@ func (s *Service) InstallDrain(ctx context.Context, agent string, agentArgs []st
 		return plan, err
 	}
 
-	// The agent is invoked with Claude Code's own flags, so --agent takes a
-	// Claude-compatible executable — a wrapper, or a build of it — and not an
-	// agent with a different CLI. Anything else needs its own wrapper script;
-	// `crq watch --dispatch -- <cmd>...` runs whatever argv it is given.
-	//
+	// Known agents receive their non-interactive flags. Any other executable is
+	// treated as a self-contained prompt-taking wrapper.
 	wrapper := fmt.Sprintf(`#!/usr/bin/env bash
 # Installed by "crq drain install". Runs the review drain: crq decides, and a
 # fix session is started for each PR that needs one.
 set -uo pipefail
-exec %q watch --dispatch -- %s
-`, self, invocation)
+exec %s watch --dispatch -- %s
+`, shellQuote(self), invocation)
 
 	for _, f := range []struct {
 		path string
@@ -307,6 +304,11 @@ func (s *Service) drainEnv(plan DrainInstall) map[string]string {
 		"CRQ_CAL_REPLY_MARKER":       s.cfg.CalibrationMarker,
 		"CRQ_REVIEW_DONE_MARKER":     s.cfg.ReviewDoneMarker,
 		"CRQ_COMPLETION_MARKER":      s.cfg.CompletionMarker,
+		"CRQ_MIN_INTERVAL":           s.cfg.MinInterval.String(),
+		"CRQ_INFLIGHT_TIMEOUT":       s.cfg.InflightTimeout.String(),
+		"CRQ_POLL":                   s.cfg.PollInterval.String(),
+		"CRQ_FEEDBACK_WAIT_TIMEOUT":  s.cfg.FeedbackWaitTimeout.String(),
+		"CRQ_SETTLE":                 s.cfg.SettleWindow.String(),
 		"PATH":                       drainPath(plan),
 	}
 	if s.cfg.RateLimitCoDegrade {
@@ -413,25 +415,29 @@ WantedBy=default.target
 func agentInvocation(agent, promptPath string, extra []string) (string, error) {
 	quoted := make([]string, 0, len(extra))
 	for _, a := range extra {
-		quoted = append(quoted, fmt.Sprintf("%q", a))
+		quoted = append(quoted, shellQuote(a))
 	}
 	args := strings.Join(quoted, " ")
 	switch filepath.Base(agent) {
 	case "claude":
 		// stream-json so the session log fills as it works rather than only at
 		// the end, where a hung session would leave an empty file.
-		return fmt.Sprintf(`%q -p "$(cat %q)" --permission-mode bypassPermissions --output-format stream-json --verbose %s`,
-			agent, promptPath, args), nil
+		return fmt.Sprintf(`%s -p "$(cat %s)" --permission-mode bypassPermissions --output-format stream-json --verbose %s`,
+			shellQuote(agent), shellQuote(promptPath), args), nil
 	case "codex":
 		// exec is codex's non-interactive form; the prompt is its final
 		// positional argument. --skip-git-repo-check because the session runs in
 		// a detached worktree crq created.
-		return fmt.Sprintf(`%q exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox %s "$(cat %q)"`,
-			agent, args, promptPath), nil
+		return fmt.Sprintf(`%s exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox %s "$(cat %s)"`,
+			shellQuote(agent), args, shellQuote(promptPath)), nil
 	default:
-		if len(extra) == 0 {
-			return "", fmt.Errorf("crq does not know how to invoke %q: pass --agent-args with the flags it needs (the prompt is at %s)", agent, promptPath)
-		}
-		return fmt.Sprintf(`%q %s "$(cat %q)"`, agent, args, promptPath), nil
+		return fmt.Sprintf(`%s %s "$(cat %s)"`, shellQuote(agent), args, shellQuote(promptPath)), nil
 	}
+}
+
+// shellQuote makes one literal POSIX shell word. The generated wrapper is Bash,
+// so single quotes prevent parameter, command and backtick expansion; an
+// embedded single quote is represented by ending and reopening the quoted word.
+func shellQuote(word string) string {
+	return "'" + strings.ReplaceAll(word, "'", `'"'"'`) + "'"
 }

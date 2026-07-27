@@ -15,6 +15,8 @@ func TestSkipMarkerHasToBeUsedNotMentioned(t *testing.T) {
 	}{
 		{"used", "Low risk.\n\n<!-- crq:skip-autoreview -->\n", true},
 		{"mentioned in a code span", "- `<!-- crq:skip-autoreview -->` stops fleet auto-review.", false},
+		{"mentioned in a double-backtick code span", "- ``<!-- crq:skip-autoreview -->`` stops fleet auto-review.", false},
+		{"double-backtick span may contain a backtick", "``example ` <!-- crq:skip-autoreview -->``", false},
 		{"mentioned in a fence", "```md\n<!-- crq:skip-autoreview -->\n```\n", false},
 		{"documented and then used", "Use `<!-- crq:skip-autoreview -->`.\n\n<!-- crq:skip-autoreview -->", true},
 		{"absent", "An ordinary description.", false},

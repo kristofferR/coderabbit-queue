@@ -2081,10 +2081,11 @@ func TestLoopDegradesToCodexOnlyOnRateLimit(t *testing.T) {
 	}
 }
 
-// TestFeedbackDefersCleanAutoCodexWithDefaultRequiredBots covers the default
-// feedback-only Codex setup: its SHA-bound clean verdict is sufficient evidence
-// even though Completion.ReviewedBy contains only the pending CodeRabbit key.
-func TestFeedbackDefersCleanAutoCodexWithDefaultRequiredBots(t *testing.T) {
+// A rate-limit notice observed by this Feedback call must affect the same
+// report. The default feedback-only Codex setup supplies a SHA-bound clean
+// verdict even though Completion.ReviewedBy contains only the pending
+// CodeRabbit key.
+func TestFeedbackUsesNewAccountBlockToDeferCleanAutoCodex(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	cfg.RateLimitCoDegrade = true
@@ -2099,16 +2100,14 @@ func TestFeedbackDefersCleanAutoCodexWithDefaultRequiredBots(t *testing.T) {
 		Body:      "Codex Review: Didn't find any major issues. :tada:\n\n**Reviewed commit:** `abcdef1234`",
 		CreatedAt: cleanAt, UpdatedAt: cleanAt}
 	clean.User.Login = "chatgpt-codex-connector[bot]"
-	gh.comments[fakeKey("o/carrier", 93)] = []ghapi.IssueComment{clean}
+	rateLimitedAt := cleanAt.Add(time.Second)
+	rateLimited := ghapi.IssueComment{ID: 702,
+		Body:      "<!-- rate limited by coderabbit.ai -->\n> ## Review limit reached\n> **Next review available in:** **30 minutes**",
+		CreatedAt: rateLimitedAt, UpdatedAt: rateLimitedAt}
+	rateLimited.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/carrier", 93)] = []ghapi.IssueComment{clean, rateLimited}
 	store := NewMemoryStore(cfg)
 	seedRound(t, store, cfg, "o/carrier", 93, "abcdef123", PhaseQueued, cleanAt.Add(-time.Minute), 0)
-	blockedUntil := time.Now().UTC().Add(30 * time.Minute)
-	if _, err := store.Update(ctx, func(st *State) error {
-		st.Account.BlockedUntil = &blockedUntil
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
 
 	svc := NewService(cfg, gh, store, nil)
 	report, err := svc.Feedback(ctx, "o/carrier", 93)

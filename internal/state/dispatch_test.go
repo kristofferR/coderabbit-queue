@@ -191,7 +191,7 @@ func TestLiveDispatchSurvivesRoundArchiveEviction(t *testing.T) {
 	}
 }
 
-func TestExpiredLiveDispatchCannotBeRenewed(t *testing.T) {
+func TestExpiredArchivedDispatchIsAtomicallyReacquired(t *testing.T) {
 	now := time.Date(2026, 7, 27, 8, 0, 0, 0, time.UTC)
 	st := New()
 	st.RememberDispatch("o/r", 1, DispatchClaim{
@@ -203,14 +203,15 @@ func TestExpiredLiveDispatchCannotBeRenewed(t *testing.T) {
 			Host: "host", Token: "tok", At: now, Heartbeat: now, Attempts: 1,
 		},
 	}}
-	if ok, taken := st.HeartbeatArchivedDispatch("o/r", 1, "tok", now.Add(DispatchTTL)); ok || taken {
+	later := now.Add(DispatchTTL)
+	if ok, taken := st.HeartbeatArchivedDispatch("o/r", 1, "tok", later); !ok || taken {
 		t.Fatalf("expired heartbeat = ok %v taken %v", ok, taken)
 	}
-	if _, exists := st.Dispatches[Key("o/r", 1)]; exists {
-		t.Fatal("expired claim was retained after a failed renewal")
+	if got := st.Dispatches[Key("o/r", 1)].Heartbeat; !got.Equal(later) {
+		t.Fatalf("reacquired heartbeat = %s, want %s", got, later)
 	}
-	if st.Archive[0].Dispatch.Token != "" {
-		t.Fatal("expired archived claim could be renewed on a later heartbeat")
+	if !st.ArchivedDispatchHeld("o/r", 1, later) {
+		t.Fatal("reacquired claim is not held")
 	}
 }
 

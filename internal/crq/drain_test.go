@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"html"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -122,6 +123,11 @@ func TestDrainUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 	cfg.FeedbackBots = []string{"custom-reviewer[bot]", "cursor[bot]", "observer[bot]"}
 	cfg.ReviewCommand = "@custom review this"
 	cfg.RateLimitCoDegrade = false
+	cfg.MinInterval = time.Hour
+	cfg.InflightTimeout = 37 * time.Minute
+	cfg.PollInterval = 23 * time.Second
+	cfg.FeedbackWaitTimeout = 41 * time.Minute
+	cfg.SettleWindow = 17 * time.Second
 	cfg.CoBots = []CoBotConfig{{
 		Name: "bugbot", Login: "cursor[bot]", Command: "bugbot run now",
 		Trigger: engine.TriggerAlways, Required: true, SelfHealGrace: 4 * time.Minute,
@@ -143,6 +149,11 @@ func TestDrainUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 		`CRQ_DISPATCH_FORKS=true`,
 		`CRQ_AUTOREVIEW_SKIP_MARKER=<!-- custom-skip -->`,
 		`CRQ_RL_CO_DEGRADE=0`,
+		`CRQ_MIN_INTERVAL=1h0m0s`,
+		`CRQ_INFLIGHT_TIMEOUT=37m0s`,
+		`CRQ_POLL=23s`,
+		`CRQ_FEEDBACK_WAIT_TIMEOUT=41m0s`,
+		`CRQ_SETTLE=17s`,
 	} {
 		if !strings.Contains(unit, want) {
 			t.Errorf("unit does not carry %q:\n%s", want, unit)
@@ -301,12 +312,24 @@ func TestAgentInvocationPerAgent(t *testing.T) {
 		}
 	}
 
-	// An unknown agent is refused rather than invoked with a guess.
-	if _, err := agentInvocation("/usr/bin/mystery", prompt, nil); err == nil {
-		t.Error("an unknown agent must be refused unless --agent-args says how to call it")
+	// An unknown executable may be a self-contained prompt-taking wrapper.
+	if got, err := agentInvocation("/usr/bin/mystery", prompt, nil); err != nil || !strings.Contains(got, prompt) {
+		t.Errorf("a self-contained wrapper should be honoured, got %q err=%v", got, err)
 	}
 	if got, err := agentInvocation("/usr/bin/mystery", prompt, []string{"--run"}); err != nil || !strings.Contains(got, "--run") {
 		t.Errorf("an unknown agent with explicit args should be honoured, got %q err=%v", got, err)
+	}
+}
+
+func TestShellQuotePreservesLiteralArguments(t *testing.T) {
+	for _, value := range []string{"", "plain", "two words", "$HOME", "`uname`", "$(printf injected)", "it's literal"} {
+		out, err := exec.Command("sh", "-c", "printf %s "+shellQuote(value)).Output()
+		if err != nil {
+			t.Fatalf("quoting %q: %v", value, err)
+		}
+		if got := string(out); got != value {
+			t.Errorf("quoted %q became %q", value, got)
+		}
 	}
 }
 

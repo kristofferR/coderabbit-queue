@@ -247,18 +247,22 @@ func ObservedAccountBlock(obs Observation, p Policy, q state.AccountQuota, now t
 			return nil
 		}
 	}
-	// A notice whose own window has passed is only worth a fresh fallback block
-	// if crq has not already accounted for it. Without this, every observation of
-	// an hour-old message would start another fallback window — a block that
-	// never ends, from a message that was answered long ago.
+	// An explicit expired window proves the notice is spent. The conservative
+	// fallback is only for a notice whose window could not be parsed; applying it
+	// to an expired timestamp would revive an hour-old message after calibration
+	// clears the notice watermark.
 	//
-	// The watermark is the last NOTICE crq accounted for, not the last quota
-	// check: Account.CheckedAt is also advanced by a calibration probe that is
+	// For an unparseable notice, the watermark is the last NOTICE crq accounted
+	// for, not the last quota check: Account.CheckedAt is also advanced by a
+	// calibration probe that is
 	// still awaiting its reply or whose reply had nothing parseable in it, and
 	// neither is evidence the account is clear. A notice crq had never seen was
 	// discarded for being older than such a probe, and the round then fired
 	// inside the block the bot had just reported.
-	if newest.Window == nil || !newest.Window.After(now) {
+	if newest.Window != nil && !newest.Window.After(now) {
+		return nil
+	}
+	if newest.Window == nil {
 		if q.RLCommentUpdated != nil && !newest.UpdatedAt.After(*q.RLCommentUpdated) {
 			return nil
 		}

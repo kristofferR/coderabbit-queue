@@ -698,10 +698,9 @@ func (s *State) HeartbeatArchivedDispatch(repo string, pr int, token string, now
 	key := Key(repo, pr)
 	if claim, exists := s.Dispatches[key]; exists {
 		if claim.Token == token {
-			if !claimHeld(claim, now) {
-				s.ReleaseArchivedDispatch(repo, pr, token)
-				return false, false
-			}
+			// The CAS update containing this heartbeat also serializes a safe
+			// reacquisition after an extended state outage. If a replacement
+			// watcher won first, its different live token is observed below.
 			claim.Heartbeat = now.UTC()
 			s.Dispatches[key] = claim
 			return true, false

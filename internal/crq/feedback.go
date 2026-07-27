@@ -100,8 +100,10 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// away, and the next fire went out inside a window the bot had already
 	// stated. It is the one write on this path, it happens once per notice rather
 	// than once per poll, and all it can do is stop a review.
-	if _, err := s.recordObservedBlock(ctx, obs, st, now); err != nil {
+	if updated, err := s.recordObservedBlock(ctx, obs, st, now); err != nil {
 		return FeedbackReport{}, fmt.Errorf("recording the account block observed on %s: %w", QueueKey(repo, pr), err)
+	} else if updated != nil {
+		st = *updated
 	}
 	pull := obs.pull
 	head := ""

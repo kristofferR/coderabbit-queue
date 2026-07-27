@@ -51,21 +51,46 @@ func stripCode(body string) string {
 
 	text := out.String()
 	var spanned strings.Builder
-	for {
-		start := strings.Index(text, "`")
+	for len(text) > 0 {
+		start := strings.IndexByte(text, '`')
 		if start < 0 {
 			break
 		}
 		spanned.WriteString(text[:start])
-		after := text[start+1:]
-		end := strings.Index(after, "`")
+		run := backtickRun(text[start:])
+		after := text[start+run:]
+		end := matchingBacktickRun(after, run)
 		if end < 0 {
-			// An unmatched backtick is a literal one, not the start of a span.
-			spanned.WriteString(after)
+			// An unmatched delimiter is literal, not the start of a span.
+			spanned.WriteString(text[start:])
 			return spanned.String()
 		}
-		text = after[end+1:]
+		text = after[end+run:]
 	}
 	spanned.WriteString(text)
 	return spanned.String()
+}
+
+func backtickRun(text string) int {
+	n := 0
+	for n < len(text) && text[n] == '`' {
+		n++
+	}
+	return n
+}
+
+func matchingBacktickRun(text string, want int) int {
+	for at := 0; at < len(text); {
+		next := strings.IndexByte(text[at:], '`')
+		if next < 0 {
+			return -1
+		}
+		at += next
+		if run := backtickRun(text[at:]); run == want {
+			return at
+		} else {
+			at += run
+		}
+	}
+	return -1
 }

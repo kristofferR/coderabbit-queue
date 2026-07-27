@@ -188,8 +188,9 @@ config file the install read and the credential must be one the service can reso
 (`gh auth login`, or a token in that file). Two rules the prompt earned the hard
 way — a session must stay on a detached HEAD and push by ref (`git push <head repo> HEAD:refs/heads/…`,
 which for a fork PR is not `origin`), because the worktrees share one mirror and a branch checked out
-in one of them makes git refuse to fetch for every PR; and it resolves threads AFTER pushing, which
-crq now allows by distinguishing a superseded round from a stolen one.
+in one of them makes git refuse to fetch for every PR. A session resolves or declines its current
+threads before calling `crq next --wait`; only that guarded wait can issue the `push` action once
+every required reviewer has answered.
 
 Each session's output is written to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log`
 (last five per PR). Three dispatch attempts in a row that start nothing put `dispatch failing` on the dashboard

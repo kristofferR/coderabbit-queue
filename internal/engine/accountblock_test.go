@@ -117,6 +117,23 @@ func TestObservedAccountBlockOutlivesAnInconclusiveCalibration(t *testing.T) {
 	}
 }
 
+func TestObservedAccountBlockIgnoresAnExpiredExplicitWindow(t *testing.T) {
+	now := time.Date(2026, 7, 27, 1, 7, 0, 0, time.UTC)
+	p := Policy{Bot: "coderabbitai[bot]", RateLimitFallback: 15 * time.Minute}
+	expired := now.Add(-time.Minute)
+	obs := Observation{Events: []dialect.BotEvent{{
+		Kind: dialect.EvRateLimited, Bot: "coderabbitai[bot]",
+		CommentID: 900, UpdatedAt: now.Add(-time.Hour), Window: &expired,
+	}}}
+
+	// A successful calibration may clear the notice watermark. The explicit
+	// expired window still proves this notice is spent; only an unparseable
+	// notice needs a conservative fallback.
+	if blk := ObservedAccountBlock(obs, p, state.AccountQuota{}, now); blk != nil {
+		t.Errorf("expired explicit window was revived until %s", blk.Until)
+	}
+}
+
 // Only the configured primary meters the account; a co-reviewer saying it is
 // busy is not an account block.
 func TestObservedAccountBlockIgnoresOtherBots(t *testing.T) {
