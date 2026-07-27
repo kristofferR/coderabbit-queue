@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -24,7 +25,7 @@ type DrainSetting struct {
 // somebody made the call, and when.
 func (s *Service) SetDrainEnabled(ctx context.Context, repo string, enabled bool, reason string) (DrainSetting, error) {
 	repo = NormalizeRepo(repo)
-	if _, _, ok := splitRepo(repo); !ok {
+	if !validRepoSlug(repo) {
 		return DrainSetting{}, fmt.Errorf("repo must be owner/name")
 	}
 	now := s.clock().UTC()
@@ -42,7 +43,7 @@ func (s *Service) SetDrainEnabled(ctx context.Context, repo string, enabled bool
 // setting was there.
 func (s *Service) ClearDrainEnabled(ctx context.Context, repo string) (bool, error) {
 	repo = NormalizeRepo(repo)
-	if _, _, ok := splitRepo(repo); !ok {
+	if !validRepoSlug(repo) {
 		return false, fmt.Errorf("repo must be owner/name")
 	}
 	cleared := false
@@ -94,4 +95,22 @@ func (s *Service) DrainSettings(ctx context.Context) ([]DrainSetting, error) {
 		add(repo)
 	}
 	return out, nil
+}
+
+// validRepoSlug reports whether repo is exactly "owner/name". The workspace
+// package has its own copy for path safety; this one guards a state key, where
+// the hazard is a setting recorded under a name nothing will ever match.
+func validRepoSlug(repo string) bool {
+	owner, name, ok := strings.Cut(repo, "/")
+	if !ok || owner == "" || name == "" {
+		return false
+	}
+	// Same segment rules the workspace package applies to a path: "." and ".."
+	// are not repository names, and a second slash means this is not one either.
+	for _, part := range []string{owner, name} {
+		if part == "." || part == ".." || strings.ContainsAny(part, `/\`) {
+			return false
+		}
+	}
+	return true
 }

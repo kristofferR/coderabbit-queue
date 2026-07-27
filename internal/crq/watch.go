@@ -17,6 +17,7 @@ import (
 
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
+	"github.com/kristofferR/coderabbit-queue/internal/workspace"
 )
 
 // WatchOptions configures `crq watch`.
@@ -645,7 +646,7 @@ func (s *Service) dispatchWithStart(
 	// fixes instead of failing at the last step of every one of them. In the
 	// environment, never in the config: the snippet is on disk, the secret is not.
 	if ws.Token != "" {
-		cmd.Env = append(cmd.Env, gitTokenEnv+"="+ws.Token)
+		cmd.Env = append(cmd.Env, workspace.TokenEnv+"="+ws.Token)
 	}
 	if s.log != nil {
 		s.log.Printf("watch: dispatching %s for %s#%d@%s (%d findings) — log: %s",
@@ -694,7 +695,7 @@ func (s *Service) dispatchWithStart(
 // be established — an unreadable tree, an unconfirmable push — counts as work
 // worth keeping. The worktree is pruned by age either way; a lost fix is not
 // recoverable at all.
-func sessionWork(ctx context.Context, co Checkout, head string) (bool, string) {
+func sessionWork(ctx context.Context, co workspace.Checkout, head string) (bool, string) {
 	dirty, err := co.Git(ctx, "status", "--porcelain")
 	if err != nil {
 		return true, "its working tree could not be read"
@@ -1059,15 +1060,10 @@ func (p *dispatchPool) wait() { p.wg.Wait() }
 // sessionLog opens the file a fix session's output goes to, and prunes the ones
 // nobody is going to read.
 func (s *Service) sessionLog(ctx context.Context, report NextReport) (string, *os.File, error) {
-	root, err := s.workspace(ctx).root()
+	dir, err := s.workspace(ctx).LogDir(report.Repo)
 	if err != nil {
 		return "", nil, err
 	}
-	owner, name, ok := splitRepo(report.Repo)
-	if !ok {
-		return "", nil, fmt.Errorf("repo must be owner/name, got %q", report.Repo)
-	}
-	dir := filepath.Join(root, "logs", owner, name)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", nil, err
 	}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
+	"github.com/kristofferR/coderabbit-queue/internal/workspace"
 )
 
 // Dispatch is the one place crq starts something that writes code, so what it
@@ -954,7 +955,7 @@ func TestSessionWorkConfirmsAForkPushThroughThePullRef(t *testing.T) {
 	repo := "owner/thing"
 	sha := originRepo(t, filepath.Join(base, repo))
 	t.Setenv("CRQ_REMOTE_BASE", base)
-	ws := Workspace{Root: t.TempDir()}
+	ws := workspace.Workspace{Root: t.TempDir()}
 	ctx := context.Background()
 
 	co, err := ws.Checkout(ctx, repo, 42, sha)

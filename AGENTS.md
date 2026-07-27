@@ -8,7 +8,7 @@ CLI contract read `README.md` and `llms.txt`; for usage read `crq help`.
 ## Package layout
 
 Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state ← crq`,
-`gh ← {state, crq}`. The engine does no I/O by construction.
+`gh ← {state, crq}`, `workspace ← crq`. The engine does no I/O by construction.
 
 - `internal/dialect/` — ALL bot-text knowledge, zero deps. CodeRabbit/Codex
   completion, rate-limit, paused, in-progress, failed, summary-only-plan,
@@ -26,6 +26,10 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
   The only package (besides dialect) allowed to say "rate limit".
   `ListCheckRuns` fetches a ref's check runs (envelope-paged, ETag'd); matching
   them to a bot is dialect's `ClassifyCheckRun`, never gh's.
+- `internal/workspace/` — reusable repository mirrors, detached PR worktrees,
+  credential-safe Git execution, stale-worktree pruning, and mirror migration.
+  Owns persistent filesystem and process I/O for checkouts; `crq` supplies only
+  configured roots and a current-token resolver.
 - `internal/state/` — persisted schema v3: one `Round` per PR, one global
   `FireSlot`, the CodeRabbit `AccountQuota`, an `Archive` ring. Round transition
   methods, the CAS store, and dashboard rendering. `Round.CoBots` holds per-
