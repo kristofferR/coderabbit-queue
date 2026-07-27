@@ -518,7 +518,7 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 		if r == nil || st.FireSlot == nil || st.FireSlot.Token != slot.Token {
 			return ErrNoChange
 		}
-		return s.applyTransition(st, r, tr, now)
+		return s.applyTransition(st, r, tr, now, cfg)
 	})
 	if err != nil {
 		return PumpResult{}, err
@@ -536,10 +536,23 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 
 // applyTransition applies a fired/reviewing round's engine Transition to state:
 // the round transition plus any fire-slot release and account-quota block.
-func (s *Service) applyTransition(st *State, r *Round, tr engine.Transition, now time.Time) error {
+//
+// cfg is the configuration Progress decided from, revalidated here for the same
+// reason applyFire revalidates its verdicts — this runs inside the CAS mutation,
+// where the state it reads is the state the write lands on.
+func (s *Service) applyTransition(st *State, r *Round, tr engine.Transition, now time.Time, cfg Config) error {
 	key := QueueKey(r.Repo, r.PR)
 	switch tr.Outcome {
 	case engine.OutComplete:
+		// The completed round is the "this head was reviewed" dedup marker, and
+		// reopenForChangedReviewers deliberately leaves an in-flight round alone —
+		// it is already going to answer. A reviewer change that commits between
+		// the decision and this write would therefore be answered by neither: the
+		// marker dedupes the head under the set that no longer gates it. Drop the
+		// stale transition; the next pump decides again under the new set.
+		if overrideChanged(st, r.Repo, cfg) {
+			return ErrNoChange
+		}
 		if err := r.Complete(); err != nil {
 			return err
 		}
@@ -661,7 +674,7 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 		if r == nil || !sameRound(r, *target) || (r.Phase != PhaseFired && r.Phase != PhaseReviewing) {
 			return ErrNoChange
 		}
-		return s.applyTransition(st, r, tr, now)
+		return s.applyTransition(st, r, tr, now, cfg)
 	})
 	if err != nil {
 		return st, err
@@ -1475,12 +1488,15 @@ func (s *Service) selfHealCoReviewers(ctx context.Context, cfg Config, round Rou
 		// not serialized by the fire slot, so two concurrent pumps observing an
 		// unset command would otherwise both post. A claim older than
 		// triggerClaimTTL is stale (the poster died mid-flight) and may be
-		// re-claimed.
+		// re-claimed. As in fireCoOnly, the claim is what authorizes the post, so
+		// the reviewer set that chose this bot must still be the configured one
+		// when it commits — otherwise a bot `crq reviewers set` has just removed
+		// is asked for a review anyway.
 		login := cp.Login
 		claimed := false
 		updated, err := s.store.Update(ctx, func(st *State) error {
 			r := st.Round(round.Repo, round.PR)
-			if !sameRound(r, round) || r.Co(login).CommandID != 0 {
+			if !sameRound(r, round) || r.Co(login).CommandID != 0 || overrideChanged(st, round.Repo, cfg) {
 				return ErrNoChange
 			}
 			if c := r.Co(login); c.ClaimedAt != nil && now.Sub(c.ClaimedAt.UTC()) < triggerClaimTTL {

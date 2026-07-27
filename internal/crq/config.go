@@ -328,12 +328,18 @@ func listEnv(env map[string]string, key, fallback string) []string {
 // convergence via RequiredBots membership. Trigger and SelfHealGrace shape
 // when crq may post Command (see engine.DecideCoPost).
 type CoBotConfig struct {
-	Login         string
-	Name          string
-	Command       string
-	Trigger       engine.TriggerMode
-	Required      bool
-	SelfHealGrace time.Duration
+	Login   string
+	Name    string
+	Command string
+	Trigger engine.TriggerMode
+	// TriggerExplicit records that CRQ_COBOT_<NAME>_TRIGGER named this mode,
+	// rather than it falling out of the registry defaults. The fleet parse lets
+	// that value win over the registry's required trigger, so a per-repo override
+	// promoting the bot to required must not quietly overrule it either — an
+	// operator who disabled a bot's command asked for that on every repository.
+	TriggerExplicit bool
+	Required        bool
+	SelfHealGrace   time.Duration
 }
 
 // parseCoBots resolves the enabled co-reviewers from CRQ_COBOTS (default all
@@ -358,16 +364,16 @@ func resolveCoBot(env map[string]string, co dialect.CoReviewer, required bool) C
 		command = stringEnvAllowEmpty(env, co.LegacyCommandEnv, command)
 	}
 	command = strings.TrimSpace(command)
-	trigger := base.Trigger
+	trigger, explicit := base.Trigger, false
 	switch v := engine.TriggerMode(strings.ToLower(strings.TrimSpace(env["CRQ_COBOT_"+key+"_TRIGGER"]))); v {
 	case engine.TriggerNever, engine.TriggerSelfHeal, engine.TriggerAlways:
-		trigger = v
+		trigger, explicit = v, true
 	}
 	if command == "" {
 		// No trigger command means crq can never post one, whatever the mode.
 		trigger = engine.TriggerNever
 	}
-	base.Command, base.Trigger = command, trigger
+	base.Command, base.Trigger, base.TriggerExplicit = command, trigger, explicit
 	base.SelfHealGrace = durationEnv(env, "CRQ_COBOT_"+key+"_GRACE", defaultSelfHealGrace)
 	return base
 }
@@ -533,10 +539,19 @@ func ownerOf(repo string) string {
 	return owner
 }
 
-// WriterID identifies this PROCESS in the shared state, in the same form the
-// autoreview leader records. A new CLI and an old daemon commonly run on one
-// machine, so a per-host key would let the upgraded CLI's write vouch for the
-// daemon that has not been upgraded.
+// processRun distinguishes this RUN of crq from an earlier one that happened to
+// get the same pid. Host and pid do not identify a process over time — a
+// containerized daemon restarts as pid 1, and ordinary pids are reused — so
+// without it a replacement process inherits its predecessor's recorded
+// capabilities: an old binary restarted into a capable one's pid would vouch for
+// itself, and LaggingWriters would report no incompatible writer while that
+// daemon ignores every repository override.
+var processRun = randomToken()[:8]
+
+// WriterID identifies this PROCESS in the shared state, and is what the
+// autoreview leader records as its owner. A new CLI and an old daemon commonly
+// run on one machine, so a per-host key would let the upgraded CLI's write vouch
+// for the daemon that has not been upgraded.
 func (c Config) WriterID() string {
-	return fmt.Sprintf("host=%s pid=%d", c.Host, os.Getpid())
+	return fmt.Sprintf("host=%s pid=%d run=%s", c.Host, os.Getpid(), processRun)
 }

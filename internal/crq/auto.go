@@ -3,8 +3,6 @@ package crq
 import (
 	"context"
 	"errors"
-	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -21,7 +19,10 @@ type AutoOptions struct {
 var errLostLeadership = errors.New("lost autoreview leadership mid-pass")
 
 func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
-	owner := fmt.Sprintf("host=%s pid=%d", s.cfg.Host, os.Getpid())
+	// The same identity capabilities are recorded under, so LaggingWriters can
+	// ask whether the process holding the lease understands what it is deciding
+	// from. Spelling it out here again would let the two drift apart.
+	owner := s.cfg.WriterID()
 	token := randomToken()
 	for {
 		held, err := s.acquireLeader(ctx, owner, token)

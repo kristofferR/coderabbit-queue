@@ -113,7 +113,7 @@ type Round struct {
 
 	Token string `json:"token,omitempty"` // reservation token (CAS race detection)
 	// ByHost identifies the PROCESS that reserved this round, in the writer form
-	// "host=<name> pid=<n>" — the key NoteWriter records capabilities under, so
+	// "host=<name> pid=<n> run=<id>" — the key NoteWriter records capabilities under, so
 	// LaggingWriters can ask whether the process driving a fire understands the
 	// configuration it is firing from. The dashboard shows the machine name.
 	ByHost string `json:"by_host,omitempty"`
@@ -374,8 +374,9 @@ func (s *State) NoteWriter(host string, caps int, now time.Time) {
 // back untouched, and keeps deciding from its own fleet-wide configuration.
 func (s *State) LaggingWriters(caps int, now time.Time) []string {
 	acting := map[string]bool{}
-	// The leader identifies itself as "host=<name> pid=<n>", which is exactly the
-	// process identity capabilities are recorded under.
+	// The leader identifies itself as "host=<name> pid=<n> run=<id>", which is
+	// exactly the process identity capabilities are recorded under — the run
+	// component is what keeps a restart into a reused pid from inheriting them.
 	if s.Leader != nil && s.Leader.ExpiresAt.After(now) && strings.TrimSpace(s.Leader.Owner) != "" {
 		acting[s.Leader.Owner] = true
 	}

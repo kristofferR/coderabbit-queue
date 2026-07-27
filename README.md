@@ -515,7 +515,9 @@ the same fire step as the CodeRabbit one. Bugbot and Macroscope default to `self
 already auto-review every push: crq stays silent unless a bot it has seen working misses the current
 head for longer than `CRQ_COBOT_<NAME>_GRACE`. In every mode crq suppresses the trigger when the bot
 auto-reviews, has already reviewed the head, has a check run in flight, or has a live command on the
-PR — so no bot is ever double-asked.
+PR — so no bot is ever double-asked. A mode you set explicitly wins over requiredness, per-repo
+requiredness included: `crq reviewers set` gives a required bot the trigger its registry default
+would have had, but never overrides a `never` you configured yourself.
 
 A co-reviewer that joins a round on its own (an actionable comment, a review, a check run) gates that
 round dynamically: convergence waits for it even though it isn't required. An exhaustion notice — for

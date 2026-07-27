@@ -231,6 +231,23 @@ func (c Config) ForRepo(ov RepoReviewers) Config {
 		keep = append(keep, cb)
 		have[dialect.NormalizeBotName(cb.Login)] = true
 	}
+	// A primary that is itself a registry bot but that the fleet neither enabled
+	// nor required has no entry to preserve above — and this repository naming it
+	// is exactly when its evidence has to be read. Add the silenced entry the
+	// fleet parse would have carried: without it observation loses that bot's
+	// wording and check-run hooks, so a check-only clean result is never fetched
+	// and the primary stays pending until the round times out. Recording it here
+	// also keeps the loop below from adding it as an ordinary co-reviewer, which
+	// would ask the same bot twice.
+	if primary := c.Bot; primary != "" && !have[dialect.NormalizeBotName(primary)] &&
+		(containsBot(required, primary) || containsBot(enabled, primary)) {
+		if cb, ok := c.knownCoBot(primary); ok {
+			cb.Required = containsBot(required, primary)
+			cb.Trigger = engine.TriggerNever // triggered as the primary; asking twice is the bug
+			keep = append(keep, cb)
+			have[dialect.NormalizeBotName(primary)] = true
+		}
+	}
 	// A repository may choose a bot the fleet does not enable — otherwise
 	// "which bots for which project" only ever subtracts. Its configuration
 	// comes from the registry, since there is no per-bot environment for a repo.
@@ -267,9 +284,12 @@ func (c Config) ForRepo(ov RepoReviewers) Config {
 // defaults to never and only becomes always when required. Retaining that entry
 // while making the bot required leaves the engine waiting for evidence no
 // command was ever posted for. Only a never trigger is promoted, so an operator
-// who deliberately configured selfheal keeps it.
+// who deliberately configured selfheal keeps it — and only one that FELL OUT of
+// the registry defaults, since CRQ_COBOT_<NAME>_TRIGGER=never already wins over
+// the required trigger fleet-wide and posting the command a repository override
+// away from that would be crq overruling the operator.
 func promoteTrigger(cb CoBotConfig) CoBotConfig {
-	if !cb.Required || cb.Trigger != engine.TriggerNever || cb.Command == "" {
+	if !cb.Required || cb.Trigger != engine.TriggerNever || cb.Command == "" || cb.TriggerExplicit {
 		return cb
 	}
 	if co, ok := dialect.CoReviewerByName(cb.Name); ok && co.RequiredTrigger != "" {

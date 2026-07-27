@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -476,5 +477,175 @@ func TestChangingRequirementsLeavesClosedPRsAlone(t *testing.T) {
 	}
 	if round := st.Round(repo, merged); round == nil || round.Phase != PhaseCompleted {
 		t.Errorf("merged round = %#v, want it left completed — a closed PR cannot be stranded", round)
+	}
+}
+
+// The other half of TestOverrideKeepsTheSilencedPrimaryEntry: when the fleet
+// configuration never carried an entry for a registry-bot primary (not enabled,
+// not fleet-required), a repository that gates on it has to gain one. Skipping
+// it as "not a co-reviewer here" leaves observation without that bot's wording
+// and check-run hooks, so a check-only clean result is never fetched and the
+// primary this repository waits for stays pending until the round times out.
+func TestOverrideAddsTheSilencedPrimaryEntryTheFleetLacked(t *testing.T) {
+	fleet := isolatedConfig(t, map[string]string{
+		// Bugbot's login is cursor[bot]: naming it primary makes the primary a
+		// registry bot, and neither CRQ_COBOTS nor CRQ_REQUIRED_BOTS mentions it.
+		"CRQ_BOT":             "cursor[bot]",
+		"CRQ_REVIEW_CMD":      "bugbot run",
+		"CRQ_COBOTS":          "codex",
+		"CRQ_REQUIRED_BOTS":   dialect.CodexBotLogin,
+		"CRQ_COBOT_CODEX_CMD": "@codex review",
+	})
+	for _, cb := range fleet.CoBots {
+		if sameBot(cb.Login, fleet.Bot) {
+			t.Fatalf("fleet CoBots = %+v already carry the primary; this test needs the gap", fleet.CoBots)
+		}
+	}
+
+	got := fleet.ForRepo(RepoReviewers{
+		Required: []string{"cursor[bot]", dialect.CodexBotLogin}, SetRequired: true,
+	})
+	var primary *CoBotConfig
+	for i, cb := range got.CoBots {
+		if sameBot(cb.Login, got.Bot) {
+			primary = &got.CoBots[i]
+		}
+	}
+	if primary == nil {
+		t.Fatalf("CoBots = %+v, want the primary's registry entry so its evidence can be read", got.CoBots)
+	}
+	// Silenced: it is asked as the primary, and asking the same bot twice is the
+	// bug the fleet parse silences it for.
+	if primary.Trigger != engine.TriggerNever {
+		t.Errorf("primary entry = %+v, want trigger never — it is triggered as the primary", *primary)
+	}
+	if !got.coChecksRelevant() {
+		t.Error("the primary's check runs must be fetched; a check-only clean result is its whole answer")
+	}
+	// And it is still exactly one reviewer, account-metered, not a second free one.
+	if p, ok := got.Primary(); !ok || !sameBot(p.Login, got.Bot) {
+		t.Errorf("Primary() = %+v/%v, want the configured primary", p, ok)
+	}
+	metered := 0
+	for _, r := range got.Reviewers {
+		if r.Metered() {
+			metered++
+		}
+	}
+	if metered != 1 {
+		t.Errorf("reviewers = %+v, want exactly one metered entry", got.Reviewers)
+	}
+}
+
+// An operator who sets CRQ_COBOT_<NAME>_TRIGGER=never has disabled that bot's
+// command everywhere: the fleet parse already lets that value win over the
+// registry's required trigger. A repository requiring the bot must not be able
+// to turn it back on — that would post the command the operator switched off.
+func TestOverrideKeepsAnExplicitNeverTrigger(t *testing.T) {
+	fleet := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":              "codex",
+		"CRQ_COBOT_CODEX_TRIGGER": "never",
+	})
+	got := fleet.ForRepo(RepoReviewers{
+		CoBots: []string{"codex"}, SetCoBots: true,
+		Required: []string{"codex"}, SetRequired: true,
+	})
+	for _, cb := range got.CoBots {
+		if cb.Name != "codex" {
+			continue
+		}
+		if cb.Trigger != engine.TriggerNever {
+			t.Errorf("codex = %+v, want the explicit never kept — the fleet parse honours it too", cb)
+		}
+		return
+	}
+	t.Fatalf("CoBots = %+v, want codex required here", got.CoBots)
+}
+
+// Completing a round writes the "this head was reviewed" dedup marker, and
+// reopenForChangedReviewers deliberately leaves an in-flight round alone — it is
+// already going to answer. A required reviewer added between Progress deciding
+// and that write is therefore caught by neither: the marker dedupes the head
+// under the set that no longer gates it, and nothing re-fires it.
+func TestCompletionIsRevalidatedInsideItsWrite(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = codexCoBots(nil)
+	store := NewMemoryStore(cfg)
+	hooked := &hookedStore{StateStore: store}
+	gh := newFakeGitHub()
+	repo, pr, head := "o/r", 12, "aaaaaaaa1"
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	svc := NewService(cfg, gh, hooked, nil)
+	now := time.Now().UTC()
+	seedRound(t, store, cfg, repo, pr, head, PhaseFired, now, 21)
+
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := svc.cfgFor(st, repo)
+	hooked.hook = func() {
+		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+			t.Error(err)
+		}
+	}
+	done := engine.Transition{Outcome: engine.OutComplete, Reason: "feedback complete"}
+	if _, err := hooked.Update(ctx, func(st *State) error {
+		return svc.applyTransition(st, st.Round(repo, pr), done, now, stale)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := roundPhase(t, store, repo, pr); got != PhaseFired {
+		t.Fatalf("phase = %s, want the stale completion dropped so the new reviewer is still asked", got)
+	}
+}
+
+// The self-heal sweep claims a co-reviewer's trigger post under CAS and then
+// posts it. The claim is what authorizes the post, so — as in fireCoOnly — the
+// reviewer set that chose the bot has to still be the configured one when the
+// claim commits, or `crq reviewers set` reports a bot disabled while crq is
+// asking it for a review.
+func TestSelfHealTriggerIsRevalidatedInsideItsClaim(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RequiredBots = []string{cfg.Bot, dialect.CodexBotLogin}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
+	store := NewMemoryStore(cfg)
+	hooked := &hookedStore{StateStore: store}
+	gh := newFakeGitHub()
+	repo, pr, head := "o/r", 13, "aaaaaaaa1"
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	svc := NewService(cfg, gh, hooked, nil)
+	now := time.Now().UTC()
+	seedRound(t, store, cfg, repo, pr, head, PhaseFired, now, 22)
+
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := *st.Round(repo, pr)
+	stale := svc.cfgFor(st, repo)
+	// Nothing observed for the head yet, so an always-mode trigger wants posting.
+	obs := engine.Observation{Head: head, Open: true}
+	hooked.hook = func() {
+		// The operator drops the co-reviewer, keeping only the primary.
+		if _, err := svc.SetReviewers(ctx, repo, []string{}, []string{cfg.Bot}); err != nil {
+			t.Error(err)
+		}
+	}
+	svc.selfHealCoReviewers(ctx, stale, round, obs, now)
+
+	for _, body := range gh.posted {
+		if strings.Contains(body, "@codex") {
+			t.Errorf("posted %q for a co-reviewer the operator had just removed", body)
+		}
+	}
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := st.Round(repo, pr).Co(dialect.CodexBotLogin); c.ClaimedAt != nil || c.CommandID != 0 {
+		t.Errorf("codex bookkeeping = %+v, want no claim for a removed reviewer", c)
 	}
 }

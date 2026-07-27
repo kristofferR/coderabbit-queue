@@ -191,10 +191,10 @@ func dash(s string) string {
 	return s
 }
 
-// hostName renders a round's writer id ("host=blue pid=4711") as the machine
-// name the host column has always shown. The round stores the writer id because
-// that is what capabilities are keyed by; the pid is bookkeeping for
-// LaggingWriters, not something a reader of the table needs.
+// hostName renders a round's writer id ("host=blue pid=4711 run=1a2b3c4d") as
+// the machine name the host column has always shown. The round stores the writer
+// id because that is what capabilities are keyed by; the pid and run id are
+// bookkeeping for LaggingWriters, not something a reader of the table needs.
 func hostName(writer string) string {
 	rest, ok := strings.CutPrefix(writer, "host=")
 	if !ok {
