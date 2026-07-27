@@ -182,6 +182,25 @@ thread left open keeps its finding actionable and `crq next` would repeat `fix` 
 disagreement is not lost: if the bot contests the decline, crq re-surfaces that reply as its own
 finding. Pass `--keep-open` to leave it unresolved deliberately.
 
+## Spent Trigger Comments
+
+crq deletes its own `@coderabbitai review` / `@codex review` comments once the round that posted
+them has progressed and the bot has answered, so a PR driven through a dozen rounds stays readable.
+Set `CRQ_TIDY=1` to do this automatically under `crq autoreview`, or run it on demand:
+
+```bash
+crq tidy "$REPO" "$PR" [--dry-run]
+```
+
+It only ever removes comments **crq posted** — candidates come from the comments each round recorded
+writing, never from matching text, and never one the round merely adopted (a person's request to
+review is not crq's to erase). A candidate must also still read as that one-line command: crq posts
+under your own account, so a recorded comment someone has since edited into a note is their words and
+it stays. A candidate also has to predate the current head, because a newer
+command is one crq would adopt instead of posting again; a request crq's own retry replaced is spent
+either way, and an unreadable head keeps everything. Never the bots' own comments, because an
+auto-generated reply can be a rate-limit or skipped-review notice that crq reads as evidence.
+
 ## Which Bots Review Which Project
 
 ```bash

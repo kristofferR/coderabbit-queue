@@ -26,6 +26,7 @@ type GitHubAPI interface {
 	GetCommit(context.Context, string, string) (ghapi.Commit, error)
 	ListReviews(context.Context, string, int) ([]ghapi.Review, error)
 	ListIssueComments(context.Context, string, int) ([]ghapi.IssueComment, error)
+	GetIssueComment(context.Context, string, int64) (ghapi.IssueComment, error)
 	ListIssueCommentsPage(context.Context, string, int, int, int) ([]ghapi.IssueComment, error)
 	ListReviewComments(context.Context, string, int) ([]ghapi.ReviewComment, error)
 	ListIssueReactions(context.Context, string, int) ([]ghapi.Reaction, error)
@@ -254,6 +255,11 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		if free, handled, err := s.sweepQuotaFree(ctx, st, s.clock(), slot.Repo, slot.PR); err != nil {
 			return PumpResult{}, err
 		} else if handled {
+			// The quota-free result is the one Pump exposes to its caller, so
+			// preserve the cleanup hook for the slot result it replaces.
+			if err := s.tidyAfterPump(ctx, res); err != nil {
+				return res, err
+			}
 			return free, nil
 		}
 		return res, nil
@@ -309,7 +315,7 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		return PumpResult{Action: "idle"}, nil
 	}
 	cfg := s.cfgFor(st, next.Repo)
-	obs, err := s.observe(ctx, cfg, next.Repo, next.PR, next, now)
+	obs, err := s.observe(ctx, cfg, next.Repo, next.PR, next, collectPosted(st, next.Repo, next.PR).commands, now)
 	if err != nil {
 		return PumpResult{}, err
 	}
@@ -374,7 +380,7 @@ func (s *Service) sweepQuotaFree(ctx context.Context, st State, now time.Time, s
 		// the cost instead.
 		scanned++
 		cfg := s.cfgFor(st, round.Repo)
-		obs, err := s.observe(ctx, cfg, round.Repo, round.PR, &round, now)
+		obs, err := s.observe(ctx, cfg, round.Repo, round.PR, &round, collectPosted(st, round.Repo, round.PR).commands, now)
 		if err != nil {
 			continue
 		}
@@ -411,7 +417,7 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 		return PumpResult{}, false, nil
 	}
 	cfg := s.cfgFor(st, repo)
-	obs, err := s.observe(ctx, cfg, repo, pr, round, now)
+	obs, err := s.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, now)
 	if err != nil {
 		return PumpResult{}, false, err
 	}
@@ -586,7 +592,7 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 		return PumpResult{}, err
 	}
 	cfg := s.cfgFor(st, slot.Repo)
-	obs, err := s.observe(ctx, cfg, slot.Repo, slot.PR, &slot, now)
+	obs, err := s.observe(ctx, cfg, slot.Repo, slot.PR, &slot, collectPosted(st, slot.Repo, slot.PR).commands, now)
 	if err != nil {
 		return PumpResult{}, err
 	}
@@ -740,7 +746,7 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 		return st, nil
 	}
 	cfg := s.cfgFor(st, target.Repo)
-	obs, err := s.observe(ctx, cfg, target.Repo, target.PR, target, now)
+	obs, err := s.observe(ctx, cfg, target.Repo, target.PR, target, collectPosted(st, target.Repo, target.PR).commands, now)
 	if err != nil {
 		if s.log != nil {
 			s.log.Printf("warning: reviewing-round sweep for %s#%d failed: %v", target.Repo, target.PR, err)
@@ -766,6 +772,12 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 		return st, err
 	}
 	s.sync(ctx, updated)
+	// A round completed here is invisible to the caller — Pump goes on to report
+	// whatever it fires next, or idle — so this is the only moment that knows the
+	// PR's trigger comments are spent.
+	if err := s.tidyProgressed(ctx, target.Repo, target.PR); err != nil {
+		return updated, err
+	}
 	return updated, nil
 }
 
@@ -1207,6 +1219,11 @@ func (s *Service) fireCoOnly(ctx context.Context, cfg Config, round Round, login
 			st.Warn = ""
 		}
 		for _, p := range posts {
+			// Recorded against the co-reviewer it was addressed to, including the
+			// one anchoring the round: a co-only round's CommandID is that same
+			// comment, and calling it the primary's would let unrelated CodeRabbit
+			// activity pass for the answer this trigger is still waiting on.
+			r.RecordPosted(p.login, p.id, p.at)
 			if r.Co(p.login).CommandID == 0 {
 				r.SetCoCommand(p.login, p.id, p.at)
 			}
@@ -1355,7 +1372,12 @@ func (s *Service) recordFire(ctx context.Context, round Round, token string, com
 			if err := r.Fire(commandID, firedAt); err != nil {
 				return err
 			}
+			// Recorded as crq's own whatever the round then does with it: the
+			// comment is on the PR either way, and the record is the only proof
+			// crq (rather than a person) wrote it.
+			r.RecordPosted(s.cfg.Bot, commandID, firedAt)
 			for _, p := range coPosts {
+				r.RecordPosted(p.login, p.id, p.at)
 				if r.Co(p.login).CommandID == 0 {
 					r.SetCoCommand(p.login, p.id, p.at)
 				}
@@ -1434,6 +1456,7 @@ func (s *Service) fireCoTrigger(ctx context.Context, cfg Config, round Round, lo
 		if !sameRound(r, round) {
 			return ErrNoChange
 		}
+		r.RecordPosted(login, id, at)
 		if r.Co(login).CommandID == 0 {
 			r.SetCoCommand(login, id, at)
 		} else {

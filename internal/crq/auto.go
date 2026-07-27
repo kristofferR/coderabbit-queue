@@ -69,7 +69,14 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 				s.log.Printf("warning: autoreview pass failed: %v", passErr)
 			}
 			passFailure = passErr
-			if _, err := s.Pump(ctx); err != nil {
+			pumped, err := s.Pump(ctx)
+			// A round that just progressed is the moment its trigger comments
+			// stop being needed, so tidying here costs one observation on a PR
+			// crq was already looking at rather than a sweep of the fleet.
+			if err == nil {
+				err = s.tidyAfterPump(ctx, pumped)
+			}
+			if err != nil {
 				if _, ok := ghapi.ThrottleWait(err); ok {
 					if cont, serr := s.sleepThrottle(ctx, opts, "pump", err); serr != nil || !cont {
 						if opts.Once {

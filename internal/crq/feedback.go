@@ -103,7 +103,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// engine.Completion over the same snapshot — no second fetch path, and the
 	// "is head reviewed?" rules live only in the engine.
 	cfg := s.cfgFor(st, repo)
-	obs, err := s.observe(ctx, cfg, repo, pr, round, now)
+	obs, err := s.observe(ctx, cfg, repo, pr, round, collectPosted(st, repo, pr).commands, now)
 	if err != nil {
 		return FeedbackReport{}, err
 	}

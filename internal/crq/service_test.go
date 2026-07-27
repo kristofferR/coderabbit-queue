@@ -27,9 +27,13 @@ type fakeGitHub struct {
 	reviewComments  map[string][]ghapi.ReviewComment
 	issueReactions  map[string][]ghapi.Reaction
 	reactions       map[int64][]ghapi.Reaction
+	reactionErrs    map[int64]error
+	reactionReads   []int64
 	checkRuns       map[string][]ghapi.CheckRun // key: ref (short or full sha)
 	checkRunErrs    map[string]error
 	postBodyErrs    map[string]error // body → error (selective trigger-post failures)
+	deleteErrs      map[int64]error  // comment id → error (GitHub refuses the delete)
+	deleteAfterErrs map[int64]error  // comment id → error after GitHub applies the delete
 	posted          []string
 	deleted         []int64
 	commentID       int64
@@ -43,6 +47,7 @@ type fakeGitHub struct {
 	refReads    int
 	reviewReads int
 	searchPRs   []ghapi.SearchPR
+	getComment  func(repo string, id int64) (ghapi.IssueComment, error)
 	// now, when set, timestamps posted comments off the same injected clock the
 	// service uses, so a fire's recorded FiredAt tracks the fake wall clock the
 	// replay suite advances. nil falls back to real time (all existing tests).
@@ -58,14 +63,17 @@ func (f *fakeGitHub) clock() time.Time {
 
 func newFakeGitHub() *fakeGitHub {
 	return &fakeGitHub{
-		pulls:          map[string]ghapi.Pull{},
-		commits:        map[string]ghapi.Commit{},
-		commitErrs:     map[string]error{},
-		reviews:        map[string][]ghapi.Review{},
-		comments:       map[string][]ghapi.IssueComment{},
-		reviewComments: map[string][]ghapi.ReviewComment{},
-		issueReactions: map[string][]ghapi.Reaction{},
-		reactions:      map[int64][]ghapi.Reaction{},
+		pulls:           map[string]ghapi.Pull{},
+		commits:         map[string]ghapi.Commit{},
+		commitErrs:      map[string]error{},
+		reviews:         map[string][]ghapi.Review{},
+		comments:        map[string][]ghapi.IssueComment{},
+		reviewComments:  map[string][]ghapi.ReviewComment{},
+		issueReactions:  map[string][]ghapi.Reaction{},
+		reactions:       map[int64][]ghapi.Reaction{},
+		reactionErrs:    map[int64]error{},
+		deleteErrs:      map[int64]error{},
+		deleteAfterErrs: map[int64]error{},
 	}
 }
 
@@ -152,6 +160,22 @@ func (f *fakeGitHub) ListIssueComments(_ context.Context, repo string, pr int) (
 	return append([]ghapi.IssueComment(nil), f.comments[fakeKey(repo, pr)]...), nil
 }
 
+func (f *fakeGitHub) GetIssueComment(_ context.Context, repo string, id int64) (ghapi.IssueComment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.getComment != nil {
+		return f.getComment(repo, id)
+	}
+	for _, comments := range f.comments {
+		for _, comment := range comments {
+			if comment.ID == id {
+				return comment, nil
+			}
+		}
+	}
+	return ghapi.IssueComment{}, ghapi.ErrNotFound
+}
+
 func (f *fakeGitHub) ListReviewComments(_ context.Context, repo string, pr int) ([]ghapi.ReviewComment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -167,6 +191,10 @@ func (f *fakeGitHub) ListIssueReactions(_ context.Context, repo string, pr int) 
 func (f *fakeGitHub) ListCommentReactions(_ context.Context, _ string, id int64) ([]ghapi.Reaction, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.reactionReads = append(f.reactionReads, id)
+	if err := f.reactionErrs[id]; err != nil {
+		return nil, err
+	}
 	return append([]ghapi.Reaction(nil), f.reactions[id]...), nil
 }
 
@@ -216,12 +244,15 @@ func (f *fakeGitHub) ListIssueCommentsPage(_ context.Context, repo string, pr, p
 func (f *fakeGitHub) DeleteIssueComment(_ context.Context, repo string, id int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.deleteErrs[id]; err != nil {
+		return err
+	}
 	for key, list := range f.comments {
 		for i, c := range list {
 			if c.ID == id {
 				f.comments[key] = append(list[:i], list[i+1:]...)
 				f.deleted = append(f.deleted, id)
-				return nil
+				return f.deleteAfterErrs[id]
 			}
 		}
 	}
@@ -1283,6 +1314,9 @@ func TestPumpKeepsRoundReviewingWhenBotOnlyReacted(t *testing.T) {
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	command := ghapi.IssueComment{ID: 5, Body: cfg.ReviewCommand, CreatedAt: firedAt, UpdatedAt: firedAt}
+	command.User.Login = "kristofferR"
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{command}
 	reaction := ghapi.Reaction{}
 	reaction.User.Login = cfg.Bot
 	gh.reactions[5] = []ghapi.Reaction{reaction}

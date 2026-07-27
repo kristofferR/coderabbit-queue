@@ -348,6 +348,93 @@ func TestFeedbackRejectsCompletionReplyFromEarlierRound(t *testing.T) {
 	}
 }
 
+func TestFeedbackPairsRepliesWithTidiedCommandHistory(t *testing.T) {
+	cfg := firingConfig()
+	sha := "abcdef1234567890"
+	head := sha[:9]
+	firedAt := time.Now().UTC().Add(-10 * time.Minute)
+	oldCommandAt := firedAt.Add(-5 * time.Minute)
+	completion := "<!-- This is an auto-generated reply by CodeRabbit -->\n✅ Action performed\n\nReview finished."
+	mk := func(id int64, login, body string, at time.Time) ghapi.IssueComment {
+		ic := ghapi.IssueComment{ID: id, Body: body, CreatedAt: at, UpdatedAt: at}
+		ic.User.Login = login
+		return ic
+	}
+
+	gh := newFakeGitHub()
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey("o/repo", 3)] = pull
+	// Tidy removed command 1. Its delayed completion lands after command 2,
+	// and must still pair with the remembered command 1.
+	gh.comments[fakeKey("o/repo", 3)] = []ghapi.IssueComment{
+		mk(2, "kristofferR", cfg.ReviewCommand, firedAt),
+		mk(3, cfg.Bot, completion, firedAt.Add(30*time.Second)),
+	}
+	prior := ghapi.Review{
+		ID:          9,
+		CommitID:    "0123456fedcba",
+		State:       "COMMENTED",
+		SubmittedAt: oldCommandAt.Add(-time.Hour),
+		Body:        "**Actionable comments posted: 2**",
+	}
+	prior.User.Login = cfg.Bot
+	gh.reviews[fakeKey("o/repo", 3)] = []ghapi.Review{prior}
+
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		old, err := st.NewRound("o/repo", 3, "0123456fe", oldCommandAt)
+		if err != nil {
+			return err
+		}
+		if err := old.Reserve("old", "host", oldCommandAt); err != nil {
+			return err
+		}
+		if err := old.Fire(1, oldCommandAt); err != nil {
+			return err
+		}
+		old.RecordPosted(cfg.Bot, 1, oldCommandAt)
+		st.PutRound(*old)
+
+		current, err := st.Supersede("o/repo", 3, head, firedAt)
+		if err != nil {
+			return err
+		}
+		if err := current.Reserve("current", "host", firedAt); err != nil {
+			return err
+		}
+		if err := current.Fire(2, firedAt); err != nil {
+			return err
+		}
+		current.RecordPosted(cfg.Bot, 2, firedAt)
+		if err := current.Acknowledge(); err != nil {
+			return err
+		}
+		st.PutRound(*current)
+		// Tidy persisted the old command outside Archive before removing it.
+		// Enough unrelated rounds then finish to evict this PR's old round from
+		// the fleet-wide ring before its delayed completion arrives.
+		st.RecordTidied("o/repo", 3, PostedCommand{ID: 1, Bot: cfg.Bot, At: oldCommandAt})
+		for i := 0; i < ArchiveMax; i++ {
+			st.Archive = append(st.Archive, Round{
+				Repo: "o/other", PR: 100 + i, Head: "999999999",
+				Phase: PhaseCompleted, EnqueuedAt: oldCommandAt,
+			})
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := NewService(cfg, gh, store, nil).Feedback(context.Background(), "o/repo", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.ReviewedBy[cfg.Bot] || report.Converged {
+		t.Fatalf("the old command's delayed completion converged the current round: %#v", report)
+	}
+}
+
 func TestFeedbackSkipsReviewAnsweredCommandsWhenPairingCompletionReplies(t *testing.T) {
 	cfg := Config{
 		Bot:               "coderabbitai[bot]",
@@ -1022,6 +1109,13 @@ func TestFeedbackUsesNoActionCompletionAfterCodexThumbsUp(t *testing.T) {
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("o/repo", 1)] = pull
+	command := ghapi.IssueComment{
+		ID:        99,
+		Body:      "@coderabbitai review",
+		CreatedAt: started,
+		UpdatedAt: started,
+	}
+	command.User.Login = "kristofferR"
 	comment := ghapi.IssueComment{
 		ID:        1,
 		Body:      "No actionable comments were generated in the recent review. 🎉",
@@ -1029,7 +1123,7 @@ func TestFeedbackUsesNoActionCompletionAfterCodexThumbsUp(t *testing.T) {
 		UpdatedAt: started.Add(time.Minute),
 	}
 	comment.User.Login = "coderabbitai[bot]"
-	gh.comments[fakeKey("o/repo", 1)] = []ghapi.IssueComment{comment}
+	gh.comments[fakeKey("o/repo", 1)] = []ghapi.IssueComment{command, comment}
 	thumb := ghapi.Reaction{Content: "+1", CreatedAt: started.Add(2 * time.Minute)}
 	thumb.User.Login = "chatgpt-codex-connector[bot]"
 	gh.reactions[99] = []ghapi.Reaction{thumb}

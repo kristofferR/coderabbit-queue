@@ -79,6 +79,16 @@ type Round struct {
 	// CodeRabbit requests must skip these.
 	CoOnly bool `json:"co_only,omitempty"`
 
+	// PostedCommands are the trigger comments crq itself WROTE for this round,
+	// including the ones a retry replaced. Two things need it. A retry posts a
+	// new command — the bot answered the previous one, usually with a rate-limit
+	// notice, so it can never be adopted again — and without this record nothing
+	// knows the old comment exists, which is why a throttled PR collects a
+	// column of identical review requests. And CommandID alone cannot say who
+	// wrote a comment: a round records an ADOPTED command there just the same,
+	// so treating it as crq's own is how tidying would erase a person's request
+	// to review.
+	PostedCommands []PostedCommand `json:"posted_commands,omitempty"`
 	// Dismissed maps the ID of a finding an agent explicitly accounted for to the
 	// reason given. GitHub offers no way to close these: a review-body finding, a
 	// review-skipped notice and an outside-diff remark all lack a review thread,
@@ -141,6 +151,15 @@ type Round struct {
 	// binary's additions survive being read and rewritten here. Unexported, so
 	// it is never a member itself. See tolerant.go.
 	unknown unknownFields
+}
+
+// PostedCommand is one trigger comment crq posted, with the reviewer it was
+// addressed to and when it landed — the two facts a later cleanup needs to
+// decide whether that reviewer has read it yet.
+type PostedCommand struct {
+	ID  int64     `json:"id"`
+	Bot string    `json:"bot,omitempty"`
+	At  time.Time `json:"at,omitempty"`
 }
 
 // CoBotRound is one co-reviewer's bookkeeping inside a Round: the trigger
@@ -355,6 +374,16 @@ type State struct {
 	// Archive keeps recently finished rounds (superseded, closed, cancelled)
 	// for the dashboard and debugging. Bounded by ArchiveMax.
 	Archive []Round `json:"archive,omitempty"`
+
+	// TidiedCommands are durable tombstones for trigger comments Tidy removed.
+	// Unlike Archive, they are not bounded: GitHub can deliver a delayed reply
+	// for as long as the PR conversation exists, and command/reply FIFO pairing
+	// still needs the deleted command's chronological position.
+	TidiedCommands map[string][]PostedCommand `json:"tidied_commands,omitempty"`
+	// TidyReactionCursors rotate the bounded scan of unanswered Codex commands
+	// so old candidates are not reread on every housekeeping pass and newer
+	// candidates are not starved.
+	TidyReactionCursors map[string]int64 `json:"tidy_reaction_cursors,omitempty"`
 
 	Warn         string     `json:"warn,omitempty"`
 	UpdatedAt    *time.Time `json:"wrote_at,omitempty"`
@@ -879,6 +908,83 @@ func (s *State) QueuedRounds(now time.Time) []Round {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
 	return out
+}
+
+// RecordPosted remembers a trigger comment crq WROTE for this round, addressed
+// to bot. Call it only where crq actually posted: an adopted command is not
+// crq's to record, and later cleanup trusts this list as proof of authorship.
+//
+// Bounded, so a PR that retries all day cannot grow its round without limit.
+func (r *Round) RecordPosted(bot string, id int64, at time.Time) {
+	const maxPosted = 50
+	if id == 0 {
+		return
+	}
+	for _, have := range r.PostedCommands {
+		if have.ID == id {
+			return
+		}
+	}
+	// Copy-on-write, like setCo: Rounds are passed around by value, so appending
+	// in place could write this entry into a sibling copy's backing array.
+	posted := make([]PostedCommand, len(r.PostedCommands), len(r.PostedCommands)+1)
+	copy(posted, r.PostedCommands)
+	posted = append(posted, PostedCommand{ID: id, Bot: bot, At: at.UTC()})
+	if len(posted) > maxPosted {
+		posted = posted[len(posted)-maxPosted:]
+	}
+	r.PostedCommands = posted
+}
+
+// RecordTidied remembers a trigger before Tidy removes it from GitHub. It is
+// idempotent because a CAS retry may apply the same mutation more than once.
+func (s *State) RecordTidied(repo string, pr int, commands ...PostedCommand) {
+	if len(commands) == 0 {
+		return
+	}
+	if s.TidiedCommands == nil {
+		s.TidiedCommands = map[string][]PostedCommand{}
+	}
+	key := Key(repo, pr)
+	have := make(map[int64]bool, len(s.TidiedCommands[key])+len(commands))
+	for _, command := range s.TidiedCommands[key] {
+		have[command.ID] = true
+	}
+	for _, command := range commands {
+		if command.ID == 0 || have[command.ID] {
+			continue
+		}
+		command.At = command.At.UTC()
+		s.TidiedCommands[key] = append(s.TidiedCommands[key], command)
+		have[command.ID] = true
+	}
+}
+
+// ForgetTidied removes tombstones for comments Tidy ultimately kept or failed
+// to delete. A present GitHub comment remains the source of truth for those.
+func (s *State) ForgetTidied(repo string, pr int, ids ...int64) {
+	key := Key(repo, pr)
+	if len(ids) == 0 || len(s.TidiedCommands[key]) == 0 {
+		return
+	}
+	remove := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		remove[id] = true
+	}
+	kept := s.TidiedCommands[key][:0]
+	for _, command := range s.TidiedCommands[key] {
+		if !remove[command.ID] {
+			kept = append(kept, command)
+		}
+	}
+	if len(kept) == 0 {
+		delete(s.TidiedCommands, key)
+		if len(s.TidiedCommands) == 0 {
+			s.TidiedCommands = nil
+		}
+		return
+	}
+	s.TidiedCommands[key] = kept
 }
 
 // Dismiss records a finding ID as accounted for. Returns false when it was
