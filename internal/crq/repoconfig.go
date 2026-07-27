@@ -164,11 +164,18 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 	now := s.clock().UTC()
 	state, err := s.store.Update(ctx, func(st *State) error {
 		ov, _ := st.RepoOverride(repo)
+		beforeOverride := ov
 		if coBots != nil {
 			ov.CoBots, ov.SetCoBots = setCoBots, true
 		}
 		if required != nil {
 			ov.Required, ov.SetRequired = setRequired, true
+		}
+		if ov.SetCoBots == beforeOverride.SetCoBots &&
+			ov.SetRequired == beforeOverride.SetRequired &&
+			sameLogins(ov.CoBots, beforeOverride.CoBots) &&
+			sameLogins(ov.Required, beforeOverride.Required) {
+			return ErrNoChange
 		}
 		ov.UpdatedAt, ov.By = &now, s.cfg.Host
 		before := s.cfg.ForRepo(mustOverride(st, repo))

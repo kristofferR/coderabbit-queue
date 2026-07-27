@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/url"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -1849,9 +1848,13 @@ func (s *Service) sync(ctx context.Context, state State) {
 func randomToken() string {
 	var buf [16]byte
 	if _, err := io.ReadFull(rand.Reader, buf[:]); err != nil {
-		return strconv.FormatInt(time.Now().UnixNano(), 16)
+		return fallbackToken(time.Now())
 	}
 	return hex.EncodeToString(buf[:])
+}
+
+func fallbackToken(now time.Time) string {
+	return fmt.Sprintf("%016x", uint64(now.UnixNano()))
 }
 
 // isCommentCapError reports whether err is GitHub's hard cap of 2500 comments per

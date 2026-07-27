@@ -332,6 +332,43 @@ func TestChangingRequirementsReopensACompletedRound(t *testing.T) {
 	}
 }
 
+func TestSettingIdenticalReviewersPreservesOverrideIdentity(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	first := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return first }
+
+	if _, err := svc.SetReviewers(ctx, "o/r", []string{"codex"}, []string{"codex"}); err != nil {
+		t.Fatal(err)
+	}
+	before, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, ok := before.RepoOverride("o/r")
+	if !ok || original.UpdatedAt == nil {
+		t.Fatalf("override = %#v, want a timestamped override", original)
+	}
+
+	svc.now = func() time.Time { return first.Add(time.Hour) }
+	if _, err := svc.SetReviewers(ctx, "o/r", []string{"codex"}, []string{"codex"}); err != nil {
+		t.Fatal(err)
+	}
+	after, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unchanged, ok := after.RepoOverride("o/r")
+	if !ok || unchanged.UpdatedAt == nil || !unchanged.UpdatedAt.Equal(*original.UpdatedAt) {
+		t.Fatalf("UpdatedAt = %v, want the original identity %v", unchanged.UpdatedAt, original.UpdatedAt)
+	}
+	if after.Rev != before.Rev {
+		t.Fatalf("state revision = %d, want unchanged %d", after.Rev, before.Rev)
+	}
+}
+
 // Optional co-reviewers can become convergence gates after participation
 // evidence appears. Enabling one therefore needs the same active round as
 // changing the statically required set, so its trigger and bounded wait run.

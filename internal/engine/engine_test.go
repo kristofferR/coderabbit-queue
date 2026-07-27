@@ -598,6 +598,42 @@ func TestDecideFireCodexDedupe(t *testing.T) {
 	}
 }
 
+func TestDecideFireForcedCoReviewerGate(t *testing.T) {
+	now := t0.Add(10 * time.Minute)
+	head := "abcdef123"
+	round := state.Round{Repo: "owner/repo", PR: 448, Head: head, Phase: state.PhaseQueued, Seq: 1}
+	obs := Observation{Head: head, Open: true, Reviews: []ReviewSeen{{
+		Bot: policy.Bot, Commit: "abcdef1234567890", SubmittedAt: now,
+	}}}
+	selfHeal := policy
+	selfHeal.CoReviewers = []CoReviewerPolicy{{
+		Login: dialect.CodexBotLogin, Command: "@codex review", Trigger: TriggerSelfHeal,
+	}}
+
+	for _, tc := range []struct {
+		name   string
+		forced bool
+		want   FireVerdict
+	}{
+		{name: "optional self-heal reviewer is not a gate", want: FireDedupe},
+		{name: "forced optional self-heal reviewer gates", forced: true, want: FireCoOnly},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := round
+			if tc.forced {
+				candidate.ForceCoReviewers = []string{dialect.CodexBotLogin}
+			}
+			got := DecideFire(Global{SlotFree: true}, candidate, obs, now, selfHeal)
+			if got.Verdict != tc.want {
+				t.Fatalf("verdict = %v, want %v (%+v)", got.Verdict, tc.want, got)
+			}
+			if tc.forced && (len(got.PostCo) != 1 || !dialect.IsCodexBot(got.PostCo[0])) {
+				t.Fatalf("PostCo = %v, want the forced reviewer", got.PostCo)
+			}
+		})
+	}
+}
+
 // TestDynamicCodexGate covers the dynamic completion gate: an observed-active
 // Codex gates a round it isn't configured-required for, a usage-limit notice
 // disengages that dynamic gate, and a configured-required Codex is left gating

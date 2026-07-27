@@ -101,6 +101,8 @@ func TestReopenKeepsTheAdoptionFloor(t *testing.T) {
 	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
 	r := Round{Repo: "owner/repo", PR: 7, Head: "abcdef123", Phase: PhaseFired,
 		FiredAt: &now, CommandID: 11}
+	floor := now.Add(-time.Hour)
+	r.LastAttemptAt = &floor
 	if err := r.Complete(); err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +112,7 @@ func TestReopenKeepsTheAdoptionFloor(t *testing.T) {
 	if r.Phase != PhaseQueued {
 		t.Fatalf("phase = %s, want the round requeued", r.Phase)
 	}
-	if r.LastAttemptAt != nil {
+	if r.LastAttemptAt == nil || !r.LastAttemptAt.Equal(floor) {
 		t.Errorf("LastAttemptAt = %v, want it untouched by a reopen", r.LastAttemptAt)
 	}
 }

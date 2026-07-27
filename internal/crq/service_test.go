@@ -695,6 +695,14 @@ func firingConfig() Config {
 	}
 }
 
+func TestFallbackTokenIsSafeToShorten(t *testing.T) {
+	for _, now := range []time.Time{time.Unix(0, 0), time.Unix(0, 1)} {
+		if got := fallbackToken(now); len(got) < 8 {
+			t.Fatalf("fallbackToken(%v) = %q, want at least 8 characters", now, got)
+		}
+	}
+}
+
 func TestEnqueueIsIdempotentAndPumpFiresOnce(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
