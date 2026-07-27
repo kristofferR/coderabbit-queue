@@ -251,6 +251,9 @@ func run(ctx context.Context, args []string) int {
 		return 0
 	case "drain":
 		switch sub := drainSubcommand(args[1:]); sub {
+		case "?":
+			fatal(fmt.Errorf("unknown drain subcommand %q (try: crq drain, crq drain on|off|default <repo>, crq drain install)", args[1]))
+			return 1
 		case "", "list":
 			if err := cfg.RequireState(); err != nil {
 				fatal(err)
@@ -1483,7 +1486,12 @@ func parseDrainArgs(args []string) (drainArgs, error) {
 }
 
 // drainSubcommand names what `crq drain ...` was asked to do. An empty string
-// means the bare command, which lists.
+// means the bare command, which lists; "?" means something this command does not
+// have.
+//
+// A typo must not list. `crq drain of owner/name` reading as the bare listing
+// would report the repository as drained and leave it drained — an answer to a
+// question nobody asked, in place of the instruction that was meant.
 func drainSubcommand(args []string) string {
 	if len(args) == 0 {
 		return ""
@@ -1492,7 +1500,7 @@ func drainSubcommand(args []string) string {
 	case "on", "off", "default", "list", "install":
 		return args[0]
 	}
-	return ""
+	return "?"
 }
 
 // parseDrainReason splits `<repo>` from an optional --reason value. An

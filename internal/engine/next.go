@@ -248,7 +248,21 @@ func (in NextInput) settling(now time.Time) bool {
 // as "a review is running" made the documented fix flow hold its own fixes until
 // a review of the pre-fix head finished.
 func reviewRequested(r state.Round) bool {
-	return r.Phase != "" && r.Phase != state.PhaseQueued
+	// Read THROUGH a dispatch hold. While a fix session holds a round, crq
+	// mirrors it into awaiting_retry so binaries that do not understand the
+	// claim still refuse to fire — but that is crq holding the round FOR the
+	// session, not a review anybody requested.
+	//
+	// Counting it as one deadlocked the session that caused it: told to hold, it
+	// waited for a reviewer that could not be asked — the claim makes the round
+	// ineligible to fire — while its own heartbeat extended the window it was
+	// waiting on. DispatchHoldPhase is what the round was before the hold, which
+	// is the phase this question is about.
+	phase := r.Phase
+	if r.DispatchHoldPhase != "" {
+		phase = r.DispatchHoldPhase
+	}
+	return phase != "" && phase != state.PhaseQueued
 }
 
 // CanStillFire reports whether a round will ask for a review at some point.

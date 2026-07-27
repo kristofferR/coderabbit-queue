@@ -446,3 +446,35 @@ func TestNextActionHoldsConvergenceThroughTheSettleWindow(t *testing.T) {
 		t.Fatalf("NextAction = %q (%s), want %q once settled", got.Kind, got.Reason, ActionDone)
 	}
 }
+
+// A session that is holding a round must not be told to hold for a reviewer.
+//
+// ClaimDispatch mirrors a queued round into awaiting_retry so older binaries
+// honour the exclusion, and reviewRequested read that as "a review was
+// requested for this head". The session was then told `hold`, waited for a
+// review nobody could ask for — the claim makes the round ineligible to fire —
+// and its own heartbeat extended the window it was waiting on. It ended by
+// exiting with a commit it never pushed.
+func TestADispatchHoldIsNotAReviewRequest(t *testing.T) {
+	now := time.Date(2026, 7, 27, 11, 0, 0, 0, time.UTC)
+	retry := now.Add(10 * time.Minute)
+	round := state.Round{
+		Repo: "o/r", PR: 1, Head: "aaaaaaaa1",
+		// What ClaimDispatch leaves behind for a round it found queued.
+		Phase:             state.PhaseAwaitingRetry,
+		DispatchHoldPhase: state.PhaseQueued,
+		RetryAt:           &retry,
+		EnqueuedAt:        now.Add(-time.Minute),
+	}
+
+	got := NextAction(NextInput{
+		Round:      round,
+		Obs:        Observation{Head: "aaaaaaaa1", Open: true},
+		Completion: CompletionStatus{ReviewedBy: map[string]bool{"coderabbitai[bot]": false}},
+		Primary:    "coderabbitai[bot]",
+		LocalWork:  true,
+	}, now)
+	if got.Kind != ActionPush {
+		t.Fatalf("action = %s (%s), want push: no review was ever requested for this head", got.Kind, got.Reason)
+	}
+}

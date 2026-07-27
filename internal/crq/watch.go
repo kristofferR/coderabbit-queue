@@ -748,18 +748,26 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 			if err != nil {
 				return err
 			}
-			// Record the head as reviewed only when these findings are about it —
-			// then it demonstrably was. That is the "this head was reviewed"
+			// Record the head as reviewed only when the METERED primary
+			// demonstrably reviewed it. That is the "this head was reviewed"
 			// marker, so the round is NOT fire-eligible and no review is bought
-			// here either. Feedback CARRIED from an older commit proves nothing
-			// about this head: marking it reviewed would leave a completed round
-			// no reviewer ever looked at, which dedups the review away while the
-			// caller waits for one that can no longer be requested.
-			if len(engine.FindingsOnHead(report.Findings, report.Head)) > 0 {
+			// here either.
+			//
+			// Findings alone are not that evidence, whoever left them. A Codex or
+			// Bugbot finding on the current head says a CO-reviewer looked, and
+			// they spend no account quota — dedupe on that and the round is
+			// completed for a primary review nobody ever asked for, which Pump
+			// can then never fire while the session waits for it. Feedback
+			// CARRIED from an older commit proves nothing about this head either.
+			// Both cases leave the round adoptable instead, so the queue can
+			// still buy the review that is actually missing.
+			if report.ReviewedBy[s.cfg.Bot] && len(engine.FindingsOnHead(report.Findings, report.Head)) > 0 {
 				if err := round.Dedupe(s.clock()); err != nil {
 					return err
 				}
 				round.Note = "reviewed outside the queue; adopted to fix its findings"
+			} else if len(engine.FindingsOnHead(report.Findings, report.Head)) > 0 {
+				round.Note = "adopted to fix co-reviewer findings; the primary has not reviewed this head"
 			} else {
 				round.Note = "adopted to fix feedback carried from an earlier head"
 			}
