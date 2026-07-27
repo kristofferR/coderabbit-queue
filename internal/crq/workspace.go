@@ -146,45 +146,18 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 		}
 	}
 	if _, err := os.Stat(filepath.Join(path, "HEAD")); err == nil {
-		// Enforce the refspec on EVERY call, not only at clone time. A mirror
-		// created before this rule still fetches +refs/*:refs/*, and one branch
-		// created in a worktree then wedges every future fetch for the whole
-		// repository with "refusing to fetch into branch ... checked out at".
-		if cerr := w.setConfig(ctx, path, "remote.origin.fetch", originRefspec); cerr != nil {
+		if cerr := w.migrateMirror(ctx, path); cerr != nil {
 			return "", fmt.Errorf("configuring %s: %w", repo, cerr)
 		}
-		// A mirror cloned with --mirror also carries remote.origin.mirror=true,
-		// which the refspec does not clear: a plain `git push` from a session's
-		// worktree would then mirror the whole local ref namespace, publishing
-		// internal refs and deleting remote branches this repository has never
-		// heard of. Read before unsetting: not being set is the normal case, and
-		// an unconditional --unset-all takes config.lock on every single call.
-		if _, gerr := w.git(ctx, path, "config", "--get", "remote.origin.mirror"); gerr == nil {
-			_, _ = w.git(ctx, path, "config", "--unset-all", "remote.origin.mirror")
+		if ferr := w.fetchMirror(ctx, path); ferr != nil {
+			return "", fmt.Errorf("fetching %s: %w", repo, ferr)
 		}
-		// Two workers fetching one mirror race on git's ref locks, and the loser
-		// reports "cannot lock ref" even though the winner has just made the
-		// mirror current. Retry briefly, then accept the mirror as it stands
-		// rather than failing a dispatch over a fetch somebody else completed.
-		var ferr error
-		for attempt := 0; attempt < 3; attempt++ {
-			if _, ferr = w.git(ctx, path, "fetch", "--prune", "origin"); ferr == nil {
-				return path, nil
-			}
-			// Only contention is somebody else's success. Expired credentials, an
-			// unreachable remote or a corrupt mirror are this caller's problem, and
-			// swallowing them hands back stale refs — which surfaces later as an
-			// unreadable commit rather than the fetch error that explains it.
-			if !isRefLockContention(ferr) {
-				return "", fmt.Errorf("fetching %s: %w", repo, ferr)
-			}
-			if err := sleepCtx(ctx, time.Duration(attempt+1)*200*time.Millisecond); err != nil {
-				return "", err
-			}
+		// After the fetch, because it is the fetch that puts the current value of
+		// every remote branch under refs/remotes/origin — which is what makes the
+		// copies an old clone left in refs/heads redundant.
+		if derr := w.dropFetchedHeads(ctx, path); derr != nil {
+			return "", fmt.Errorf("migrating %s: %w", repo, derr)
 		}
-		// Still contended. Another worker is updating the mirror right now, so
-		// returning an error here fails a dispatch over somebody else's success —
-		// the case concurrent dispatch is supposed to survive.
 		return path, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
@@ -244,8 +217,108 @@ func (w Workspace) remoteURL(repo string) string {
 // out in a worktree makes any fetch that would update it fail outright.
 const originRefspec = "+refs/heads/*:refs/remotes/origin/*"
 
+// migrateMirror brings a mirror an older crq left behind up to the rules this
+// one depends on, and is a no-op on a mirror that already follows them.
+func (w Workspace) migrateMirror(ctx context.Context, path string) error {
+	// Enforce the refspec on EVERY call, not only at clone time. A mirror
+	// created before this rule still fetches +refs/*:refs/*, and one branch
+	// created in a worktree then wedges every future fetch for the whole
+	// repository with "refusing to fetch into branch ... checked out at".
+	if err := w.setConfig(ctx, path, "remote.origin.fetch", originRefspec); err != nil {
+		return err
+	}
+	// A mirror cloned with --mirror also carries remote.origin.mirror=true, which
+	// the refspec does not clear: a plain `git push` from a session's worktree
+	// would then mirror the whole local ref namespace, publishing internal refs
+	// and deleting remote branches this repository has never heard of.
+	return w.unsetConfig(ctx, path, "remote.origin.mirror")
+}
+
+// fetchMirror brings the mirror at path up to date.
+func (w Workspace) fetchMirror(ctx context.Context, path string) error {
+	// Two workers fetching one mirror race on git's ref locks, and the loser
+	// reports "cannot lock ref" even though the winner has just made the mirror
+	// current. Retry briefly rather than failing a dispatch over that.
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if _, err = w.git(ctx, path, "fetch", "--prune", "origin"); err == nil {
+			return nil
+		}
+		// Only contention is somebody else's success. Expired credentials, an
+		// unreachable remote or a corrupt mirror are this caller's problem, and
+		// swallowing them hands back stale refs — which surfaces later as an
+		// unreadable commit rather than the fetch error that explains it.
+		if !isRefLockContention(err) {
+			return err
+		}
+		if serr := sleepCtx(ctx, time.Duration(attempt+1)*200*time.Millisecond); serr != nil {
+			return serr
+		}
+	}
+	// Three losses in a row is no longer evidence of somebody else's success: a
+	// ref lock left behind by a killed git never clears, and reads exactly like a
+	// live race for as long as it sits there. Report the fetch that did not
+	// happen — the alternative is stale refs presented as current ones.
+	return err
+}
+
+// dropFetchedHeads removes the branch copies an older `git clone --mirror` wrote
+// into refs/heads.
+//
+// Changing the refspec does not move refs a previous clone already made: they go
+// on occupying the names refs/heads reserves for the sessions — `git checkout -b
+// feature` fails with "a branch named 'feature' already exists" — and they stay
+// frozen at whatever commit that clone saw. The fetch has just written the
+// current value of each under refs/remotes/origin, so the copy is redundant.
+//
+// Two guards, because a session's own branch lives in refs/heads too: only names
+// origin actually has are dropped, and never one a worktree has checked out.
+// `git update-ref -d` deletes a checked-out branch without a word of complaint,
+// and that branch is where a fix session's work lives before it is pushed.
+func (w Workspace) dropFetchedHeads(ctx context.Context, path string) error {
+	heads, err := gitDir(ctx, path, "for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads")
+	if err != nil {
+		return err
+	}
+	if heads == "" {
+		return nil // the usual case: a mirror crq made itself never writes refs/heads
+	}
+	live, err := checkedOutBranches(ctx, path)
+	if err != nil {
+		return err
+	}
+	for _, name := range strings.Split(heads, "\n") {
+		if live[name] {
+			continue
+		}
+		if _, err := gitDir(ctx, path, "show-ref", "--verify", "--quiet", "refs/remotes/origin/"+name); err != nil {
+			continue // origin has no such branch, so this one belongs to a session
+		}
+		if _, err := gitDir(ctx, path, "update-ref", "-d", "refs/heads/"+name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkedOutBranches is the set of branch names some worktree of the mirror at
+// path currently has checked out.
+func checkedOutBranches(ctx context.Context, path string) (map[string]bool, error) {
+	out, err := gitDir(ctx, path, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	live := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		if name, ok := strings.CutPrefix(strings.TrimSpace(line), "branch refs/heads/"); ok {
+			live[name] = true
+		}
+	}
+	return live, nil
+}
+
 // setConfig writes one config key of the mirror at path, unless it already holds
-// value.
+// exactly value and nothing else.
 //
 // git serializes configuration writes through config.lock, so two dispatches of
 // the same repository arriving together make one of them fail with "could not
@@ -255,10 +328,16 @@ const originRefspec = "+refs/heads/*:refs/remotes/origin/*"
 func (w Workspace) setConfig(ctx context.Context, path, key, value string) error {
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
-		if cur, gerr := w.git(ctx, path, "config", "--get", key); gerr == nil && cur == value {
+		// --get-all, not --get: a key holding several values answers --get with the
+		// last of them, so the one shape that most needs rewriting — a mirror with
+		// a second remote.origin.fetch — would read as already current.
+		if cur, gerr := w.git(ctx, path, "config", "--get-all", key); gerr == nil && cur == value {
 			return nil
 		}
-		if _, err = w.git(ctx, path, "config", key, value); err == nil {
+		// --replace-all for the same reason: a plain single-value write refuses a
+		// multi-valued key outright ("cannot overwrite multiple values with a
+		// single value"), which would fail every later call for that repository.
+		if _, err = w.git(ctx, path, "config", "--replace-all", key, value); err == nil {
 			return nil
 		}
 		if !isConfigLockContention(err) {
@@ -270,7 +349,35 @@ func (w Workspace) setConfig(ctx context.Context, path, key, value string) error
 	}
 	// Still contended: the other worker is writing this same migration, so its
 	// result is the one we wanted. Only its absence is worth an error.
-	if cur, gerr := w.git(ctx, path, "config", "--get", key); gerr == nil && cur == value {
+	if cur, gerr := w.git(ctx, path, "config", "--get-all", key); gerr == nil && cur == value {
+		return nil
+	}
+	return err
+}
+
+// unsetConfig removes every value of one config key of the mirror at path.
+//
+// Read before writing and retry on contention, for setConfig's reasons. What
+// differs is what a failure costs: a remote.origin.mirror that survives this
+// turns a session's plain `git push` back into a mirror push, so the key's
+// absence is verified rather than inferred from a command having run.
+func (w Workspace) unsetConfig(ctx context.Context, path, key string) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if _, gerr := w.git(ctx, path, "config", "--get-all", key); gerr != nil {
+			return nil // not set, which is the normal case and worth no write at all
+		}
+		if _, err = w.git(ctx, path, "config", "--unset-all", key); err == nil {
+			return nil
+		}
+		if !isConfigLockContention(err) {
+			return err
+		}
+		if serr := sleepCtx(ctx, time.Duration(attempt+1)*200*time.Millisecond); serr != nil {
+			return serr
+		}
+	}
+	if _, gerr := w.git(ctx, path, "config", "--get-all", key); gerr != nil {
 		return nil
 	}
 	return err

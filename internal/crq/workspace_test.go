@@ -563,6 +563,166 @@ func TestMirrorMigratesAnOldRefspec(t *testing.T) {
 	}
 }
 
+// A mirror an older crq made with `git clone --mirror` had already copied the
+// remote's branches into refs/heads, and changing the fetch refspec does not
+// move them: the name a session needs stays taken by a ref frozen at the commit
+// that clone saw.
+func TestMirrorDropsHeadsAnOldCloneLeftInPlace(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	origin := filepath.Join(base, repo)
+	sha := originRepo(t, origin)
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+	if _, err := gitDir(ctx, origin, "branch", "feature"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Lay the mirror out the way the older crq left it.
+	mirror, err := ws.mirrorPath(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(mirror), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(ctx, "", "clone", "--mirror", "--quiet", ws.remoteURL(repo), mirror); err != nil {
+		t.Fatal(err)
+	}
+	// A branch of a session's own, which origin has never heard of.
+	if _, err := gitDir(ctx, mirror, "update-ref", "refs/heads/crq/fix-3", sha); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	heads, err := gitDir(ctx, mirror, "for-each-ref", "--format=%(refname)", "refs/heads")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(heads, "refs/heads/feature") || strings.Contains(heads, "refs/heads/main") {
+		t.Errorf("refs/heads = %q, want the clone's copies of origin's branches gone", heads)
+	}
+	if !strings.Contains(heads, "refs/heads/crq/fix-3") {
+		t.Errorf("refs/heads = %q, want a session's own branch left alone", heads)
+	}
+	if remotes, err := gitDir(ctx, mirror, "for-each-ref", "--format=%(refname)", "refs/remotes/origin"); err != nil || !strings.Contains(remotes, "refs/remotes/origin/feature") {
+		t.Errorf("remote refs = %q err=%v, want origin's branches under origin", remotes, err)
+	}
+
+	// The name is free for a session again — and stays the session's, even though
+	// origin has a branch of that name: `git update-ref -d` would delete a
+	// checked-out branch without complaint, work and all.
+	co, err := ws.Checkout(ctx, repo, 3, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := co.Git(ctx, "checkout", "-b", "feature"); err != nil {
+		t.Fatalf("a session could not create its branch: %v", err)
+	}
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	if branch, err := co.Git(ctx, "rev-parse", "--abbrev-ref", "HEAD"); err != nil || branch != "feature" {
+		t.Errorf("branch = %q err=%v, want the session's checked-out branch to survive", branch, err)
+	}
+}
+
+// A mirror with a second remote.origin.fetch refused a single-value write —
+// "cannot overwrite multiple values with a single value" — which would have
+// failed every later Mirror call for that repository for good.
+func TestMirrorMigratesAMultiValuedRefspec(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The refspec that reaches into refs/heads, added rather than replacing.
+	if _, err := gitDir(ctx, mirror, "config", "--add", "remote.origin.fetch", "+refs/*:refs/*"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Fatalf("a mirror with two refspecs could not be migrated: %v", err)
+	}
+	if got, err := gitDir(ctx, mirror, "config", "--get-all", "remote.origin.fetch"); err != nil || got != originRefspec {
+		t.Errorf("refspec = %q err=%v, want only %q", got, err, originRefspec)
+	}
+}
+
+// A ref lock left behind by a killed git never clears, and reads exactly like a
+// live race for as long as it sits there. Retrying past it and handing back the
+// mirror anyway presented refs known to be stale as current ones.
+func TestMirrorReportsAFetchItCouldNotComplete(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	origin := filepath.Join(base, repo)
+	originRepo(t, origin)
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Origin moves on, so the next fetch has a ref it must update...
+	if err := os.WriteFile(filepath.Join(origin, "README.md"), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "README.md"}, {"commit", "-m", "second"}} {
+		if _, err := gitDir(ctx, origin, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// ...and the lock makes that impossible for as long as it is there.
+	lock := filepath.Join(mirror, "refs", "remotes", "origin", "main.lock")
+	if err := os.MkdirAll(filepath.Dir(lock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Mirror(ctx, repo); err == nil {
+		t.Error("a mirror that could not be fetched was reported as current")
+	}
+}
+
+// Discarding the failure to clear remote.origin.mirror handed back a mirror
+// whose later plain push still had mirror semantics — publishing internal refs
+// and deleting remote branches, the exact hazard the migration exists for.
+func TestMirrorReportsAPushMirrorFlagItCouldNotClear(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(ctx, mirror, "config", "remote.origin.mirror", "true"); err != nil {
+		t.Fatal(err)
+	}
+	// Somebody else holds the lock for good, the way a killed git does.
+	if err := os.WriteFile(filepath.Join(mirror, "config.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(filepath.Join(mirror, "config.lock"))
+	if _, err := ws.Mirror(ctx, repo); err == nil {
+		t.Error("a mirror still configured to push as a mirror was handed back as usable")
+	}
+}
+
 // git serializes config writes through config.lock, so an unconditional write on
 // every Mirror call made two dispatches of one repository collide with "could
 // not lock config file" — before the fetch, which is the part written to survive
