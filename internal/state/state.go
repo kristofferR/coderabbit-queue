@@ -307,10 +307,14 @@ type State struct {
 	// hold_until and clear an orphaned slot during Normalize, but their State
 	// tolerance carries this unknown top-level member. New binaries can therefore
 	// still recover the hold after an older writer rewrites the shared state.
-	FireSlotHoldUntil *time.Time   `json:"fire_slot_hold_until,omitempty"`
-	LastFired         *time.Time   `json:"last_fired,omitempty"`
-	Account           AccountQuota `json:"account"`
-	Leader            *LeaderLease `json:"leader,omitempty"`
+	FireSlotHoldUntil *time.Time `json:"fire_slot_hold_until,omitempty"`
+	// FireSlotHoldLastFired is the real pacing anchor replaced while the hold
+	// is dual-written into LastFired for binaries that do not understand the
+	// top-level mirror. Current binaries restore it when the hold ends.
+	FireSlotHoldLastFired *time.Time   `json:"fire_slot_hold_last_fired,omitempty"`
+	LastFired             *time.Time   `json:"last_fired,omitempty"`
+	Account               AccountQuota `json:"account"`
+	Leader                *LeaderLease `json:"leader,omitempty"`
 
 	// CalibrationIssue overrides the configured calibration PR/issue when the
 	// original hit GitHub's hard 2500-comment cap and crq rotated to a fresh
@@ -806,8 +810,33 @@ func (s *State) HoldSlotUntil(until time.Time) {
 		return
 	}
 	u := until.UTC()
+	before := s.LastFired
+	if s.FireSlotHoldUntil != nil && s.LastFired != nil &&
+		s.LastFired.Equal(*s.FireSlotHoldUntil) {
+		before = s.FireSlotHoldLastFired
+	}
 	s.FireSlot.HoldUntil = &u
 	s.FireSlotHoldUntil = &u
+	s.FireSlotHoldLastFired = before
+	// The previous binary preserves the top-level mirror but does not read it.
+	// It does read LastFired, so a future pacing anchor keeps its Pump from
+	// posting another metered review. Its MinInterval may conservatively extend
+	// the wait; a current binary restores the real anchor below.
+	if s.LastFired == nil || s.LastFired.Before(u) {
+		s.LastFired = &u
+	}
+}
+
+// ClearSlotHold removes the compatibility hold and restores the pacing anchor
+// it temporarily replaced. If another writer fired after the deadline,
+// LastFired no longer equals the synthetic value and is left untouched.
+func (s *State) ClearSlotHold() {
+	if s.FireSlotHoldUntil != nil && s.LastFired != nil &&
+		s.LastFired.Equal(*s.FireSlotHoldUntil) {
+		s.LastFired = s.FireSlotHoldLastFired
+	}
+	s.FireSlotHoldUntil = nil
+	s.FireSlotHoldLastFired = nil
 }
 
 // NextEligible returns the fire-eligible round with the lowest Seq, or nil.
@@ -1042,7 +1071,7 @@ func (s *State) Normalize(now time.Time) {
 	}
 	if !s.SlotHeld(now) {
 		s.FireSlot = nil
-		s.FireSlotHoldUntil = nil
+		s.ClearSlotHold()
 	}
 	for key, r := range s.Rounds {
 		r.foldLegacyCodex()

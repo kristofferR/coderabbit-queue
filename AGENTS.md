@@ -36,6 +36,10 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
   added survives being read and rewritten by an older one — which is what makes
   adding one safe without another dual-write, and without a schema bump (an
   unknown version auto-reinitialises and would erase the fleet's rounds).
+  `FireSlot.HoldUntil` is the compatibility exception for the binary immediately
+  before nested slot tolerance: its deadline is mirrored at the tolerant top
+  level and in the legacy pacing anchor so that writer both preserves and
+  honours it during a rolling deployment.
 - `internal/engine/` — PURE decision logic, `now` passed in, no ctx/gh:
   `DecideFire` (the single fire owner), `Progress` (fired/reviewing round
   transitions), `Completion` (the one "is the round done?"), `BlockingFindings`

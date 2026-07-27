@@ -136,6 +136,9 @@ func TestOrphanedHoldSurvivesALegacyRewrite(t *testing.T) {
 	if err := json.Unmarshal(raw, &legacy); err != nil {
 		t.Fatal(err)
 	}
+	if legacy["last_fired"] != until.Format(time.RFC3339) {
+		t.Fatalf("legacy pacing anchor = %v, want hold deadline %s", legacy["last_fired"], until)
+	}
 	delete(legacy, "fire_slot")
 	rewritten, err := json.Marshal(legacy)
 	if err != nil {
@@ -150,8 +153,12 @@ func TestOrphanedHoldSurvivesALegacyRewrite(t *testing.T) {
 	if !back.SlotHeld(now) {
 		t.Fatalf("legacy rewrite lost the orphaned hold: %+v", back)
 	}
-	if back.SlotHeld(until.Add(time.Second)) {
-		t.Fatal("the recovered compatibility hold must still expire")
+	back.Normalize(until.Add(time.Second))
+	if back.SlotHeld(until.Add(time.Second)) || back.FireSlotHoldUntil != nil {
+		t.Fatalf("the recovered compatibility hold did not expire: %+v", back)
+	}
+	if back.LastFired != nil {
+		t.Fatalf("current writer did not restore the pre-hold pacing anchor: %s", back.LastFired)
 	}
 }
 

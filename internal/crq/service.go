@@ -587,7 +587,7 @@ func (s *Service) applyTransition(st *State, r *Round, tr engine.Transition, now
 func releaseSlot(st *State, key string) {
 	if st.FireSlot != nil && st.FireSlot.Key == key {
 		st.FireSlot = nil
-		st.FireSlotHoldUntil = nil
+		st.ClearSlotHold()
 	}
 }
 
