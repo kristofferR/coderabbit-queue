@@ -31,6 +31,10 @@ type NextReport struct {
 	// Pending lists the required reviewers with no evidence for this head.
 	Pending  []string          `json:"pending,omitempty"`
 	Findings []dialect.Finding `json:"findings"`
+	// Dismissed counts the findings this head's round has accounted for through
+	// `crq dismiss`. They are withheld from Findings, so the count is how a
+	// caller sees that something was set aside rather than never reported.
+	Dismissed int `json:"dismissed,omitempty"`
 
 	ReviewedBy map[string]bool `json:"reviewed_by,omitempty"`
 	// LocalWork records whether crq saw changes the PR head does not have. It
@@ -66,6 +70,16 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 	report, action, feedback, err := s.nextFromState(ctx, repo, pr)
 	if err != nil {
 		return report, err
+	}
+	// Convergence can release the head before the optional primary acknowledges
+	// the metered command. Preserve that slot before telling the caller to push:
+	// the push supersedes this round, so leaving the hold attached only to the
+	// live round would let Normalize release it while the review is still in
+	// flight.
+	if action.Kind == engine.ActionPush && feedback.PrimaryAckPending {
+		if err := s.completeWaitRound(ctx, repo, pr, report.Head, true, &feedback.config); err != nil {
+			return report, err
+		}
 	}
 
 	// Undrained feedback for THIS head: publish nothing. Another review of the
@@ -112,6 +126,10 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 		report.Action = string(engine.ActionWait)
 		report.Reason = "the head moved while deciding; re-reading it"
 		report.Findings = []dialect.Finding{}
+		// Dismissals are head-scoped, so the count read for the old head says
+		// nothing about this one — reporting it beside the new head would credit
+		// the new head with decisions never made about it.
+		report.Dismissed = 0
 		at := s.clock().Add(s.waitTick()).UTC()
 		report.RecheckAfter = &at
 		return report, nil
@@ -214,6 +232,10 @@ func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextR
 
 	report.LocalWork, report.LocalWorkReason = s.checkLocalWork(ctx,
 		[]string{repo, feedback.HeadRepo}, report.Head, feedback.HeadRef)
+
+	// Feedback has already withheld what this round dismissed — including from
+	// its own convergence verdict — so there is one filter, not one per caller.
+	report.Dismissed = feedback.Dismissed
 
 	in := engine.NextInput{
 		Obs:           engine.Observation{Head: feedback.Head, Open: feedback.Open},

@@ -37,6 +37,10 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
   added survives being read and rewritten by an older one — which is what makes
   adding one safe without another dual-write, and without a schema bump (an
   unknown version auto-reinitialises and would erase the fleet's rounds).
+  `FireSlot.HoldUntil` is the compatibility exception for the binary immediately
+  before nested slot tolerance: its deadline is mirrored at the tolerant top
+  level and in the legacy pacing anchor so that writer both preserves and
+  honours it during a rolling deployment.
 - `internal/engine/` — PURE decision logic, `now` passed in, no ctx/gh:
   `DecideFire` (the single fire owner), `Progress` (fired/reviewing round
   transitions), `Completion` (the one "is the round done?"), `BlockingFindings`
@@ -73,9 +77,25 @@ r.Head == head → skip`. A completed round stays as the "this head was reviewed
 dedup marker. A rate-limited requeue parks the round in `awaiting_retry` (keeping
 its head/attempts/history), it does not delete a fired marker.
 
+The one exception to that skip is `Round.ReviewersChanged`: a reviewer change
+requeues the repository's completed rounds, but only for PRs that are open —
+marking the closed ones instead of handing Pump dead work. A marked round is
+reopened by whichever enqueue path next sees the PR alive, so reopening a PR
+picks up the requirements it missed while it was shut.
+
 The global `FireSlot` allows ≤1 concurrent fire fleet-wide (CAS). A bot ack
 releases the slot while the review keeps running (the round moves to
-`reviewing`); the round itself stays open until `Completion` is done.
+`reviewing`); the round itself stays open until `Completion` is done. The
+converse does not hold: convergence alone never releases the slot. A repository
+whose required set omits the primary converges as soon as its co-reviewers
+answer, and completing there would hand the slot to the next PR while the
+metered command is still unanswered — so a round that spent the quota stays
+`fired` until the primary acknowledges or its in-flight timeout expires. Staying
+`fired` holds the slot only while the round exists, and converging is what tells
+the agent to push, so the loop also stamps `FireSlot.HoldUntil`: the hold belongs
+to the command, not to the head it was posted at, and it outlives the supersede
+that the success it reported invites. Every fire gate asks `SlotHeld`, not
+"is there a round holding it".
 
 ## observe → decide → apply
 

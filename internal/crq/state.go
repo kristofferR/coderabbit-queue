@@ -21,6 +21,7 @@ type (
 	AccountQuota  = crqstate.AccountQuota
 	LeaderLease   = crqstate.LeaderLease
 	PostedCommand = crqstate.PostedCommand
+	RepoReviewers = crqstate.RepoReviewers
 	Revision      = crqstate.Revision
 	StateStore    = crqstate.StateStore
 	StoreConfig   = crqstate.StoreConfig
@@ -35,6 +36,9 @@ const (
 	PhaseAwaitingRetry = crqstate.PhaseAwaitingRetry
 	PhaseCompleted     = crqstate.PhaseCompleted
 	PhaseAbandoned     = crqstate.PhaseAbandoned
+
+	// CapsRepoOverrides is the binary capability per-repo reviewer overrides need.
+	CapsRepoOverrides = crqstate.CapsRepoOverrides
 )
 
 var (
@@ -51,6 +55,7 @@ func (c Config) storeConfig() StoreConfig {
 		Timezone:       c.Timezone,
 		Scope:          c.Scope,
 		CoReviewers:    c.coReviewerSummary(),
+		Host:           c.WriterID(),
 		MinInterval:    c.MinInterval,
 	}
 }
@@ -123,6 +128,12 @@ func (c Config) policy() engine.Policy {
 		RateLimitCoDegrade: c.RateLimitCoDegrade,
 	}
 	for _, cb := range c.CoBots {
+		// A registry-backed primary keeps a silenced CoBots entry so observation
+		// can use that registry's wording and check hooks. It is still the
+		// primary, not a dynamic co-reviewer convergence gate.
+		if sameBot(cb.Login, c.Bot) {
+			continue
+		}
 		p.CoReviewers = append(p.CoReviewers, engine.CoReviewerPolicy{
 			Login:         cb.Login,
 			Command:       cb.Command,

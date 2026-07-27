@@ -404,7 +404,16 @@ func (s *adoptionRaceStore) Load(context.Context) (State, Revision, error) {
 
 func (s *adoptionRaceStore) Update(_ context.Context, mutate func(*State) error) (State, error) {
 	state := cloneState(s.loadState)
-	state.FireSlot = &FireSlot{Key: "owner/repo#99", Token: "other", Since: time.Now().UTC()}
+	now := time.Now().UTC()
+	other, err := state.NewRound("owner/repo", 99, "999999999", now)
+	if err != nil {
+		return State{}, err
+	}
+	if err := other.Reserve("other", "other-host", now); err != nil {
+		return State{}, err
+	}
+	state.PutRound(*other)
+	state.FireSlot = &FireSlot{Key: "owner/repo#99", Token: "other", Since: now}
 	if err := mutate(&state); err != nil {
 		if errors.Is(err, ErrNoChange) {
 			return state, nil
@@ -717,6 +726,14 @@ func firingConfig() Config {
 	}
 }
 
+func TestFallbackTokenIsSafeToShorten(t *testing.T) {
+	for _, now := range []time.Time{time.Unix(0, 0), time.Unix(0, 1)} {
+		if got := fallbackToken(now); len(got) < 8 {
+			t.Fatalf("fallbackToken(%v) = %q, want at least 8 characters", now, got)
+		}
+	}
+}
+
 func TestEnqueueIsIdempotentAndPumpFiresOnce(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
@@ -791,6 +808,12 @@ func TestPumpPersistsPostedReviewAfterTransientStateFailure(t *testing.T) {
 	r := state.Round("owner/repo", 12)
 	if r == nil || r.Phase != PhaseFired || r.CommandID == 0 {
 		t.Fatalf("posted review metadata was not persisted after retry: %#v", r)
+	}
+	// The firing PROCESS, in the form capabilities are recorded under: a bare
+	// hostname here can never match a writer entry, so LaggingWriters would name
+	// this very process as needing an upgrade for as long as the fire lasts.
+	if r.ByHost != cfg.WriterID() {
+		t.Errorf("ByHost = %q, want the writer id %q", r.ByHost, cfg.WriterID())
 	}
 	if state.FiredMarker("owner/repo", 12) != "abcdef123" {
 		t.Fatalf("fired marker was not persisted after retry")
@@ -1446,6 +1469,46 @@ func TestPumpTreatsExistingReviewAdoptionRaceAsLostRace(t *testing.T) {
 	}
 	if len(gh.posted) != 0 {
 		t.Fatalf("adoption race must not post another review command, posted=%d", len(gh.posted))
+	}
+}
+
+func TestFireRoundRechecksOrphanedSlotHold(t *testing.T) {
+	for _, post := range []bool{false, true} {
+		name := "adopt"
+		if post {
+			name = "post"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			cfg := firingConfig()
+			gh := newFakeGitHub()
+			store := NewMemoryStore(cfg)
+			now := time.Now().UTC()
+			seedRound(t, store, cfg, "owner/repo", 12, "abcdef123", PhaseQueued, now, 0)
+			if _, err := store.Update(ctx, func(st *State) error {
+				until := now.Add(cfg.InflightTimeout)
+				st.FireSlotHoldUntil = &until
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			st, _, err := store.Load(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			round := *st.Round("owner/repo", 12)
+			svc := NewService(cfg, gh, store, nil)
+			got, err := svc.fireRound(ctx, cfg, round, engine.Observation{}, post, 77, now.Add(-time.Minute), "test", nil, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Action != "lost_race" {
+				t.Fatalf("action = %q, want lost_race while an orphaned hold is active", got.Action)
+			}
+			if len(gh.posted) != 0 {
+				t.Fatalf("posted %d review commands while an orphaned hold is active", len(gh.posted))
+			}
+		})
 	}
 }
 
@@ -2395,7 +2458,7 @@ func TestFireCoDeferredAdoptionHonorsDryRunAndActiveClaim(t *testing.T) {
 	round := *st.Round("o/carrier", 95)
 
 	svc.cfg.DryRun = true
-	res, err := svc.fireCoDeferred(ctx, round, engine.FireDecision{Verdict: engine.FireCoDeferred, Reason: "dry run adopt", AdoptCo: map[string]engine.CommandSeen{dialect.CodexBotLogin: {ID: 703, CreatedAt: now.Add(-time.Minute)}}}, now)
+	res, err := svc.fireCoDeferred(ctx, svc.cfg, round, engine.FireDecision{Verdict: engine.FireCoDeferred, Reason: "dry run adopt", AdoptCo: map[string]engine.CommandSeen{dialect.CodexBotLogin: {ID: 703, CreatedAt: now.Add(-time.Minute)}}}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2416,7 +2479,7 @@ func TestFireCoDeferredAdoptionHonorsDryRunAndActiveClaim(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	res, err = svc.fireCoDeferred(ctx, round, engine.FireDecision{Verdict: engine.FireCoDeferred, Reason: "claimed adopt", AdoptCo: map[string]engine.CommandSeen{dialect.CodexBotLogin: {ID: 703, CreatedAt: now.Add(-time.Minute)}}}, now)
+	res, err = svc.fireCoDeferred(ctx, svc.cfg, round, engine.FireDecision{Verdict: engine.FireCoDeferred, Reason: "claimed adopt", AdoptCo: map[string]engine.CommandSeen{dialect.CodexBotLogin: {ID: 703, CreatedAt: now.Add(-time.Minute)}}}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2429,7 +2492,7 @@ func TestFireCoDeferredAdoptionHonorsDryRunAndActiveClaim(t *testing.T) {
 	}
 
 	staleNow := now.Add(triggerClaimTTL + time.Second)
-	res, err = svc.fireCoDeferred(ctx, round, engine.FireDecision{Verdict: engine.FireCoDeferred, Reason: "stale claim adopt", AdoptCo: map[string]engine.CommandSeen{dialect.CodexBotLogin: {ID: 703, CreatedAt: now.Add(-time.Minute)}}}, staleNow)
+	res, err = svc.fireCoDeferred(ctx, svc.cfg, round, engine.FireDecision{Verdict: engine.FireCoDeferred, Reason: "stale claim adopt", AdoptCo: map[string]engine.CommandSeen{dialect.CodexBotLogin: {ID: 703, CreatedAt: now.Add(-time.Minute)}}}, staleNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2602,6 +2665,70 @@ func TestPumpSweepsQuotaFreeRoundWhileTheSlotIsHeld(t *testing.T) {
 	for _, p := range gh.posted {
 		if strings.Contains(p, cfg.ReviewCommand) {
 			t.Fatalf("a quota-free sweep must never post the CodeRabbit command, posted=%v", gh.posted)
+		}
+	}
+}
+
+func TestPumpSweepsQuotaFreeRoundWhileAnOrphanedHoldIsActive(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
+	cfg.FeedbackBots = cfg.RequiredBots
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+
+	frontSHA := "111111111"
+	front := ghapi.Pull{State: "open"}
+	front.Head.SHA = frontSHA + "abcdef0"
+	gh.pulls[fakeKey("o/front", 10)] = front
+
+	backSHA := "2222222222222222"
+	back := ghapi.Pull{State: "open"}
+	back.Head.SHA = backSHA
+	gh.pulls[fakeKey("o/back", 20)] = back
+	walkthrough := ghapi.IssueComment{
+		ID:        900,
+		Body:      corpusMessage(t, "coderabbit/summary-only-free-plan.md"),
+		CreatedAt: now.Add(-time.Minute),
+		UpdatedAt: now.Add(-time.Minute),
+	}
+	walkthrough.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/back", 20)] = []ghapi.IssueComment{walkthrough}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+	seedRound(t, store, cfg, "o/front", 10, frontSHA, PhaseQueued, now.Add(-time.Minute), 0)
+	if _, err := svc.Enqueue(ctx, "o/back", 20); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		holdUntil := now.Add(cfg.InflightTimeout)
+		st.FireSlotHoldUntil = &holdUntil
+		frontRound := st.Round("o/front", 10)
+		frontRound.SetCoCommand(dialect.CodexBotLogin, 701, now.Add(-time.Minute))
+		st.PutRound(*frontRound)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Repo != "o/back" || res.PR != 20 {
+		t.Fatalf("the quota-free round behind an orphaned hold must be rescued, got %#v", res)
+	}
+	st, _, _ := store.Load(ctx)
+	if round := st.Round("o/back", 20); round == nil || round.Phase == PhaseQueued {
+		t.Fatalf("the quota-free round must leave the queue, got %#v", round)
+	}
+	for _, posted := range gh.posted {
+		if strings.Contains(posted, cfg.ReviewCommand) {
+			t.Fatalf("the rescue must not spend primary review quota, posted=%v", gh.posted)
 		}
 	}
 }
