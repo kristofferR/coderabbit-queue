@@ -939,6 +939,13 @@ func TestStatusLine(t *testing.T) {
 	if got := StatusLine(fleetPaced, StoreConfig{MinInterval: 0}); strings.Contains(got, "next #7") {
 		t.Errorf("fleet pacing must keep status from claiming the round is ready: %q", got)
 	}
+	// The recorded value is whatever an operator typed, and the parser that
+	// accepted it at `crq config set` trims. One that queue decisions honour must
+	// not leave this renderer quietly falling back to the host's interval.
+	fleetPaced.SetFleetValue("min-interval", " 1h ")
+	if got := StatusLine(fleetPaced, StoreConfig{MinInterval: 0}); strings.Contains(got, "next #7") {
+		t.Errorf("a padded fleet interval must pace status like an unpadded one: %q", got)
+	}
 
 	// Blocked: the countdown is the useful part.
 	blockedState := stateWith(queuedRound("kristofferr/a", 7, 1, now))

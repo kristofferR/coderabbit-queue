@@ -97,8 +97,18 @@ func (c Config) coReviewerSummary() string {
 
 // NewGitStateStore builds the git-ref-backed store. The logger surfaces the
 // loud auto-reinit line when a stale-schema payload is loaded.
+//
+// The store renders dashboard.md on every state commit, and it renders it with
+// the fleet's policy rather than this host's startup settings — otherwise the
+// file in the state ref would carry whichever co-reviewer set the writing
+// machine happened to be configured with, while the gate issue shows the
+// fleet's.
 func NewGitStateStore(cfg Config, gh *ghapi.GitHub, log Logger) *crqstate.GitStateStore {
-	return crqstate.NewGitStateStore(cfg.storeConfig(), gh, log)
+	store := crqstate.NewGitStateStore(cfg.storeConfig(), gh, log)
+	store.SetRenderConfig(func(st State) StoreConfig {
+		return applyFleet(cfg, st.FleetConfig, nil).storeConfig()
+	})
+	return store
 }
 
 func NewMemoryStore(cfg Config) *crqstate.MemoryStore {

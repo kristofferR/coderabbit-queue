@@ -98,6 +98,15 @@ type GitStateStore struct {
 	gh  *gh.GitHub
 	log Logger
 
+	// renderCfg resolves the configuration a dashboard render should use for a
+	// given state, defaulting to this process's own. crq replaces it with one
+	// that applies fleet policy: dashboard.md is rewritten on EVERY state
+	// commit, so rendering it from startup configuration would have each host
+	// write its own reviewer set into the shared file — flapping between
+	// machines, and disagreeing with the gate issue, which SyncDashboard already
+	// renders from the effective policy.
+	renderCfg func(State) StoreConfig
+
 	// syncMu serializes the read-then-write in SyncDashboard, so concurrent
 	// syncs cannot both see a stale gate issue and both write it.
 	syncMu sync.Mutex
@@ -105,6 +114,21 @@ type GitStateStore struct {
 
 func NewGitStateStore(cfg StoreConfig, client *gh.GitHub, log Logger) *GitStateStore {
 	return &GitStateStore{cfg: cfg, gh: client, log: log}
+}
+
+// SetRenderConfig installs the resolver compareAndSwap renders dashboard.md
+// with. It is set once, before the store is used: the state package holds no bot
+// registry, so only crq can turn recorded fleet policy into a rendering
+// configuration.
+func (s *GitStateStore) SetRenderConfig(resolve func(State) StoreConfig) {
+	s.renderCfg = resolve
+}
+
+func (s *GitStateStore) renderConfig(st State) StoreConfig {
+	if s.renderCfg == nil {
+		return s.cfg
+	}
+	return s.renderCfg(st)
 }
 
 func (s *GitStateStore) logf(format string, args ...any) {
@@ -228,7 +252,7 @@ func (s *GitStateStore) Update(ctx context.Context, mutate func(*State) error) (
 }
 
 func (s *GitStateStore) compareAndSwap(ctx context.Context, st *State, rev Revision) error {
-	dashboard := RenderDashboard(*st, s.cfg)
+	dashboard := RenderDashboard(*st, s.renderConfig(*st))
 	st.DashboardSHA = hashString(dashboard)
 	stateJSON, err := json.MarshalIndent(*st, "", "  ")
 	if err != nil {

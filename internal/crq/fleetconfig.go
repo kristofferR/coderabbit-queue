@@ -3,8 +3,12 @@ package crq
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
 )
 
 // fleetSetting is one policy the whole fleet shares: how to read it from the
@@ -38,7 +42,7 @@ type fleetSetting struct {
 // disagree about is how a repository ends up excluded on one and reviewed by
 // another with nothing to say so.
 func fleetSettings() map[string]fleetSetting {
-	return map[string]fleetSetting{
+	settings := map[string]fleetSetting{
 		"scope": {
 			Doc: "owners crq scans when no repository list is set",
 			Env: "CRQ_SCOPE",
@@ -148,7 +152,205 @@ func fleetSettings() map[string]fleetSetting {
 			},
 			Show: func(cfg Config) string { return strings.Join(sortedSetKeys(cfg.SkipAuthors), ",") },
 		},
+		"cobots": {
+			Doc: "co-reviewers crq surfaces and triggers (empty disables all)",
+			Env: "CRQ_COBOTS",
+			Apply: func(cfg *Config, v string) error {
+				names, err := fleetCoBotNames(v)
+				if err != nil {
+					return err
+				}
+				*cfg = cfg.ForRepo(RepoReviewers{CoBots: names, SetCoBots: true})
+				return nil
+			},
+			Show: func(cfg Config) string {
+				names := make([]string, 0, len(cfg.CoBots))
+				for _, cb := range cfg.CoBots {
+					names = append(names, cb.Name)
+				}
+				return strings.Join(names, ",")
+			},
+		},
+		"rate-limit-co-degrade": {
+			Doc: "run co-reviewer-only rounds while the CodeRabbit account is blocked",
+			Env: "CRQ_RL_CO_DEGRADE",
+			Apply: func(cfg *Config, v string) error {
+				on, err := parseFleetBool(v)
+				if err != nil {
+					return err
+				}
+				cfg.RateLimitCoDegrade = on
+				return nil
+			},
+			Show: func(cfg Config) string { return fleetBool(cfg.RateLimitCoDegrade) },
+		},
 	}
+	// Every co-reviewer's own policy, one family per bot. Nothing here names a
+	// bot: the registry is what says which exist, so a new co-reviewer arrives
+	// with its fleet settings already in place.
+	for _, co := range dialect.KnownCoReviewers() {
+		for key, setting := range coBotFleetSettings(co) {
+			settings[key] = setting
+		}
+	}
+	return settings
+}
+
+// coBotFleetSettings is how the fleet drives one co-reviewer: whether crq posts
+// its command, what it posts, and how long a self-heal nudge waits first.
+//
+// Required-ness is deliberately NOT here — required-bots owns that list, and two
+// settings answering the same question is how they end up disagreeing.
+func coBotFleetSettings(co dialect.CoReviewer) map[string]fleetSetting {
+	name := co.Name
+	env := "CRQ_COBOT_" + strings.ToUpper(name)
+	return map[string]fleetSetting{
+		"cobot-" + name + "-trigger": {
+			Doc: "when crq posts " + name + "'s command: never, selfheal or always (empty leaves it to how the bot is required)",
+			Env: env + "_TRIGGER",
+			Apply: func(cfg *Config, v string) error {
+				value := strings.ToLower(strings.TrimSpace(v))
+				if value == "" {
+					// The environment's "unset" — the registry default for how the
+					// bot is required, recomputed rather than frozen.
+					updateCoBot(cfg, name, func(cb *CoBotConfig) { cb.TriggerExplicit = false })
+					return nil
+				}
+				mode := engine.TriggerMode(value)
+				switch mode {
+				case engine.TriggerNever, engine.TriggerSelfHeal, engine.TriggerAlways:
+				default:
+					return fmt.Errorf("trigger must be never, selfheal or always, got %q", v)
+				}
+				updateCoBot(cfg, name, func(cb *CoBotConfig) {
+					cb.Trigger, cb.TriggerExplicit = mode, true
+				})
+				return nil
+			},
+			Show: func(cfg Config) string {
+				if cb := coBotOf(cfg, name); cb.TriggerExplicit {
+					return string(cb.Trigger)
+				}
+				return ""
+			},
+		},
+		"cobot-" + name + "-cmd": {
+			Doc: "the comment that triggers " + name + " (empty means crq never posts one)",
+			Env: env + "_CMD",
+			Apply: func(cfg *Config, v string) error {
+				command := strings.TrimSpace(v)
+				updateCoBot(cfg, name, func(cb *CoBotConfig) { cb.Command = command })
+				return nil
+			},
+			Show: func(cfg Config) string { return coBotOf(cfg, name).Command },
+		},
+		"cobot-" + name + "-grace": {
+			Doc: "how long a selfheal trigger waits for " + name + " to show up on its own",
+			Env: env + "_GRACE",
+			Apply: func(cfg *Config, v string) error {
+				d, err := parseFleetDuration(v)
+				if err != nil {
+					return err
+				}
+				updateCoBot(cfg, name, func(cb *CoBotConfig) { cb.SelfHealGrace = d })
+				return nil
+			},
+			Show: func(cfg Config) string { return coBotOf(cfg, name).SelfHealGrace.String() },
+		},
+	}
+}
+
+// coBotOf is how this host currently drives a co-reviewer: its enabled entry
+// when it has one, otherwise what its environment resolved for a bot the fleet
+// leaves disabled — which is still the configuration a repository override
+// would pick it up with.
+func coBotOf(cfg Config, name string) CoBotConfig {
+	for _, cb := range cfg.CoBots {
+		if strings.EqualFold(cb.Name, name) {
+			return cb
+		}
+	}
+	cb, _ := cfg.knownCoBot(name)
+	return cb
+}
+
+// updateCoBot changes one co-reviewer wherever its configuration is held: the
+// enabled set crq drives, and the registry-wide set a per-repo override draws
+// from for a bot the fleet does not enable. Both are copied first — the caller's
+// Config shares these slices, and a setting that fails to parse must leave it
+// untouched.
+func updateCoBot(cfg *Config, name string, mutate func(*CoBotConfig)) {
+	cfg.CoBots = updateCoBotIn(cfg.CoBots, name, mutate)
+	// The registry-wide set is what a bot this host never resolved is enabled
+	// from — by the fleet's own cobots setting, or by a repository override — so
+	// it has to hold the policy even when there is no entry to change yet.
+	// Without this the fleet's answer would be silently dropped, which is the
+	// failure the shared registry exists to prevent.
+	if !hasCoBot(cfg.KnownCoBots, name) {
+		if co, ok := dialect.CoReviewerByName(name); ok {
+			cfg.KnownCoBots = append(append([]CoBotConfig(nil), cfg.KnownCoBots...), defaultCoBot(co, false))
+		}
+	}
+	cfg.KnownCoBots = updateCoBotIn(cfg.KnownCoBots, name, mutate)
+}
+
+func hasCoBot(bots []CoBotConfig, name string) bool {
+	for _, cb := range bots {
+		if strings.EqualFold(cb.Name, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func updateCoBotIn(bots []CoBotConfig, name string, mutate func(*CoBotConfig)) []CoBotConfig {
+	out := append([]CoBotConfig(nil), bots...)
+	for i, cb := range out {
+		if !strings.EqualFold(cb.Name, name) {
+			continue
+		}
+		mutate(&cb)
+		// Re-derive what the change implies, exactly as the environment parse
+		// does: an implicit trigger follows the registry default for how the bot
+		// is required, and no command means crq can never post one.
+		cb = reconcileTrigger(cb)
+		if cb.Command == "" {
+			cb.Trigger = engine.TriggerNever
+		}
+		out[i] = cb
+	}
+	return out
+}
+
+// fleetCoBotNames resolves a recorded co-reviewer list to registry names,
+// refusing one this binary does not know rather than skipping it: a silently
+// dropped bot looks exactly like one that is simply never triggered.
+func fleetCoBotNames(value string) ([]string, error) {
+	var names, unknown []string
+	for _, item := range splitList(value) {
+		co, ok := dialect.CoReviewerByName(item)
+		if !ok {
+			unknown = append(unknown, item)
+			continue
+		}
+		names = append(names, co.Name)
+	}
+	if len(unknown) > 0 {
+		known := make([]string, 0, 3)
+		for _, co := range dialect.KnownCoReviewers() {
+			known = append(known, co.Name)
+		}
+		return nil, fmt.Errorf("unknown co-reviewer %s (known: %s)",
+			strings.Join(unknown, ", "), strings.Join(known, ", "))
+	}
+	return names, nil
+}
+
+// isReviewerFleetKey reports whether a setting reshapes who reviews, or how a
+// co-reviewer is driven. Those are the ones whose derived views have to be
+// rebuilt, and whose changes existing rounds may have to be reconciled against.
+func isReviewerFleetKey(key string) bool {
+	return key == "required-bots" || key == "cobots" || strings.HasPrefix(key, "cobot-")
 }
 
 // FleetKeys lists every setting the fleet owns, in a stable order.
@@ -174,6 +376,30 @@ func parseFleetDuration(v string) (time.Duration, error) {
 		return 0, fmt.Errorf("duration must not be negative, got %s", d)
 	}
 	return d, nil
+}
+
+// parseFleetBool reads the spellings the environment already accepts, so a
+// seeded value and a hand-typed one mean the same thing.
+func parseFleetBool(v string) (bool, error) {
+	switch value := strings.ToLower(strings.TrimSpace(v)); value {
+	case "on":
+		return true, nil
+	case "off":
+		return false, nil
+	default:
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return false, fmt.Errorf("not a switch (try 1 or 0): %w", err)
+		}
+		return b, nil
+	}
+}
+
+func fleetBool(on bool) string {
+	if on {
+		return "1"
+	}
+	return "0"
 }
 
 // ValidateFleetSetting reports whether key is a fleet setting and value is one
@@ -228,10 +454,15 @@ func applyFleet(cfg Config, fleet map[string]string, warn func(string)) Config {
 		}
 		cfg = candidate
 	}
-	// RequiredBots is the input to the derived reviewer views. Applying it as a
-	// scalar without rebuilding those views can leave a required co-reviewer
-	// disabled or carrying its optional trigger mode.
-	if _, ok := fleet["required-bots"]; ok {
+	// The reviewer settings are the inputs to the derived reviewer views.
+	// Applying one as a scalar without rebuilding those views can leave a
+	// required co-reviewer disabled, carrying its optional trigger mode, or
+	// still driven by the command this host was started with.
+	if touchesReviewers(fleet) {
+		// A primary that is also a registry bot is triggered as the primary;
+		// asking it twice is the bug, and a fleet trigger for it must not undo
+		// the silencing LoadConfig applied.
+		cfg.CoBots = silenceTrigger(cfg.CoBots, cfg.Bot)
 		enabled := make([]string, 0, len(cfg.CoBots))
 		for _, cb := range cfg.CoBots {
 			enabled = append(enabled, cb.Login)
@@ -244,6 +475,15 @@ func applyFleet(cfg Config, fleet map[string]string, warn func(string)) Config {
 		})
 	}
 	return cfg
+}
+
+func touchesReviewers(fleet map[string]string) bool {
+	for key := range fleet {
+		if isReviewerFleetKey(key) {
+			return true
+		}
+	}
+	return false
 }
 
 func sortedKeys(m map[string]string) []string {

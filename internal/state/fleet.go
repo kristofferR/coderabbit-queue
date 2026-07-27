@@ -2,6 +2,7 @@ package state
 
 import (
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -61,9 +62,13 @@ func (s *State) FleetKeys() []string {
 // withFleet applies the state-backed settings the state package itself renders.
 // The full policy is interpreted by crq; MinInterval also shapes queue
 // readiness in dashboards/status, including GitStateStore's background sync.
+//
+// Trimmed the way crq's own fleet parser trims, because the recorded value is
+// whatever an operator typed: a stored " 5m " that queue decisions honour must
+// not leave the dashboard and status line advertising this host's interval.
 func (c StoreConfig) withFleet(s State) StoreConfig {
 	if value, ok := s.FleetValue("min-interval"); ok {
-		if interval, err := time.ParseDuration(value); err == nil && interval >= 0 {
+		if interval, err := time.ParseDuration(strings.TrimSpace(value)); err == nil && interval >= 0 {
 			c.MinInterval = interval
 		}
 	}

@@ -491,8 +491,10 @@ Set these in `~/.config/crq/env` (sourced automatically) or as environment varia
 ### One configuration for the fleet, not one per machine
 
 These settings belong to the whole fleet and live in the state ref, not in the table below:
-`scope`, `repos`, `exclude`, `required-bots`, `min-interval`, `inflight-timeout`,
-`rate-limit-fallback`, `calibrate-ttl`, `settle`, `skip-marker`, `skip-authors`.
+`scope`, `repos`, `exclude`, `required-bots`, `cobots`, `rate-limit-co-degrade`,
+`min-interval`, `inflight-timeout`, `rate-limit-fallback`, `calibrate-ttl`, `settle`,
+`skip-marker`, `skip-authors`, and one family per co-reviewer —
+`cobot-<name>-trigger`, `cobot-<name>-cmd`, `cobot-<name>-grace`.
 
 ```bash
 crq config                      # what is in force, and where it came from

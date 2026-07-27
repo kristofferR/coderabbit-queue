@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
@@ -164,6 +165,122 @@ func TestFleetRequiredBotsRebuildsDerivedReviewers(t *testing.T) {
 	}
 	if len(got.CoBots) != 1 || !got.CoBots[0].Required || got.CoBots[0].Trigger != "always" {
 		t.Fatalf("CoBots = %+v, want required codex with its required trigger", got.CoBots)
+	}
+}
+
+// Which co-reviewers run, how crq drives them, and whether an account-blocked
+// round degrades to them are decisions, not machine facts. Two hosts answering
+// them differently is the same divergence as one excluding a repository the
+// other reviews: both behave correctly, and the PRs disagree.
+func TestFleetOwnsTheCoReviewerPolicy(t *testing.T) {
+	ctx := context.Background()
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":              "codex",
+		"CRQ_REQUIRED_BOTS":       "coderabbitai[bot]",
+		"CRQ_COBOT_BUGBOT_CMD":    "bugbot run",
+		"CRQ_COBOT_BUGBOT_GRACE":  "10m",
+		"CRQ_COBOT_CODEX_TRIGGER": "always",
+		"CRQ_RL_CO_DEGRADE":       "0",
+	})
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	for _, set := range []struct{ key, value string }{
+		{"cobots", "bugbot"},
+		{"cobot-bugbot-trigger", "always"},
+		{"cobot-bugbot-cmd", "bugbot run now"},
+		{"cobot-bugbot-grace", "30m"},
+		{"rate-limit-co-degrade", "1"},
+	} {
+		if err := svc.SetFleetConfig(ctx, set.key, set.value); err != nil {
+			t.Fatalf("set %s: %v", set.key, err)
+		}
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := svc.fleetCfg(st)
+
+	if len(got.CoBots) != 1 || got.CoBots[0].Name != "bugbot" {
+		t.Fatalf("CoBots = %+v, want only the fleet's bugbot", got.CoBots)
+	}
+	bugbot := got.CoBots[0]
+	if bugbot.Trigger != engine.TriggerAlways || bugbot.Command != "bugbot run now" || bugbot.SelfHealGrace != 30*time.Minute {
+		t.Errorf("bugbot = %+v, want the fleet's trigger, command and grace", bugbot)
+	}
+	if !got.RateLimitCoDegrade {
+		t.Error("the fleet turned co-reviewer degradation on and this host stayed off")
+	}
+	// The derived views have to follow, or which co-reviewer runs depends on
+	// which view crq happens to ask.
+	var seen bool
+	for _, r := range got.Reviewers {
+		if !sameBot(r.Login, bugbot.Login) {
+			continue
+		}
+		seen = true
+		if r.Trigger != engine.TriggerAlways || r.Command != "bugbot run now" {
+			t.Errorf("reviewer %+v disagrees with the fleet's co-reviewer policy", r)
+		}
+	}
+	if !seen {
+		t.Errorf("Reviewers = %+v, want the fleet's co-reviewer among them", got.Reviewers)
+	}
+}
+
+// A value only some hosts can read breaks the fleet from the inside, so the
+// co-reviewer settings are refused where they are set like every other one.
+func TestFleetRefusesCoReviewerPolicyItCannotRead(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	for _, bad := range []struct{ key, value string }{
+		{"cobots", "codex,nosuchbot"},
+		{"cobot-codex-trigger", "sometimes"},
+		{"cobot-codex-grace", "-5m"},
+		{"rate-limit-co-degrade", "maybe"},
+	} {
+		if err := svc.SetFleetConfig(ctx, bad.key, bad.value); err == nil {
+			t.Errorf("%s accepted %q", bad.key, bad.value)
+		}
+	}
+	// Explicitly none is a real answer, not a malformed one.
+	if err := svc.SetFleetConfig(ctx, "cobots", ""); err != nil {
+		t.Errorf("cobots refused an empty set: %v", err)
+	}
+}
+
+// Enabling a co-reviewer fleet-wide is a reviewer change like requiring one:
+// the heads already reviewed were reviewed without it.
+func TestFleetCoBotChangeReopensCompletedRounds(t *testing.T) {
+	ctx := context.Background()
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":        "codex",
+		"CRQ_REQUIRED_BOTS": "coderabbitai[bot]",
+	})
+	repo, pr := "owner/repo", 7
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.PutRound(Round{Repo: repo, PR: pr, Head: "abcdef123", Phase: PhaseCompleted})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+	if err := svc.SetFleetConfig(ctx, "cobots", "codex,bugbot"); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ := store.Load(ctx)
+	round := st.Round(repo, pr)
+	if round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("round = %+v, want the completed round reopened for the new co-reviewer", round)
+	}
+	if !containsBot(round.ForceCoReviewers, dialect.BugbotLogin) {
+		t.Errorf("ForceCoReviewers = %v, want the newly enabled self-heal bot nudged once", round.ForceCoReviewers)
 	}
 }
 

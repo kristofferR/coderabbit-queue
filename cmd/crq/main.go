@@ -1123,8 +1123,10 @@ window one host respects and another does not — and nothing says so, because
 each host is behaving correctly according to what it can see. These settings
 have one answer for the fleet:
 
-  scope, repos, exclude, required-bots, min-interval, inflight-timeout,
-  rate-limit-fallback, calibrate-ttl, settle, skip-marker, skip-authors
+  scope, repos, exclude, required-bots, cobots, rate-limit-co-degrade,
+  min-interval, inflight-timeout, rate-limit-fallback, calibrate-ttl, settle,
+  skip-marker, skip-authors, and per co-reviewer: cobot-<name>-trigger,
+  cobot-<name>-cmd, cobot-<name>-grace
 
 Three kinds of setting deliberately stay local: where the state lives
 (CRQ_REPO, CRQ_ISSUE, CRQ_STATE_REF — a host cannot read fleet policy until it

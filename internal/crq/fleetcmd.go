@@ -161,7 +161,7 @@ func (s *Service) SeedFleetConfig(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	var open map[string]map[int]bool
-	if _, ok := initial.FleetValue("required-bots"); !ok {
+	if seedsReviewers(initial) {
 		open, err = s.openFleetPRs(ctx, initial)
 		if err != nil {
 			return nil, err
@@ -261,7 +261,7 @@ func (s *Service) requireFleetCapableDrivers(st *State) error {
 }
 
 func (s *Service) prepareFleetReviewerChange(ctx context.Context, key string) (map[string]map[int]bool, error) {
-	if key != "required-bots" {
+	if !isReviewerFleetKey(key) {
 		return nil, nil
 	}
 	st, _, err := s.store.Load(ctx)
@@ -269,6 +269,21 @@ func (s *Service) prepareFleetReviewerChange(ctx context.Context, key string) (m
 		return nil, err
 	}
 	return s.openFleetPRs(ctx, st)
+}
+
+// seedsReviewers reports whether seeding would record a reviewer setting the
+// fleet has no answer for yet, which is the case where the effective reviewers
+// can move and existing rounds have to be reconciled against them.
+func seedsReviewers(st State) bool {
+	for _, key := range FleetKeys() {
+		if !isReviewerFleetKey(key) {
+			continue
+		}
+		if _, ok := st.FleetValue(key); !ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) openFleetPRs(ctx context.Context, st State) (map[string]map[int]bool, error) {
@@ -346,10 +361,11 @@ func sameFoldedSet(a, b []string) bool {
 	return true
 }
 
+// reopenForFleetReviewerChange requeues what a fleet reviewer change invalidates.
+// Which rounds those are is decided per repository, against that repository's
+// override — the fleet's required set is only half of the effective one, and a
+// co-reviewer the fleet enables or disables moves it just as much.
 func (s *Service) reopenForFleetReviewerChange(st *State, before, after Config, open map[string]map[int]bool) {
-	if sameLogins(before.RequiredBots, after.RequiredBots) {
-		return
-	}
 	repos := map[string]bool{}
 	for _, round := range st.Rounds {
 		repos[NormalizeRepo(round.Repo)] = true
