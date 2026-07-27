@@ -3,7 +3,6 @@ package crq
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"testing"
 	"time"
 
@@ -364,7 +363,7 @@ func TestTidyReportsDeletionFailures(t *testing.T) {
 	cfg.Tidy = true
 	gh := newFakeGitHub()
 	gh.graphQL = noForcePush
-	gh.deleteErrs[100] = errors.New("resource not accessible by integration")
+	gh.deleteErrs[100] = &ghapi.APIError{Method: "DELETE", Status: 403, Body: "resource not accessible by integration"}
 	now := time.Now().UTC()
 	repo, pr := "o/r", 16
 
@@ -405,6 +404,13 @@ func TestTidyReportsDeletionFailures(t *testing.T) {
 	if len(result.Failed) != 1 || result.Failed[0].ID != 100 || result.Failed[0].Error == "" {
 		t.Fatalf("failed = %+v, want the refused comment and why", result.Failed)
 	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.TidiedCommands[QueueKey(repo, pr)]; len(got) != 0 {
+		t.Fatalf("definitively refused delete retained tombstones: %v", got)
+	}
 
 	// Ordinary cleanup failures stay best-effort, but a GitHub throttle must
 	// reach autoreview so it sleeps through the reset window.
@@ -416,7 +422,7 @@ func TestTidyReportsDeletionFailures(t *testing.T) {
 	if err := svc.tidyProgressed(ctx, repo, pr); !ghapi.IsThrottled(err) {
 		t.Fatalf("tidyProgressed error = %v, want the pre-delete read throttle", err)
 	}
-	st, _, err := store.Load(ctx)
+	st, _, err = store.Load(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,6 +436,59 @@ func TestTidyReportsDeletionFailures(t *testing.T) {
 	gh.graphQL = func(string, map[string]any, any) error { return throttle }
 	if _, err := svc.Tidy(ctx, repo, pr, false); !ghapi.IsThrottled(err) {
 		t.Fatalf("Tidy error = %v, want the force-push lookup throttle", err)
+	}
+}
+
+func TestTidyRetainsTombstoneWhenDeleteOutcomeIsAmbiguous(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.Tidy = true
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	gh.deleteAfterErrs[100] = context.DeadlineExceeded
+	now := time.Now().UTC()
+	repo, pr := "o/r", 29
+
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "bbbbbbbb2"
+	gh.pulls[fakeKey(repo, pr)] = pull
+	gh.commits["bbbbbbbb2"] = commitAt(now.Add(-10 * time.Minute))
+
+	c := ghapi.IssueComment{ID: 100, Body: cfg.ReviewCommand, CreatedAt: now.Add(-2 * time.Hour)}
+	c.User.Login = "kristofferR"
+	gh.comments[fakeKey(repo, pr)] = []ghapi.IssueComment{c}
+	review := ghapi.Review{ID: 900, CommitID: "bbbbbbbb2", SubmittedAt: now.Add(-90 * time.Minute), State: "COMMENTED"}
+	review.User.Login = cfg.Bot
+	gh.reviews[fakeKey(repo, pr)] = []ghapi.Review{review}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		return completedRound(st, repo, pr, now, func(r *Round) error {
+			if err := r.Fire(100, now.Add(-2*time.Hour)); err != nil {
+				return err
+			}
+			r.RecordPosted(cfg.Bot, 100, now.Add(-2*time.Hour))
+			return nil
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.Tidy(ctx, repo, pr, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Failed) != 1 || result.Failed[0].ID != 100 {
+		t.Fatalf("failed = %+v, want the ambiguous delete failure", result.Failed)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.TidiedCommands[QueueKey(repo, pr)]; len(got) != 1 || got[0].ID != 100 {
+		t.Fatalf("tidied commands = %v, want tombstone for ambiguously deleted comment 100", got)
 	}
 }
 

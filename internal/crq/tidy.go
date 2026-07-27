@@ -229,11 +229,18 @@ deleteLoop:
 			// comments, and a person may tidy by hand.
 			result.Deleted = append(result.Deleted, id)
 		default:
-			forget = append(forget, id)
 			if ghapi.IsThrottled(err) {
+				forget = append(forget, id)
 				throttleErr = err
 				forget = append(forget, stale[i+1:]...)
 				break deleteLoop
+			}
+			// A transport failure may arrive after GitHub applied the DELETE.
+			// Keep the prewritten tombstone unless an API response proves the
+			// comment remained on GitHub.
+			var apiErr *ghapi.APIError
+			if errors.As(err, &apiErr) {
+				forget = append(forget, id)
 			}
 			// One write failing must not abandon the rest — but it is reported,
 			// not just logged: a caller reading the result is the only one who can

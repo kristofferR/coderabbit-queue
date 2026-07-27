@@ -33,6 +33,7 @@ type fakeGitHub struct {
 	checkRunErrs    map[string]error
 	postBodyErrs    map[string]error // body → error (selective trigger-post failures)
 	deleteErrs      map[int64]error  // comment id → error (GitHub refuses the delete)
+	deleteAfterErrs map[int64]error  // comment id → error after GitHub applies the delete
 	posted          []string
 	deleted         []int64
 	commentID       int64
@@ -62,16 +63,17 @@ func (f *fakeGitHub) clock() time.Time {
 
 func newFakeGitHub() *fakeGitHub {
 	return &fakeGitHub{
-		pulls:          map[string]ghapi.Pull{},
-		commits:        map[string]ghapi.Commit{},
-		commitErrs:     map[string]error{},
-		reviews:        map[string][]ghapi.Review{},
-		comments:       map[string][]ghapi.IssueComment{},
-		reviewComments: map[string][]ghapi.ReviewComment{},
-		issueReactions: map[string][]ghapi.Reaction{},
-		reactions:      map[int64][]ghapi.Reaction{},
-		reactionErrs:   map[int64]error{},
-		deleteErrs:     map[int64]error{},
+		pulls:           map[string]ghapi.Pull{},
+		commits:         map[string]ghapi.Commit{},
+		commitErrs:      map[string]error{},
+		reviews:         map[string][]ghapi.Review{},
+		comments:        map[string][]ghapi.IssueComment{},
+		reviewComments:  map[string][]ghapi.ReviewComment{},
+		issueReactions:  map[string][]ghapi.Reaction{},
+		reactions:       map[int64][]ghapi.Reaction{},
+		reactionErrs:    map[int64]error{},
+		deleteErrs:      map[int64]error{},
+		deleteAfterErrs: map[int64]error{},
 	}
 }
 
@@ -250,7 +252,7 @@ func (f *fakeGitHub) DeleteIssueComment(_ context.Context, repo string, id int64
 			if c.ID == id {
 				f.comments[key] = append(list[:i], list[i+1:]...)
 				f.deleted = append(f.deleted, id)
-				return nil
+				return f.deleteAfterErrs[id]
 			}
 		}
 	}
