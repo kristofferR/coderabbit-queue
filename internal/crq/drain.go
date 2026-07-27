@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"html"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -66,6 +67,10 @@ func (s *Service) InstallDrain(ctx context.Context, agent string, agentArgs []st
 			return DrainInstall{}, fmt.Errorf("fix agent %q cannot be run: %w", agent, lerr)
 		}
 		agent = resolved
+	}
+	agent, err = filepath.Abs(agent)
+	if err != nil {
+		return DrainInstall{}, fmt.Errorf("resolving fix agent %q: %w", agent, err)
 	}
 	if len(repos) == 0 {
 		for repo := range s.cfg.AllowRepos {
@@ -291,6 +296,7 @@ func (s *Service) drainEnv(plan DrainInstall) map[string]string {
 		"CRQ_WATCH_INTERVAL":        s.cfg.WatchInterval.String(),
 		"CRQ_DISPATCH_MAX_ATTEMPTS": fmt.Sprint(s.cfg.DispatchMaxAttempts),
 		"CRQ_DISPATCH_CONCURRENCY":  fmt.Sprint(s.cfg.DispatchConcurrency),
+		"CRQ_DISPATCH_FORKS":        strconv.FormatBool(s.cfg.DispatchForks),
 		"CRQ_BOT":                   s.cfg.Bot,
 		"CRQ_REQUIRED_BOTS":         strings.Join(s.cfg.RequiredBots, ","),
 		"CRQ_FEEDBACK_BOTS":         strings.Join(s.cfg.FeedbackBots, ","),
@@ -355,7 +361,8 @@ func (s *Service) drainUnit(plan DrainInstall) string {
 	if plan.Platform == "darwin" {
 		var entries strings.Builder
 		for _, k := range keys {
-			fmt.Fprintf(&entries, "\t\t<key>%s</key><string>%s</string>\n", k, env[k])
+			fmt.Fprintf(&entries, "\t\t<key>%s</key><string>%s</string>\n",
+				html.EscapeString(k), html.EscapeString(env[k]))
 		}
 		return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -369,7 +376,8 @@ func (s *Service) drainUnit(plan DrainInstall) string {
 	<key>StandardOutPath</key><string>%s/drain.log</string>
 	<key>StandardErrorPath</key><string>%s/drain.err</string>
 </dict></plist>
-`, plan.Wrapper, entries.String(), logDir, logDir)
+`, html.EscapeString(plan.Wrapper), entries.String(),
+			html.EscapeString(logDir), html.EscapeString(logDir))
 	}
 	var lines strings.Builder
 	for _, k := range keys {

@@ -165,14 +165,16 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 			if !isRefLockContention(ferr) {
 				return "", fmt.Errorf("fetching %s: %w", repo, ferr)
 			}
-			if err := sleepCtx(ctx, time.Duration(attempt+1)*200*time.Millisecond); err != nil {
-				return "", err
+			if attempt < 2 {
+				if err := sleepCtx(ctx, time.Duration(attempt+1)*200*time.Millisecond); err != nil {
+					return "", err
+				}
 			}
 		}
-		// Still contended. Another worker is updating the existing mirror, so
-		// failing this dispatch would reject the concurrency this retry
-		// exists to support.
-		return path, nil
+		// Repeated lock contention is an error: it can be a stale lock left by a
+		// killed Git process, and without a successful fetch the mirror is not
+		// known current.
+		return "", fmt.Errorf("fetching %s after lock retries: %w", repo, ferr)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
@@ -270,6 +272,16 @@ func (w Workspace) configureOrigin(ctx context.Context, path string) error {
 		// helper with -c for network commands; using it here would answer with
 		// that command-line value even when the local config is empty, and the
 		// dispatched session's later plain `git push` would have no helper.
+		if kv[0] == "remote.origin.fetch" {
+			if got, err := gitDir(ctx, path, "config", "--local", "--get-all", kv[0]); err == nil &&
+				got == kv[1] {
+				continue
+			}
+			if _, err := gitDir(ctx, path, "config", "--local", "--replace-all", kv[0], kv[1]); err != nil {
+				return err
+			}
+			continue
+		}
 		if got, err := gitDir(ctx, path, "config", "--local", "--get", kv[0]); err == nil && got == kv[1] {
 			continue
 		}
@@ -449,12 +461,16 @@ func (w Workspace) sweepStaleWork(ctx context.Context, mirror, prDir string) {
 // newestModTime is the most recent modification anywhere under dir.
 func newestModTime(dir string) time.Time {
 	newest := time.Time{}
+	now := time.Now()
 	_ = filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		if info, ierr := d.Info(); ierr == nil && info.ModTime().After(newest) {
-			newest = info.ModTime()
+		if info, ierr := d.Info(); ierr == nil {
+			modified := info.ModTime()
+			if !modified.After(now) && modified.After(newest) {
+				newest = modified
+			}
 		}
 		return nil
 	})

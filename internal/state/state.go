@@ -308,6 +308,13 @@ type State struct {
 	// has been failing for hours would be wiped by unrelated progress, which is
 	// exactly how the failure stayed invisible.
 	Drain *DrainHealth `json:"drain,omitempty"`
+	// Drains keeps each host's failure streak independent. Drain above is the
+	// fleet summary dual-written for older binaries during rolling upgrades.
+	Drains map[string]DrainHealth `json:"drains,omitempty"`
+	// Dispatches holds live PR-level claims outside the bounded round archive.
+	// A session may still be resolving threads after its push superseded the
+	// claimed round, and archive eviction must not admit a second session.
+	Dispatches map[string]DispatchClaim `json:"dispatches,omitempty"`
 
 	Warn         string     `json:"warn,omitempty"`
 	UpdatedAt    *time.Time `json:"wrote_at,omitempty"`
@@ -672,6 +679,9 @@ func (r *Round) DispatchHeld(now time.Time) bool {
 // same worktree generation's work.
 func (s *State) ArchivedDispatchHeld(repo string, pr int, now time.Time) bool {
 	key := Key(repo, pr)
+	if claim, ok := s.Dispatches[key]; ok && claimHeld(claim, now) {
+		return true
+	}
 	for i := range s.Archive {
 		r := &s.Archive[i]
 		if Key(r.Repo, r.PR) == key && r.DispatchHeld(now) {
@@ -686,12 +696,30 @@ func (s *State) ArchivedDispatchHeld(repo string, pr int, now time.Time) bool {
 // it still owns the PR until thread resolution and the process both finish.
 func (s *State) HeartbeatArchivedDispatch(repo string, pr int, token string, now time.Time) (ok, taken bool) {
 	key := Key(repo, pr)
+	if claim, exists := s.Dispatches[key]; exists {
+		if claim.Token == token {
+			if !claimHeld(claim, now) {
+				s.ReleaseArchivedDispatch(repo, pr, token)
+				return false, false
+			}
+			claim.Heartbeat = now.UTC()
+			s.Dispatches[key] = claim
+			return true, false
+		}
+		if claimHeld(claim, now) {
+			return false, true
+		}
+	}
 	for i := range s.Archive {
 		r := &s.Archive[i]
 		if Key(r.Repo, r.PR) != key {
 			continue
 		}
 		if refreshed, byOther := r.HeartbeatDispatch(token, now); refreshed {
+			if s.Dispatches == nil {
+				s.Dispatches = map[string]DispatchClaim{}
+			}
+			s.Dispatches[key] = *r.Dispatch
 			return true, false
 		} else if byOther {
 			taken = true
@@ -706,6 +734,10 @@ func (s *State) HeartbeatArchivedDispatch(repo string, pr int, token string, now
 func (s *State) ReleaseArchivedDispatch(repo string, pr int, token string) bool {
 	key := Key(repo, pr)
 	released := false
+	if claim, ok := s.Dispatches[key]; ok && claim.Token == token {
+		delete(s.Dispatches, key)
+		released = true
+	}
 	for i := range s.Archive {
 		r := &s.Archive[i]
 		if Key(r.Repo, r.PR) == key && r.ReleaseDispatch(token) {
@@ -713,6 +745,18 @@ func (s *State) ReleaseArchivedDispatch(repo string, pr int, token string) bool 
 		}
 	}
 	return released
+}
+
+// RememberDispatch stores a newly granted claim independently of its round.
+func (s *State) RememberDispatch(repo string, pr int, claim DispatchClaim) {
+	if s.Dispatches == nil {
+		s.Dispatches = map[string]DispatchClaim{}
+	}
+	s.Dispatches[Key(repo, pr)] = claim
+}
+
+func claimHeld(claim DispatchClaim, now time.Time) bool {
+	return !claim.Heartbeat.IsZero() && now.UTC().Sub(claim.Heartbeat) < DispatchTTL
 }
 
 // ClaimDispatch takes this round's dispatch claim, or reports why it cannot. A
@@ -825,20 +869,50 @@ func (d *DrainHealth) Unhealthy() bool {
 // NoteDispatch records one dispatch attempt's outcome: whether a session
 // started, and the reason if it did not.
 func (s *State) NoteDispatch(host string, started bool, reason string, now time.Time) {
-	if s.Drain == nil {
-		s.Drain = &DrainHealth{}
+	if s.Drains == nil {
+		s.Drains = map[string]DrainHealth{}
+		if s.Drain != nil && s.Drain.Host != "" {
+			s.Drains[s.Drain.Host] = *s.Drain
+		}
 	}
 	at := now.UTC()
-	s.Drain.Host = host
+	drain := s.Drains[host]
+	drain.Host = host
 	if started {
-		s.Drain.ConsecutiveFailures = 0
-		s.Drain.LastError = ""
-		s.Drain.LastSuccessAt = &at
-		return
+		drain.ConsecutiveFailures = 0
+		drain.LastError = ""
+		drain.LastSuccessAt = &at
+	} else {
+		drain.ConsecutiveFailures++
+		drain.LastError = reason
+		drain.LastFailureAt = &at
 	}
-	s.Drain.ConsecutiveFailures++
-	s.Drain.LastError = reason
-	s.Drain.LastFailureAt = &at
+	s.Drains[host] = drain
+	s.summarizeDrains()
+}
+
+func (s *State) summarizeDrains() {
+	var summary *DrainHealth
+	for _, drain := range s.Drains {
+		candidate := drain
+		if summary == nil ||
+			candidate.ConsecutiveFailures > summary.ConsecutiveFailures ||
+			(candidate.ConsecutiveFailures == summary.ConsecutiveFailures &&
+				(timeAfter(candidate.LastFailureAt, summary.LastFailureAt) ||
+					(timeEqual(candidate.LastFailureAt, summary.LastFailureAt) &&
+						candidate.Host < summary.Host))) {
+			summary = &candidate
+		}
+	}
+	s.Drain = summary
+}
+
+func timeAfter(a, b *time.Time) bool {
+	return a != nil && (b == nil || a.After(*b))
+}
+
+func timeEqual(a, b *time.Time) bool {
+	return (a == nil && b == nil) || (a != nil && b != nil && a.Equal(*b))
 }
 
 // Queue-entry wait reasons. A waiting round is held by exactly one of these
@@ -1032,6 +1106,17 @@ func (s *State) Normalize(now time.Time) {
 	}
 	if s.Version == 0 {
 		s.Version = SchemaVersion
+	}
+	if s.Drain != nil && s.Drain.Host != "" {
+		if s.Drains == nil {
+			s.Drains = map[string]DrainHealth{}
+		}
+		if _, ok := s.Drains[s.Drain.Host]; !ok {
+			s.Drains[s.Drain.Host] = *s.Drain
+		}
+	}
+	if s.Drains != nil {
+		s.summarizeDrains()
 	}
 	if s.FireSlot != nil && s.SlotRound() == nil {
 		s.FireSlot = nil

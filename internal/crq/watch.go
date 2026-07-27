@@ -215,6 +215,16 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			// fire — so the marker has to be honoured before calling it, not
 			// after.
 			if s.cfg.SkipsReview(pull.Body) {
+				event := WatchEvent{
+					Repo: repo, PR: pull.Number,
+					Action: "skipped", Reason: "fleet auto-review skip marker present",
+					At: s.clock().UTC(),
+				}
+				if emit != nil {
+					if err := emit(event); err != nil {
+						return fmt.Errorf("emitting %s#%d: %w", repo, pull.Number, err)
+					}
+				}
 				continue
 			}
 			var report NextReport
@@ -385,7 +395,14 @@ func (s *Service) startDispatchResult(
 	if s.cfg.DryRun {
 		return false, "dry run: would dispatch a fix session", nil
 	}
-	if ok, why := pool.acquire(); !ok {
+	var ok bool
+	var why string
+	if opts.Once {
+		ok, why = pool.acquireContext(ctx)
+	} else {
+		ok, why = pool.acquire()
+	}
+	if !ok {
 		return false, why, nil
 	}
 	token := randomToken()
@@ -671,6 +688,7 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 			reason, byDesign = why, true
 			return ErrNoChange
 		}
+		st.RememberDispatch(report.Repo, report.PR, *round.Dispatch)
 		st.PutRound(*round)
 		return nil
 	})
@@ -775,6 +793,7 @@ func (s *Service) beatDispatch(ctx context.Context, report NextReport, token str
 					if !ok {
 						return ErrNoChange
 					}
+					st.RememberDispatch(report.Repo, report.PR, *round.Dispatch)
 					st.PutRound(*round)
 					return nil
 				}); err != nil && !errors.Is(err, ErrNoChange) {
@@ -840,6 +859,27 @@ func (p *dispatchPool) acquire() (bool, string) {
 		// waiting on a slot is the shape of problem this whole command
 		// exists to remove, so say so rather than logging it as routine.
 		return false, "at the configured dispatch cap (CRQ_DISPATCH_CONCURRENCY); this PR waits"
+	}
+}
+
+// acquireContext waits for capacity in a one-shot run. Unlike a long-lived
+// watcher, --once has no later pass in which to revisit a skipped PR.
+func (p *dispatchPool) acquireContext(ctx context.Context) (bool, string) {
+	if p.slots == nil {
+		return true, ""
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err.Error()
+	}
+	select {
+	case p.slots <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			p.release()
+			return false, err.Error()
+		}
+		return true, ""
+	case <-ctx.Done():
+		return false, ctx.Err().Error()
 	}
 }
 

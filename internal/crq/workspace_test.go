@@ -339,6 +339,31 @@ func TestPruningMeasuresTheNewestFileNotTheDirectory(t *testing.T) {
 	}
 }
 
+func TestPruningIgnoresFutureModificationTimes(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Now().Add(-2 * staleWorkAge)
+	future := time.Now().Add(30 * 24 * time.Hour)
+	oldFile := filepath.Join(dir, "old")
+	futureFile := filepath.Join(dir, "future")
+	for _, path := range []string{oldFile, futureFile} {
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(oldFile, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(futureFile, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if got := newestModTime(dir); got.After(time.Now()) || got.Before(old.Add(-time.Second)) {
+		t.Errorf("newest usable modification = %s, want the old non-future timestamp", got)
+	}
+}
+
 // A mirror created before the refspec rule still fetches +refs/*:refs/*. One
 // branch created in a worktree then wedges every future fetch for the whole
 // repository — "refusing to fetch into branch ... checked out at" — which is how
@@ -374,6 +399,30 @@ func TestMirrorMigratesAnOldRefspec(t *testing.T) {
 	got, err := gitDir(ctx, mirror, "config", "--get", "remote.origin.fetch")
 	if err != nil || got != originRefspec {
 		t.Errorf("refspec = %q err=%v, want it migrated to %q", got, err, originRefspec)
+	}
+}
+
+func TestMirrorReplacesEveryOldFetchRefspec(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(ctx, mirror, "config", "--add", "remote.origin.fetch", "+refs/*:refs/*"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	got, err := gitDir(ctx, mirror, "config", "--get-all", "remote.origin.fetch")
+	if err != nil || got != originRefspec {
+		t.Errorf("fetch refspecs = %q err=%v, want exactly %q", got, err, originRefspec)
 	}
 }
 

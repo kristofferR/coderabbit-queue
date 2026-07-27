@@ -160,6 +160,80 @@ func TestArchivedDispatchCanBeHeartbeatedWithoutRevivingItsRound(t *testing.T) {
 	}
 }
 
+func TestLiveDispatchSurvivesRoundArchiveEviction(t *testing.T) {
+	now := time.Date(2026, 7, 27, 8, 0, 0, 0, time.UTC)
+	st := New()
+	r, err := st.NewRound("o/r", 1, "aaaaaaaa1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, why := r.ClaimDispatch("host", "tok", now, 3); !ok {
+		t.Fatal(why)
+	}
+	st.RememberDispatch(r.Repo, r.PR, *r.Dispatch)
+	st.PutRound(*r)
+	st.EndRound(r.Repo, r.PR, "superseded")
+	for i := 0; i < ArchiveMax+10; i++ {
+		pr := i + 100
+		if _, err := st.NewRound("o/r", pr, "bbbbbbbb2", now); err != nil {
+			t.Fatal(err)
+		}
+		st.EndRound("o/r", pr, "closed")
+	}
+	if !st.ArchivedDispatchHeld("o/r", 1, now.Add(time.Minute)) {
+		t.Fatal("live PR claim was lost when its historical round was evicted")
+	}
+	if ok, taken := st.HeartbeatArchivedDispatch("o/r", 1, "tok", now.Add(2*time.Minute)); !ok || taken {
+		t.Fatalf("heartbeat after eviction = ok %v taken %v", ok, taken)
+	}
+	if !st.ReleaseArchivedDispatch("o/r", 1, "tok") {
+		t.Fatal("claim outside the archive could not be released")
+	}
+}
+
+func TestExpiredLiveDispatchCannotBeRenewed(t *testing.T) {
+	now := time.Date(2026, 7, 27, 8, 0, 0, 0, time.UTC)
+	st := New()
+	st.RememberDispatch("o/r", 1, DispatchClaim{
+		Host: "host", Token: "tok", At: now, Heartbeat: now, Attempts: 1,
+	})
+	st.Archive = []Round{{
+		Repo: "o/r", PR: 1, Phase: PhaseAbandoned,
+		Dispatch: &DispatchClaim{
+			Host: "host", Token: "tok", At: now, Heartbeat: now, Attempts: 1,
+		},
+	}}
+	if ok, taken := st.HeartbeatArchivedDispatch("o/r", 1, "tok", now.Add(DispatchTTL)); ok || taken {
+		t.Fatalf("expired heartbeat = ok %v taken %v", ok, taken)
+	}
+	if _, exists := st.Dispatches[Key("o/r", 1)]; exists {
+		t.Fatal("expired claim was retained after a failed renewal")
+	}
+	if st.Archive[0].Dispatch.Token != "" {
+		t.Fatal("expired archived claim could be renewed on a later heartbeat")
+	}
+}
+
+func TestReplacementDispatchCannotBeOverwrittenByArchivedOwner(t *testing.T) {
+	now := time.Date(2026, 7, 27, 8, 0, 0, 0, time.UTC)
+	st := New()
+	st.RememberDispatch("o/r", 1, DispatchClaim{
+		Host: "new", Token: "new-token", At: now, Heartbeat: now, Attempts: 1,
+	})
+	st.Archive = []Round{{
+		Repo: "o/r", PR: 1, Phase: PhaseAbandoned,
+		Dispatch: &DispatchClaim{
+			Host: "old", Token: "old-token", At: now, Heartbeat: now, Attempts: 1,
+		},
+	}}
+	if ok, taken := st.HeartbeatArchivedDispatch("o/r", 1, "old-token", now.Add(time.Minute)); ok || !taken {
+		t.Fatalf("old heartbeat = ok %v taken %v, want replacement reported", ok, taken)
+	}
+	if got := st.Dispatches[Key("o/r", 1)].Token; got != "new-token" {
+		t.Fatalf("active token = %q, want replacement preserved", got)
+	}
+}
+
 // A session's own push moves the head, so crq supersedes the round and the fresh
 // one carries no claim. Reading that as "somebody took this round" killed the
 // session between pushing and resolving — every single time it succeeded.

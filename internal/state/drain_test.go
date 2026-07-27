@@ -55,3 +55,25 @@ func TestDrainHealthSurfacesAFailingDispatcher(t *testing.T) {
 		t.Error("recovery must be recorded")
 	}
 }
+
+func TestDrainHealthStreaksAreIndependentPerHost(t *testing.T) {
+	now := time.Date(2026, 7, 27, 8, 0, 0, 0, time.UTC)
+	st := New()
+	for i := 0; i < DrainUnhealthyAfter; i++ {
+		at := now.Add(time.Duration(i) * time.Minute)
+		st.NoteDispatch("broken", false, "cannot start", at)
+		st.NoteDispatch("healthy", true, "", at)
+	}
+	if got := st.Drains["broken"].ConsecutiveFailures; got != DrainUnhealthyAfter {
+		t.Fatalf("broken host failures = %d, want %d", got, DrainUnhealthyAfter)
+	}
+	if !st.Drain.Unhealthy() || st.Drain.Host != "broken" {
+		t.Fatalf("fleet summary = %+v, want the broken host retained", st.Drain)
+	}
+
+	loaded := State{Drains: st.Drains}
+	loaded.Normalize(now)
+	if loaded.Drain == nil || loaded.Drain.Host != "broken" {
+		t.Fatalf("normalized summary = %+v, want it rebuilt from per-host records", loaded.Drain)
+	}
+}

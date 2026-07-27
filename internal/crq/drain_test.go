@@ -2,6 +2,8 @@ package crq
 
 import (
 	"context"
+	"encoding/xml"
+	"html"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -113,6 +115,7 @@ func TestDrainUnitCarriesTheConfigurationTheInstallRead(t *testing.T) {
 
 func TestDrainUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 	cfg := firingConfig()
+	cfg.DispatchForks = true
 	cfg.Bot = "custom-reviewer[bot]"
 	cfg.RequiredBots = []string{"custom-reviewer[bot]", "cursor[bot]"}
 	cfg.FeedbackBots = []string{"custom-reviewer[bot]", "cursor[bot]", "observer[bot]"}
@@ -136,11 +139,61 @@ func TestDrainUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 		`CRQ_COBOT_BUGBOT_TRIGGER=always`,
 		`CRQ_COBOT_BUGBOT_REQUIRED=true`,
 		`CRQ_COBOT_BUGBOT_GRACE=4m0s`,
+		`CRQ_DISPATCH_FORKS=true`,
 		`CRQ_RL_CO_DEGRADE=0`,
 	} {
 		if !strings.Contains(unit, want) {
 			t.Errorf("unit does not carry %q:\n%s", want, unit)
 		}
+	}
+}
+
+func TestLaunchdUnitEscapesXMLValues(t *testing.T) {
+	cfg := firingConfig()
+	cfg.ReviewCommand = "@bot review <this> & report"
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	plan := DrainInstall{
+		Platform: "darwin",
+		Wrapper:  "/tmp/a&b/crq-drain",
+		LogDir:   "/tmp/a<b/logs",
+	}
+
+	unit := svc.drainUnit(plan)
+	var document struct{}
+	if err := xml.Unmarshal([]byte(unit), &document); err != nil {
+		t.Fatalf("launchd unit is not valid XML: %v\n%s", err, unit)
+	}
+	for _, raw := range []string{plan.Wrapper, plan.LogDir, cfg.ReviewCommand} {
+		if strings.Contains(unit, raw) {
+			t.Errorf("launchd unit contains unescaped value %q:\n%s", raw, unit)
+		}
+		if escaped := html.EscapeString(raw); !strings.Contains(unit, escaped) {
+			t.Errorf("launchd unit lost escaped value %q:\n%s", escaped, unit)
+		}
+	}
+}
+
+func TestInstallDrainMakesRelativeAgentAbsolute(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agent := filepath.Join(bin, "wrapper")
+	if err := os.WriteFile(agent, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/name": true}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	plan, err := svc.InstallDrain(context.Background(), "./bin/wrapper", []string{"--run"}, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(plan.Agent) || plan.Agent != agent {
+		t.Errorf("agent = %q, want absolute %q", plan.Agent, agent)
 	}
 }
 

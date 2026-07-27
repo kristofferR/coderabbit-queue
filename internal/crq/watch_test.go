@@ -121,6 +121,72 @@ func TestWatchRefusesDispatchWithNoCommand(t *testing.T) {
 	}
 }
 
+func TestWatchEmitsAnEventForASkipMarkedPullRequest(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/r": true}
+	cfg.SkipMarker = "<!-- crq:skip-autoreview -->"
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Number = 9
+	pull.Body = cfg.SkipMarker
+	gh.pulls[fakeKey("o/r", 9)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	var events []WatchEvent
+	if err := svc.watchPass(context.Background(), WatchOptions{}, newDispatchPool(0), func(event WatchEvent) error {
+		events = append(events, event)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Action != "skipped" || events[0].Reason == "" {
+		t.Fatalf("events = %#v, want one explained skip", events)
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Round("o/r", 9) != nil {
+		t.Fatal("skip-marked PR was passed to the mutating Next oracle")
+	}
+}
+
+func TestOneShotDispatchPoolWaitsForCapacity(t *testing.T) {
+	pool := newDispatchPool(1)
+	if ok, why := pool.acquire(); !ok {
+		t.Fatal(why)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result := make(chan bool)
+	go func() {
+		ok, _ := pool.acquireContext(ctx)
+		result <- ok
+	}()
+	select {
+	case <-result:
+		t.Fatal("one-shot acquisition did not wait for the occupied slot")
+	case <-time.After(20 * time.Millisecond):
+	}
+	pool.release()
+	if ok := <-result; !ok {
+		t.Fatal("one-shot acquisition did not take capacity when it became available")
+	}
+	pool.release()
+
+	if ok, why := pool.acquire(); !ok {
+		t.Fatal(why)
+	}
+	cancelled, cancelNow := context.WithCancel(context.Background())
+	cancelNow()
+	if ok, why := pool.acquireContext(cancelled); ok || !strings.Contains(why, context.Canceled.Error()) {
+		t.Fatalf("cancelled acquisition = ok %v reason %q", ok, why)
+	}
+	pool.release()
+}
+
 // DryRun means crq writes nothing and posts nothing. Claiming shared state and
 // running a code-writing command is the largest possible violation of that.
 func TestDispatchHonoursDryRun(t *testing.T) {

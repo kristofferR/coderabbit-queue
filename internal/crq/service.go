@@ -441,11 +441,11 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 // window, and never shortens it.
 func (s *Service) recordObservedBlock(ctx context.Context, obs observation, st State, now time.Time) (*State, error) {
 	blk := engine.ObservedAccountBlock(obs.eng, s.cfg.policy(), st.Account, now)
-	if blk == nil || s.cfg.DryRun || !engine.AcceptAccountBlock(st.Account.BlockedUntil, blk.Until) {
+	if blk == nil || s.cfg.DryRun || !observedAccountBlockChanges(st.Account, blk) {
 		return nil, nil
 	}
 	updated, err := s.store.Update(ctx, func(w *State) error {
-		if !engine.AcceptAccountBlock(w.Account.BlockedUntil, blk.Until) {
+		if !observedAccountBlockChanges(w.Account, blk) {
 			return ErrNoChange
 		}
 		applyAccountBlock(w, blk, now)
@@ -467,6 +467,26 @@ func (s *Service) recordObservedBlock(ctx context.Context, obs observation, st S
 		s.log.Printf("account blocked until %s (observed, not tied to a round)", blk.Until.UTC().Format(time.RFC3339))
 	}
 	return &updated, nil
+}
+
+// observedAccountBlockChanges accepts a longer window, or a distinct notice
+// whose shorter window the engine has already clamped to the standing block.
+// The latter still has to advance the notice watermark so it cannot become a
+// fresh fallback block when the standing window expires.
+func observedAccountBlockChanges(q AccountQuota, blk *engine.AccountBlock) bool {
+	if engine.AcceptAccountBlock(q.BlockedUntil, blk.Until) {
+		return true
+	}
+	if q.BlockedUntil == nil || !blk.Until.Equal(*q.BlockedUntil) || blk.CommentID == 0 {
+		return false
+	}
+	if q.RLCommentUpdated != nil && !blk.CommentUpdated.After(*q.RLCommentUpdated) {
+		return false
+	}
+	if blk.CommentID != q.RLCommentID || q.RLCommentUpdated == nil {
+		return true
+	}
+	return true
 }
 
 // applyAccountBlock records an observed account-quota block, whatever observed
@@ -634,7 +654,8 @@ func applyAccountBlock(st *State, blk *engine.AccountBlock, now time.Time) {
 	st.Account.Remaining = &zero
 	st.Account.Source = "warning"
 	st.Account.CheckedAt = &now
-	if blk.CommentID != 0 {
+	if blk.CommentID != 0 &&
+		(st.Account.RLCommentUpdated == nil || blk.CommentUpdated.After(*st.Account.RLCommentUpdated)) {
 		st.Account.RLCommentID = blk.CommentID
 		u := blk.CommentUpdated.UTC()
 		st.Account.RLCommentUpdated = &u

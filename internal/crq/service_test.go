@@ -2712,3 +2712,60 @@ func TestFeedbackRecordsARateLimitNoticeItObserves(t *testing.T) {
 		}
 	}
 }
+
+func TestObservedAccountBlockPersistsANewerNoticeAtTheStandingWindow(t *testing.T) {
+	now := time.Date(2026, 7, 27, 8, 0, 0, 0, time.UTC)
+	standing := now.Add(time.Hour)
+	oldNotice := now.Add(-2 * time.Minute)
+	newNotice := now.Add(-time.Minute)
+	q := AccountQuota{
+		BlockedUntil:     &standing,
+		RLCommentID:      100,
+		RLCommentUpdated: &oldNotice,
+	}
+	blk := &engine.AccountBlock{
+		Until: standing, CommentID: 101, CommentUpdated: newNotice,
+	}
+	if !observedAccountBlockChanges(q, blk) {
+		t.Fatal("a distinct shorter notice was not accepted for watermarking")
+	}
+	st := State{Account: q}
+	applyAccountBlock(&st, blk, now)
+	if st.Account.RLCommentID != 101 || !st.Account.RLCommentUpdated.Equal(newNotice) {
+		t.Fatalf("notice watermark = id %d updated %v, want id 101 at %s",
+			st.Account.RLCommentID, st.Account.RLCommentUpdated, newNotice)
+	}
+}
+
+func TestObservedAccountBlockDoesNotRollTheNoticeWatermarkBackward(t *testing.T) {
+	now := time.Date(2026, 7, 27, 8, 0, 0, 0, time.UTC)
+	standing := now.Add(time.Hour)
+	watermark := now.Add(-time.Minute)
+	older := now.Add(-2 * time.Minute)
+	q := AccountQuota{
+		BlockedUntil:     &standing,
+		RLCommentID:      100,
+		RLCommentUpdated: &watermark,
+	}
+	blk := &engine.AccountBlock{
+		Until: standing, CommentID: 101, CommentUpdated: older,
+	}
+	if observedAccountBlockChanges(q, blk) {
+		t.Fatal("an older notice from a different comment rolled the watermark backward")
+	}
+
+	later := standing.Add(time.Hour)
+	blk.Until = later
+	if !observedAccountBlockChanges(q, blk) {
+		t.Fatal("an older notice's longer block window was discarded")
+	}
+	st := State{Account: q}
+	applyAccountBlock(&st, blk, now)
+	if !st.Account.BlockedUntil.Equal(later) {
+		t.Fatalf("blocked until %s, want extension to %s", st.Account.BlockedUntil, later)
+	}
+	if st.Account.RLCommentID != q.RLCommentID || !st.Account.RLCommentUpdated.Equal(watermark) {
+		t.Fatalf("older notice replaced watermark with id %d at %v",
+			st.Account.RLCommentID, st.Account.RLCommentUpdated)
+	}
+}
