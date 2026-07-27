@@ -19,6 +19,8 @@ func TestSkipMarkerHasToBeUsedNotMentioned(t *testing.T) {
 		{"double-backtick span may contain a backtick", "``example ` <!-- crq:skip-autoreview -->``", false},
 		{"mentioned in a fence", "```md\n<!-- crq:skip-autoreview -->\n```\n", false},
 		{"mentioned in a tilde fence", "~~~md\n<!-- crq:skip-autoreview -->\n~~~\n", false},
+		{"shorter nested fence does not close a longer fence", "````md\n```\n<!-- crq:skip-autoreview -->\n```\n````\n", false},
+		{"longer fence closes a shorter fence", "```md\n<!-- crq:skip-autoreview -->\n````\n<!-- crq:skip-autoreview -->", true},
 		{"mentioned in an indented block", "Example:\n\n    <!-- crq:skip-autoreview -->\n", false},
 		{"indented block followed by a used marker", "Example:\n\n    <!-- crq:skip-autoreview -->\n\n<!-- crq:skip-autoreview -->", true},
 		{"mentioned in a tab-indented block", "Example:\n\n\t<!-- crq:skip-autoreview -->\n", false},

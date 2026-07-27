@@ -24,12 +24,13 @@ var fixPrompt string
 // DrainInstall describes what an install would do, so --dry-run can print it and
 // the result can be reported.
 type DrainInstall struct {
-	Platform string `json:"platform"`
-	Prompt   string `json:"prompt"`
-	Wrapper  string `json:"wrapper"`
-	Unit     string `json:"unit"`
-	LogDir   string `json:"log_dir"`
-	Agent    string `json:"agent"`
+	Platform  string `json:"platform"`
+	Prompt    string `json:"prompt"`
+	Wrapper   string `json:"wrapper"`
+	Unit      string `json:"unit"`
+	LogDir    string `json:"log_dir"`
+	Workspace string `json:"workspace,omitempty"`
+	Agent     string `json:"agent"`
 	// Invocation is the exact command the wrapper runs, so --dry-run shows what
 	// the fix session will actually be — including the model, which is the
 	// agent's business and not crq's to hardcode.
@@ -98,6 +99,12 @@ func (s *Service) InstallDrain(ctx context.Context, agent string, agentArgs []st
 		Agent:    agent,
 		Repos:    repos,
 		DryRun:   dryRun,
+	}
+	if root := strings.TrimSpace(s.cfg.WorkspaceRoot); root != "" {
+		plan.Workspace, err = filepath.Abs(root)
+		if err != nil {
+			return plan, fmt.Errorf("resolving drain workspace %q: %w", root, err)
+		}
 	}
 	switch runtime.GOOS {
 	case "darwin":
@@ -331,8 +338,12 @@ func (s *Service) drainEnv(plan DrainInstall) map[string]string {
 	// A workspace supplied by the installing shell is already folded into cfg,
 	// but the service does not inherit that shell. Preserve the effective value
 	// or dispatch silently falls back to another filesystem.
-	if s.cfg.WorkspaceRoot != "" {
-		env["CRQ_WORKSPACE"] = s.cfg.WorkspaceRoot
+	workspace := plan.Workspace
+	if workspace == "" {
+		workspace = s.cfg.WorkspaceRoot
+	}
+	if workspace != "" {
+		env["CRQ_WORKSPACE"] = workspace
 	}
 	if path := ConfigPath(); path != "" {
 		env["CRQ_CONFIG"] = path
@@ -408,7 +419,15 @@ StandardError=append:%s/drain.err
 
 [Install]
 WantedBy=default.target
-`, lines.String(), plan.Wrapper, logDir, logDir)
+`, lines.String(), systemdExecWord(plan.Wrapper), logDir, logDir)
+}
+
+// systemdExecWord makes one literal word for an ExecStart command line.
+// Doubling '$' and '%' suppresses systemd's environment and specifier
+// expansion; strconv.Quote handles whitespace, quotes and control characters.
+func systemdExecWord(word string) string {
+	word = strings.NewReplacer("$", "$$", "%", "%%").Replace(word)
+	return strconv.Quote(word)
 }
 
 // agentInvocation renders the shell words that run one fix session.

@@ -183,6 +183,25 @@ func TestDrainEnvCarriesConfiguredWorkspace(t *testing.T) {
 	}
 }
 
+func TestInstallDrainMakesRelativeWorkspaceAbsolute(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/name": true}
+	cfg.WorkspaceRoot = "relative workspace"
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	plan, err := svc.InstallDrain(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(root, cfg.WorkspaceRoot)
+	if got := svc.drainEnv(plan)["CRQ_WORKSPACE"]; got != want {
+		t.Fatalf("CRQ_WORKSPACE = %q, want absolute install-time path %q", got, want)
+	}
+}
+
 func TestLaunchdUnitEscapesXMLValues(t *testing.T) {
 	cfg := firingConfig()
 	cfg.ReviewCommand = "@bot review <this> & report"
@@ -247,6 +266,17 @@ func TestSystemdEnvironmentAssignmentsQuoteWhitespace(t *testing.T) {
 	}
 	if strings.Contains(unit, "Environment=CRQ_CONFIG=") {
 		t.Errorf("CRQ_CONFIG was emitted as an unquoted systemd assignment:\n%s", unit)
+	}
+	if !strings.Contains(unit, `ExecStart="/tmp/crq-drain"`) {
+		t.Errorf("ExecStart executable is not quoted:\n%s", unit)
+	}
+}
+
+func TestSystemdExecWordQuotesWhitespaceAndExpansion(t *testing.T) {
+	got := systemdExecWord(`/tmp/a path/$user/%i/"crq"`)
+	want := `"/tmp/a path/$$user/%%i/\"crq\""`
+	if got != want {
+		t.Fatalf("systemdExecWord = %q, want %q", got, want)
 	}
 }
 
