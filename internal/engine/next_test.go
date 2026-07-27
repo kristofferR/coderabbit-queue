@@ -170,6 +170,17 @@ func TestNextAction(t *testing.T) {
 			want: ActionPush,
 		},
 		{
+			// The other side of that boundary: reserving the slot IS the request,
+			// so the command is imminent and the head must stop moving.
+			name: "a reserved round is a review to hold for",
+			in: NextInput{
+				Round: state.Round{Phase: state.PhaseReserved},
+				Obs:   openObs(), Completion: both(false, false), LocalWork: true,
+				MinDelay: time.Minute,
+			},
+			want: ActionHold, wantAt: t0.Add(time.Minute),
+		},
+		{
 			name: "all answered with staged work means push",
 			in: NextInput{
 				Obs: openObs(), Completion: both(true, true), LocalWork: true,
