@@ -1075,6 +1075,24 @@ func TestReopenedRoundDedupesOnlyOnCompletionEvidence(t *testing.T) {
 						CreatedAt: t0, UpdatedAt: t0.Add(2 * time.Minute)}}},
 			want: FirePost,
 		},
+		{
+			// Each half used to find its own reply: the round's failed command
+			// satisfied the command-id check, while a later successful command
+			// satisfied the completion-evidence check.
+			name: "later command cannot repair this round's failed reply",
+			obs: Observation{Head: head, Open: true, Reviews: []ReviewSeen{priorReview},
+				Events: []dialect.BotEvent{
+					command,
+					completion,
+					{Kind: dialect.EvFailed, Bot: "coderabbitai[bot]", CommentID: 900,
+						CreatedAt: t0, UpdatedAt: t0.Add(2 * time.Minute)},
+					{Kind: dialect.EvCommand, Bot: "kristofferR", CommentID: 2001,
+						CreatedAt: t0.Add(3 * time.Minute), UpdatedAt: t0.Add(3 * time.Minute)},
+					{Kind: dialect.EvCompletion, Bot: "coderabbitai[bot]", CommentID: 2002,
+						AutoReply: true, CreatedAt: t0.Add(4 * time.Minute), UpdatedAt: t0.Add(4 * time.Minute)},
+				}},
+			want: FirePost,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

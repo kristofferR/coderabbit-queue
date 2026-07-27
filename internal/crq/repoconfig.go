@@ -252,7 +252,7 @@ func mustOverride(st *State, repo string) RepoReviewers {
 	return ov
 }
 
-// reopenForChangedReviewers requeues this repository's completed rounds when the
+// reopenForChangedReviewers updates this repository's live rounds when the
 // effective reviewer set changed.
 //
 // A completed round is the "this head was reviewed" dedup marker, so adding a
@@ -263,12 +263,13 @@ func mustOverride(st *State, repo string) RepoReviewers {
 //
 // Optional co-reviewers count too: once one has participation evidence,
 // Completion waits for it, and its trigger/self-heal needs an active round to
-// run. Only completed rounds are touched — an in-flight round is already going
-// to answer — and only those whose pull request is still open. Rounds are never
-// deleted, so a repository's merged and closed PRs stay behind as completed
-// dedup markers: requeueing those would hand Pump hundreds of dead rounds to
-// observe and drop one per tick, ahead of every real one, and a stranded PR is
-// by definition an open one.
+// run. Existing active rounds receive the same one-shot force as reopened ones:
+// an in-flight self-heal reviewer with no activity cannot otherwise know it was
+// just required. Completed rounds are reopened only when their pull request is
+// still open. Rounds are never deleted, so a repository's merged and closed PRs
+// stay behind as completed dedup markers: requeueing those would hand Pump
+// hundreds of dead rounds to observe and drop one per tick, ahead of every real
+// one, and a stranded PR is by definition an open one.
 //
 // A closed PR's round is marked instead of requeued, because closed is not
 // final: reopened at the same head, its completed round would be the dedup
@@ -286,10 +287,22 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 		return
 	}
 	for _, round := range st.Rounds {
-		if NormalizeRepo(round.Repo) != NormalizeRepo(repo) || round.Phase != PhaseCompleted {
+		if NormalizeRepo(round.Repo) != NormalizeRepo(repo) {
 			continue
 		}
 		forced := forcedCoReviewers(round.ForceCoReviewers, before, after)
+		switch round.Phase {
+		case PhaseQueued, PhaseReserved, PhaseFired, PhaseReviewing, PhaseAwaitingRetry:
+			if !sameLogins(round.ForceCoReviewers, forced) {
+				updated := round
+				updated.ForceCoReviewers = forced
+				st.PutRound(updated)
+			}
+			continue
+		case PhaseCompleted:
+		default:
+			continue
+		}
 		if !open[round.PR] {
 			if !round.ReviewersChanged || !sameLogins(round.ForceCoReviewers, forced) {
 				marked := round
@@ -311,10 +324,10 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 	}
 }
 
-// forcedCoReviewers carries the one exceptional trigger a completed-head reopen
-// needs. A newly enabled or required self-heal bot has no activity on that old
-// head, so its normal mode cannot decide it missed anything; force it once
-// without changing the repository's steady-state trigger policy.
+// forcedCoReviewers carries the one exceptional trigger an existing round
+// needs. A newly enabled or required self-heal bot has no activity on that head,
+// so its normal mode cannot decide it missed anything; force it once without
+// changing the repository's steady-state trigger policy.
 func forcedCoReviewers(existing []string, before, after Config) []string {
 	var out []string
 	for _, cb := range after.CoBots {

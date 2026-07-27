@@ -320,11 +320,11 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if err != nil {
 		return result, err
 	}
-	// A blocked front of the queue must not starve later PRs of resolutions that
-	// spend NO CodeRabbit quota — a co-reviewer defer, or a summary-only round
-	// whose review is never coming from CodeRabbit at all.
+	// A blocked or orphaned-slot-held front of the queue must not starve later
+	// PRs of resolutions that spend NO CodeRabbit quota — a co-reviewer defer,
+	// or a summary-only round whose review is never coming from CodeRabbit at all.
 	accountBlocked := global.BlockedUntil != nil && global.BlockedUntil.After(now)
-	if decision.Verdict == engine.FireNo && accountBlocked {
+	if decision.Verdict == engine.FireNo && (accountBlocked || st.SlotHeld(now)) {
 		if free, handled, err := s.sweepQuotaFree(ctx, st, now, next.Repo, next.PR); err != nil {
 			return PumpResult{}, err
 		} else if handled {

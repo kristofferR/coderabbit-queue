@@ -110,8 +110,8 @@ type Round struct {
 	// the round rather than treating it as "this head was reviewed". Reopen
 	// clears it — the reopened round answers under the current requirements.
 	ReviewersChanged bool `json:"reviewers_changed,omitempty"`
-	// ForceCoReviewers names newly required self-heal reviewers that need one
-	// immediate trigger when a completed head is reopened. Once their command is
+	// ForceCoReviewers names newly enabled or required self-heal reviewers that
+	// need one immediate trigger on an existing round. Once their command is
 	// recorded, normal per-bot dedupe makes the force harmless.
 	ForceCoReviewers []string `json:"force_co_reviewers,omitempty"`
 

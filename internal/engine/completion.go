@@ -272,8 +272,17 @@ func PrimaryCompletedRound(r state.Round, obs Observation, p Policy) bool {
 	if r.CommandID == 0 {
 		return false
 	}
-	return CommandHasCompletionReply(obs, p, r.CommandID) &&
-		completionReplyForRound(obs, p, cutoff)
+	if !botHasAnyReview(obs.Reviews, p.Bot) {
+		return false
+	}
+	for _, reply := range commandReplies(obs, p) {
+		if reply.commandID == r.CommandID && reply.completion &&
+			notBefore(reply.commandAt, cutoff) &&
+			!stateSince(obs, p, reply.commandAt, dialect.EvInProgress, dialect.EvRateLimited, dialect.EvPaused, dialect.EvFailed) {
+			return true
+		}
+	}
+	return false
 }
 
 func botHasAnyReview(reviews []ReviewSeen, bot string) bool {

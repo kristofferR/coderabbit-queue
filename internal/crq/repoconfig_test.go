@@ -358,6 +358,53 @@ func TestChangingEnabledCoReviewersReopensACompletedRound(t *testing.T) {
 	}
 }
 
+func TestChangingReviewersForcesExistingActiveRounds(t *testing.T) {
+	for _, phase := range []Phase{PhaseQueued, PhaseFired, PhaseReviewing, PhaseAwaitingRetry} {
+		t.Run(string(phase), func(t *testing.T) {
+			ctx := context.Background()
+			cfg := isolatedConfig(t, map[string]string{"CRQ_COBOTS": ""})
+			store := NewMemoryStore(cfg)
+			gh := newFakeGitHub()
+			repo, pr, head := "o/r", 4, "aaaaaaaa1"
+			gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+			svc := NewService(cfg, gh, store, nil)
+			seedPhase := phase
+			if phase == PhaseAwaitingRetry {
+				seedPhase = PhaseReviewing
+			}
+			seedRound(t, store, cfg, repo, pr, head, seedPhase, time.Now().UTC(), 11)
+			if phase == PhaseAwaitingRetry {
+				if _, err := store.Update(ctx, func(st *State) error {
+					r := st.Round(repo, pr)
+					retryAt := time.Now().UTC().Add(time.Hour)
+					if err := r.AwaitRetry(retryAt, "test", time.Now().UTC()); err != nil {
+						return err
+					}
+					st.PutRound(*r)
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if _, err := svc.SetReviewers(ctx, repo, []string{"bugbot"}, []string{"bugbot"}); err != nil {
+				t.Fatal(err)
+			}
+			st, _, err := store.Load(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			round := st.Round(repo, pr)
+			if round == nil || !round.ForceCoReviewer(dialect.BugbotLogin) {
+				t.Fatalf("round = %#v, want newly required bugbot forced on the active round", round)
+			}
+			if round.Phase != phase {
+				t.Fatalf("phase = %s, want active round to stay %s", round.Phase, phase)
+			}
+		})
+	}
+}
+
 // Dedupe writes the "every required reviewer answered this head" marker, so a
 // required reviewer added between the decision and the write must void it. The
 // round is still queued when the operator's write lands — nothing to requeue —

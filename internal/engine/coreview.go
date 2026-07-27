@@ -419,6 +419,9 @@ func DecideCoPost(r state.Round, obs Observation, cp CoReviewerPolicy, commandPr
 	case TriggerAlways:
 		return !obs.co(cp.Login).AutoActive
 	case TriggerSelfHeal:
+		if r.ForceCoReviewer(cp.Login) {
+			return true
+		}
 		co := obs.co(cp.Login)
 		if !co.AutoActive && !co.ActiveThisRound {
 			return false

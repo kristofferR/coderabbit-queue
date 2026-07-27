@@ -2627,6 +2627,70 @@ func TestPumpSweepsQuotaFreeRoundWhileTheSlotIsHeld(t *testing.T) {
 	}
 }
 
+func TestPumpSweepsQuotaFreeRoundWhileAnOrphanedHoldIsActive(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
+	cfg.FeedbackBots = cfg.RequiredBots
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+
+	frontSHA := "111111111"
+	front := ghapi.Pull{State: "open"}
+	front.Head.SHA = frontSHA + "abcdef0"
+	gh.pulls[fakeKey("o/front", 10)] = front
+
+	backSHA := "2222222222222222"
+	back := ghapi.Pull{State: "open"}
+	back.Head.SHA = backSHA
+	gh.pulls[fakeKey("o/back", 20)] = back
+	walkthrough := ghapi.IssueComment{
+		ID:        900,
+		Body:      corpusMessage(t, "coderabbit/summary-only-free-plan.md"),
+		CreatedAt: now.Add(-time.Minute),
+		UpdatedAt: now.Add(-time.Minute),
+	}
+	walkthrough.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/back", 20)] = []ghapi.IssueComment{walkthrough}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+	seedRound(t, store, cfg, "o/front", 10, frontSHA, PhaseQueued, now.Add(-time.Minute), 0)
+	if _, err := svc.Enqueue(ctx, "o/back", 20); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		holdUntil := now.Add(cfg.InflightTimeout)
+		st.FireSlotHoldUntil = &holdUntil
+		frontRound := st.Round("o/front", 10)
+		frontRound.SetCoCommand(dialect.CodexBotLogin, 701, now.Add(-time.Minute))
+		st.PutRound(*frontRound)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Repo != "o/back" || res.PR != 20 {
+		t.Fatalf("the quota-free round behind an orphaned hold must be rescued, got %#v", res)
+	}
+	st, _, _ := store.Load(ctx)
+	if round := st.Round("o/back", 20); round == nil || round.Phase == PhaseQueued {
+		t.Fatalf("the quota-free round must leave the queue, got %#v", round)
+	}
+	for _, posted := range gh.posted {
+		if strings.Contains(posted, cfg.ReviewCommand) {
+			t.Fatalf("the rescue must not spend primary review quota, posted=%v", gh.posted)
+		}
+	}
+}
+
 // TestWaitResolvesSummaryOnlyWithoutTheQueue pins the architectural rule the
 // dogfood exposed: a summary-only round is NOT a queue citizen. The Seq FIFO and
 // the FireSlot exist solely to serialize CodeRabbit's account-wide review limit,
