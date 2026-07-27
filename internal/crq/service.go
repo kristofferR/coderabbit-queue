@@ -440,7 +440,7 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 // counts here. AcceptAccountBlock still decides whether it replaces the standing
 // window, and never shortens it.
 func (s *Service) recordObservedBlock(ctx context.Context, obs observation, st State, now time.Time) (*State, error) {
-	blk := engine.ObservedAccountBlock(obs.eng, s.policy(), st.Account, now)
+	blk := engine.ObservedAccountBlock(obs.eng, s.cfg.policy(), st.Account, now)
 	if blk == nil || s.cfg.DryRun || !engine.AcceptAccountBlock(st.Account.BlockedUntil, blk.Until) {
 		return nil, nil
 	}
