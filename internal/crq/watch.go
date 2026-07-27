@@ -104,10 +104,20 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 		concurrency = *opts.Concurrency
 	}
 	pool := newDispatchPool(concurrency)
+	// Sessions run under a context this function can cancel, and the deferred
+	// order matters: cancel first, wait second.
+	//
+	// Returning an error — an emit that failed because the JSON consumer went
+	// away, a repository that could not be read — used to fall straight into
+	// pool.wait() with the sessions still running. Agents kept writing code with
+	// nobody observing the watcher, and the error the caller needed could not
+	// surface until the last session exited, possibly hours later.
+	sessionCtx, endSessions := context.WithCancel(ctx)
 	defer pool.wait()
+	defer endSessions()
 	for {
 		wait := opts.Interval
-		if err := s.watchPass(ctx, opts, pool, emit); err != nil {
+		if err := s.watchPass(sessionCtx, opts, pool, emit); err != nil {
 			reset, throttled := ghapi.ThrottleWait(err)
 			if !throttled {
 				return err

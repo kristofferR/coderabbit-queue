@@ -69,7 +69,7 @@ func TestInstallDrainRefusesWithoutAnAgent(t *testing.T) {
 
 // The prompt crq installs is the one documented, because it is the same bytes.
 func TestEmbeddedPromptCarriesTheRulesThatCostUs(t *testing.T) {
-	for _, want := range []string{"DETACHED", "HEAD:refs/heads/", "Only after the commit is confirmed", "crq resolve"} {
+	for _, want := range []string{"DETACHED", "HEAD:refs/heads/", "crq resolve", "--wait", "`.action` is `push`"} {
 		if !strings.Contains(fixPrompt, want) {
 			t.Errorf("the embedded fix prompt no longer mentions %q", want)
 		}

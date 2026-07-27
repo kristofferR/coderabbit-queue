@@ -50,6 +50,21 @@ type DrainInstall struct {
 // a setup people get wrong is a setup that silently does nothing, which is the
 // failure this whole feature is about.
 func (s *Service) InstallDrain(ctx context.Context, agent string, agentArgs []string, repos []string, dryRun bool) (DrainInstall, error) {
+	plan, err := DrainPlan(s.cfg, agent, agentArgs, repos, dryRun)
+	if err != nil || dryRun {
+		return plan, err
+	}
+	return s.applyDrain(ctx, plan)
+}
+
+// DrainPlan computes what an install WOULD write and run, from configuration
+// alone.
+//
+// Separate from applying it because `crq drain install --dry-run` is documented
+// as a preview and must work for somebody who has not authenticated yet: the
+// plan reads no GitHub state, so requiring a token to see it turned the one
+// command for inspecting the setup into another thing to set up first.
+func DrainPlan(cfg Config, agent string, agentArgs []string, repos []string, dryRun bool) (DrainInstall, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return DrainInstall{}, err
@@ -74,7 +89,7 @@ func (s *Service) InstallDrain(ctx context.Context, agent string, agentArgs []st
 		return DrainInstall{}, fmt.Errorf("resolving fix agent %q: %w", agent, err)
 	}
 	if len(repos) == 0 {
-		for repo := range s.cfg.AllowRepos {
+		for repo := range cfg.AllowRepos {
 			repos = append(repos, repo)
 		}
 	}
@@ -82,10 +97,6 @@ func (s *Service) InstallDrain(ctx context.Context, agent string, agentArgs []st
 		return DrainInstall{}, fmt.Errorf("no repositories to watch: pass them, or set CRQ_REPOS")
 	}
 
-	self, err := os.Executable()
-	if err != nil {
-		return DrainInstall{}, err
-	}
 	// The service writes its output here. systemd refuses to start a unit whose
 	// StandardOutput path cannot be opened (209/STDOUT), so the directory has to
 	// exist before the unit does — a service that will not start is exactly the
@@ -100,7 +111,7 @@ func (s *Service) InstallDrain(ctx context.Context, agent string, agentArgs []st
 		Repos:    repos,
 		DryRun:   dryRun,
 	}
-	if root := strings.TrimSpace(s.cfg.WorkspaceRoot); root != "" {
+	if root := strings.TrimSpace(cfg.WorkspaceRoot); root != "" {
 		plan.Workspace, err = filepath.Abs(root)
 		if err != nil {
 			return plan, fmt.Errorf("resolving drain workspace %q: %w", root, err)
@@ -132,8 +143,15 @@ func (s *Service) InstallDrain(ctx context.Context, agent string, agentArgs []st
 	}
 	plan.Invocation = invocation
 
-	if dryRun {
-		return plan, nil
+	return plan, nil
+}
+
+// applyDrain writes the plan to disk and starts the service.
+func (s *Service) applyDrain(ctx context.Context, plan DrainInstall) (DrainInstall, error) {
+	invocation, logDir := plan.Invocation, plan.LogDir
+	self, err := os.Executable()
+	if err != nil {
+		return plan, err
 	}
 	if err := drainCanAuthenticate(ctx); err != nil {
 		return plan, err
@@ -316,7 +334,15 @@ func (s *Service) drainEnv(plan DrainInstall) map[string]string {
 		"CRQ_POLL":                   s.cfg.PollInterval.String(),
 		"CRQ_FEEDBACK_WAIT_TIMEOUT":  s.cfg.FeedbackWaitTimeout.String(),
 		"CRQ_SETTLE":                 s.cfg.SettleWindow.String(),
-		"PATH":                       drainPath(plan),
+		// The quota timings belong here for the same reason as every other
+		// setting: the service does not inherit the shell that installed it. A
+		// deliberately longer fallback set only in that shell was folded into
+		// this config, written into no unit, and then silently replaced by the
+		// default — so the watcher retried a review command earlier than
+		// configured for every account block it could not parse a window from.
+		"CRQ_CALIBRATE_TTL": s.cfg.CalibrationTTL.String(),
+		"CRQ_RL_FALLBACK":   s.cfg.RateLimitFallback.String(),
+		"PATH":              drainPath(plan),
 	}
 	if s.cfg.RateLimitCoDegrade {
 		env["CRQ_RL_CO_DEGRADE"] = "1"

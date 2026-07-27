@@ -60,6 +60,27 @@ func run(ctx context.Context, args []string) int {
 		return 1
 	case "preflight":
 		return preflight(ctx, args[1:])
+	case "drain":
+		// A dry run is documented as a PREVIEW: it writes nothing and reads no
+		// GitHub state. Deciding it here, before the authenticated client is
+		// built, is what lets somebody inspect the setup before finishing it —
+		// otherwise the one command for looking at the plan was itself another
+		// thing to set up first. A real install still goes through the
+		// authenticated path below.
+		if opts, perr := parseDrainArgs(args[1:]); perr == nil && opts.dryRun {
+			cfg, cerr := crq.LoadConfig()
+			if cerr != nil {
+				fatal(cerr)
+				return 1
+			}
+			plan, ierr := crq.DrainPlan(cfg, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, true)
+			if ierr != nil {
+				fatal(ierr)
+				return 1
+			}
+			printJSON(plan)
+			return 0
+		}
 	}
 
 	cfg, err := crq.LoadConfig()
@@ -229,28 +250,16 @@ func run(ctx context.Context, args []string) int {
 		printJSON(result)
 		return 0
 	case "drain":
-		fs := flag.NewFlagSet("drain", flag.ContinueOnError)
-		fs.SetOutput(os.Stderr)
-		agent := fs.String("agent", "", "fix agent to run: claude or codex (default: claude on PATH)")
-		agentArgs := fs.String("agent-args", "", "extra flags for the agent, e.g. model and reasoning effort")
-		dryRun := fs.Bool("dry-run", false, "print what would be written and run")
-		sub := ""
-		rest := args[1:]
-		if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
-			sub, rest = rest[0], rest[1:]
-		}
-		if err := fs.Parse(rest); err != nil {
-			return 1
-		}
-		if sub != "install" {
-			fatal(errors.New("usage: crq drain install [--agent <path>] [--dry-run] [<repo>...]"))
+		opts, perr := parseDrainArgs(args[1:])
+		if perr != nil {
+			fatal(perr)
 			return 1
 		}
 		if err := cfg.RequireState(); err != nil {
 			fatal(err)
 			return 1
 		}
-		plan, ierr := service.InstallDrain(ctx, *agent, crq.SplitArgv(*agentArgs), fs.Args(), *dryRun)
+		plan, ierr := service.InstallDrain(ctx, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, opts.dryRun)
 		if ierr != nil {
 			fatal(ierr)
 			return 1
@@ -1301,4 +1310,33 @@ func configPath() string {
 		return "~/.config/crq/env"
 	}
 	return home + "/.config/crq/env"
+}
+
+// drainArgs is `crq drain install`'s parsed command line.
+type drainArgs struct {
+	agent     string
+	agentArgs string
+	dryRun    bool
+	repos     []string
+}
+
+// parseDrainArgs is shared by the pre-authentication dry-run path and the
+// install itself, so the two cannot disagree about what was asked for.
+func parseDrainArgs(args []string) (drainArgs, error) {
+	fs := flag.NewFlagSet("drain", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	agent := fs.String("agent", "", "fix agent to run: claude or codex (default: claude on PATH)")
+	agentArgs := fs.String("agent-args", "", "extra flags for the agent, e.g. model and reasoning effort")
+	dryRun := fs.Bool("dry-run", false, "print what would be written and run")
+	sub, rest := "", args
+	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+		sub, rest = rest[0], rest[1:]
+	}
+	if err := fs.Parse(rest); err != nil {
+		return drainArgs{}, err
+	}
+	if sub != "install" {
+		return drainArgs{}, errors.New("usage: crq drain install [--agent <path>] [--dry-run] [<repo>...]")
+	}
+	return drainArgs{agent: *agent, agentArgs: *agentArgs, dryRun: *dryRun, repos: fs.Args()}, nil
 }

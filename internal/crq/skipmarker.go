@@ -102,17 +102,38 @@ func stripIndentedCode(body string) string {
 	return out.String()
 }
 
+// nextFence finds the next fenced-block OPENER, which only exists at the start
+// of a line after at most three spaces — the same position matchingFence
+// already requires of a closer.
+//
+// Searching the whole text instead read a mid-line run as an opener: a body
+// mentioning ```` ```bash ```` inline opened a block whose inline closer no
+// closer position could match, so the fence read as unclosed, everything after
+// it was discarded, and a marker further down went unseen. crq then fired a
+// review the author had opted out of. Mid-line runs belong to the inline-span
+// pass, which runs next.
 func nextFence(text string) (int, byte, int) {
-	backticks := strings.Index(text, "```")
-	tildes := strings.Index(text, "~~~")
-	at, marker := backticks, byte('`')
-	if at < 0 || tildes >= 0 && tildes < at {
-		at, marker = tildes, '~'
+	for lineStart := 0; lineStart < len(text); {
+		lineEnd := strings.IndexByte(text[lineStart:], '\n')
+		if lineEnd < 0 {
+			lineEnd = len(text)
+		} else {
+			lineEnd += lineStart
+		}
+		line := text[lineStart:lineEnd]
+		if indent := fenceIndent(line); indent < len(line) {
+			if marker := line[indent]; marker == '`' || marker == '~' {
+				if width := fenceRun(line[indent:], marker); width >= 3 {
+					return lineStart + indent, marker, width
+				}
+			}
+		}
+		if lineEnd == len(text) {
+			break
+		}
+		lineStart = lineEnd + 1
 	}
-	if at < 0 {
-		return -1, 0, 0
-	}
-	return at, marker, fenceRun(text[at:], marker)
+	return -1, 0, 0
 }
 
 func matchingFence(text string, marker byte, width int) (int, int) {

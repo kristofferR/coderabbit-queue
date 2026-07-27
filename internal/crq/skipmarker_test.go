@@ -43,3 +43,41 @@ func TestSkipMarkerHasToBeUsedNotMentioned(t *testing.T) {
 		t.Error("an empty marker skipped a pull request")
 	}
 }
+
+// A fenced block opens only at the start of a line. Reading a mid-line run as
+// an opener left a fence that nothing could close, so everything after it was
+// discarded and a marker further down went unseen — and crq fired a review the
+// author had explicitly opted out of.
+func TestSkipMarkerSeesPastAnInlineTripleBacktick(t *testing.T) {
+	cfg := Config{SkipMarker: "<!-- crq:skip-autoreview -->"}
+	for _, tc := range []struct {
+		name string
+		body string
+		skip bool
+	}{
+		{
+			"inline run before the marker",
+			"Write ```bash``` for a shell block.\n\n<!-- crq:skip-autoreview -->\n",
+			true,
+		},
+		{
+			"a real fence still hides what it contains",
+			"```\n<!-- crq:skip-autoreview -->\n```\n",
+			false,
+		},
+		{
+			"an indented fence opener still counts",
+			"   ```\n<!-- crq:skip-autoreview -->\n   ```\n",
+			false,
+		},
+		{
+			"four spaces is an indented code block, not a fence",
+			"    ```\n\n<!-- crq:skip-autoreview -->\n",
+			true,
+		},
+	} {
+		if got := cfg.SkipsReview(tc.body); got != tc.skip {
+			t.Errorf("%s: SkipsReview = %v, want %v", tc.name, got, tc.skip)
+		}
+	}
+}
