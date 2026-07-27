@@ -87,6 +87,15 @@ func TestFleetRefusesWhatItCannotRead(t *testing.T) {
 			}
 		}
 	}
+	// A scope entry is an owner login, not a slug: autoreview hands each one to
+	// EachOpenPR as a user or organisation name, so a repository typed here — or
+	// anything else GitHub cannot resolve — fails every pass, on every host at
+	// once, because the value is fleet-wide.
+	for _, owner := range []string{"owner/repo", "own er", "owner?", ".."} {
+		if err := svc.SetFleetConfig(ctx, "scope", owner); err == nil {
+			t.Errorf("scope accepted the malformed owner %q", owner)
+		}
+	}
 	if err := svc.SetFleetConfig(ctx, "required-bots", ""); err == nil {
 		t.Error("an empty required reviewer set was accepted")
 	}
@@ -1044,6 +1053,39 @@ func TestFleetCoBotTimingChangeScansNoPullRequests(t *testing.T) {
 		if _, err := svc.UnsetFleetConfig(ctx, key); err != nil {
 			t.Fatalf("unset %s: %v", key, err)
 		}
+	}
+}
+
+// An idempotent membership command scans nothing either. Re-recording the value
+// the fleet already holds, or unsetting a key it never held, reconciles nothing
+// — and a fleet whose round history names many repositories would otherwise
+// spend an open-PR lookup on each of them and fail outright when one was
+// throttled, for a command with nothing to change.
+func TestIdempotentFleetReviewerCommandScansNoPullRequests(t *testing.T) {
+	ctx := context.Background()
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":        "codex",
+		"CRQ_REQUIRED_BOTS": "coderabbitai[bot]",
+	})
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.PutRound(Round{Repo: "owner/repo", PR: 7, Head: "bbbbbbb22", Phase: PhaseCompleted})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+	if err := svc.SetFleetConfig(ctx, "required-bots", "coderabbitai[bot]"); err != nil {
+		t.Fatalf("recording required-bots: %v", err)
+	}
+	// Only now does the lookup fail, so reaching it at all is the failure.
+	gh.listPullErrs["owner/repo"] = &ghapi.RateLimitError{Kind: "secondary"}
+	if err := svc.SetFleetConfig(ctx, "required-bots", "coderabbitai[bot]"); err != nil {
+		t.Fatalf("repeating the recorded value: %v", err)
+	}
+	if dropped, err := svc.UnsetFleetConfig(ctx, "cobots"); err != nil || dropped {
+		t.Fatalf("unsetting a key the fleet never recorded = (%v, %v), want (false, nil)", dropped, err)
 	}
 }
 

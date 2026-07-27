@@ -513,6 +513,11 @@ What stays per host: where the state lives (`CRQ_REPO`, `CRQ_ISSUE`, `CRQ_STATE_
 and what the machine can physically do (`CRQ_DISPATCH_CMD`, `CRQ_WORKSPACE`,
 `CRQ_DISPATCH_CONCURRENCY`).
 
+The primary reviewer stays per host too, for a different reason: who it is (`CRQ_BOT`) and the
+wording crq reads it by (`CRQ_REVIEW_CMD` and the completion/rate-limit/review-done/calibration
+markers) are one unit, and they are compiled into the dialect classifiers before any state ref is
+read. Keep them the same on every host — `crq doctor` cannot report a disagreement about them.
+
 
 | Variable | Default | What it does |
 |----------|---------|--------------|

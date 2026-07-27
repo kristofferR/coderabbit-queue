@@ -47,14 +47,27 @@ type fleetSetting struct {
 // sessions it can take). Everything else is policy, and policy the hosts
 // disagree about is how a repository ends up excluded on one and reviewed by
 // another with nothing to say so.
+//
+// The primary reviewer is the one policy deliberately left out, and it is a
+// FOURTH kind rather than an oversight: who the primary is (CRQ_BOT) is
+// inseparable from the wording crq reads it by (CRQ_REVIEW_CMD and the
+// completion, rate-limit, review-done and calibration markers), and those are
+// compiled into the dialect classifiers when the Service is constructed —
+// before any state ref has been read. Recording the login and its command while
+// the markers stayed per-host would make a host post the fleet's command for a
+// bot it classifies with its own wording, which is the half-applied policy
+// applyFleet refuses everywhere else. Centralizing it means moving the whole
+// family and building the classifiers from the fleet-applied configuration, not
+// adding two entries here.
 func fleetSettings() map[string]fleetSetting {
 	settings := map[string]fleetSetting{
 		"scope": {
 			Doc: "owners crq scans when no repository list is set",
 			Env: "CRQ_SCOPE",
 			Apply: func(cfg *Config, v string) error {
-				cfg.Scope = splitList(v)
-				return nil
+				owners, err := fleetOwners(v)
+				cfg.Scope = owners
+				return err
 			},
 			Show: func(cfg Config) string { return strings.Join(cfg.Scope, ",") },
 		},
@@ -504,6 +517,24 @@ func ValidateFleetSetting(key, value string) error {
 	}
 	probe := Config{}
 	return setting.Apply(&probe, value)
+}
+
+// fleetOwners refuses a scope entry that is not an owner login — a repository
+// slug typed here being the mistake to catch.
+//
+// autoReviewPass hands every scope target to EachOpenPR as a user or
+// organisation name, which resolves it against /users/<target>; one that is
+// neither fails the whole pass. Recorded for the fleet, a single typo therefore
+// stops scanning on every host at once, which is exactly the reach that makes
+// validating it here worth more than validating a per-host variable.
+func fleetOwners(value string) ([]string, error) {
+	owners := splitList(value)
+	for _, owner := range owners {
+		if !validNameSegment(owner) {
+			return nil, fmt.Errorf("scope must be owner or organisation logins, got %q", owner)
+		}
+	}
+	return owners, nil
 }
 
 func fleetRepoSet(value string) (map[string]bool, error) {

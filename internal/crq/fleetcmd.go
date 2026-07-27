@@ -88,7 +88,10 @@ func (s *Service) SetFleetConfig(ctx context.Context, key, value string) error {
 	if err := ValidateFleetSetting(key, value); err != nil {
 		return err
 	}
-	open, err := s.prepareFleetReviewerChange(ctx, key)
+	open, err := s.prepareFleetReviewerChange(ctx, key, func(st State) bool {
+		current, recorded := st.FleetValue(key)
+		return !recorded || current != value
+	})
 	if err != nil {
 		return err
 	}
@@ -124,7 +127,10 @@ func (s *Service) UnsetFleetConfig(ctx context.Context, key string) (bool, error
 	if _, ok := fleetSettings()[key]; ok {
 		known = true
 	}
-	open, err := s.prepareFleetReviewerChange(ctx, key)
+	open, err := s.prepareFleetReviewerChange(ctx, key, func(st State) bool {
+		_, recorded := st.FleetValue(key)
+		return recorded
+	})
 	if err != nil {
 		return false, err
 	}
@@ -312,13 +318,26 @@ func (s *Service) requireNoAdvancedDrivers(st *State, key string) error {
 // moves either — so asking for the open PRs of every repository ever recorded in
 // Rounds bought nothing, spent a REST lookup per historical repository, and made
 // a purely local timing update fail whenever one of them was throttled.
-func (s *Service) prepareFleetReviewerChange(ctx context.Context, key string) (map[string]map[int]bool, error) {
+//
+// A membership key that is not actually moving asks it just as pointlessly, and
+// `changes` is what settles that against the recorded value before anything is
+// spent: re-recording the value the fleet already holds, or unsetting a key it
+// never held, reconciles nothing, and without this an idempotent command still
+// cost a lookup per historical repository and still failed under throttling. The
+// recorded value is read again inside the CAS, so a concurrent write landing
+// between the two leaves `open` nil rather than wrong — the same degraded case an
+// inaccessible repository already produces, where a completed round is marked
+// rather than reopened and the next enqueue that finds the PR alive reopens it.
+func (s *Service) prepareFleetReviewerChange(ctx context.Context, key string, changes func(State) bool) (map[string]map[int]bool, error) {
 	if !isReviewerMembershipFleetKey(key) {
 		return nil, nil
 	}
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if !changes(st) {
+		return nil, nil
 	}
 	return s.openFleetPRs(ctx, st)
 }

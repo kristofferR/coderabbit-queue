@@ -103,26 +103,28 @@ func (s *Service) DrainSettings(ctx context.Context) ([]DrainSetting, error) {
 // the hazard is a setting recorded under a name nothing will ever match.
 func validRepoSlug(repo string) bool {
 	owner, name, ok := strings.Cut(repo, "/")
-	if !ok || owner == "" || name == "" {
+	return ok && validNameSegment(owner) && validNameSegment(name)
+}
+
+// validNameSegment reports whether part is one segment a GitHub owner or
+// repository name could be.
+//
+// Same segment rules the workspace package applies to a path: "." and ".." are
+// not names. The character class is GitHub's: an owner or repository name is
+// letters, digits, hyphen, underscore and dot, so a segment holding anything
+// else — a space, a slash, a control character — is one no scan result can ever
+// normalize to. Recorded, it reads as a rule covering something while covering
+// nothing at all.
+func validNameSegment(part string) bool {
+	if part == "" || part == "." || part == ".." {
 		return false
 	}
-	// Same segment rules the workspace package applies to a path: "." and ".."
-	// are not repository names. The character class is GitHub's: an owner or
-	// repository name is letters, digits, hyphen, underscore and dot, so a slug
-	// holding anything else — a space, a second slash, a control character — is
-	// one no scan result can ever normalize to. Recorded, it reads as a rule
-	// covering a repository while covering nothing at all.
-	for _, part := range []string{owner, name} {
-		if part == "." || part == ".." {
+	for _, r := range part {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
 			return false
-		}
-		for _, r := range part {
-			switch {
-			case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-			case r == '-', r == '_', r == '.':
-			default:
-				return false
-			}
 		}
 	}
 	return true
