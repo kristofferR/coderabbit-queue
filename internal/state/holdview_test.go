@@ -87,3 +87,36 @@ func TestTheHostColumnSaysNobodyRatherThanNothing(t *testing.T) {
 		t.Errorf("the host column does not say there is no host: %s", row)
 	}
 }
+
+// Reviewers are per repository, so the header row is a FLEET DEFAULT. A bare
+// list claims more than it knows: a reader of the issue sees three bots and has
+// no way to tell that one repository has been set to something else.
+func TestCoReviewerRowSaysItIsTheDefaultAndNamesExceptions(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	cfg := StoreConfig{CoReviewers: "codex (required, always) · bugbot (selfheal)"}
+
+	st := New()
+	body := RenderDashboard(st, cfg)
+	if !strings.Contains(body, "fleet default") {
+		t.Error("the row does not say the list is a default")
+	}
+
+	// Once a repository overrides it, the row names which.
+	st.SetRepoOverride("owner/special", RepoReviewers{SetCoBots: true, UpdatedAt: &now})
+	body = RenderDashboard(st, cfg)
+	if !strings.Contains(body, "owner/special") {
+		t.Errorf("the row does not name the repository that differs:\n%s", body)
+	}
+	if !strings.Contains(body, "override") {
+		t.Error("the row does not say the named repository overrides the default")
+	}
+
+	// Many overrides are truncated rather than allowed to wrap the table.
+	for _, repo := range []string{"owner/a", "owner/b", "owner/c", "owner/d"} {
+		st.SetRepoOverride(repo, RepoReviewers{SetCoBots: true, UpdatedAt: &now})
+	}
+	body = RenderDashboard(st, cfg)
+	if !strings.Contains(body, "+2 more") {
+		t.Errorf("five overrides were not summarised:\n%s", body)
+	}
+}

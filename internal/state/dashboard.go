@@ -332,7 +332,7 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 		fmt.Fprintf(&b, "| **CodeRabbit quota** | ✅ not currently blocked |\n")
 	}
 	if cfg.CoReviewers != "" {
-		fmt.Fprintf(&b, "| **Co-reviewers** | %s |\n", cfg.CoReviewers)
+		fmt.Fprintf(&b, "| **Co-reviewers** | %s |\n", coReviewerCell(st, cfg.CoReviewers))
 	}
 	fmt.Fprintf(&b, "| **Last review fired** | %s |\n", fmtStamp(st.LastFired, loc))
 	if st.Drain.Unhealthy() {
@@ -471,4 +471,40 @@ func cell(v string) string {
 	v = strings.ReplaceAll(v, "\n", " ")
 	v = strings.ReplaceAll(v, "\r", " ")
 	return strings.ReplaceAll(v, "|", "\\|")
+}
+
+// coReviewerCell renders the co-reviewer row, which is a FLEET DEFAULT rather
+// than the answer for any particular repository.
+//
+// Reviewers became per-repository, so a bare list here claims more than it
+// knows: a reader of the issue sees "codex, bugbot, macroscope" and has no way
+// to tell that one repository has been set to something else. The default is
+// still worth showing — it governs everything nobody has ruled on — so it is
+// labelled, and the repositories that differ are named beside it.
+func coReviewerCell(st State, fleet string) string {
+	overrides := make([]string, 0, len(st.Repos))
+	for repo := range st.Repos {
+		overrides = append(overrides, repo)
+	}
+	if len(overrides) == 0 {
+		return fleet + " _(fleet default)_"
+	}
+	sort.Strings(overrides)
+	// Named, not just counted: "3 repositories differ" sends the reader to the
+	// CLI to find out which, and the answer is already here.
+	const show = 3
+	listed := overrides
+	suffix := ""
+	if len(listed) > show {
+		listed, suffix = listed[:show], fmt.Sprintf(" +%d more", len(overrides)-show)
+	}
+	return fmt.Sprintf("%s _(fleet default; %s override%s)_", fleet,
+		strings.Join(listed, ", ")+suffix, plural(len(overrides)))
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return "s"
+	}
+	return ""
 }
