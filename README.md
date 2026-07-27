@@ -284,7 +284,7 @@ Read `.action`, do exactly that, call it again.
 
 | `.action` | what to do |
 |---|---|
-| `fix` | fix `.findings[]`, validate, then `crq resolve` (or `crq decline`) each thread |
+| `fix` | fix `.findings[]`, validate, then `crq resolve` (or `crq decline`) each thread; `crq dismiss` one with no thread |
 | `hold` | **do not commit or push** — a required reviewer hasn't answered for this head; call again at `.recheck_after` |
 | `push` | the head is released — commit and push your fixes once |
 | `wait` | nothing to do until `.recheck_after` |
@@ -383,11 +383,14 @@ least 10 minutes of silence.
 crq next <repo> <pr>      # ⭐ the agent loop: emit the single next action as JSON (--wait blocks)
 crq loop <repo> <pr>      # blocking one-shot round: fire + wait + emit JSON findings
 crq feedback <repo> <pr>  # current normalized findings as JSON, WITHOUT triggering a review
+crq threads <repo> <pr>                                     # every unresolved thread, outdated included
 crq resolve <thread-id> [<thread-id>...]                    # resolve addressed review threads
 crq decline <thread-id> [...] --reason "<why>" [--resolve]  # record why a finding is declined
 crq reviewers <repo>      # which bots review this project, and what each costs
 crq reviewers set <repo> [--bots <a,b>] [--required <a,b>] # choose them (either flag alone)
 crq reviewers clear <repo>                                 # back to the fleet default
+
+crq dismiss <repo> <pr> <finding-id> [...] --reason "<why>"  # account for a finding with no thread
 crq autoreview            # ⭐ review ALL open PRs automatically, rate-coordinated
                           #    (--no-incremental = first review only; --once = single pass for cron)
 crq status                # show the dashboard: queue, in-flight, quota, next slot
@@ -603,6 +606,12 @@ If you're an autonomous agent running a PR-review loop, here's everything you ne
 - **Resolve / decline:** after fixing a finding, `crq resolve <thread-id>...` (pass them all at
   once). If you're declining one, `crq decline <thread-id> --reason "…"` — that resolves it too,
   because a thread left open keeps its finding actionable; `--keep-open` overrides.
+- **Dismiss what has no thread:** a finding with no `thread_id` cannot be resolved or declined, and
+  blocks every future round until it is accounted for: `crq dismiss <repo> <pr> <finding-id>
+  --reason "…"`. It covers the current head only. A `source: "review_comment"`
+  finding is refused: it lost its thread ID to crq's REST fallback and still has
+  an open thread, so it needs `resolve`/`decline` once crq can read threads again. For a skipped review, narrowing the PR fixes the
+  cause; dismissing only records that you chose to proceed.
 - **Don't narrate the wait.** Report real state changes — findings, a push, convergence, a block —
   not elapsed time.
 - **Setup check:** run `crq doctor`; if config is missing, do the Quick Start (install + `crq init`).

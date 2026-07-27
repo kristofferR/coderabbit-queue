@@ -217,6 +217,23 @@ func run(ctx context.Context, args []string) int {
 			return 1
 		}
 		return runReviewers(ctx, service, args[1:])
+	case "threads":
+		repo, pr, ok := repoPR(args[1:])
+		if !ok {
+			fatal(errors.New("usage: crq threads <repo> <pr>"))
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		threads, terr := service.OpenThreads(ctx, repo, pr)
+		if terr != nil {
+			fatal(terr)
+			return 1
+		}
+		printJSON(threads)
+		return 0
 	case "decline":
 		threads, reason, resolve, ok := parseDeclineArgs(args[1:])
 		if !ok || len(threads) == 0 || strings.TrimSpace(reason) == "" {
@@ -226,6 +243,34 @@ func run(ctx context.Context, args []string) int {
 		result, err := service.DeclineThreads(ctx, threads, reason, resolve)
 		if err != nil {
 			fatal(err)
+			return 1
+		}
+		printJSON(result)
+		return 0
+	case "dismiss":
+		rest, reason, ok := parseDismissArgs(args[1:])
+		if !ok || strings.TrimSpace(reason) == "" {
+			fatal(errors.New(`usage: crq dismiss <repo> <pr> <finding-id> [<finding-id>...] --reason "<why>"`))
+			return 1
+		}
+		if len(rest) < 3 {
+			fatal(errors.New(`usage: crq dismiss <repo> <pr> <finding-id> [<finding-id>...] --reason "<why>"`))
+			return 1
+		}
+		// Same target validation as every other command, so a non-numeric or
+		// non-positive PR fails the same way here as there.
+		repo, pr, ok := repoPR(rest[:2])
+		if !ok {
+			fatal(fmt.Errorf("bad target %q %q (usage: crq dismiss <repo> <pr> <finding-id>... --reason \"<why>\")", rest[0], rest[1]))
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		result, derr := service.Dismiss(ctx, repo, pr, rest[2:], reason)
+		if derr != nil {
+			fatal(derr)
 			return 1
 		}
 		printJSON(result)
@@ -338,6 +383,7 @@ DRIVING A PR REVIEW
   Call crq next, do exactly what .action says, call it again. That is the whole loop.
 
     fix      fix .findings[], validate, then crq resolve (or crq decline) each thread
+             (no .thread_id? crq dismiss it once judged — at this head nothing else can)
     hold     do NOT push: a required reviewer is pending; call again at .recheck_after
     push     the head is released — commit and push your fixes once
     wait     nothing to do; call again at .recheck_after
@@ -366,6 +412,9 @@ USAGE
   crq reviewers set <repo> [--bots <a,b>] [--required <a,b>]
                                    choose this project's reviewers (either flag alone)
   crq reviewers clear <repo>       go back to the fleet default
+  crq threads <repo> <pr>          list every unresolved review thread, outdated ones included
+  crq dismiss <repo> <pr> <finding-id> [...] --reason "<why>"
+                                   account for a finding GitHub gives you no thread to close
   crq autoreview [--once] [--no-incremental]
                                    keep open PRs reviewed, rate-coordinated
   crq preflight [--type all|committed|uncommitted] [--base <branch>]
@@ -548,6 +597,39 @@ bug worth not having.
 The primary reviewer is fleet-wide. Its markers and command are compiled into the
 classifiers when crq starts, so a per-repo primary would mean per-repo
 classifiers — a much larger change than choosing who else runs.
+`)
+	case "threads":
+		fmt.Print(`crq threads <repo> <pr>
+
+List the PR's unresolved review threads as JSON, including the ones GitHub has
+marked OUTDATED, with .thread_id ready for crq resolve.
+
+Findings leave outdated threads out on purpose: the code they point at is gone,
+and anything carrying a thread ID blocks the round until it is resolved. But an
+outdated thread is still open on the PR — and after a push that is every thread
+from the previous head, so fixing and pushing used to leave no way to close them
+through crq at all.
+
+Read this, decide, then crq resolve (or crq decline) the ones you have answered.
+`)
+	case "dismiss":
+		fmt.Print(`crq dismiss <repo> <pr> <finding-id> [<finding-id>...] --reason "<why>"
+
+Record that you have accounted for a finding that has no review thread, so it
+stops blocking the round.
+
+crq resolve and crq decline both act on a thread. A review-body finding, a
+review-skipped notice or an outside-diff remark has none, so neither command can
+touch it — and a finding that can never drain blocks every future round, leaving
+a PR whose current head no review was ever requested for.
+
+Finding IDs come from .findings[].id. They are content-derived, not GitHub node
+IDs, so the repo and PR are required. A dismissal covers the current head only:
+push, and the next reviewer has to report it again.
+
+Use it for a finding you have judged and set aside. Fix what is real instead — and
+for a review crq was told was SKIPPED, narrowing the PR fixes the cause, while
+dismissing only records that you decided to live with it at this head.
 `)
 	case "autoreview", "auto":
 		fmt.Print(`crq autoreview [--once] [--no-incremental]
@@ -907,6 +989,30 @@ func positional(args []string) []string {
 func parseResolveArgs(args []string) ([]string, bool) {
 	threads, _, _, ok := parseThreadCommand(args, false)
 	return threads, ok
+}
+
+// parseDismissArgs splits `crq dismiss <repo> <pr> <id>...` from its --reason.
+// Unlike a thread ID, a finding ID is not globally unique — it is a hash of the
+// finding's own text — so the repo and PR genuinely identify something here and
+// are required.
+func parseDismissArgs(args []string) (rest []string, reason string, ok bool) {
+	for i := 0; i < len(args); i++ {
+		switch arg := args[i]; {
+		case arg == "--reason":
+			if i+1 >= len(args) {
+				return nil, "", false
+			}
+			reason = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--reason="):
+			reason = strings.TrimPrefix(arg, "--reason=")
+		case strings.HasPrefix(arg, "-"):
+			return nil, "", false // a typo must fail, not become a finding ID
+		default:
+			rest = append(rest, arg)
+		}
+	}
+	return rest, reason, true
 }
 
 func parseDeclineArgs(args []string) (threads []string, reason string, resolve, ok bool) {
