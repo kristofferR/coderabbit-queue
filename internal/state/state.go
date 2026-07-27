@@ -84,6 +84,14 @@ type Round struct {
 	// a session that dies does not hold the round forever — the claim is
 	// heartbeated, and one older than DispatchTTL is free to take over.
 	Dispatch *DispatchClaim `json:"dispatch,omitempty"`
+	// DispatchHoldPhase/DispatchHoldRetryAt preserve the queue state hidden by a
+	// live dispatch. While held, a queued round is mirrored into
+	// awaiting_retry with a heartbeat-extended RetryAt. Older binaries already
+	// honor that phase/window even though they do not understand Dispatch, so a
+	// rolling deployment cannot fire a review for code a new watcher is fixing.
+	// These are top-level round members so tolerant old binaries preserve them.
+	DispatchHoldPhase   Phase      `json:"dispatch_hold_phase,omitempty"`
+	DispatchHoldRetryAt *time.Time `json:"dispatch_hold_retry_at,omitempty"`
 
 	// RetryAt is the earliest time this head may fire again (awaiting_retry).
 	RetryAt *time.Time `json:"retry_at,omitempty"`
@@ -673,6 +681,25 @@ func (s *State) ArchivedDispatchHeld(repo string, pr int, now time.Time) bool {
 	return false
 }
 
+// HeartbeatArchivedDispatch refreshes the archived claim owned by token. A
+// successful session archives its own round when its push moves the head, but
+// it still owns the PR until thread resolution and the process both finish.
+func (s *State) HeartbeatArchivedDispatch(repo string, pr int, token string, now time.Time) (ok, taken bool) {
+	key := Key(repo, pr)
+	for i := range s.Archive {
+		r := &s.Archive[i]
+		if Key(r.Repo, r.PR) != key {
+			continue
+		}
+		if refreshed, byOther := r.HeartbeatDispatch(token, now); refreshed {
+			return true, false
+		} else if byOther {
+			taken = true
+		}
+	}
+	return false, taken
+}
+
 // ReleaseArchivedDispatch drops a claim this token owns on an archived round, so
 // a session that has finished stops holding the next one out for the rest of the
 // TTL. It reports whether anything was released.
@@ -703,8 +730,27 @@ func (r *Round) ClaimDispatch(host, token string, now time.Time, maxAttempts int
 	if maxAttempts > 0 && attempts >= maxAttempts {
 		return false, fmt.Sprintf("%d dispatch attempts already made for this head", attempts)
 	}
+	r.beginDispatchHold(now)
 	r.Dispatch = &DispatchClaim{Host: host, Token: token, At: now, Heartbeat: now, Attempts: attempts + 1}
 	return true, ""
+}
+
+// beginDispatchHold mirrors the new dispatch exclusion into queue state every
+// older binary already knows. The original cooldown is restored on release.
+func (r *Round) beginDispatchHold(now time.Time) {
+	if r.DispatchHoldPhase == "" && (r.Phase == PhaseQueued || r.Phase == PhaseAwaitingRetry) {
+		r.DispatchHoldPhase = r.Phase
+		if r.RetryAt != nil {
+			at := r.RetryAt.UTC()
+			r.DispatchHoldRetryAt = &at
+		}
+	}
+	if r.DispatchHoldPhase == "" || (r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry) {
+		return
+	}
+	until := now.UTC().Add(DispatchTTL)
+	r.Phase = PhaseAwaitingRetry
+	r.RetryAt = &until
 }
 
 // HeartbeatDispatch refreshes a claim this token owns.
@@ -724,6 +770,7 @@ func (r *Round) HeartbeatDispatch(token string, now time.Time) (ok, taken bool) 
 		return false, r.DispatchHeld(now)
 	}
 	r.Dispatch.Heartbeat = now.UTC()
+	r.beginDispatchHold(now)
 	return true, false
 }
 
@@ -734,6 +781,16 @@ func (r *Round) ReleaseDispatch(token string) bool {
 	}
 	r.Dispatch.Heartbeat = time.Time{}
 	r.Dispatch.Token = ""
+	if r.DispatchHoldPhase != "" {
+		// An archived round was abandoned when it was superseded. Never revive it
+		// into the queue just because its session finished.
+		if r.Phase == PhaseAwaitingRetry {
+			r.Phase = r.DispatchHoldPhase
+			r.RetryAt = r.DispatchHoldRetryAt
+		}
+		r.DispatchHoldPhase = ""
+		r.DispatchHoldRetryAt = nil
+	}
 	return true
 }
 
@@ -861,6 +918,9 @@ func (s *State) Queue(now time.Time, minInterval time.Duration) []QueueEntry {
 	var queued, freeRunning []QueueEntry
 	for _, r := range s.Rounds {
 		if r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry {
+			continue
+		}
+		if r.DispatchHeld(now) {
 			continue
 		}
 		e := QueueEntry{Round: r}

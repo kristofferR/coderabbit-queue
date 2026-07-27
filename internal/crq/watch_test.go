@@ -158,6 +158,48 @@ func TestDispatchHonoursDryRun(t *testing.T) {
 	}
 }
 
+func TestWatchClaimsCarriedFeedbackBeforeAdvancingTheQueue(t *testing.T) {
+	base := t.TempDir()
+	repo, pr := "owner/thing", 12
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{repo: true}
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", pr, sha
+	gh.pulls[fakeKey(repo, pr)] = pull
+	created := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	gh.graphQL = func(query string, _ map[string]any, out any) error {
+		if strings.Contains(query, "reviewThreads") {
+			payload := `{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},` +
+				`"nodes":[{"id":"THREAD1","isResolved":false,"isOutdated":false,"path":"a.go","line":1,` +
+				`"comments":{"nodes":[{"databaseId":55,"body":"Carried-over finding","url":"http://x","path":"a.go","line":1,` +
+				`"createdAt":"` + created + `","author":{"login":"coderabbitai[bot]"},"commit":{"oid":"oldhead123456"}}]}}]}}}}`
+			return json.Unmarshal([]byte(payload), out)
+		}
+		return noForcePush(query, nil, out)
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	script := filepath.Join(t.TempDir(), "session.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.Watch(context.Background(), WatchOptions{
+		Repos: []string{repo}, Once: true, Dispatch: true,
+		Command: []string{script}, MaxAttempts: 3,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("watch fired a review before claiming the carried-feedback fix: %v", gh.posted)
+	}
+}
+
 // One repository renamed, deleted, or unreadable by this token used to abort the
 // whole pass. The service restarts into the same list and hits it again, so every
 // healthy repository after it gets no events and no fix sessions — indefinitely.
@@ -385,6 +427,40 @@ func TestDispatchRefundsTheAttemptWhenTheCommandCannotStart(t *testing.T) {
 	}
 }
 
+func TestDispatchHealthRecordsProcessStartBeforeItsExit(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	seedRound(t, store, cfg, repo, 15, sha, PhaseQueued, time.Now().UTC(), 0)
+	script := filepath.Join(t.TempDir(), "agent.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 17\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := newDispatchPool(0)
+	report := NextReport{Repo: repo, PR: 15, Head: sha, Action: "fix"}
+	if ok, why := svc.startDispatch(context.Background(), WatchOptions{
+		Dispatch: true, Command: []string{script}, MaxAttempts: 3,
+	}, pool, report); !ok {
+		t.Fatalf("dispatch was not claimed: %s", why)
+	}
+	pool.wait()
+
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Drain == nil || st.Drain.LastSuccessAt == nil || st.Drain.ConsecutiveFailures != 0 {
+		t.Errorf("a process that started but exited nonzero was recorded as a start failure: %+v", st.Drain)
+	}
+}
+
 // Findings on a head crq never queued — a review somebody triggered by hand, or
 // feedback that predates the drain — used to be undispatchable forever, because
 // `Next` returns fix before enqueueing and the claim had nowhere to live.
@@ -560,7 +636,9 @@ func TestExhaustedAttemptsAreNotADispatcherFailure(t *testing.T) {
 func TestSessionLogPruneLeavesRoomForTheNewLog(t *testing.T) {
 	dir := t.TempDir()
 	for i := 0; i < 8; i++ {
-		name := fmt.Sprintf("7-abcdef123-2026010%dT000000.log", i)
+		// Heads deliberately sort opposite to timestamps: pruning the whole
+		// filename would retain the oldest four.
+		name := fmt.Sprintf("7-%09d-202601%02dT000000.log", 999999999-i, i+1)
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -575,7 +653,7 @@ func TestSessionLogPruneLeavesRoomForTheNewLog(t *testing.T) {
 	}
 	// The ones kept are the newest.
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "7-abcdef123-20260103") {
+		if stamp := sessionLogTimestamp(e.Name()); stamp < "20260105T000000" {
 			t.Errorf("%s was kept over a newer log", e.Name())
 		}
 	}

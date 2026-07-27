@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -173,11 +174,19 @@ exec %q watch --dispatch -- %s
 			parts[len(parts)-1] = os.Getenv("USER")
 		}
 		cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
-		if err := cmd.Run(); err != nil {
-			if s.log != nil {
-				s.log.Printf("drain install: %s: %v", line, err)
+		output, err := cmd.CombinedOutput()
+		if err != nil && launchdJobAbsent(line, output) {
+			continue
+		}
+		if err != nil {
+			detail := err.Error()
+			if text := strings.TrimSpace(string(output)); text != "" {
+				detail += ": " + text
 			}
-			failed = append(failed, fmt.Sprintf("%s: %v", line, err))
+			if s.log != nil {
+				s.log.Printf("drain install: %s: %s", line, detail)
+			}
+			failed = append(failed, fmt.Sprintf("%s: %s", line, detail))
 		}
 	}
 	if len(failed) > 0 {
@@ -189,6 +198,18 @@ exec %q watch --dispatch -- %s
 }
 
 func currentUID() string { return fmt.Sprint(os.Getuid()) }
+
+// launchctl bootout is the replacement half of a launchd reinstall. The job
+// does not exist on the first install, which is already the desired state; only
+// that explicit response is benign. Bootstrap failures and every other bootout
+// failure still fail the install.
+func launchdJobAbsent(command string, output []byte) bool {
+	if !strings.HasPrefix(strings.TrimSpace(command), "launchctl bootout ") {
+		return false
+	}
+	text := strings.ToLower(string(output))
+	return strings.Contains(text, "no such process") || strings.Contains(text, "could not find service")
+}
 
 // drainCanAuthenticate reports whether the SERVICE will find a GitHub
 // credential — which is not the same question as whether this shell has one.
@@ -270,8 +291,34 @@ func (s *Service) drainEnv(plan DrainInstall) map[string]string {
 		"CRQ_WATCH_INTERVAL":        s.cfg.WatchInterval.String(),
 		"CRQ_DISPATCH_MAX_ATTEMPTS": fmt.Sprint(s.cfg.DispatchMaxAttempts),
 		"CRQ_DISPATCH_CONCURRENCY":  fmt.Sprint(s.cfg.DispatchConcurrency),
+		"CRQ_BOT":                   s.cfg.Bot,
+		"CRQ_REQUIRED_BOTS":         strings.Join(s.cfg.RequiredBots, ","),
+		"CRQ_FEEDBACK_BOTS":         strings.Join(s.cfg.FeedbackBots, ","),
+		"CRQ_REVIEW_CMD":            s.cfg.ReviewCommand,
+		"CRQ_RATELIMIT_CMD":         s.cfg.RateLimitCommand,
+		"CRQ_RL_MARKER":             s.cfg.RateLimitMarker,
+		"CRQ_CAL_REPLY_MARKER":      s.cfg.CalibrationMarker,
+		"CRQ_REVIEW_DONE_MARKER":    s.cfg.ReviewDoneMarker,
+		"CRQ_COMPLETION_MARKER":     s.cfg.CompletionMarker,
 		"PATH":                      drainPath(plan),
 	}
+	if s.cfg.RateLimitCoDegrade {
+		env["CRQ_RL_CO_DEGRADE"] = "1"
+	} else {
+		env["CRQ_RL_CO_DEGRADE"] = "0"
+	}
+	coNames := make([]string, 0, len(s.cfg.CoBots))
+	for _, co := range s.cfg.CoBots {
+		coNames = append(coNames, co.Name)
+		prefix := "CRQ_COBOT_" + strings.ToUpper(co.Name)
+		env[prefix+"_CMD"] = co.Command
+		env[prefix+"_TRIGGER"] = string(co.Trigger)
+		env[prefix+"_REQUIRED"] = strconv.FormatBool(co.Required)
+		env[prefix+"_GRACE"] = co.SelfHealGrace.String()
+	}
+	// Explicitly carry an empty set: omitting this key would re-enable every
+	// default co-reviewer when the service starts.
+	env["CRQ_COBOTS"] = strings.Join(coNames, ",")
 	if path := ConfigPath(); path != "" {
 		env["CRQ_CONFIG"] = path
 	}
@@ -326,7 +373,9 @@ func (s *Service) drainUnit(plan DrainInstall) string {
 	}
 	var lines strings.Builder
 	for _, k := range keys {
-		fmt.Fprintf(&lines, "Environment=%s=%s\n", k, env[k])
+		// Quote the whole assignment. systemd otherwise tokenizes whitespace in
+		// CRQ_CONFIG, PATH, commands, and markers into separate assignments.
+		fmt.Fprintf(&lines, "Environment=%s\n", strconv.Quote(k+"="+env[k]))
 	}
 	return fmt.Sprintf(`[Unit]
 Description=crq review drain (watch + dispatch fix sessions)

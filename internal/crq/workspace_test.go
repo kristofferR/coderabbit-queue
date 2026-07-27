@@ -214,6 +214,25 @@ func TestGitTokenTravelsInTheEnvironment(t *testing.T) {
 	}
 }
 
+func TestConfigureOriginPersistsTokenCredentialHelper(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mirror.git")
+	if _, err := gitDir(context.Background(), "", "init", "--bare", path); err != nil {
+		t.Fatal(err)
+	}
+	ws := Workspace{Token: "ghp_secret_value"}
+	if err := ws.configureOrigin(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := gitDir(context.Background(), path, "config", "--local", "--get", "credential.helper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != credentialHelper {
+		t.Fatalf("persisted credential.helper = %q, want dispatch helper", got)
+	}
+}
+
 // A relative root would make `git worktree add` — which runs inside the mirror —
 // create the worktree under the mirror, while the path handed back points at a
 // directory that does not exist.

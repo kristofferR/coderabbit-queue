@@ -7,6 +7,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
 )
 
 // Setup people get wrong is setup that silently does nothing, which is the exact
@@ -105,6 +108,70 @@ func TestDrainUnitCarriesTheConfigurationTheInstallRead(t *testing.T) {
 	// Rewriting it for the same configuration must produce the same file.
 	if again := svc.drainUnit(plan); again != unit {
 		t.Error("two renderings of one configuration differ; every re-install would rewrite the unit")
+	}
+}
+
+func TestDrainUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
+	cfg := firingConfig()
+	cfg.Bot = "custom-reviewer[bot]"
+	cfg.RequiredBots = []string{"custom-reviewer[bot]", "cursor[bot]"}
+	cfg.FeedbackBots = []string{"custom-reviewer[bot]", "cursor[bot]", "observer[bot]"}
+	cfg.ReviewCommand = "@custom review this"
+	cfg.RateLimitCoDegrade = false
+	cfg.CoBots = []CoBotConfig{{
+		Name: "bugbot", Login: "cursor[bot]", Command: "bugbot run now",
+		Trigger: engine.TriggerAlways, Required: true, SelfHealGrace: 4 * time.Minute,
+	}}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	plan := DrainInstall{Platform: "linux", Wrapper: "/tmp/crq drain", LogDir: "/tmp/crq logs"}
+
+	unit := svc.drainUnit(plan)
+	for _, want := range []string{
+		`CRQ_BOT=custom-reviewer[bot]`,
+		`CRQ_REQUIRED_BOTS=custom-reviewer[bot],cursor[bot]`,
+		`CRQ_FEEDBACK_BOTS=custom-reviewer[bot],cursor[bot],observer[bot]`,
+		`CRQ_REVIEW_CMD=@custom review this`,
+		`CRQ_COBOTS=bugbot`,
+		`CRQ_COBOT_BUGBOT_CMD=bugbot run now`,
+		`CRQ_COBOT_BUGBOT_TRIGGER=always`,
+		`CRQ_COBOT_BUGBOT_REQUIRED=true`,
+		`CRQ_COBOT_BUGBOT_GRACE=4m0s`,
+		`CRQ_RL_CO_DEGRADE=0`,
+	} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("unit does not carry %q:\n%s", want, unit)
+		}
+	}
+}
+
+func TestSystemdEnvironmentAssignmentsQuoteWhitespace(t *testing.T) {
+	cfg := firingConfig()
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "config with spaces", "env"))
+	t.Setenv("PATH", "/usr/bin:/opt/tools with spaces/bin")
+	plan := DrainInstall{Platform: "linux", Wrapper: "/tmp/crq-drain", LogDir: "/tmp/crq"}
+
+	unit := svc.drainUnit(plan)
+	for _, key := range []string{"CRQ_CONFIG", "PATH", "CRQ_REVIEW_CMD"} {
+		if !strings.Contains(unit, `Environment="`+key+`=`) {
+			t.Errorf("%s assignment is not quoted:\n%s", key, unit)
+		}
+	}
+	if strings.Contains(unit, "Environment=CRQ_CONFIG=") {
+		t.Errorf("CRQ_CONFIG was emitted as an unquoted systemd assignment:\n%s", unit)
+	}
+}
+
+func TestLaunchdMissingJobIsBenignOnlyForBootout(t *testing.T) {
+	output := []byte("Boot-out failed: 3: No such process")
+	if !launchdJobAbsent("launchctl bootout gui/501/no.kristofferr.crq-drain", output) {
+		t.Error("first-install bootout should accept an absent launchd job")
+	}
+	if launchdJobAbsent("launchctl bootstrap gui/501 /tmp/drain.plist", output) {
+		t.Error("a bootstrap failure must never be ignored")
+	}
+	if launchdJobAbsent("launchctl bootout gui/501/no.kristofferr.crq-drain", []byte("permission denied")) {
+		t.Error("a genuine bootout failure must not be ignored")
 	}
 }
 

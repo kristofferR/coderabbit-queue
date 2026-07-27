@@ -229,13 +229,23 @@ func ObservedAccountBlock(obs Observation, p Policy, q state.AccountQuota, now t
 	if newest == nil {
 		return nil
 	}
-	// Only NEW evidence, and an EDIT is not new evidence: CodeRabbit rewrites its
-	// rate-limit notice in place as the window counts down, so treating each edit
-	// as a fresh block would renew it forever from a message crq has already
-	// accounted for. The standing window still applies; when it passes, this
-	// comment is spent.
+	// While the recorded block stands, edits to its comment are only countdown
+	// updates and must not renew it. Once that block has ended (by time or a
+	// conclusive calibration), CodeRabbit may reuse the same comment for a later
+	// fire. A newer UpdatedAt is then fresh evidence; permanently spending the
+	// ID would miss the new account-wide block.
 	if newest.CommentID != 0 && newest.CommentID == q.RLCommentID {
-		return nil
+		if q.BlockedUntil != nil && q.BlockedUntil.After(now) {
+			return nil
+		}
+		// An edit made during the old window is still that window's countdown,
+		// even when we only observe it after the window expires.
+		if q.BlockedUntil != nil && !newest.UpdatedAt.After(*q.BlockedUntil) {
+			return nil
+		}
+		if q.RLCommentUpdated != nil && !newest.UpdatedAt.After(*q.RLCommentUpdated) {
+			return nil
+		}
 	}
 	// A notice whose own window has passed is only worth a fresh fallback block
 	// if crq has not already accounted for it. Without this, every observation of

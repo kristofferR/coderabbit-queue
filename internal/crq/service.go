@@ -1591,6 +1591,13 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 		// metered round until a window the bot has just contradicted expires.
 		reviewsLeft := st.Account.Remaining != nil && *st.Account.Remaining > 0 &&
 			st.Account.BlockedUntil == nil && st.Account.CalibAskedAt == nil
+		if reviewsLeft {
+			// A conclusive available reading ends the old comment's identity as
+			// well as its window. CodeRabbit can reuse that ID after the next
+			// fire; keeping it marked spent would hide the new block.
+			st.Account.RLCommentID = 0
+			st.Account.RLCommentUpdated = nil
+		}
 		if !reviewsLeft && prevBlock != nil && prevBlock.After(now) &&
 			(st.Account.BlockedUntil == nil || prevBlock.After(*st.Account.BlockedUntil)) {
 			st.Account.BlockedUntil = prevBlock

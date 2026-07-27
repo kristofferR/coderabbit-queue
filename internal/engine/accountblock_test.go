@@ -40,8 +40,9 @@ func TestObservedAccountBlockIgnoresAnEditedNotice(t *testing.T) {
 	now := time.Date(2026, 7, 27, 1, 7, 0, 0, time.UTC)
 	p := Policy{Bot: "coderabbitai[bot]", RateLimitFallback: 15 * time.Minute}
 	recorded := now.Add(-30 * time.Minute)
+	blocked := now.Add(30 * time.Minute)
 
-	q := state.AccountQuota{RLCommentID: 900, RLCommentUpdated: &recorded}
+	q := state.AccountQuota{BlockedUntil: &blocked, RLCommentID: 900, RLCommentUpdated: &recorded}
 	obs := Observation{Events: []dialect.BotEvent{{
 		Kind: dialect.EvRateLimited, Bot: "coderabbitai[bot]",
 		CommentID: 900, UpdatedAt: now, // edited just now
@@ -55,6 +56,29 @@ func TestObservedAccountBlockIgnoresAnEditedNotice(t *testing.T) {
 	obs.Events[0].CommentID = 901
 	if blk := ObservedAccountBlock(obs, p, q, now); blk == nil {
 		t.Error("a new rate-limit notice must block the account")
+	}
+}
+
+func TestObservedAccountBlockAcceptsAReusedCommentAfterTheOldBlock(t *testing.T) {
+	now := time.Date(2026, 7, 27, 2, 7, 0, 0, time.UTC)
+	p := Policy{Bot: "coderabbitai[bot]", RateLimitFallback: 15 * time.Minute}
+	recorded := now.Add(-40 * time.Minute)
+	expired := now.Add(-10 * time.Minute)
+	nextWindow := now.Add(45 * time.Minute)
+	q := state.AccountQuota{
+		BlockedUntil: &expired, RLCommentID: 900, RLCommentUpdated: &recorded,
+	}
+	obs := Observation{Events: []dialect.BotEvent{{
+		Kind: dialect.EvRateLimited, Bot: "coderabbitai[bot]",
+		CommentID: 900, UpdatedAt: now, Window: &nextWindow,
+	}}}
+
+	blk := ObservedAccountBlock(obs, p, q, now)
+	if blk == nil {
+		t.Fatal("a later fire's update of the reused comment was treated as permanently spent")
+	}
+	if !blk.Until.Equal(nextWindow) {
+		t.Errorf("until = %s, want the reused comment's new window %s", blk.Until, nextWindow)
 	}
 }
 

@@ -132,6 +132,29 @@ func TestLoadConfigPreservesEmptyCompletionMarkerFromFile(t *testing.T) {
 	}
 }
 
+func TestLoadConfigProcessTokenWinsAcrossAliases(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "env")
+	if err := os.WriteFile(path, []byte("GITHUB_TOKEN=file-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRQ_CONFIG", path)
+	t.Setenv("GH_TOKEN", "process-token")
+	t.Setenv("GITHUB_TOKEN", "")
+	if err := os.Unsetenv("GITHUB_TOKEN"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("GITHUB_TOKEN"); got != "" {
+		t.Fatalf("file GITHUB_TOKEN %q overrode the process GH_TOKEN alias", got)
+	}
+	if got := os.Getenv("GH_TOKEN"); got != "process-token" {
+		t.Fatalf("GH_TOKEN = %q, want the process credential", got)
+	}
+}
+
 func TestUnionBotsDedupesAndPreservesOrder(t *testing.T) {
 	got := unionBots([]string{"coderabbitai[bot]", ""}, []string{"coderabbitai", "chatgpt-codex-connector[bot]"})
 	want := []string{"coderabbitai[bot]", "chatgpt-codex-connector[bot]"}

@@ -96,12 +96,67 @@ func TestAClaimedRoundLeavesTheFireQueue(t *testing.T) {
 	if fixing.FireEligible(now) {
 		t.Error("a round a fix session holds is fire-eligible; the review would be of a head about to move")
 	}
+	if fixing.Phase != PhaseAwaitingRetry || fixing.RetryAt == nil || !fixing.RetryAt.After(now) {
+		t.Fatalf("claim was not mirrored into the retry gate older binaries honor: %#v", fixing)
+	}
 	if next := s.NextEligible(now); next == nil || next.PR != 2 {
 		t.Errorf("next eligible = %#v, want the PR nobody is fixing — the queue must keep moving", next)
+	}
+	for _, e := range s.Queue(now, 0) {
+		if e.PR == fixing.PR {
+			t.Errorf("held dispatch appears in the rendered queue: %#v", e)
+		}
 	}
 	// A claim nobody heartbeats expires, so this can never park a round for good.
 	if !fixing.FireEligible(now.Add(2 * DispatchTTL)) {
 		t.Error("an expired claim still holds the round out of the queue")
+	}
+}
+
+func TestDispatchHoldRestoresTheOriginalQueueState(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	cooldown := now.Add(30 * time.Minute)
+	r := Round{Repo: "o/r", PR: 1, Head: "aaaaaaaa1", Phase: PhaseAwaitingRetry, RetryAt: &cooldown}
+
+	if ok, why := r.ClaimDispatch("host", "tok", now, 3); !ok {
+		t.Fatal(why)
+	}
+	firstHold := *r.RetryAt
+	if ok, taken := r.HeartbeatDispatch("tok", now.Add(DispatchTTL/2)); !ok || taken {
+		t.Fatalf("heartbeat = ok %v taken %v", ok, taken)
+	}
+	if !r.RetryAt.After(firstHold) {
+		t.Errorf("retry compatibility hold was not extended: %s <= %s", r.RetryAt, firstHold)
+	}
+	if !r.ReleaseDispatch("tok") {
+		t.Fatal("release failed")
+	}
+	if r.Phase != PhaseAwaitingRetry || r.RetryAt == nil || !r.RetryAt.Equal(cooldown) {
+		t.Errorf("release restored phase=%s retry=%v, want awaiting_retry at %s", r.Phase, r.RetryAt, cooldown)
+	}
+}
+
+func TestArchivedDispatchCanBeHeartbeatedWithoutRevivingItsRound(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	r := Round{Repo: "o/r", PR: 1, Head: "aaaaaaaa1", Phase: PhaseQueued}
+	if ok, why := r.ClaimDispatch("host", "tok", now, 3); !ok {
+		t.Fatal(why)
+	}
+	r.Abandon("superseded")
+	st := State{Archive: []Round{r}}
+
+	later := now.Add(DispatchTTL / 2)
+	if ok, taken := st.HeartbeatArchivedDispatch("o/r", 1, "tok", later); !ok || taken {
+		t.Fatalf("archived heartbeat = ok %v taken %v", ok, taken)
+	}
+	if got := st.Archive[0].Dispatch.Heartbeat; !got.Equal(later) {
+		t.Errorf("heartbeat = %s, want %s", got, later)
+	}
+	if !st.ReleaseArchivedDispatch("o/r", 1, "tok") {
+		t.Fatal("archived release failed")
+	}
+	if st.Archive[0].Phase != PhaseAbandoned {
+		t.Errorf("release revived archived round into %s", st.Archive[0].Phase)
 	}
 }
 

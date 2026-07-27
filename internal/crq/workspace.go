@@ -249,10 +249,14 @@ func (w Workspace) configureOrigin(ctx context.Context, path string) error {
 		want = append(want, [2]string{"credential.helper", credentialHelper})
 	}
 	for _, kv := range want {
-		if got, err := w.git(ctx, path, "config", "--get", kv[0]); err == nil && got == kv[1] {
+		// This asks what is PERSISTED in the mirror. w.git injects the token
+		// helper with -c for network commands; using it here would answer with
+		// that command-line value even when the local config is empty, and the
+		// dispatched session's later plain `git push` would have no helper.
+		if got, err := gitDir(ctx, path, "config", "--local", "--get", kv[0]); err == nil && got == kv[1] {
 			continue
 		}
-		if _, err := w.git(ctx, path, "config", kv[0], kv[1]); err != nil {
+		if _, err := gitDir(ctx, path, "config", "--local", kv[0], kv[1]); err != nil {
 			return err
 		}
 	}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
@@ -213,7 +212,20 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			if marker := strings.TrimSpace(s.cfg.SkipMarker); marker != "" && strings.Contains(pull.Body, marker) {
 				continue
 			}
-			report, err := s.Next(ctx, repo, pull.Number)
+			var report NextReport
+			var err error
+			if opts.Dispatch {
+				// Peek through the non-firing decision path first. A carried
+				// finding can make Next enqueue and Pump the current head before
+				// returning "fix"; claiming only afterwards spends a metered
+				// review on the code this session is about to replace.
+				report, _, _, err = s.nextFromState(ctx, repo, pull.Number)
+				if err == nil && report.Action != string(engine.ActionFix) {
+					report, err = s.Next(ctx, repo, pull.Number)
+				}
+			} else {
+				report, err = s.Next(ctx, repo, pull.Number)
+			}
 			if err != nil {
 				if _, ok := ghapi.ThrottleWait(err); ok {
 					return err
@@ -325,14 +337,24 @@ func (s *Service) startDispatch(ctx context.Context, opts WatchOptions, pool *di
 // runs in the pool, off the pass, so a long session delays nothing else.
 func (s *Service) runDispatch(ctx context.Context, opts WatchOptions, report NextReport, token string) {
 	ok, why := s.dispatch(ctx, opts, report, token)
-	s.noteDispatchHealth(ctx, ok, why)
 	if !ok && s.log != nil {
 		s.log.Printf("watch: %s#%d not fixed: %s", report.Repo, report.PR, why)
 	}
 }
 
 // dispatch checks the claimed round's head out and runs the fix session.
-func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextReport, token string) (bool, string) {
+func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextReport, token string) (ok bool, reason string) {
+	// Health means "can this drain START a session", not whether the agent later
+	// succeeds at the work it was given. Record pre-start failures on return;
+	// cmd.Start records recovery immediately, while a healthy long-running
+	// session is still running.
+	started := false
+	defer func() {
+		if !started {
+			s.noteDispatchHealth(context.WithoutCancel(ctx), false, reason)
+		}
+	}()
+
 	// Losing the claim means another watcher has taken this round and may be
 	// running its own session. Two sessions writing one worktree is worse than
 	// no session, so the heartbeat cancels this one.
@@ -398,12 +420,16 @@ func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextRe
 		s.log.Printf("watch: dispatching %s for %s#%d@%s (%d findings) — log: %s",
 			opts.Command[0], report.Repo, report.PR, report.Head, len(report.Findings), logPath)
 	}
-	runErr := cmd.Run()
-	// A command that never reached a process did not use up the per-head budget.
-	// A missing or non-executable fix agent would otherwise spend every attempt
-	// on a session that never ran, and correcting the configuration would come
-	// too late for that head — the case releaseDispatch's contract is about.
-	s.releaseDispatch(context.WithoutCancel(ctx), report, token, commandStarted(runErr))
+	if err := cmd.Start(); err != nil {
+		// A command that never reached a process did not use up the per-head
+		// budget. Correcting a missing agent must leave this head retryable.
+		s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
+		return false, "fix session could not start: " + err.Error()
+	}
+	started = true
+	s.noteDispatchHealth(context.WithoutCancel(ctx), true, "")
+	runErr := cmd.Wait()
+	s.releaseDispatch(context.WithoutCancel(ctx), report, token, true)
 	if lost() {
 		return false, "another watcher took this round; the session was stopped"
 	}
@@ -424,19 +450,6 @@ func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextRe
 	}
 	_ = co.Remove(context.WithoutCancel(ctx))
 	return true, ""
-}
-
-// commandStarted reports whether a failed run got as far as a process. A command
-// that could not be found or could not be executed fails before that, as an
-// *exec.Error or a fork/exec *fs.PathError; a process that ran and exited
-// unsuccessfully gives an *exec.ExitError, and that attempt did happen.
-func commandStarted(err error) bool {
-	if err == nil {
-		return true
-	}
-	var noCommand *exec.Error
-	var noFile *fs.PathError
-	return !errors.As(err, &noCommand) && !errors.As(err, &noFile)
 }
 
 // sessionWork reports whether this checkout holds work that exists nowhere else,
@@ -613,7 +626,7 @@ func (s *Service) beatDispatch(ctx context.Context, report NextReport, token str
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				taken, superseded := false, false
+				taken, gone := false, false
 				if _, err := s.store.Update(ctx, func(st *State) error {
 					round := st.Round(report.Repo, report.PR)
 					// A round for ANOTHER head is not this round: superseding is
@@ -622,8 +635,19 @@ func (s *Service) beatDispatch(ctx context.Context, report NextReport, token str
 					// a theft would kill this session between pushing and
 					// resolving, every time it succeeded.
 					if round == nil || round.Head != report.Head {
-						superseded = true
-						return ErrNoChange
+						ok, byOther := st.HeartbeatArchivedDispatch(
+							report.Repo, report.PR, token, s.clock())
+						taken = byOther
+						if !ok {
+							// A current live claim for the replacement head is also
+							// proof that this session no longer owns the PR.
+							if round != nil && round.DispatchHeld(s.clock()) {
+								taken = true
+							}
+							gone = !taken
+							return ErrNoChange
+						}
+						return nil
 					}
 					ok, byOther := round.HeartbeatDispatch(token, s.clock())
 					taken = byOther
@@ -632,7 +656,7 @@ func (s *Service) beatDispatch(ctx context.Context, report NextReport, token str
 					}
 					st.PutRound(*round)
 					return nil
-				}); err != nil {
+				}); err != nil && !errors.Is(err, ErrNoChange) {
 					// A failed write is not proof of anything; the next tick
 					// decides.
 					continue
@@ -644,10 +668,9 @@ func (s *Service) beatDispatch(ctx context.Context, report NextReport, token str
 					stop()
 					return
 				}
-				// The claim is simply gone, or this head is no longer the one being
-				// worked on. Stop heartbeating and let the session finish —
-				// resolving its threads comes AFTER the push.
-				if superseded {
+				// The token is nowhere in current or archived state. There is
+				// nothing left to refresh; let the session finish.
+				if gone {
 					return
 				}
 			}
@@ -779,8 +802,25 @@ func pruneSessionLogs(dir string, pr int) {
 	if len(mine) <= room {
 		return
 	}
-	sort.Strings(mine) // the timestamp is in the name, so this is chronological
+	sort.Slice(mine, func(i, j int) bool {
+		// Names are <pr>-<head>-<timestamp>.log. Comparing the whole name orders
+		// primarily by head SHA and can delete a recent failure while retaining
+		// an old log. The fixed-width UTC timestamp itself sorts chronologically.
+		left, right := sessionLogTimestamp(mine[i]), sessionLogTimestamp(mine[j])
+		if left == right {
+			return mine[i] < mine[j]
+		}
+		return left < right
+	})
 	for _, name := range mine[:len(mine)-room] {
 		_ = os.Remove(filepath.Join(dir, name))
 	}
+}
+
+func sessionLogTimestamp(name string) string {
+	name = strings.TrimSuffix(name, ".log")
+	if at := strings.LastIndexByte(name, '-'); at >= 0 {
+		return name[at+1:]
+	}
+	return ""
 }

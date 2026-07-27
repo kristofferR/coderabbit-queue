@@ -141,9 +141,15 @@ func LoadConfig() (Config, error) {
 		// (internal/gh, and `git` through it), not from this map — so a token
 		// configured here would authenticate nothing. Exporting it is what lets a
 		// service unit carry no secret of its own: point it at this file.
-		for _, key := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
-			if v := strings.TrimSpace(values[key]); v != "" && os.Getenv(key) == "" {
-				os.Setenv(key, v)
+		// gh treats these as aliases, with GITHUB_TOKEN taking precedence. Treat
+		// them as one setting here too: exporting a file GITHUB_TOKEN when the
+		// process supplied GH_TOKEN would silently replace the caller's explicit
+		// credential with the file's account.
+		if os.Getenv("GITHUB_TOKEN") == "" && os.Getenv("GH_TOKEN") == "" {
+			for _, key := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
+				if v := strings.TrimSpace(values[key]); v != "" {
+					os.Setenv(key, v)
+				}
 			}
 		}
 	}
