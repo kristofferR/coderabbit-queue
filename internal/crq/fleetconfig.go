@@ -22,6 +22,12 @@ type fleetSetting struct {
 	Doc string
 	// Env names the variable it used to come from, so an operator can find it.
 	Env string
+	// AltEnv names the other variables a host may still feed this policy from:
+	// legacy aliases and per-bot keys. A host exporting one of these diverges
+	// from the fleet exactly as the canonical name does, and `crq doctor` has to
+	// say so — otherwise the stale setting stays, invisible, and the host falls
+	// back to it the moment the fleet key is unset.
+	AltEnv []string
 	// Apply writes value onto cfg, rejecting a value it cannot parse. A bad
 	// value must fail where it is SET, but it is validated here too: the state
 	// ref is shared, and a host reading a value it cannot use has to say so
@@ -73,8 +79,9 @@ func fleetSettings() map[string]fleetSetting {
 			Show: func(cfg Config) string { return strings.Join(sortedSetKeys(cfg.ExcludeRepos), ",") },
 		},
 		"required-bots": {
-			Doc: "logins that must review a head before a round converges",
-			Env: "CRQ_REQUIRED_BOTS",
+			Doc:    "logins that must review a head before a round converges",
+			Env:    "CRQ_REQUIRED_BOTS",
+			AltEnv: coBotRequiredEnvs(),
 			Apply: func(cfg *Config, v string) error {
 				cfg.RequiredBots = splitList(v)
 				if len(cfg.RequiredBots) == 0 {
@@ -176,6 +183,9 @@ func fleetSettings() map[string]fleetSetting {
 		"cobots": {
 			Doc: "co-reviewers crq surfaces and triggers (empty disables all)",
 			Env: "CRQ_COBOTS",
+			// A required bot is enabled whatever CRQ_COBOTS lists, so the per-bot
+			// required keys shape this set too.
+			AltEnv: coBotRequiredEnvs(),
 			Apply: func(cfg *Config, v string) error {
 				names, err := fleetCoBotNames(v)
 				if err != nil {
@@ -193,8 +203,9 @@ func fleetSettings() map[string]fleetSetting {
 			},
 		},
 		"rate-limit-co-degrade": {
-			Doc: "run co-reviewer-only rounds while the CodeRabbit account is blocked",
-			Env: "CRQ_RL_CO_DEGRADE",
+			Doc:    "run co-reviewer-only rounds while the CodeRabbit account is blocked",
+			Env:    "CRQ_RL_CO_DEGRADE",
+			AltEnv: []string{"CRQ_RL_CODEX_DEGRADE"},
 			Apply: func(cfg *Config, v string) error {
 				on, err := parseFleetBool(v)
 				if err != nil {
@@ -225,6 +236,10 @@ func fleetSettings() map[string]fleetSetting {
 func coBotFleetSettings(co dialect.CoReviewer) map[string]fleetSetting {
 	name := co.Name
 	env := "CRQ_COBOT_" + strings.ToUpper(name)
+	var legacyCommand []string
+	if co.LegacyCommandEnv != "" {
+		legacyCommand = []string{co.LegacyCommandEnv}
+	}
 	return map[string]fleetSetting{
 		"cobot-" + name + "-trigger": {
 			Doc: "when crq posts " + name + "'s command: never, selfheal or always (empty leaves it to how the bot is required)",
@@ -256,8 +271,9 @@ func coBotFleetSettings(co dialect.CoReviewer) map[string]fleetSetting {
 			},
 		},
 		"cobot-" + name + "-cmd": {
-			Doc: "the comment that triggers " + name + " (empty means crq never posts one)",
-			Env: env + "_CMD",
+			Doc:    "the comment that triggers " + name + " (empty means crq never posts one)",
+			Env:    env + "_CMD",
+			AltEnv: legacyCommand,
 			Apply: func(cfg *Config, v string) error {
 				command := strings.TrimSpace(v)
 				updateCoBot(cfg, name, func(cb *CoBotConfig) { cb.Command = command })
@@ -279,6 +295,41 @@ func coBotFleetSettings(co dialect.CoReviewer) map[string]fleetSetting {
 			Show: func(cfg Config) string { return coBotOf(cfg, name).SelfHealGrace.String() },
 		},
 	}
+}
+
+// coBotRequiredEnvs is every per-bot required key. Required-ness is not a fleet
+// setting of its own (required-bots owns the list), but the environment still
+// lets a host answer it per bot — so those variables belong to the settings that
+// carry the answer, not to none of them.
+func coBotRequiredEnvs() []string {
+	out := make([]string, 0, 3)
+	for _, co := range dialect.KnownCoReviewers() {
+		out = append(out, "CRQ_COBOT_"+strings.ToUpper(co.Name)+"_REQUIRED")
+	}
+	return out
+}
+
+// envNames is every variable this host may be feeding the setting from, canonical
+// name first.
+func (s fleetSetting) envNames() []string {
+	return append([]string{s.Env}, s.AltEnv...)
+}
+
+// explicitEnv names the variables this host actually set for one fleet setting,
+// canonical name first. Empty for a setting the host leaves to the fleet — and
+// for the zero fleetSetting an unknown key resolves to, whose empty Env no
+// environment can hold.
+func explicitEnv(cfg Config, setting fleetSetting) []string {
+	var out []string
+	for _, name := range setting.envNames() {
+		if name == "" {
+			continue
+		}
+		if cfg.ExplicitFleetEnv[name] {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // coBotOf is how this host currently drives a co-reviewer: its enabled entry

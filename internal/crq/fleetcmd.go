@@ -246,7 +246,12 @@ func (s *Service) FleetDivergence(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	var out []string
+	settings := fleetSettings()
 	for _, item := range items {
+		// Every name the host is still feeding this policy from, not just the
+		// canonical one: a legacy alias left behind is what the host falls back to
+		// if the fleet key is ever unset.
+		hostEnv := explicitEnv(s.cfg, settings[item.Key])
 		switch {
 		case item.Unknown:
 			out = append(out, fmt.Sprintf("%s is recorded for the fleet but is not a setting this crq understands; upgrade crq on this host or run crq config unset %s",
@@ -254,9 +259,9 @@ func (s *Service) FleetDivergence(ctx context.Context) ([]string, error) {
 		case item.Error != "":
 			out = append(out, fmt.Sprintf("%s: the fleet's value is one this crq cannot read (%s); using this host's %q",
 				item.Key, item.Error, item.Value))
-		case item.HostValue != nil && s.cfg.ExplicitFleetEnv[item.Env]:
+		case item.HostValue != nil && len(hostEnv) > 0:
 			out = append(out, fmt.Sprintf("%s is %q for the fleet, but %s is set to %q on this host; remove it or run crq config set %s",
-				item.Key, item.Value, item.Env, *item.HostValue, item.Key))
+				item.Key, item.Value, strings.Join(hostEnv, ", "), *item.HostValue, item.Key))
 		}
 	}
 	return out, nil

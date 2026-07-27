@@ -89,8 +89,10 @@ type Config struct {
 	// that commits a decision.
 	FleetRevision string
 	// ExplicitFleetEnv records fleet-owned variables supplied by either the
-	// config file or the process environment. LoadConfig does not export normal
-	// config-file values, so os.Getenv alone cannot detect that divergence.
+	// config file or the process environment, under the name the host actually
+	// used — a legacy alias or per-bot key counts, since the fleet overrides it
+	// just the same. LoadConfig does not export normal config-file values, so
+	// os.Getenv alone cannot detect that divergence.
 	ExplicitFleetEnv  map[string]bool
 	RateLimitCommand  string
 	RateLimitMarker   string
@@ -271,8 +273,10 @@ func LoadConfig() (Config, error) {
 	}
 	cfg.ExplicitFleetEnv = map[string]bool{}
 	for _, setting := range fleetSettings() {
-		if _, ok := env[setting.Env]; ok {
-			cfg.ExplicitFleetEnv[setting.Env] = true
+		for _, name := range setting.envNames() {
+			if _, ok := env[name]; ok {
+				cfg.ExplicitFleetEnv[name] = true
+			}
 		}
 	}
 	if len(cfg.Scope) == 0 && cfg.GateRepo != "" {

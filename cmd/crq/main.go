@@ -544,6 +544,13 @@ func run(ctx context.Context, args []string) int {
 		rest := args[1:]
 		switch {
 		case len(rest) == 0 || rest[0] == "show":
+			// Showing takes no operand either: a trailing token is a misspelled
+			// setting or subcommand, and printing the whole configuration would
+			// report success for an invocation that asked for something else.
+			if len(rest) > 1 {
+				fatal(errors.New("usage: crq config show"))
+				return 1
+			}
 			settings, cerr := service.FleetConfig(ctx)
 			if cerr != nil {
 				fatal(cerr)

@@ -107,10 +107,22 @@ func validRepoSlug(repo string) bool {
 		return false
 	}
 	// Same segment rules the workspace package applies to a path: "." and ".."
-	// are not repository names, and a second slash means this is not one either.
+	// are not repository names. The character class is GitHub's: an owner or
+	// repository name is letters, digits, hyphen, underscore and dot, so a slug
+	// holding anything else — a space, a second slash, a control character — is
+	// one no scan result can ever normalize to. Recorded, it reads as a rule
+	// covering a repository while covering nothing at all.
 	for _, part := range []string{owner, name} {
-		if part == "." || part == ".." || strings.ContainsAny(part, `/\`) {
+		if part == "." || part == ".." {
 			return false
+		}
+		for _, r := range part {
+			switch {
+			case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			case r == '-', r == '_', r == '.':
+			default:
+				return false
+			}
 		}
 	}
 	return true

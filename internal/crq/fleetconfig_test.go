@@ -79,8 +79,12 @@ func TestFleetRefusesWhatItCannotRead(t *testing.T) {
 		t.Error("an unknown setting was accepted")
 	}
 	for _, key := range []string{"repos", "exclude"} {
-		if err := svc.SetFleetConfig(ctx, key, "owner-repo"); err == nil {
-			t.Errorf("%s accepted a malformed repository slug", key)
+		// A slug GitHub can never return is a rule covering nothing, whether it
+		// is missing the slash or holds a character no repository name can.
+		for _, slug := range []string{"owner-repo", "owner/re po", "owner/re\tpo", "owner/repo?"} {
+			if err := svc.SetFleetConfig(ctx, key, slug); err == nil {
+				t.Errorf("%s accepted the malformed repository slug %q", key, slug)
+			}
 		}
 	}
 	if err := svc.SetFleetConfig(ctx, "required-bots", ""); err == nil {
@@ -707,6 +711,57 @@ func TestFleetDivergenceIncludesAnExplicitlyEmptyHostValue(t *testing.T) {
 	}
 	if len(got) != 1 || !strings.Contains(got[0], `CRQ_EXCLUDE is set to ""`) {
 		t.Fatalf("divergence = %v, want the explicitly empty host value", got)
+	}
+}
+
+// A policy a host feeds from a legacy alias or a per-bot key diverges exactly as
+// the canonical variable does — and the remedy names the variable that is
+// actually there, since that is the one still waiting to be fallen back on.
+func TestFleetDivergenceNamesTheVariableTheHostSet(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		key   string
+		value string
+		env   string
+		host  func(*Config)
+	}{
+		{
+			name:  "legacy alias",
+			key:   "rate-limit-co-degrade",
+			value: "1",
+			env:   "CRQ_RL_CODEX_DEGRADE",
+			host:  func(cfg *Config) { cfg.RateLimitCoDegrade = false },
+		},
+		{
+			name:  "per-bot required key",
+			key:   "required-bots",
+			value: "coderabbitai[bot]",
+			env:   "CRQ_COBOT_BUGBOT_REQUIRED",
+			host: func(cfg *Config) {
+				cfg.RequiredBots = []string{"coderabbitai[bot]", dialect.BugbotLogin}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			cfg := firingConfig()
+			tc.host(&cfg)
+			cfg.ExplicitFleetEnv = map[string]bool{tc.env: true}
+			store := NewMemoryStore(cfg)
+			if _, err := store.Update(ctx, func(st *State) error {
+				st.SetFleetValue(tc.key, tc.value)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			got, err := NewService(cfg, newFakeGitHub(), store, nil).FleetDivergence(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || !strings.Contains(got[0], tc.env) {
+				t.Fatalf("divergence = %v, want it to name %s", got, tc.env)
+			}
+		})
 	}
 }
 
