@@ -27,6 +27,7 @@ type fakeGitHub struct {
 	reviewComments  map[string][]ghapi.ReviewComment
 	issueReactions  map[string][]ghapi.Reaction
 	reactions       map[int64][]ghapi.Reaction
+	reactionErrs    map[int64]error
 	checkRuns       map[string][]ghapi.CheckRun // key: ref (short or full sha)
 	checkRunErrs    map[string]error
 	postBodyErrs    map[string]error // body → error (selective trigger-post failures)
@@ -67,6 +68,7 @@ func newFakeGitHub() *fakeGitHub {
 		reviewComments: map[string][]ghapi.ReviewComment{},
 		issueReactions: map[string][]ghapi.Reaction{},
 		reactions:      map[int64][]ghapi.Reaction{},
+		reactionErrs:   map[int64]error{},
 		deleteErrs:     map[int64]error{},
 	}
 }
@@ -169,6 +171,9 @@ func (f *fakeGitHub) ListIssueReactions(_ context.Context, repo string, pr int) 
 func (f *fakeGitHub) ListCommentReactions(_ context.Context, _ string, id int64) ([]ghapi.Reaction, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.reactionErrs[id]; err != nil {
+		return nil, err
+	}
 	return append([]ghapi.Reaction(nil), f.reactions[id]...), nil
 }
 
@@ -1265,6 +1270,9 @@ func TestPumpKeepsRoundReviewingWhenBotOnlyReacted(t *testing.T) {
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("owner/repo", 12)] = pull
+	command := ghapi.IssueComment{ID: 5, Body: cfg.ReviewCommand, CreatedAt: firedAt, UpdatedAt: firedAt}
+	command.User.Login = "kristofferR"
+	gh.comments[fakeKey("owner/repo", 12)] = []ghapi.IssueComment{command}
 	reaction := ghapi.Reaction{}
 	reaction.User.Login = cfg.Bot
 	gh.reactions[5] = []ghapi.Reaction{reaction}

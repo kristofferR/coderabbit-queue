@@ -382,7 +382,7 @@ func TestObserveScopesShellFilterToCodeRabbit(t *testing.T) {
 	f.gh.reviews[key] = []ghapi.Review{crShell, codexReview}
 	f.gh.mu.Unlock()
 
-	obs, err := f.svc.observe(f.ctx, f.svc.cfg, repo, pr, nil, f.clk.now())
+	obs, err := f.svc.observe(f.ctx, f.svc.cfg, repo, pr, nil, nil, f.clk.now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -530,7 +530,7 @@ func TestSelfHealCodexClaimPreventsDoublePost(t *testing.T) {
 	}
 	st, _, _ := f.store.Load(f.ctx)
 	round := st.Round(repo, pr)
-	obs, err := f.svc.observe(f.ctx, f.svc.cfg, repo, pr, round, f.clk.now())
+	obs, err := f.svc.observe(f.ctx, f.svc.cfg, repo, pr, round, nil, f.clk.now())
 	if err != nil {
 		t.Fatal(err)
 	}

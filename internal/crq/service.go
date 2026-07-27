@@ -244,6 +244,9 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		if free, handled, err := s.sweepQuotaFree(ctx, st, s.clock(), slot.Repo, slot.PR); err != nil {
 			return PumpResult{}, err
 		} else if handled {
+			// The quota-free result is the one Pump exposes to its caller, so
+			// preserve the cleanup hook for the slot result it replaces.
+			s.tidyAfterPump(ctx, res)
 			return free, nil
 		}
 		return res, nil
@@ -298,7 +301,7 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if next == nil {
 		return PumpResult{Action: "idle"}, nil
 	}
-	obs, err := s.observe(ctx, s.cfg, next.Repo, next.PR, next, now)
+	obs, err := s.observe(ctx, s.cfg, next.Repo, next.PR, next, collectPosted(st, next.Repo, next.PR).commands, now)
 	if err != nil {
 		return PumpResult{}, err
 	}
@@ -363,7 +366,7 @@ func (s *Service) sweepQuotaFree(ctx context.Context, st State, now time.Time, s
 		// left them behind the account block for hours. The budget above bounds
 		// the cost instead.
 		scanned++
-		obs, err := s.observe(ctx, s.cfg, round.Repo, round.PR, &round, now)
+		obs, err := s.observe(ctx, s.cfg, round.Repo, round.PR, &round, collectPosted(st, round.Repo, round.PR).commands, now)
 		if err != nil {
 			continue
 		}
@@ -399,7 +402,7 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 	if round == nil || !round.FireEligible(now) {
 		return PumpResult{}, false, nil
 	}
-	obs, err := s.observe(ctx, s.cfg, repo, pr, round, now)
+	obs, err := s.observe(ctx, s.cfg, repo, pr, round, collectPosted(st, repo, pr).commands, now)
 	if err != nil {
 		return PumpResult{}, false, err
 	}
@@ -487,7 +490,7 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 	if err != nil {
 		return PumpResult{}, err
 	}
-	obs, err := s.observe(ctx, s.cfg, slot.Repo, slot.PR, &slot, now)
+	obs, err := s.observe(ctx, s.cfg, slot.Repo, slot.PR, &slot, collectPosted(st, slot.Repo, slot.PR).commands, now)
 	if err != nil {
 		return PumpResult{}, err
 	}
@@ -626,7 +629,7 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 	if target == nil {
 		return st, nil
 	}
-	obs, err := s.observe(ctx, s.cfg, target.Repo, target.PR, target, now)
+	obs, err := s.observe(ctx, s.cfg, target.Repo, target.PR, target, collectPosted(st, target.Repo, target.PR).commands, now)
 	if err != nil {
 		if s.log != nil {
 			s.log.Printf("warning: reviewing-round sweep for %s#%d failed: %v", target.Repo, target.PR, err)

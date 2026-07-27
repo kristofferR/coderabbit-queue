@@ -586,6 +586,142 @@ func TestTidyAfterPumpSkipsAPumpThatChangedNothing(t *testing.T) {
 	}
 }
 
+// Pump can progress the slot holder and then return a different PR's
+// quota-free result. The caller can only tidy the returned result, so Pump must
+// tidy the progressed slot before replacing it.
+func TestPumpTidiesProgressedSlotBeforeReturningQuotaFreeResult(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.Tidy = true
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+
+	holderRepo, holderPR := "o/holder", 21
+	holderSHA := "1111111111111111"
+	holderPull := ghapi.Pull{State: "open"}
+	holderPull.Head.SHA = holderSHA
+	gh.pulls[fakeKey(holderRepo, holderPR)] = holderPull
+	gh.commits[holderSHA] = commitAt(now.Add(-10 * time.Minute))
+	holderCommand := ghapi.IssueComment{
+		ID:        100,
+		Body:      cfg.ReviewCommand,
+		CreatedAt: now.Add(-2 * time.Hour),
+		UpdatedAt: now.Add(-2 * time.Hour),
+	}
+	holderCommand.User.Login = "kristofferR"
+	gh.comments[fakeKey(holderRepo, holderPR)] = []ghapi.IssueComment{holderCommand}
+	holderReview := ghapi.Review{
+		ID:          101,
+		CommitID:    holderSHA,
+		State:       "COMMENTED",
+		SubmittedAt: now.Add(-time.Minute),
+		Body:        "review complete",
+	}
+	holderReview.User.Login = cfg.Bot
+	gh.reviews[fakeKey(holderRepo, holderPR)] = []ghapi.Review{holderReview}
+
+	backRepo, backPR := "o/back", 22
+	backSHA := "2222222222222222"
+	backPull := ghapi.Pull{State: "open"}
+	backPull.Head.SHA = backSHA
+	gh.pulls[fakeKey(backRepo, backPR)] = backPull
+	backReview := ghapi.Review{
+		ID:          201,
+		CommitID:    backSHA,
+		State:       "COMMENTED",
+		SubmittedAt: now.Add(-time.Minute),
+		Body:        "already reviewed",
+	}
+	backReview.User.Login = cfg.Bot
+	gh.reviews[fakeKey(backRepo, backPR)] = []ghapi.Review{backReview}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+	seedRound(t, store, cfg, holderRepo, holderPR, holderSHA[:9], PhaseFired, now.Add(-2*time.Hour), holderCommand.ID)
+	if _, err := store.Update(ctx, func(st *State) error {
+		r := st.Round(holderRepo, holderPR)
+		r.RecordPosted(cfg.Bot, holderCommand.ID, holderCommand.CreatedAt)
+		st.PutRound(*r)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Enqueue(ctx, backRepo, backPR); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.Pump(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Repo != backRepo || result.PR != backPR {
+		t.Fatalf("the quota-free result should replace the progressed slot result, got %#v", result)
+	}
+	if len(gh.deleted) != 1 || gh.deleted[0] != holderCommand.ID {
+		t.Fatalf("the replaced slot result was not tidied, deleted=%v", gh.deleted)
+	}
+}
+
+// A completed round remains the dedupe marker after its trigger is tidied.
+// Feedback must not ask GitHub for reactions on that now-deleted comment.
+func TestFeedbackSkipsReactionsForTidiedCommand(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+	repo, pr := "o/r", 23
+	head := "bbbbbbbb22222222"
+
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = head
+	gh.pulls[fakeKey(repo, pr)] = pull
+	gh.commits[head] = commitAt(now.Add(-10 * time.Minute))
+	command := ghapi.IssueComment{
+		ID:        100,
+		Body:      cfg.ReviewCommand,
+		CreatedAt: now.Add(-2 * time.Hour),
+		UpdatedAt: now.Add(-2 * time.Hour),
+	}
+	command.User.Login = "kristofferR"
+	gh.comments[fakeKey(repo, pr)] = []ghapi.IssueComment{command}
+	review := ghapi.Review{
+		ID:          101,
+		CommitID:    head,
+		State:       "COMMENTED",
+		SubmittedAt: now.Add(-time.Minute),
+		Body:        "review complete",
+	}
+	review.User.Login = cfg.Bot
+	gh.reviews[fakeKey(repo, pr)] = []ghapi.Review{review}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		return completedRound(st, repo, pr, now, func(r *Round) error {
+			if err := r.Fire(command.ID, command.CreatedAt); err != nil {
+				return err
+			}
+			r.RecordPosted(cfg.Bot, command.ID, command.CreatedAt)
+			return nil
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := svc.Tidy(ctx, repo, pr, false); err != nil {
+		t.Fatal(err)
+	} else if len(result.Deleted) != 1 {
+		t.Fatalf("tidy result = %#v, want the spent trigger deleted", result)
+	}
+	gh.reactionErrs[command.ID] = ghapi.ErrNotFound
+
+	if _, err := svc.Feedback(ctx, repo, pr); err != nil {
+		t.Fatalf("feedback read reactions from the deleted command: %v", err)
+	}
+}
+
 // completedRound builds a round that fired (via fire) and then completed, which
 // is the "has progressed" precondition every tidy candidate needs.
 func completedRound(st *State, repo string, pr int, now time.Time, fire func(*Round) error) error {

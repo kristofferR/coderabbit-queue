@@ -88,7 +88,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// findings from the raw reviews/comments and derives convergence from
 	// engine.Completion over the same snapshot — no second fetch path, and the
 	// "is head reviewed?" rules live only in the engine.
-	obs, err := s.observe(ctx, s.cfg, repo, pr, round, now)
+	obs, err := s.observe(ctx, s.cfg, repo, pr, round, collectPosted(st, repo, pr).commands, now)
 	if err != nil {
 		return FeedbackReport{}, err
 	}
