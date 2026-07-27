@@ -292,21 +292,22 @@ func drainPath(plan DrainInstall) string {
 // none.
 func (s *Service) drainEnv(plan DrainInstall) map[string]string {
 	env := map[string]string{
-		"CRQ_REPOS":                 strings.Join(plan.Repos, ","),
-		"CRQ_WATCH_INTERVAL":        s.cfg.WatchInterval.String(),
-		"CRQ_DISPATCH_MAX_ATTEMPTS": fmt.Sprint(s.cfg.DispatchMaxAttempts),
-		"CRQ_DISPATCH_CONCURRENCY":  fmt.Sprint(s.cfg.DispatchConcurrency),
-		"CRQ_DISPATCH_FORKS":        strconv.FormatBool(s.cfg.DispatchForks),
-		"CRQ_BOT":                   s.cfg.Bot,
-		"CRQ_REQUIRED_BOTS":         strings.Join(s.cfg.RequiredBots, ","),
-		"CRQ_FEEDBACK_BOTS":         strings.Join(s.cfg.FeedbackBots, ","),
-		"CRQ_REVIEW_CMD":            s.cfg.ReviewCommand,
-		"CRQ_RATELIMIT_CMD":         s.cfg.RateLimitCommand,
-		"CRQ_RL_MARKER":             s.cfg.RateLimitMarker,
-		"CRQ_CAL_REPLY_MARKER":      s.cfg.CalibrationMarker,
-		"CRQ_REVIEW_DONE_MARKER":    s.cfg.ReviewDoneMarker,
-		"CRQ_COMPLETION_MARKER":     s.cfg.CompletionMarker,
-		"PATH":                      drainPath(plan),
+		"CRQ_REPOS":                  strings.Join(plan.Repos, ","),
+		"CRQ_WATCH_INTERVAL":         s.cfg.WatchInterval.String(),
+		"CRQ_DISPATCH_MAX_ATTEMPTS":  fmt.Sprint(s.cfg.DispatchMaxAttempts),
+		"CRQ_DISPATCH_CONCURRENCY":   fmt.Sprint(s.cfg.DispatchConcurrency),
+		"CRQ_DISPATCH_FORKS":         strconv.FormatBool(s.cfg.DispatchForks),
+		"CRQ_AUTOREVIEW_SKIP_MARKER": s.cfg.SkipMarker,
+		"CRQ_BOT":                    s.cfg.Bot,
+		"CRQ_REQUIRED_BOTS":          strings.Join(s.cfg.RequiredBots, ","),
+		"CRQ_FEEDBACK_BOTS":          strings.Join(s.cfg.FeedbackBots, ","),
+		"CRQ_REVIEW_CMD":             s.cfg.ReviewCommand,
+		"CRQ_RATELIMIT_CMD":          s.cfg.RateLimitCommand,
+		"CRQ_RL_MARKER":              s.cfg.RateLimitMarker,
+		"CRQ_CAL_REPLY_MARKER":       s.cfg.CalibrationMarker,
+		"CRQ_REVIEW_DONE_MARKER":     s.cfg.ReviewDoneMarker,
+		"CRQ_COMPLETION_MARKER":      s.cfg.CompletionMarker,
+		"PATH":                       drainPath(plan),
 	}
 	if s.cfg.RateLimitCoDegrade {
 		env["CRQ_RL_CO_DEGRADE"] = "1"

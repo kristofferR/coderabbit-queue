@@ -455,7 +455,7 @@ func TestLoadConfigRejectsUnknownCoBot(t *testing.T) {
 // argument: splitting inside the quotes hands the fix agent three prompt
 // fragments instead of one prompt.
 func TestSplitArgvKeepsQuotedArgumentsWhole(t *testing.T) {
-	got := splitArgv(`claude -p "fix these findings" --dir '/tmp/with space'`)
+	got := SplitArgv(`claude -p "fix these findings" --dir '/tmp/with space'`)
 	want := []string{"claude", "-p", "fix these findings", "--dir", "/tmp/with space"}
 	if len(got) != len(want) {
 		t.Fatalf("argv = %q, want %q", got, want)
@@ -466,8 +466,30 @@ func TestSplitArgvKeepsQuotedArgumentsWhole(t *testing.T) {
 		}
 	}
 	// Still not a shell: nothing here expands what the operator did not write.
-	if argv := splitArgv(`echo $HOME *.go`); len(argv) != 3 || argv[1] != "$HOME" || argv[2] != "*.go" {
+	if argv := SplitArgv(`echo $HOME *.go`); len(argv) != 3 || argv[1] != "$HOME" || argv[2] != "*.go" {
 		t.Errorf("argv = %q, want the literal words back", argv)
+	}
+}
+
+func TestLoadConfigParsesDispatchForksAsABoolean(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_DISPATCH_FORKS", "false")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DispatchForks {
+		t.Fatal("CRQ_DISPATCH_FORKS=false enabled unattended dispatch on forks")
+	}
+
+	t.Setenv("CRQ_DISPATCH_FORKS", "true")
+	cfg, err = LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.DispatchForks {
+		t.Fatal("CRQ_DISPATCH_FORKS=true did not enable fork dispatch")
 	}
 }
 

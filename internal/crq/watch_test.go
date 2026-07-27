@@ -315,6 +315,34 @@ func TestOneShotWatchReportsDispatchFailure(t *testing.T) {
 	}
 }
 
+func TestDispatchReportsAZeroExitSessionWithUnlandedWork(t *testing.T) {
+	base := t.TempDir()
+	repo, pr := "owner/thing", 13
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	report := NextReport{
+		Repo: repo, PR: pr, Head: sha, Action: "fix",
+		Findings: []dialect.Finding{{ID: "f1", Commit: sha}},
+	}
+	token := "dispatch-token"
+	if ok, why, _ := svc.claimDispatch(context.Background(), report, token, 3); !ok {
+		t.Fatalf("claimDispatch refused: %s", why)
+	}
+	script := filepath.Join(t.TempDir(), "session.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch unfinished.go\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, why := svc.dispatch(context.Background(), WatchOptions{Command: []string{script}}, report, token)
+	if ok || why != "the session left uncommitted work" {
+		t.Fatalf("dispatch = (%t, %q), want an unlanded-work failure", ok, why)
+	}
+}
+
 // One repository renamed, deleted, or unreadable by this token used to abort the
 // whole pass. The service restarts into the same list and hits it again, so every
 // healthy repository after it gets no events and no fix sessions — indefinitely.

@@ -231,9 +231,9 @@ func LoadConfig() (Config, error) {
 		LeaderTTL:           durationEnv(env, "CRQ_LEADER_TTL", 3*time.Minute),
 		FiredMax:            intEnv(env, "CRQ_FIRED_MAX", 500),
 		WatchInterval:       durationEnv(env, "CRQ_WATCH_INTERVAL", 2*time.Minute),
-		DispatchCommand:     splitArgv(env["CRQ_DISPATCH_CMD"]),
+		DispatchCommand:     SplitArgv(env["CRQ_DISPATCH_CMD"]),
 		DispatchMaxAttempts: intEnv(env, "CRQ_DISPATCH_MAX_ATTEMPTS", 3),
-		DispatchForks:       stringEnv(env, "CRQ_DISPATCH_FORKS", "0") != "0",
+		DispatchForks:       boolEnv(env, "CRQ_DISPATCH_FORKS", false),
 		DispatchConcurrency: intEnv(env, "CRQ_DISPATCH_CONCURRENCY", 0),
 		WorkspaceRoot:       env["CRQ_WORKSPACE"],
 		NoOpen:              env["CRQ_NO_OPEN"] != "",
@@ -545,7 +545,7 @@ func ownerOf(repo string) string {
 	return owner
 }
 
-// splitArgv splits a configured command into argv on whitespace, keeping
+// SplitArgv splits a configured command into argv on whitespace, keeping
 // quoted runs together: 'claude -p "fix these findings"' is three arguments,
 // not five with stray quote characters in them.
 //
@@ -554,7 +554,7 @@ func ownerOf(repo string) string {
 // that the operator did not write. Both quote styles behave the same way, and
 // an unclosed quote simply runs to the end rather than failing a config load
 // over it.
-func splitArgv(value string) []string {
+func SplitArgv(value string) []string {
 	var argv []string
 	var arg strings.Builder
 	quote := rune(0)

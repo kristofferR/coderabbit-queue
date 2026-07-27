@@ -549,7 +549,7 @@ func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextRe
 		if s.log != nil {
 			s.log.Printf("watch: keeping %s — %s", co.Dir, why)
 		}
-		return true, ""
+		return false, why
 	}
 	_ = co.Remove(context.WithoutCancel(ctx))
 	return true, ""

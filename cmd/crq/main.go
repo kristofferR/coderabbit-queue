@@ -250,7 +250,7 @@ func run(ctx context.Context, args []string) int {
 			fatal(err)
 			return 1
 		}
-		plan, ierr := service.InstallDrain(ctx, *agent, strings.Fields(*agentArgs), fs.Args(), *dryRun)
+		plan, ierr := service.InstallDrain(ctx, *agent, crq.SplitArgv(*agentArgs), fs.Args(), *dryRun)
 		if ierr != nil {
 			fatal(ierr)
 			return 1

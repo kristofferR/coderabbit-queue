@@ -200,6 +200,13 @@ func (w Workspace) Mirror(ctx context.Context, repo string) (string, error) {
 	if err := w.configureOrigin(ctx, pending); err != nil {
 		return "", fmt.Errorf("configuring %s: %w", repo, err)
 	}
+	// A bare clone puts the remote's branches in local refs/heads. The refspec
+	// above only governs later fetches, so populate refs/remotes/origin on the
+	// first use too. Sessions and repository checks can then rely on origin/main
+	// from their very first checkout, not only after a second dispatch.
+	if _, err := w.git(ctx, pending, "fetch", "--prune", "origin"); err != nil {
+		return "", fmt.Errorf("fetching freshly cloned %s: %w", repo, err)
+	}
 	if err := os.Rename(pending, path); err != nil {
 		if _, statErr := os.Stat(filepath.Join(path, "HEAD")); statErr == nil {
 			return path, nil // somebody else won the race; their mirror is as good
@@ -268,28 +275,58 @@ func (w Workspace) configureOrigin(ctx context.Context, path string) error {
 		want = append(want, [2]string{"credential.helper", credentialHelper})
 	}
 	for _, kv := range want {
-		// This asks what is PERSISTED in the mirror. w.git injects the token
-		// helper with -c for network commands; using it here would answer with
-		// that command-line value even when the local config is empty, and the
-		// dispatched session's later plain `git push` would have no helper.
-		if kv[0] == "remote.origin.fetch" {
-			if got, err := gitDir(ctx, path, "config", "--local", "--get-all", kv[0]); err == nil &&
-				got == kv[1] {
-				continue
-			}
-			if _, err := gitDir(ctx, path, "config", "--local", "--replace-all", kv[0], kv[1]); err != nil {
-				return err
-			}
-			continue
-		}
-		if got, err := gitDir(ctx, path, "config", "--local", "--get", kv[0]); err == nil && got == kv[1] {
-			continue
-		}
-		if _, err := gitDir(ctx, path, "config", "--local", kv[0], kv[1]); err != nil {
+		if err := configureOriginValue(ctx, path, kv[0], kv[1], kv[0] == "remote.origin.fetch"); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// configureOriginValue migrates one persisted setting without making another
+// concurrent checkout lose a config.lock race over the same migration.
+func configureOriginValue(ctx context.Context, path, key, value string, replaceAll bool) error {
+	get := []string{"config", "--local", "--get", key}
+	set := []string{"config", "--local", key, value}
+	if replaceAll {
+		get[2] = "--get-all"
+		set = []string{"config", "--local", "--replace-all", key, value}
+	}
+	matches := func() bool {
+		// Read the persisted mirror config directly. Workspace.git injects a
+		// command-line credential helper, which would hide a missing local one.
+		got, err := gitDir(ctx, path, get...)
+		return err == nil && got == value
+	}
+
+	var writeErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if matches() {
+			return nil
+		}
+		if _, writeErr = gitDir(ctx, path, set...); writeErr == nil {
+			return nil
+		}
+		if !isConfigLockContention(writeErr) {
+			return writeErr
+		}
+		if err := sleepCtx(ctx, time.Duration(attempt+1)*100*time.Millisecond); err != nil {
+			return err
+		}
+	}
+	// The competing writer may have completed during the final backoff.
+	if matches() {
+		return nil
+	}
+	return writeErr
+}
+
+func isConfigLockContention(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "could not lock config file") &&
+		(strings.Contains(msg, "file exists") || strings.Contains(msg, "another git process"))
 }
 
 // Checkout is a worktree at one commit, and the directory git commands for that

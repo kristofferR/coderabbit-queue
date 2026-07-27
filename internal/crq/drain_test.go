@@ -116,6 +116,7 @@ func TestDrainUnitCarriesTheConfigurationTheInstallRead(t *testing.T) {
 func TestDrainUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 	cfg := firingConfig()
 	cfg.DispatchForks = true
+	cfg.SkipMarker = "<!-- custom-skip -->"
 	cfg.Bot = "custom-reviewer[bot]"
 	cfg.RequiredBots = []string{"custom-reviewer[bot]", "cursor[bot]"}
 	cfg.FeedbackBots = []string{"custom-reviewer[bot]", "cursor[bot]", "observer[bot]"}
@@ -140,11 +141,24 @@ func TestDrainUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 		`CRQ_COBOT_BUGBOT_REQUIRED=true`,
 		`CRQ_COBOT_BUGBOT_GRACE=4m0s`,
 		`CRQ_DISPATCH_FORKS=true`,
+		`CRQ_AUTOREVIEW_SKIP_MARKER=<!-- custom-skip -->`,
 		`CRQ_RL_CO_DEGRADE=0`,
 	} {
 		if !strings.Contains(unit, want) {
 			t.Errorf("unit does not carry %q:\n%s", want, unit)
 		}
+	}
+}
+
+func TestDrainEnvCarriesAnIntentionallyEmptySkipMarker(t *testing.T) {
+	cfg := firingConfig()
+	cfg.SkipMarker = ""
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	env := svc.drainEnv(DrainInstall{})
+	marker, ok := env["CRQ_AUTOREVIEW_SKIP_MARKER"]
+	if !ok || marker != "" {
+		t.Fatalf("skip marker = %q, present=%t; want an explicit empty value", marker, ok)
 	}
 }
 

@@ -57,6 +57,9 @@ func TestWorkspaceChecksOutAHeadWithoutACheckout(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(mirror, "HEAD")); err != nil {
 		t.Fatalf("mirror is not a git directory: %v", err)
 	}
+	if _, err := gitDir(ctx, mirror, "show-ref", "--verify", "refs/remotes/origin/main"); err != nil {
+		t.Fatalf("first clone did not populate origin/main: %v", err)
+	}
 
 	// Second call fetches into the same mirror rather than cloning again: a
 	// mirror is reused across PRs and rounds, so the clone happens once.
@@ -509,6 +512,39 @@ func TestMirrorDoesNotRewriteConfigItAgreesWith(t *testing.T) {
 	defer os.Remove(lock)
 	if _, err := ws.Mirror(ctx, repo); err != nil {
 		t.Errorf("a checkout failed over configuration it did not need to change: %v", err)
+	}
+}
+
+func TestMirrorRetriesAConcurrentConfigMigration(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+	ws := Workspace{Root: t.TempDir()}
+	ctx := context.Background()
+
+	mirror, err := ws.Mirror(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitDir(ctx, mirror, "config", "--local", "remote.origin.mirror", "true"); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(mirror, "config.lock")
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	removed := make(chan error, 1)
+	time.AfterFunc(50*time.Millisecond, func() { removed <- os.Remove(lock) })
+
+	if _, err := ws.Mirror(ctx, repo); err != nil {
+		t.Fatalf("mirror migration lost a transient config.lock race: %v", err)
+	}
+	if err := <-removed; err != nil {
+		t.Fatal(err)
+	}
+	if got, err := gitDir(ctx, mirror, "config", "--get", "remote.origin.mirror"); err != nil || got != "false" {
+		t.Fatalf("remote.origin.mirror = %q, err=%v; want false after migration", got, err)
 	}
 }
 
