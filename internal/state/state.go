@@ -277,6 +277,24 @@ func (l LeaderLease) HasCapability(want string) bool {
 	return false
 }
 
+// LeaderCapabilityLease dual-writes the active leader's capabilities at the
+// top level. Older schema-v3 binaries preserve unknown top-level members, while
+// they drop unknown members nested inside LeaderLease. The token prevents a
+// preserved capability list from being attributed to a different leader.
+type LeaderCapabilityLease struct {
+	Token        string   `json:"token"`
+	Capabilities []string `json:"capabilities,omitempty"`
+}
+
+func (l LeaderCapabilityLease) HasCapability(want string) bool {
+	for _, capability := range l.Capabilities {
+		if capability == want {
+			return true
+		}
+	}
+	return false
+}
+
 // State is schema v3. It persists as state.json in the git state ref exactly
 // like v2; only the payload shape changed (no migration — v2 payloads
 // auto-reinit, crq is pre-release).
@@ -290,6 +308,9 @@ type State struct {
 	LastFired *time.Time       `json:"last_fired,omitempty"`
 	Account   AccountQuota     `json:"account"`
 	Leader    *LeaderLease     `json:"leader,omitempty"`
+	// LeaderCapabilities is outside Leader so old binaries' tolerant state
+	// writer carries it across lease renewals and unrelated state mutations.
+	LeaderCapabilities *LeaderCapabilityLease `json:"leader_capabilities,omitempty"`
 
 	// CalibrationIssue overrides the configured calibration PR/issue when the
 	// original hit GitHub's hard 2500-comment cap and crq rotated to a fresh
@@ -315,6 +336,21 @@ type State struct {
 	// unknown carries top-level JSON members this binary has no field for. See
 	// tolerant.go.
 	unknown unknownFields
+}
+
+// LeaderHasCapability reports whether the current lease holder advertises a
+// capability, accepting either the nested representation or its rolling-
+// deployment-safe top-level copy.
+func (s State) LeaderHasCapability(want string) bool {
+	if s.Leader == nil {
+		return false
+	}
+	if s.Leader.HasCapability(want) {
+		return true
+	}
+	return s.LeaderCapabilities != nil &&
+		s.LeaderCapabilities.Token == s.Leader.Token &&
+		s.LeaderCapabilities.HasCapability(want)
 }
 
 const SchemaVersion = 3

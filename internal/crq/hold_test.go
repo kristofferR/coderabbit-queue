@@ -236,3 +236,42 @@ func TestHoldRequiresACapableLiveLeader(t *testing.T) {
 		t.Fatalf("hold with capable leader: %v", err)
 	}
 }
+
+func TestHoldAcceptsTopLevelCapabilityPreservedByOldWriter(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	svc.now = func() time.Time { return now }
+
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Leader = &LeaderLease{
+			Owner:     "new-daemon",
+			Token:     "current-token",
+			ExpiresAt: now.Add(time.Minute),
+			UpdatedAt: now,
+		}
+		st.LeaderCapabilities = &LeaderCapabilityLease{
+			Token:        "current-token",
+			Capabilities: []string{leaderCapabilityHolds},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Hold(ctx, "o/r", 5, "waiting on a decision"); err != nil {
+		t.Fatalf("hold with preserved top-level capability: %v", err)
+	}
+
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Unhold("o/r", 5)
+		st.Leader.Token = "old-daemon-token"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Hold(ctx, "o/r", 5, "waiting on a decision"); err == nil {
+		t.Fatal("stale capabilities from a different lease token were accepted")
+	}
+}

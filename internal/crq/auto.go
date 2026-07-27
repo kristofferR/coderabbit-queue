@@ -167,6 +167,7 @@ func (s *Service) releaseLeader(ctx context.Context, token string) error {
 			return ErrNoChange
 		}
 		st.Leader = nil
+		st.LeaderCapabilities = nil
 		released = true
 		return nil
 	})
@@ -196,6 +197,10 @@ func (s *Service) renewLeader(ctx context.Context, owner, token string) (State, 
 			Token:        token,
 			ExpiresAt:    expires,
 			UpdatedAt:    now,
+			Capabilities: []string{leaderCapabilityHolds},
+		}
+		st.LeaderCapabilities = &LeaderCapabilityLease{
+			Token:        token,
 			Capabilities: []string{leaderCapabilityHolds},
 		}
 		held = true

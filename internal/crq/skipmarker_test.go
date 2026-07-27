@@ -17,6 +17,11 @@ func TestSkipMarkerHasToBeUsedNotMentioned(t *testing.T) {
 		{"mentioned in a code span", "- `<!-- crq:skip-autoreview -->` stops fleet auto-review.", false},
 		{"mentioned in a fence", "```md\n<!-- crq:skip-autoreview -->\n```\n", false},
 		{"mentioned in a tilde fence", "~~~md\n<!-- crq:skip-autoreview -->\n~~~\n", false},
+		{"mentioned in an indented block", "Example:\n\n    <!-- crq:skip-autoreview -->\n", false},
+		{"mentioned in a tab-indented block", "Example:\n\n\t<!-- crq:skip-autoreview -->\n", false},
+		{"used in a paragraph continuation", "Paragraph\n    <!-- crq:skip-autoreview -->\n", true},
+		{"mentioned in code after a heading", "# Example\n    <!-- crq:skip-autoreview -->\n", false},
+		{"mentioned in code after a thematic break", "***\n    <!-- crq:skip-autoreview -->\n", false},
 		{"mentioned in a long fence", "````md\n```\n<!-- crq:skip-autoreview -->\n```\n````\n", false},
 		{"mentioned in a long code span", "Use `` ` <!-- crq:skip-autoreview --> ` `` to document it.", false},
 		{"documented and then used", "Use `<!-- crq:skip-autoreview -->`.\n\n<!-- crq:skip-autoreview -->", true},
@@ -33,5 +38,15 @@ func TestSkipMarkerHasToBeUsedNotMentioned(t *testing.T) {
 	// No marker configured means nothing is ever skipped, whatever a body says.
 	if (Config{}).SkipsReview("<!-- crq:skip-autoreview -->") {
 		t.Error("an empty marker skipped a pull request")
+	}
+}
+
+func TestSkipMarkerMatchesConfiguredWhitespaceExactly(t *testing.T) {
+	cfg := Config{SkipMarker: "no review "}
+	if cfg.SkipsReview("no review") {
+		t.Error("a marker without its configured trailing space matched")
+	}
+	if !cfg.SkipsReview("no review ") {
+		t.Error("the marker with its configured trailing space did not match")
 	}
 }

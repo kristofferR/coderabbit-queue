@@ -122,7 +122,7 @@ func (s *Service) Hold(ctx context.Context, repo string, pr int, reason string) 
 		// An older daemon preserves Holds as unknown JSON but cannot enforce it.
 		// Require a capable live leader: without one, an older standby could
 		// acquire the expired/empty lease immediately after this write.
-		if st.Leader == nil || !st.Leader.ExpiresAt.After(now) || !st.Leader.HasCapability(leaderCapabilityHolds) {
+		if st.Leader == nil || !st.Leader.ExpiresAt.After(now) || !st.LeaderHasCapability(leaderCapabilityHolds) {
 			return errors.New("administrative holds require a live hold-capable autoreview leader; start or upgrade the daemon and try again")
 		}
 		st.Hold(repo, pr, reason, s.cfg.Host, now)
@@ -1940,6 +1940,15 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 			result, err := s.Enqueue(ctx, repo, pr)
 			if err != nil {
 				return PumpResult{}, 1, err
+			}
+			if result.Held {
+				return PumpResult{
+					Action: "skipped",
+					Repo:   repo,
+					PR:     pr,
+					Head:   result.Head,
+					Reason: result.Reason,
+				}, 2, nil
 			}
 			enqueued = result.Queued || result.AlreadyQueued
 			if result.Deduped {

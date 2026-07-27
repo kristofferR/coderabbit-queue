@@ -1488,6 +1488,43 @@ func TestWaitReenqueuesAfterClearingStaleRound(t *testing.T) {
 	}
 }
 
+func TestWaitReturnsWhenPRIsHeld(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.WaitTimeout = 0
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls["owner/repo#12"] = pull
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Hold("owner/repo", 12, "waiting on a decision", "operator", time.Now())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(cfg, gh, store, nil)
+
+	result, code, err := service.Wait(ctx, "owner/repo", 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 2 || result.Action != "skipped" || result.Reason != "held: waiting on a decision" {
+		t.Fatalf("held PR should terminate the legacy wait, code=%d result=%#v", code, result)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Round("owner/repo", 12); got != nil {
+		t.Fatalf("held PR enqueued a round: %+v", got)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("held PR posted %d review commands", len(gh.posted))
+	}
+}
+
 func TestWaitFiresRealReviewWhenOnlyCarriedThreadVisible(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
