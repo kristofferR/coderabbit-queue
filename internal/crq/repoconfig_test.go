@@ -7,6 +7,7 @@ import (
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 // The override has to reach a real decision, not just the config value: a
@@ -194,8 +195,10 @@ func TestChangingRequirementsReopensACompletedRound(t *testing.T) {
 	cfg := firingConfig()
 	cfg.CoBots = codexCoBots(nil)
 	store := NewMemoryStore(cfg)
-	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	gh := newFakeGitHub()
 	repo, pr, head := "o/r", 3, "aaaaaaaa1"
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	svc := NewService(cfg, gh, store, nil)
 	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 11)
 
 	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
@@ -237,5 +240,36 @@ func TestChangingRequirementsReopensACompletedRound(t *testing.T) {
 	st, _, _ = store.Load(ctx)
 	if round := st.Round(repo, pr); round == nil || round.Phase != PhaseCompleted {
 		t.Errorf("round = %#v, want it left completed when nothing changed", round)
+	}
+}
+
+// Rounds are never deleted, so a repository's merged and closed PRs stay behind
+// as completed dedup markers. Requeueing those on a reviewer change would put
+// every dead round ahead of real work — Pump observes and drops them one per
+// tick — and no closed PR can be stranded by a reviewer it will never get.
+func TestChangingRequirementsLeavesClosedPRsAlone(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = codexCoBots(nil)
+	store := NewMemoryStore(cfg)
+	gh := newFakeGitHub()
+	repo, open, merged := "o/r", 4, 5
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: open}}
+	svc := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, repo, open, "aaaaaaaa1", PhaseCompleted, time.Now().UTC(), 11)
+	seedRound(t, store, cfg, repo, merged, "bbbbbbbb2", PhaseCompleted, time.Now().UTC(), 12)
+
+	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(repo, open); round == nil || round.Phase != PhaseQueued {
+		t.Errorf("open round = %#v, want it requeued so the new reviewer can be asked", round)
+	}
+	if round := st.Round(repo, merged); round == nil || round.Phase != PhaseCompleted {
+		t.Errorf("merged round = %#v, want it left completed — a closed PR cannot be stranded", round)
 	}
 }

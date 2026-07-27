@@ -247,6 +247,24 @@ func CommandHasCompletionReply(obs Observation, p Policy, commandID int64) bool 
 	return false
 }
 
+// PrimaryCompletedRound reports whether the primary answered THIS round's own
+// command with a completion reply that counts as its review of the head.
+//
+// It is the gate that lets a reopened round skip re-asking a primary that
+// already answered, so it holds to Completion's rule 4 rather than to the weaker
+// adoption question: CommandHasCompletionReply deliberately omits the
+// prior-review requirement and the failed-summary guard, and a reply failing
+// either is not a review of this head. Deduping on it writes a completed marker
+// that every later same-head check skips, so a wrong yes here is one nothing
+// recovers from.
+func PrimaryCompletedRound(r state.Round, obs Observation, p Policy) bool {
+	if r.CommandID == 0 || r.FiredAt == nil {
+		return false
+	}
+	return CommandHasCompletionReply(obs, p, r.CommandID) &&
+		completionReplyForRound(obs, p, r.FiredAt.UTC())
+}
+
 func botHasAnyReview(reviews []ReviewSeen, bot string) bool {
 	for _, review := range reviews {
 		if sameBot(review.Bot, bot) {

@@ -64,3 +64,53 @@ func TestLaggingWritersMatchesTheLeadersProcessIdentity(t *testing.T) {
 		t.Errorf("lagging = %v, want the un-upgraded daemon named", got)
 	}
 }
+
+// The other acting process is whoever holds the fire slot, and a round records
+// that process in ByHost. Recording a bare hostname there could never match a
+// writer entry, so every `crq reviewers` call during a fire named the current
+// process as lagging — telling operators to upgrade a binary that already
+// understands overrides.
+func TestLaggingWritersMatchesTheFireSlotOwner(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	writer := "host=cachyos pid=1234"
+	st := New()
+	r, err := st.NewRound("owner/repo", 7, "abcdef123", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Reserve("tok", writer, now); err != nil {
+		t.Fatal(err)
+	}
+	st.PutRound(*r)
+	st.FireSlot = &FireSlot{Key: Key("owner/repo", 7), Token: "tok", Since: now}
+
+	if got := st.LaggingWriters(CapsRepoOverrides, now); len(got) != 1 || got[0] != writer {
+		t.Fatalf("lagging = %v, want the un-announced slot owner named", got)
+	}
+	st.NoteWriter(writer, CapsRepoOverrides, now)
+	if got := st.LaggingWriters(CapsRepoOverrides, now); len(got) != 0 {
+		t.Errorf("lagging = %v, want none — the process firing IS the capable writer", got)
+	}
+}
+
+// Reopening a round is not a failed attempt. Moving LastAttemptAt would raise
+// the adoption floor past a newly required co-reviewer's own unanswered trigger,
+// so crq would post that bot a second request for the round it is reopening to
+// let it answer.
+func TestReopenKeepsTheAdoptionFloor(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	r := Round{Repo: "owner/repo", PR: 7, Head: "abcdef123", Phase: PhaseFired,
+		FiredAt: &now, CommandID: 11}
+	if err := r.Complete(); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Reopen(); err != nil {
+		t.Fatal(err)
+	}
+	if r.Phase != PhaseQueued {
+		t.Fatalf("phase = %s, want the round requeued", r.Phase)
+	}
+	if r.LastAttemptAt != nil {
+		t.Errorf("LastAttemptAt = %v, want it untouched by a reopen", r.LastAttemptAt)
+	}
+}

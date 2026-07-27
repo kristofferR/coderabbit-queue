@@ -191,6 +191,19 @@ func dash(s string) string {
 	return s
 }
 
+// hostName renders a round's writer id ("host=blue pid=4711") as the machine
+// name the host column has always shown. The round stores the writer id because
+// that is what capabilities are keyed by; the pid is bookkeeping for
+// LaggingWriters, not something a reader of the table needs.
+func hostName(writer string) string {
+	rest, ok := strings.CutPrefix(writer, "host=")
+	if !ok {
+		return writer
+	}
+	name, _, _ := strings.Cut(rest, " ")
+	return name
+}
+
 // RenderDashboard renders the human-facing dashboard for v3 state: rounds by
 // phase instead of v2's queue/fired/awaiting maps.
 func RenderDashboard(st State, cfg StoreConfig) string {
@@ -266,7 +279,7 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 		for _, r := range inFlight {
 			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %s | %s | `%s` |\n",
 				r.Repo, r.PR, r.Repo, r.PR, r.Head, r.Phase,
-				fmtStamp(firedTimeOf(r), loc), fmtStamp(r.WaitDeadline, loc), dash(coBotMarks(r)), r.ByHost)
+				fmtStamp(firedTimeOf(r), loc), fmtStamp(r.WaitDeadline, loc), dash(coBotMarks(r)), hostName(r.ByHost))
 		}
 	}
 
@@ -303,7 +316,7 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 			}
 			fmt.Fprintf(&b, "| %s | [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %d | %s | `%s` |\n",
 				position, e.Repo, e.PR, e.Repo, e.PR, e.Head, ready, dash(e.Why),
-				e.Attempts, fmtStamp(&e.EnqueuedAt, loc), e.ByHost)
+				e.Attempts, fmtStamp(&e.EnqueuedAt, loc), hostName(e.ByHost))
 		}
 	}
 
@@ -315,7 +328,7 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 		fmt.Fprintf(&b, "| PR | commit | requested | host |\n|---|---|---|---|\n")
 		for _, r := range requested {
 			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | `%s` |\n",
-				r.Repo, r.PR, r.Repo, r.PR, r.Head, fmtStamp(r.FiredAt, loc), r.ByHost)
+				r.Repo, r.PR, r.Repo, r.PR, r.Head, fmtStamp(r.FiredAt, loc), hostName(r.ByHost))
 		}
 	}
 

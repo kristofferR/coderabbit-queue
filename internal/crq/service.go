@@ -670,10 +670,14 @@ func firedOrEnqueuedAt(r Round) time.Time {
 func (s *Service) applyFire(ctx context.Context, cfg Config, round Round, obs engine.Observation, d engine.FireDecision, now time.Time) (PumpResult, error) {
 	// The decision was made from a configuration that may have been replaced
 	// since. Acting on it would post a trigger for a co-reviewer an operator has
-	// just removed, or skip one they have just required.
-	if st, _, err := s.store.Load(ctx); err == nil && overrideChanged(&st, round.Repo, cfg) {
-		return PumpResult{Action: "deduped", Repo: round.Repo, PR: round.PR, Head: round.Head,
-			Reason: "reviewer configuration changed while deciding"}, nil
+	// just removed, or skip one they have just required — so only the verdicts
+	// that POST pay for the re-read. FireNo is by far the most common outcome of
+	// a pump, and a Load is four API calls against the git-backed store.
+	if firePosts(d.Verdict) {
+		if st, _, err := s.store.Load(ctx); err == nil && overrideChanged(&st, round.Repo, cfg) {
+			return PumpResult{Action: "deduped", Repo: round.Repo, PR: round.PR, Head: round.Head,
+				Reason: "reviewer configuration changed while deciding"}, nil
+		}
 	}
 	switch d.Verdict {
 	case engine.FireDrop:
@@ -695,6 +699,18 @@ func (s *Service) applyFire(ctx context.Context, cfg Config, round Round, obs en
 	default: // FireNo
 		return PumpResult{Action: mapFireNo(d.Reason), Repo: round.Repo, PR: round.PR, Head: round.Head, Reason: d.Reason}, nil
 	}
+}
+
+// firePosts reports whether a verdict posts a command chosen by the repository's
+// reviewer configuration. The rest either write nothing to GitHub or write a
+// round transition the override has no say in, and their round-identity CAS
+// already guards them.
+func firePosts(v engine.FireVerdict) bool {
+	switch v {
+	case engine.FireCoOnly, engine.FireCoDeferred, engine.FireAdopt, engine.FirePost:
+		return true
+	}
+	return false
 }
 
 func mapFireNo(reason string) string {
@@ -821,7 +837,7 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 			if !sameRound(r, round) || !r.FireEligible(now) {
 				return ErrNoChange
 			}
-			if err := r.Reserve(token, s.cfg.Host, now); err != nil {
+			if err := r.Reserve(token, s.cfg.WriterID(), now); err != nil {
 				return err
 			}
 			if err := r.Fire(adoptID, firedAt); err != nil {
@@ -883,7 +899,7 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 		if !sameRound(r, round) || !r.FireEligible(now) {
 			return ErrNoChange
 		}
-		if err := r.Reserve(token, s.cfg.Host, now); err != nil {
+		if err := r.Reserve(token, s.cfg.WriterID(), now); err != nil {
 			return err
 		}
 		st.FireSlot = &FireSlot{Key: key, Token: token, Since: now}
@@ -1038,7 +1054,7 @@ func (s *Service) fireCoOnly(ctx context.Context, cfg Config, round Round, login
 			// still-queued round through Reserve (a pure phase transition — no
 			// global FireSlot is registered) so the park is a legal edge.
 			if r.FireEligible(now) {
-				if rerr := r.Reserve(randomToken(), s.cfg.Host, now); rerr != nil {
+				if rerr := r.Reserve(randomToken(), s.cfg.WriterID(), now); rerr != nil {
 					return rerr
 				}
 			}
@@ -1069,7 +1085,7 @@ func (s *Service) fireCoOnly(ctx context.Context, cfg Config, round Round, login
 			return ErrNoChange
 		}
 		if r.FireEligible(now) {
-			if err := r.Reserve(randomToken(), s.cfg.Host, now); err != nil {
+			if err := r.Reserve(randomToken(), s.cfg.WriterID(), now); err != nil {
 				return err
 			}
 			if err := r.Fire(posts[0].id, firedAt); err != nil {

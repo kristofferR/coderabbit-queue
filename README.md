@@ -386,7 +386,7 @@ crq feedback <repo> <pr>  # current normalized findings as JSON, WITHOUT trigger
 crq resolve <thread-id> [<thread-id>...]                    # resolve addressed review threads
 crq decline <thread-id> [...] --reason "<why>" [--resolve]  # record why a finding is declined
 crq reviewers <repo>      # which bots review this project, and what each costs
-crq reviewers set <repo> --bots <a,b> [--required <a,b>]   # choose them
+crq reviewers set <repo> [--bots <a,b>] [--required <a,b>] # choose them (either flag alone)
 crq reviewers clear <repo>                                 # back to the fleet default
 crq autoreview            # ⭐ review ALL open PRs automatically, rate-coordinated
                           #    (--no-incremental = first review only; --once = single pass for cron)

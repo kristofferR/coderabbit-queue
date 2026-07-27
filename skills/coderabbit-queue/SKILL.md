@@ -180,7 +180,9 @@ crq reviewers clear "$REPO"                             # back to the fleet defa
 ```
 
 Each reviewer reports its `budget`: `account` is serialized against the shared CodeRabbit allowance,
-`none` runs immediately and waits for nobody. That is the only property the queue cares about.
+`none` runs immediately, outside that queue. That is the only property the queue cares about — it says
+what a reviewer costs, never whether a round waits for it. `--required` alone decides that, and either
+flag may be given without the other (`--bots` and `--required` update separate halves of the override).
 
 The setting lives in the shared state ref, so the daemon and every agent read the same one.
 

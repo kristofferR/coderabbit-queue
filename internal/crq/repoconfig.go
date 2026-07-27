@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 // ReviewerView is how one repository's reviewers read after its override is
@@ -40,11 +40,17 @@ type ReviewerDetail struct {
 
 // Reviewers reports the reviewers that will run on repo.
 func (s *Service) Reviewers(ctx context.Context, repo string) (ReviewerView, error) {
+	repo = NormalizeRepo(repo)
+	// The same shape check set and clear do. A malformed target reads no
+	// override, so reporting it would answer with the fleet default and exit 0 —
+	// telling the caller its typo is a repository crq is following.
+	if err := checkRepoShape(repo); err != nil {
+		return ReviewerView{}, err
+	}
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
 		return ReviewerView{}, err
 	}
-	repo = NormalizeRepo(repo)
 	cfg := s.cfgFor(st, repo)
 	view := ReviewerView{Repo: repo, Reviewers: []ReviewerDetail{}}
 	view.Lagging = st.LaggingWriters(CapsRepoOverrides, s.clock().UTC())
@@ -75,8 +81,15 @@ func (s *Service) Reviewers(ctx context.Context, repo string) (ReviewerView, err
 // mean per-repo classifiers.
 func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, required []string) (ReviewerView, error) {
 	repo = NormalizeRepo(repo)
-	if repo == "" || !strings.Contains(repo, "/") {
-		return ReviewerView{}, fmt.Errorf("repo must be owner/name, got %q", repo)
+	if err := checkRepoShape(repo); err != nil {
+		return ReviewerView{}, err
+	}
+	if coBots == nil && required == nil {
+		// Neither half was named, so there is nothing to set. Writing anyway would
+		// stamp a fresh UpdatedAt, and that timestamp IS the override's identity:
+		// applyFire revalidates against it, so a no-op call would discard every
+		// in-flight fire decision for the repository.
+		return s.Reviewers(ctx, repo)
 	}
 	// Accept either spelling: the login (chatgpt-codex-connector[bot]) or the
 	// short config name (codex), which is what CRQ_COBOTS already takes.
@@ -139,6 +152,14 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 		setRequired = resolved
 	}
 
+	// Read before the write: the requeue below may only touch live pull requests,
+	// and the CAS closure cannot ask GitHub. A failed lookup fails the whole
+	// command, which is retryable — writing the override and skipping the requeue
+	// would strand exactly the PRs the requeue exists for.
+	open, err := s.openPRs(ctx, repo)
+	if err != nil {
+		return ReviewerView{}, err
+	}
 	now := s.clock().UTC()
 	state, err := s.store.Update(ctx, func(st *State) error {
 		ov, _ := st.RepoOverride(repo)
@@ -151,7 +172,7 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 		ov.UpdatedAt, ov.By = &now, s.cfg.Host
 		before := s.cfg.ForRepo(mustOverride(st, repo))
 		st.SetRepoOverride(repo, ov)
-		s.reopenForChangedReviewers(st, repo, before, s.cfg.ForRepo(ov), now)
+		s.reopenForChangedReviewers(st, repo, before, s.cfg.ForRepo(ov), open)
 		return nil
 	})
 	if err != nil {
@@ -164,19 +185,22 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 // ClearReviewers returns repo to the fleet default.
 func (s *Service) ClearReviewers(ctx context.Context, repo string) (ReviewerView, error) {
 	repo = NormalizeRepo(repo)
-	// The same shape check set does. A typo like "owner-repo" would otherwise
-	// clear a key nothing uses and exit 0, so automation believes it restored the
-	// fleet default while the real override is still in force.
-	if !strings.Contains(repo, "/") {
-		return ReviewerView{}, fmt.Errorf("repo must be owner/name, got %q", repo)
+	// A typo like "owner-repo" would otherwise clear a key nothing uses and exit
+	// 0, so automation believes it restored the fleet default while the real
+	// override is still in force.
+	if err := checkRepoShape(repo); err != nil {
+		return ReviewerView{}, err
 	}
-	now := s.clock().UTC()
+	open, err := s.openPRs(ctx, repo)
+	if err != nil {
+		return ReviewerView{}, err
+	}
 	state, err := s.store.Update(ctx, func(st *State) error {
 		before := s.cfg.ForRepo(mustOverride(st, repo))
 		if !st.ClearRepoOverride(repo) {
 			return ErrNoChange
 		}
-		s.reopenForChangedReviewers(st, repo, before, s.cfg, now)
+		s.reopenForChangedReviewers(st, repo, before, s.cfg, open)
 		return nil
 	})
 	if err != nil && !errors.Is(err, ErrNoChange) {
@@ -186,6 +210,15 @@ func (s *Service) ClearReviewers(ctx context.Context, repo string) (ReviewerView
 		s.sync(ctx, state)
 	}
 	return s.Reviewers(ctx, repo)
+}
+
+// checkRepoShape is the one repository-shape check every reviewers path applies,
+// so reading a target can never succeed where setting it would fail.
+func checkRepoShape(repo string) error {
+	if repo == "" || !strings.Contains(repo, "/") {
+		return fmt.Errorf("repo must be owner/name, got %q", repo)
+	}
+	return nil
 }
 
 // knownLogins is the deduplicated set of accepted reviewers, for an error a
@@ -221,14 +254,18 @@ func mustOverride(st *State, repo string) RepoReviewers {
 // still there. No eligible round exists to trigger it, and `crq next` waits for
 // a push that has no reason to come.
 //
-// Only rounds whose required set actually changed are touched, and only
-// completed ones — an in-flight round is already going to answer.
+// Only rounds whose required set actually changed are touched, only completed
+// ones — an in-flight round is already going to answer — and only those whose
+// pull request is still open. Rounds are never deleted, so a repository's merged
+// and closed PRs stay behind as completed dedup markers: requeueing those would
+// hand Pump hundreds of dead rounds to observe and drop one per tick, ahead of
+// every real one, and a stranded PR is by definition an open one.
 //
 // The primary is not re-asked: DecideFire's already-reviewed gate now counts a
 // completion reply paired to the round's command, not only a submitted Review
 // object, so a reopened round that the primary already answered dedupes instead
 // of buying a second review.
-func (s *Service) reopenForChangedReviewers(st *State, repo string, before, after Config, now time.Time) {
+func (s *Service) reopenForChangedReviewers(st *State, repo string, before, after Config, open map[int]bool) {
 	if sameLogins(before.RequiredBots, after.RequiredBots) {
 		return
 	}
@@ -236,8 +273,11 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 		if NormalizeRepo(round.Repo) != NormalizeRepo(repo) || round.Phase != PhaseCompleted {
 			continue
 		}
+		if !open[round.PR] {
+			continue
+		}
 		reopened := round
-		if err := reopened.Reopen(now); err != nil {
+		if err := reopened.Reopen(); err != nil {
 			continue
 		}
 		st.PutRound(reopened)
@@ -245,6 +285,22 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 			s.log.Printf("reviewers: requeued %s#%d@%s — the required set changed", round.Repo, round.PR, round.Head)
 		}
 	}
+}
+
+// openPRs is the set of repo's currently open pull request numbers — the only
+// ones a reviewer change can strand.
+func (s *Service) openPRs(ctx context.Context, repo string) (map[int]bool, error) {
+	open := map[int]bool{}
+	err := s.gh.EachOpenPR(ctx, repo, true, func(pr ghapi.SearchPR) (bool, error) {
+		if NormalizeRepo(pr.Repo) == repo {
+			open[pr.Number] = true
+		}
+		return false, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return open, nil
 }
 
 // sameLogins compares two reviewer lists as sets, since order is presentation.

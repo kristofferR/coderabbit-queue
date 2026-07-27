@@ -944,3 +944,69 @@ func TestAcceptAccountBlock(t *testing.T) {
 		})
 	}
 }
+
+// A reopened round asks whether the primary already answered THIS round's
+// command, and answering yes writes a completed marker every later same-head
+// check skips — so the gate must hold to Completion's evidence, not to the
+// weaker adoption question CommandHasCompletionReply answers.
+func TestReopenedRoundDedupesOnlyOnCompletionEvidence(t *testing.T) {
+	free := Global{SlotFree: true}
+	now := t0.Add(10 * time.Minute)
+	head := "abcdef123"
+
+	reopened := func(t *testing.T) state.Round {
+		t.Helper()
+		r := firedRound(t, head)
+		if err := r.Complete(); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Reopen(); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	command := dialect.BotEvent{Kind: dialect.EvCommand, Bot: "kristofferR", CommentID: 1001,
+		CreatedAt: t0.Add(2 * time.Second), UpdatedAt: t0.Add(2 * time.Second)}
+	completion := dialect.BotEvent{Kind: dialect.EvCompletion, Bot: "coderabbitai[bot]", CommentID: 1002,
+		AutoReply: true, CreatedAt: t0.Add(time.Minute), UpdatedAt: t0.Add(time.Minute)}
+	priorReview := ReviewSeen{Bot: "coderabbitai[bot]", Commit: "0000000099", SubmittedAt: t0.Add(-time.Hour)}
+
+	cases := []struct {
+		name string
+		obs  Observation
+		want FireVerdict
+	}{
+		{
+			// The reply stands in for a re-review that found nothing new.
+			name: "completion reply with a prior review",
+			obs: Observation{Head: head, Open: true, Reviews: []ReviewSeen{priorReview},
+				Events: []dialect.BotEvent{command, completion}},
+			want: FireDedupe,
+		},
+		{
+			// Nothing to stand in for: the bot has never submitted a review, so
+			// the head has not been reviewed and the round must still fire.
+			name: "completion reply with no review anywhere",
+			obs: Observation{Head: head, Open: true,
+				Events: []dialect.BotEvent{command, completion}},
+			want: FirePost,
+		},
+		{
+			// The review failed after answering, so the reply describes a review
+			// that did not land.
+			name: "failed summary after the completion reply",
+			obs: Observation{Head: head, Open: true, Reviews: []ReviewSeen{priorReview},
+				Events: []dialect.BotEvent{command, completion,
+					{Kind: dialect.EvFailed, Bot: "coderabbitai[bot]", CommentID: 900,
+						CreatedAt: t0, UpdatedAt: t0.Add(2 * time.Minute)}}},
+			want: FirePost,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if d := DecideFire(free, reopened(t), tc.obs, now, policy); d.Verdict != tc.want {
+				t.Fatalf("verdict = %v, want %v (%+v)", d.Verdict, tc.want, d)
+			}
+		})
+	}
+}

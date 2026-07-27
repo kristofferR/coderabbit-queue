@@ -761,6 +761,12 @@ func TestPumpPersistsPostedReviewAfterTransientStateFailure(t *testing.T) {
 	if r == nil || r.Phase != PhaseFired || r.CommandID == 0 {
 		t.Fatalf("posted review metadata was not persisted after retry: %#v", r)
 	}
+	// The firing PROCESS, in the form capabilities are recorded under: a bare
+	// hostname here can never match a writer entry, so LaggingWriters would name
+	// this very process as needing an upgrade for as long as the fire lasts.
+	if r.ByHost != cfg.WriterID() {
+		t.Errorf("ByHost = %q, want the writer id %q", r.ByHost, cfg.WriterID())
+	}
 	if state.FiredMarker("owner/repo", 12) != "abcdef123" {
 		t.Fatalf("fired marker was not persisted after retry")
 	}

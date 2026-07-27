@@ -103,7 +103,11 @@ type Round struct {
 	// the round is retried or surfaced as timed out.
 	WaitDeadline *time.Time `json:"wait_deadline,omitempty"`
 
-	Token  string `json:"token,omitempty"` // reservation token (CAS race detection)
+	Token string `json:"token,omitempty"` // reservation token (CAS race detection)
+	// ByHost identifies the PROCESS that reserved this round, in the writer form
+	// "host=<name> pid=<n>" — the key NoteWriter records capabilities under, so
+	// LaggingWriters can ask whether the process driving a fire understands the
+	// configuration it is firing from. The dashboard shows the machine name.
 	ByHost string `json:"by_host,omitempty"`
 	Note   string `json:"note,omitempty"` // human-readable reason for the last transition
 
@@ -454,14 +458,15 @@ func (e *TransitionError) Error() string {
 func (r *Round) illegal(to Phase) error { return &TransitionError{From: r.Phase, To: to} }
 
 // Reserve takes the fire slot for this round: queued (or retry-eligible
-// awaiting_retry) → reserved.
-func (r *Round) Reserve(token, host string, now time.Time) error {
+// awaiting_retry) → reserved. writer is the reserving process's writer id (see
+// ByHost), not a bare hostname.
+func (r *Round) Reserve(token, writer string, now time.Time) error {
 	if r.Phase != PhaseQueued && !r.retryEligible(now) {
 		return r.illegal(PhaseReserved)
 	}
 	r.Phase = PhaseReserved
 	r.Token = token
-	r.ByHost = host
+	r.ByHost = writer
 	t := now.UTC()
 	r.ReservedAt = &t
 	r.Note = ""
@@ -509,7 +514,12 @@ func (r *Round) ReleaseToQueue(reason string, now time.Time) error {
 // trigger it. This is the one transition that reopens a finished round, and it
 // keeps the head, the attempts and the co-reviewer bookkeeping — what changed is
 // who still has to answer, not what happened.
-func (r *Round) Reopen(now time.Time) error {
+//
+// LastAttemptAt is deliberately left alone: it is the adoption floor for a
+// FAILED attempt, and moving it would discard a newly required co-reviewer's own
+// unanswered trigger comment as too old to adopt — so crq would post that bot a
+// second request for the very round the reopen exists to let it answer.
+func (r *Round) Reopen() error {
 	if r.Phase != PhaseCompleted {
 		return r.illegal(PhaseQueued)
 	}
@@ -518,8 +528,6 @@ func (r *Round) Reopen(now time.Time) error {
 	r.ReservedAt = nil
 	r.WaitDeadline = nil
 	r.RetryAt = nil
-	t := now.UTC()
-	r.LastAttemptAt = &t
 	r.Note = "reviewer requirements changed"
 	return nil
 }

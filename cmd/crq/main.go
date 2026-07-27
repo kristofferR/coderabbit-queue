@@ -363,8 +363,8 @@ USAGE
                                    reply on a thread to record why a finding is declined
                                    (resolves it; --keep-open leaves it open)
   crq reviewers <repo>             which bots review this project (and what each costs)
-  crq reviewers set <repo> --bots <a,b> [--required <a,b>]
-                                   choose this project's reviewers
+  crq reviewers set <repo> [--bots <a,b>] [--required <a,b>]
+                                   choose this project's reviewers (either flag alone)
   crq reviewers clear <repo>       go back to the fleet default
   crq autoreview [--once] [--no-incremental]
                                    keep open PRs reviewed, rate-coordinated
@@ -522,7 +522,7 @@ intend to keep working). Thread IDs come from .findings[].thread_id.
 `)
 	case "reviewers":
 		fmt.Print(`crq reviewers <repo>
-crq reviewers set <repo> --bots <login,...> [--required <login,...>]
+crq reviewers set <repo> [--bots <login,...>] [--required <login,...>]
 crq reviewers clear <repo>
 
 Which bots review one project, and what each of them costs.
@@ -530,11 +530,14 @@ Which bots review one project, and what each of them costs.
 Without a subcommand it reports the reviewers that will actually run there — the
 fleet default, or this repository's own choice if it has one. Each entry carries
 its budget: "account" is serialized against the shared CodeRabbit allowance,
-"none" runs immediately and waits for nobody.
+"none" runs immediately, outside that queue. Budget is not requiredness: whether
+a round WAITS for a reviewer is --required, whatever the reviewer costs.
 
   set     --bots chooses the co-reviewers; --required chooses which reviewers
-          gate convergence. An empty value means none here, which is a different
-          answer from not setting it at all.
+          gate convergence. Either flag alone updates only its own half. An
+          empty --bots means none here, which is a different answer from not
+          setting it at all; an empty --required is refused, because a round
+          that gates on nobody converges before any reviewer runs.
   clear   drops the override so the repository follows the fleet again.
 
 The configuration lives in the shared state ref, not in a file the repository

@@ -162,9 +162,10 @@ func DecideFire(g Global, r state.Round, obs Observation, now time.Time, p Polic
 	// reading only obs.Reviews there means crq posts the command again and buys
 	// a second review of code it has already been told about. The reply is
 	// paired to THIS round's command, so it only counts while the round still
-	// tracks the head.
-	if !reviewedHead && r.Head == obs.Head && r.CommandID != 0 {
-		reviewedHead = CommandHasCompletionReply(obs, p, r.CommandID)
+	// tracks the head, and it must carry the evidence Completion asks for — a
+	// reply nothing backs would mark an unreviewed head reviewed for good.
+	if !reviewedHead && r.Head == obs.Head {
+		reviewedHead = PrimaryCompletedRound(r, obs, p)
 	}
 	// Belt-and-braces live check: even with a fresh round, never fire at a
 	// head the bot has already reviewed (e.g. state was reinitialized). But a
