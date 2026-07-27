@@ -502,10 +502,10 @@ func TestTidyBoundsAndRotatesUnansweredCodexReactionReads(t *testing.T) {
 	}
 }
 
-// Codex can answer a trigger with nothing but its thumbs-up, and that reaction
-// alone completes the round — so it is the only evidence that trigger was ever
-// read, and without it the comment would be kept for ever.
-func TestTidyCountsCodexThumbsUpAsTheAnswer(t *testing.T) {
+// Codex can answer a trigger with nothing but its thumbs-up, and deleting the
+// target deletes that approval too. Keep the target so subsequent observations
+// still see the completed gate.
+func TestTidyRetainsCodexThumbsUpReactionTarget(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	cfg.CoBots = []CoBotConfig{{Login: dialect.CodexBotLogin, Name: "codex", Command: "@codex review"}}
@@ -516,9 +516,9 @@ func TestTidyCountsCodexThumbsUpAsTheAnswer(t *testing.T) {
 
 	var pull ghapi.Pull
 	pull.State = "open"
-	pull.Head.SHA = "bbbbbbbb2"
+	pull.Head.SHA = "aaaaaaaa1"
 	gh.pulls[fakeKey(repo, pr)] = pull
-	gh.commits["bbbbbbbb2"] = commitAt(now.Add(-10 * time.Minute))
+	gh.commits["aaaaaaaa1"] = commitAt(now.Add(-10 * time.Minute))
 
 	c := ghapi.IssueComment{ID: 100, Body: "@codex review", CreatedAt: now.Add(-2 * time.Hour)}
 	c.User.Login = "kristofferR"
@@ -527,6 +527,12 @@ func TestTidyCountsCodexThumbsUpAsTheAnswer(t *testing.T) {
 	thumb := ghapi.Reaction{ID: 1, Content: "+1", CreatedAt: now.Add(-100 * time.Minute)}
 	thumb.User.Login = dialect.CodexBotLogin
 	gh.reactions[100] = []ghapi.Reaction{thumb}
+	review := ghapi.Review{
+		ID: 101, CommitID: pull.Head.SHA, State: "COMMENTED",
+		SubmittedAt: now.Add(-90 * time.Minute), Body: "review complete",
+	}
+	review.User.Login = cfg.Bot
+	gh.reviews[fakeKey(repo, pr)] = []ghapi.Review{review}
 
 	store := NewMemoryStore(cfg)
 	svc := NewService(cfg, gh, store, nil)
@@ -550,8 +556,13 @@ func TestTidyCountsCodexThumbsUpAsTheAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Deleted) != 1 || result.Deleted[0] != 100 {
-		t.Fatalf("deleted = %v (kept: %v), want the thumbed-up trigger removed", result.Deleted, result.Kept)
+	if len(result.Deleted) != 0 {
+		t.Fatalf("deleted = %v, want the reaction target retained", result.Deleted)
+	}
+	if report, err := svc.Feedback(ctx, repo, pr); err != nil {
+		t.Fatal(err)
+	} else if !report.Converged {
+		t.Fatalf("feedback lost the Codex approval after tidy: %#v", report)
 	}
 }
 
@@ -683,12 +694,18 @@ func TestTidyCountsACodexThumbsUpOnTheFiredCommand(t *testing.T) {
 		c.User.Login = "kristofferR"
 		gh.comments[fakeKey(repo, pr)] = append(gh.comments[fakeKey(repo, pr)], c)
 	}
-	add(100, cfg.ReviewCommand) // the round's own fire, adopted from a person
-	add(101, "@codex review")   // and the co-reviewer trigger crq posted beside it
+	add(100, cfg.ReviewCommand) // the round's own fire, posted by crq
+	add(101, "@codex review")   // and its co-reviewer trigger
 	// Codex's whole answer, left on the command that fired the round.
 	thumb := ghapi.Reaction{ID: 1, Content: "+1", CreatedAt: now.Add(-100 * time.Minute)}
 	thumb.User.Login = dialect.CodexBotLogin
 	gh.reactions[100] = []ghapi.Reaction{thumb}
+	review := ghapi.Review{
+		ID: 900, CommitID: pull.Head.SHA, State: "COMMENTED",
+		SubmittedAt: now.Add(-90 * time.Minute), Body: "review complete",
+	}
+	review.User.Login = cfg.Bot
+	gh.reviews[fakeKey(repo, pr)] = []ghapi.Review{review}
 
 	store := NewMemoryStore(cfg)
 	svc := NewService(cfg, gh, store, nil)
@@ -698,6 +715,7 @@ func TestTidyCountsACodexThumbsUpOnTheFiredCommand(t *testing.T) {
 				return err
 			}
 			r.SetCoCommand(dialect.CodexBotLogin, 101, now.Add(-2*time.Hour))
+			r.RecordPosted(cfg.Bot, 100, now.Add(-2*time.Hour))
 			r.RecordPosted(dialect.CodexBotLogin, 101, now.Add(-2*time.Hour))
 			return nil
 		})
@@ -710,7 +728,7 @@ func TestTidyCountsACodexThumbsUpOnTheFiredCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(result.Deleted) != 1 || result.Deleted[0] != 101 {
-		t.Fatalf("deleted = %v (kept: %v), want the trigger the reaction on the fired command answered", result.Deleted, result.Kept)
+		t.Fatalf("deleted = %v (kept: %v), want the co trigger removed and its reaction target retained", result.Deleted, result.Kept)
 	}
 }
 

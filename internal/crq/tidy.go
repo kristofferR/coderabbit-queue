@@ -153,7 +153,7 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 		AdoptableFrom: adoptableFrom,
 	}
 	cursor := st.TidyReactionCursors[QueueKey(repo, pr)]
-	in.AnsweredAt, cursor, err = s.answered(ctx, repo, pr, obs, commands, posted, cursor)
+	in.AnsweredAt, in.ReactionTargets, cursor, err = s.answered(ctx, repo, pr, obs, commands, posted, cursor)
 	if err != nil {
 		return result, err
 	}
@@ -277,7 +277,7 @@ type postedCommands struct {
 	superseded map[int64]bool
 	// firedOn maps a posted trigger to the primary command its round fired on,
 	// when that is another comment. observe() reads a Codex thumbs-up from there
-	// too, so it is a reaction source tidying needs — never a delete candidate.
+	// too, so answered() retains it while its reaction is completion evidence.
 	firedOn map[int64]int64
 }
 
@@ -420,8 +420,9 @@ func (s *Service) adoptableFrom(ctx context.Context, repo string, pr int, headAt
 // still unanswered, so the ordinary pass pays for none of them.
 const maxTidyReactionCandidates = 4
 
-func (s *Service) answered(ctx context.Context, repo string, pr int, obs observation, commands []engine.CommandComment, posted postedCommands, cursor int64) (map[string]time.Time, int64, error) {
+func (s *Service) answered(ctx context.Context, repo string, pr int, obs observation, commands []engine.CommandComment, posted postedCommands, cursor int64) (map[string]time.Time, map[int64]bool, int64, error) {
 	out := answeredAt(obs)
+	reactionTargets := map[int64]bool{}
 	var candidates []engine.CommandComment
 	for _, cmd := range commands {
 		if posted.live[cmd.ID] || !dialect.IsCodexBot(cmd.Bot) || answeredSince(out, cmd) {
@@ -430,7 +431,28 @@ func (s *Service) answered(ctx context.Context, repo string, pr int, obs observa
 		candidates = append(candidates, cmd)
 	}
 	if len(candidates) == 0 {
-		return out, cursor, nil
+		return out, reactionTargets, cursor, nil
+	}
+	// A candidate may have been triggered beside another command and Codex may
+	// have approved by reacting to that primary command. Until this bounded scan
+	// identifies where the approval lives, conservatively retain every possible
+	// target; otherwise an unscanned candidate could lose its evidence.
+	possibleTargets := map[int64]int{}
+	for _, cmd := range candidates {
+		if fired := posted.firedOn[cmd.ID]; fired != 0 {
+			possibleTargets[fired]++
+			reactionTargets[fired] = true
+		}
+	}
+	clearPossibleTarget := func(cmd engine.CommandComment) {
+		fired := posted.firedOn[cmd.ID]
+		if fired == 0 {
+			return
+		}
+		possibleTargets[fired]--
+		if possibleTargets[fired] == 0 {
+			delete(reactionTargets, fired)
+		}
 	}
 	start := 0
 	foundCursor := false
@@ -466,7 +488,7 @@ func (s *Service) answered(ctx context.Context, repo string, pr int, obs observa
 		reactions, err := s.gh.ListCommentReactions(ctx, repo, cmd.ID)
 		if err != nil {
 			if ghapi.IsThrottled(err) {
-				return out, cursor, err
+				return out, reactionTargets, cursor, err
 			}
 			// Housekeeping: an unreadable reaction keeps the comment, and the
 			// next pass tries again.
@@ -475,15 +497,18 @@ func (s *Service) answered(ctx context.Context, repo string, pr int, obs observa
 			}
 			continue
 		}
-		noteThumbsUp(out, cmd, reactions)
+		if noteThumbsUp(out, cmd, reactions) {
+			reactionTargets[cmd.ID] = true
+		}
 		if answeredSince(out, cmd) {
+			clearPossibleTarget(cmd)
 			continue
 		}
 		if !readPR {
 			readPR = true
 			if onPR, err = s.gh.ListIssueReactions(ctx, repo, pr); err != nil {
 				if ghapi.IsThrottled(err) {
-					return out, cursor, err
+					return out, reactionTargets, cursor, err
 				}
 				if s.log != nil {
 					s.log.Printf("tidy: %s#%d reactions: %v", repo, pr, err)
@@ -493,6 +518,7 @@ func (s *Service) answered(ctx context.Context, repo string, pr int, obs observa
 		}
 		noteThumbsUp(out, cmd, onPR)
 		if answeredSince(out, cmd) {
+			clearPossibleTarget(cmd)
 			continue
 		}
 		// Last, the command this trigger's own round fired on. A round gated on
@@ -502,17 +528,19 @@ func (s *Service) answered(ctx context.Context, repo string, pr int, obs observa
 			reactions, err := s.gh.ListCommentReactions(ctx, repo, fired)
 			if err != nil {
 				if ghapi.IsThrottled(err) {
-					return out, cursor, err
+					return out, reactionTargets, cursor, err
 				}
 				if s.log != nil {
 					s.log.Printf("tidy: %s reactions on comment %d: %v", repo, fired, err)
 				}
 				continue
 			}
-			noteThumbsUp(out, cmd, reactions)
+			if !noteThumbsUp(out, cmd, reactions) {
+				clearPossibleTarget(cmd)
+			}
 		}
 	}
-	return out, cursor, nil
+	return out, reactionTargets, cursor, nil
 }
 
 // recordTidyState advances the bounded reaction scan and writes command
@@ -548,12 +576,15 @@ func answeredSince(answered map[string]time.Time, cmd engine.CommandComment) boo
 	return ok && !at.Before(cmd.CreatedAt)
 }
 
-// noteThumbsUp records a Codex +1 among reactions as cmd's bot having acted.
-func noteThumbsUp(answered map[string]time.Time, cmd engine.CommandComment, reactions []ghapi.Reaction) {
+// noteThumbsUp records a Codex +1 among reactions as cmd's bot having acted and
+// reports whether the comment carrying those reactions must be retained.
+func noteThumbsUp(answered map[string]time.Time, cmd engine.CommandComment, reactions []ghapi.Reaction) bool {
+	found := false
 	for _, reaction := range reactions {
 		if !isCurrentCodexThumbsUp(reaction, cmd.CreatedAt) {
 			continue
 		}
+		found = true
 		at := reaction.CreatedAt
 		if at.IsZero() {
 			at = cmd.CreatedAt
@@ -562,6 +593,7 @@ func noteThumbsUp(answered map[string]time.Time, cmd engine.CommandComment, reac
 			answered[cmd.Bot] = at
 		}
 	}
+	return found
 }
 
 // answeredAt is the newest moment each reviewer demonstrably acted on this PR.

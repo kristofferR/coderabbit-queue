@@ -31,6 +31,9 @@ type TidyInput struct {
 	// one. They are exempt from the head check: crq's own record that it has
 	// replaced a command is stronger evidence than any timestamp.
 	Superseded map[int64]bool
+	// ReactionTargets are comments whose reaction is still completion evidence.
+	// Deleting the comment would delete that evidence with it.
+	ReactionTargets map[int64]bool
 }
 
 // StaleCommands returns the trigger comments that can be deleted: crq asked, the
@@ -56,7 +59,7 @@ type TidyInput struct {
 func StaleCommands(in TidyInput) []int64 {
 	var stale []int64
 	for _, cmd := range in.Commands {
-		if in.Live[cmd.ID] {
+		if in.Live[cmd.ID] || in.ReactionTargets[cmd.ID] {
 			continue
 		}
 		answered, ok := in.AnsweredAt[cmd.Bot]

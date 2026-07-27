@@ -40,6 +40,15 @@ func TestStaleCommands(t *testing.T) {
 			},
 		},
 		{
+			name: "a reaction target keeps its completion evidence",
+			in: TidyInput{
+				AdoptableFrom:   head,
+				AnsweredAt:      answered,
+				ReactionTargets: map[int64]bool{1: true},
+				Commands:        []CommandComment{{ID: 1, Bot: "coderabbitai", CreatedAt: base}},
+			},
+		},
+		{
 			name: "no evidence this bot ever acted",
 			in: TidyInput{
 				AdoptableFrom: head,
