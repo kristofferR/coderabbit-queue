@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -1010,8 +1014,17 @@ type doctorReport struct {
 	CodeRabbitCLI   doctorCodeRabbitCLI `json:"coderabbit_cli"`
 	Tools           map[string]toolInfo `json:"tools"`
 	Environment     doctorEnvironment   `json:"environment"`
+	OtherInstalls   []otherInstall      `json:"other_installs"`
 	AgentCommands   []string            `json:"agent_commands"`
 	Recommendations []string            `json:"recommendations"`
+}
+
+// otherInstall is another crq executable this host can run. Every one of them
+// writes the same state ref, and an older one erases what a newer one recorded.
+type otherInstall struct {
+	Path      string `json:"path"`
+	SameBuild bool   `json:"same_build"`
+	ModTime   string `json:"mod_time,omitempty"`
 }
 
 type doctorConfig struct {
@@ -1109,7 +1122,85 @@ func doctor(ctx context.Context) doctorReport {
 	if (report.Tools["cr"].Found || report.Tools["coderabbit"].Found) && !report.Environment.CodeRabbitAPIKey && !report.CodeRabbitCLI.Authenticated {
 		report.Recommendations = append(report.Recommendations, "optional: set CODERABBIT_API_KEY or run coderabbit auth login for headless local reviews")
 	}
+	report.OtherInstalls = otherInstalls()
+	for _, other := range report.OtherInstalls {
+		if !other.SameBuild {
+			report.Recommendations = append(report.Recommendations,
+				"replace or remove "+other.Path+": a different crq build writes the same state ref, and an older one erases fields this one records")
+		}
+	}
 	return report
+}
+
+// otherInstalls finds every other crq this host can run.
+//
+// They all write one state ref, and a build old enough to predate a field
+// simply drops it: one stale binary quietly erased every dispatch claim in the
+// fleet, so three fix sessions ran on one pull request at once. Version
+// tolerance carries unknown members, but only for a binary that HAS it — the one
+// that does the damage is by definition older than the mechanism meant to stop
+// it. Nothing in this build can prevent that, which is why it is worth naming.
+//
+// Compared by content, not by version: every build reports the same
+// "2.0.0-dev", so the version string cannot tell two of them apart. GOPATH/bin
+// is included whether or not it is on PATH — the binary that caused this was
+// not on the daemon's PATH and ran anyway.
+func otherInstalls() []otherInstall {
+	self, err := os.Executable()
+	if err != nil {
+		return nil
+	}
+	if resolved, rerr := filepath.EvalSymlinks(self); rerr == nil {
+		self = resolved
+	}
+	mine, err := fileDigest(self)
+	if err != nil {
+		return nil
+	}
+	dirs := filepath.SplitList(os.Getenv("PATH"))
+	if gopath := strings.TrimSpace(os.Getenv("GOPATH")); gopath != "" {
+		dirs = append(dirs, filepath.Join(gopath, "bin"))
+	} else if home, herr := os.UserHomeDir(); herr == nil {
+		dirs = append(dirs, filepath.Join(home, "go", "bin"))
+	}
+	var found []otherInstall
+	seen := map[string]bool{self: true}
+	for _, dir := range dirs {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		path := filepath.Join(dir, "crq")
+		if resolved, rerr := filepath.EvalSymlinks(path); rerr == nil {
+			path = resolved
+		}
+		if seen[path] {
+			continue
+		}
+		info, serr := os.Stat(path)
+		if serr != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+			continue
+		}
+		seen[path] = true
+		entry := otherInstall{Path: path, ModTime: info.ModTime().UTC().Format(time.RFC3339)}
+		if digest, derr := fileDigest(path); derr == nil {
+			entry.SameBuild = digest == mine
+		}
+		found = append(found, entry)
+	}
+	return found
+}
+
+func fileDigest(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	sum := sha256.New()
+	if _, err := io.Copy(sum, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(sum.Sum(nil)), nil
 }
 
 func checkCodeRabbitAuth(ctx context.Context, tools map[string]toolInfo) doctorCodeRabbitCLI {
