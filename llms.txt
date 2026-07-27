@@ -238,6 +238,11 @@ for that PR, even after its own push supersedes the round): the review would be 
 move. `--once` exits non-zero if any PR or repository could not be checked, so cron cannot mistake a
 partial scan for a clean one; a daemon pass logs the failure and carries on to the rest of the fleet.
 
+A PR whose head branch lives in a FORK is reviewed like any other but not dispatched: the session
+would run an agent over a stranger's code with approvals bypassed and a write token in reach. Set
+`CRQ_DISPATCH_FORKS=1` to fix contributor pull requests anyway. That is a trust decision, not a
+sandbox — crq has none to offer.
+
 Current feedback without triggering a review:
 
 ```bash

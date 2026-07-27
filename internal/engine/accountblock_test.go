@@ -129,3 +129,37 @@ func TestObservedAccountBlockIgnoresOtherBots(t *testing.T) {
 		t.Errorf("a co-reviewer's limit blocked the account until %s", blk.Until)
 	}
 }
+
+// Every PR gets its own rate-limit notice, and each one is told when THAT pull
+// request may go again — so a notice from another PR routinely names an earlier
+// moment than the window already standing. Applying it moved the whole fleet's
+// block backwards, and the next fire landed inside a window the bot had not
+// lifted.
+func TestObservedAccountBlockIsNeverShortenedByAnotherNotice(t *testing.T) {
+	now := time.Date(2026, 7, 27, 1, 7, 0, 0, time.UTC)
+	p := Policy{Bot: "coderabbitai[bot]", RateLimitFallback: 15 * time.Minute}
+	standing := now.Add(50 * time.Minute)
+	shorter := now.Add(9 * time.Minute)
+
+	obs := Observation{Events: []dialect.BotEvent{{
+		Kind: dialect.EvRateLimited, Bot: "coderabbitai[bot]",
+		CommentID: 901, UpdatedAt: now.Add(-1 * time.Minute), Window: &shorter,
+	}}}
+	q := state.AccountQuota{
+		BlockedUntil: &standing,
+		RLCommentID:  900, // a DIFFERENT notice, from the PR that is blocked longest
+	}
+
+	blk := ObservedAccountBlock(obs, p, q, now)
+	if blk == nil {
+		t.Fatal("a distinct notice is still evidence and must be accounted for")
+	}
+	if !blk.Until.Equal(standing) {
+		t.Errorf("until = %s, want the standing window kept (%s)", blk.Until, standing)
+	}
+	// Recorded as accounted for, or the same expired message reads as unseen
+	// evidence on a later pass and becomes a fresh fallback block of its own.
+	if blk.CommentID != 901 {
+		t.Errorf("comment = %d, want the notice that was just read (901)", blk.CommentID)
+	}
+}

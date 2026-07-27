@@ -251,7 +251,9 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				Action: report.Action, Reason: report.Reason,
 				Findings: len(report.Findings), At: s.clock().UTC(),
 			}
-			if opts.Dispatch && report.Action == string(engine.ActionFix) {
+			if opts.Dispatch && report.Action == string(engine.ActionFix) && !s.mayDispatch(repo, pull) {
+				event.Skipped = "the head branch is a fork; set CRQ_DISPATCH_FORKS=1 to fix contributor pull requests"
+			} else if opts.Dispatch && report.Action == string(engine.ActionFix) {
 				// Claimed here, run in the pool: the pass moves on to the next PR
 				// while this session runs.
 				var result <-chan dispatchResult
@@ -302,6 +304,30 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		return fmt.Errorf("%d target(s) could not be checked: %s", len(failures), strings.Join(failures, "; "))
 	}
 	return nil
+}
+
+// mayDispatch reports whether a fix session may run on this pull request's code.
+//
+// A fix session checks the head out and runs an agent over it with approvals
+// bypassed, holding a token that can write to the repository. On a pull request
+// from a fork, that code is a stranger's: a build script, a test, or an
+// instruction file in the branch executes with the account's credentials on this
+// host. Which is fine for a fleet of one's own branches, and is not something to
+// turn on for a project accepting contributions without saying so.
+//
+// So a fork is skipped unless CRQ_DISPATCH_FORKS says otherwise. This is not a
+// sandbox and does not claim to be one — it is the line between code the
+// operator wrote and code somebody else did. Reviewing a fork is unaffected:
+// reading a pull request runs nothing.
+func (s *Service) mayDispatch(repo string, pull ghapi.Pull) bool {
+	if s.cfg.DispatchForks {
+		return true
+	}
+	head := NormalizeRepo(pull.Head.Repo.FullName)
+	// An unreadable head repository is not evidence that it is ours. A deleted
+	// fork answers with an empty name, and defaulting to "same repository" would
+	// hand exactly the untrusted case the permission it is missing.
+	return head != "" && head == NormalizeRepo(repo)
 }
 
 // noteDispatchHealth records whether fix sessions are starting, and says so

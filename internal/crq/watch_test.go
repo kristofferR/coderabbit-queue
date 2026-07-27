@@ -744,3 +744,33 @@ func TestSessionWorkConfirmsAForkPushThroughThePullRef(t *testing.T) {
 		t.Errorf("kept=%v (%s), want a landed fork push recognised", kept, why)
 	}
 }
+
+// A fix session checks the head out and runs an agent over it with approvals
+// bypassed, holding a token that can write to the repository. On a fork PR that
+// code belongs to a stranger, so it is not run unless the operator says so.
+func TestDispatchSkipsAForkUnlessAllowed(t *testing.T) {
+	cfg := firingConfig()
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	var own, fork ghapi.Pull
+	own.Head.Repo.FullName = "Owner/Thing" // case differs; the repository does not
+	fork.Head.Repo.FullName = "contributor/thing"
+
+	if !svc.mayDispatch("owner/thing", own) {
+		t.Error("a branch in the repository itself must be dispatchable")
+	}
+	if svc.mayDispatch("owner/thing", fork) {
+		t.Error("a fork was dispatched without CRQ_DISPATCH_FORKS")
+	}
+	// A deleted fork answers with no repository at all. Reading that as "ours"
+	// would grant exactly the untrusted case the permission it lacks.
+	if svc.mayDispatch("owner/thing", ghapi.Pull{}) {
+		t.Error("an unreadable head repository was treated as our own")
+	}
+
+	allowed := cfg
+	allowed.DispatchForks = true
+	if !NewService(allowed, newFakeGitHub(), NewMemoryStore(allowed), nil).mayDispatch("owner/thing", fork) {
+		t.Error("CRQ_DISPATCH_FORKS did not allow a fork")
+	}
+}

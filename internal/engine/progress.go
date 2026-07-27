@@ -267,5 +267,19 @@ func ObservedAccountBlock(obs Observation, p Policy, q state.AccountQuota, now t
 	if !until.After(now) {
 		return nil
 	}
+	// A standing block is never SHORTENED by a notice that ends sooner. Each PR
+	// gets its own message, and CodeRabbit tells each one when that PR may go
+	// again — so a notice arriving from another PR routinely names an earlier
+	// moment than the window already recorded. Applying it would move the whole
+	// fleet's block backwards and let the next fire land inside a window the bot
+	// has not lifted.
+	//
+	// The notice is still recorded as accounted for. That is the half worth
+	// keeping: without it the same now-expired message reads as unseen evidence
+	// on the next pass, and turns into a fresh fallback block from a message that
+	// was answered long ago.
+	if q.BlockedUntil != nil && q.BlockedUntil.After(until) {
+		until = q.BlockedUntil.UTC()
+	}
 	return &AccountBlock{Until: until, CommentID: newest.CommentID, CommentUpdated: newest.UpdatedAt}
 }

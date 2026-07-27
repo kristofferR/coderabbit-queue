@@ -54,6 +54,10 @@ type Config struct {
 	WatchInterval       time.Duration
 	DispatchCommand     []string
 	DispatchMaxAttempts int
+	// DispatchForks allows fix sessions on pull requests whose head branch lives
+	// in another repository. Off by default: a session runs an agent over that
+	// branch's code with approvals bypassed and a write token in reach.
+	DispatchForks bool
 	// DispatchConcurrency caps concurrent fix sessions. 0 (the default) means no
 	// cap: fixing findings spends no account quota, so it does not belong in a
 	// queue. It is a resource valve for a machine that cannot take the load.
@@ -228,6 +232,7 @@ func LoadConfig() (Config, error) {
 		WatchInterval:       durationEnv(env, "CRQ_WATCH_INTERVAL", 2*time.Minute),
 		DispatchCommand:     splitArgv(env["CRQ_DISPATCH_CMD"]),
 		DispatchMaxAttempts: intEnv(env, "CRQ_DISPATCH_MAX_ATTEMPTS", 3),
+		DispatchForks:       stringEnv(env, "CRQ_DISPATCH_FORKS", "0") != "0",
 		DispatchConcurrency: intEnv(env, "CRQ_DISPATCH_CONCURRENCY", 0),
 		WorkspaceRoot:       env["CRQ_WORKSPACE"],
 		NoOpen:              env["CRQ_NO_OPEN"] != "",

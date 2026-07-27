@@ -272,6 +272,12 @@ func (f *fakeGitHub) ListPulls(_ context.Context, repo string, query url.Values)
 		if wantRef != "" && p.Head.Ref != wantRef {
 			continue
 		}
+		// GitHub always names the head's repository, and dispatch reads it to
+		// tell a fork from a branch of this repository. A fake that left it
+		// empty would make every test PR look like an unreadable fork.
+		if p.Head.Repo.FullName == "" {
+			p.Head.Repo.FullName = repo
+		}
 		out = append(out, p)
 	}
 	// Deterministic: map iteration order must not decide what a test sees.
