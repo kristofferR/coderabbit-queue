@@ -102,6 +102,27 @@ export function SolverEditor({
           Each row below says which layer its value came from.
         </p>
 
+        {(solver.agent_on?.length ?? 0) > 0 && (
+          <p className="mt-2 flex flex-wrap items-center gap-2 text-[12px]">
+            <span className="text-faint">Agent available on:</span>
+            {solver.agent_on!.map((h) => (
+              <span
+                key={h.host}
+                title={h.has ? h.path : "not on the PATH that host's service runs with"}
+                className={`rounded-full border px-2 py-0.5 ${
+                  h.has === undefined
+                    ? "border-edge text-faint"
+                    : h.has
+                      ? "border-ok-edge bg-ok-bg text-ok"
+                      : "border-bad-edge bg-bad-bg text-bad"
+                }`}
+              >
+                {h.host} {h.has === undefined ? "· unknown" : h.has ? "✓" : "missing"}
+              </span>
+            ))}
+          </p>
+        )}
+
         {solver.lagging_hosts && solver.lagging_hosts.length > 0 && (
           <div className="mt-2.5 rounded-lg border border-warn-edge bg-warn-bg px-3 py-2 text-[12.5px] text-warn">
             These hosts run a binary that predates per-repository fix settings and will use their own

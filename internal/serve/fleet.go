@@ -296,6 +296,7 @@ type FleetSettings struct {
 	WeeklyLimit    int               `json:"weekly_limit"`
 	AutofixDefault bool              `json:"autofix_default"`
 	Sources        map[string]string `json:"sources"`
+	Overriding     []string          `json:"overriding,omitempty"`
 	By             string            `json:"by,omitempty"`
 	UpdatedAt      string            `json:"updated_at,omitempty"`
 	Lagging        []string          `json:"lagging_hosts,omitempty"`

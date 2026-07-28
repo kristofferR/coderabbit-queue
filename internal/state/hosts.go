@@ -53,9 +53,27 @@ func (t ToolReport) Found() bool { return t.Path != "" }
 const HostReportTTL = 30 * time.Minute
 
 // SetHostReport records what a host says about itself.
+//
+// Roles MERGE rather than replace, because a machine runs more than one crq
+// service and each reports only its own: the autofix watcher and the review
+// daemon on the same host would otherwise take turns overwriting each other,
+// and the table would show whichever wrote last as the only thing running
+// there. A role is dropped only when the record ages out entirely.
 func (s *State) SetHostReport(r HostReport, now time.Time) {
 	if s.HostReports == nil {
 		s.HostReports = map[string]HostReport{}
+	}
+	if prev, ok := s.HostReports[r.Host]; ok && now.Sub(prev.At) <= HostReportTTL {
+		seen := map[string]bool{}
+		for _, role := range r.Roles {
+			seen[role] = true
+		}
+		for _, role := range prev.Roles {
+			if !seen[role] {
+				r.Roles = append(r.Roles, role)
+			}
+		}
+		sort.Strings(r.Roles)
 	}
 	r.At = now.UTC()
 	s.HostReports[r.Host] = r

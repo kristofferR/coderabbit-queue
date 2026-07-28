@@ -283,6 +283,7 @@ export type FleetSettings = {
   weekly_limit: number;
   autofix_default: boolean;
   sources: Record<string, string>;
+  overriding?: string[];
   by?: string;
   updated_at?: string;
   lagging_hosts?: string[];

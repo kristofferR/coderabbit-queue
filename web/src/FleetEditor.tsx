@@ -112,6 +112,22 @@ export function FleetEditor({
           records it for every host.
         </p>
 
+        {(fleet.overriding?.length ?? 0) > 0 && (
+          <p className="mt-2 text-[12.5px] text-faint">
+            {fleet.overriding!.length} repositor{fleet.overriding!.length === 1 ? "y has" : "ies have"} their
+            own reviewers and are not reached by the default below:{" "}
+            {fleet.overriding!.map((r, i) => (
+              <span key={r}>
+                {i > 0 && ", "}
+                <a href="#/repos" className="text-acc hover:underline">
+                  {r.split("/").pop()}
+                </a>
+              </span>
+            ))}
+            .
+          </p>
+        )}
+
         {fleet.lagging_hosts && fleet.lagging_hosts.length > 0 && (
           <div className="mt-2.5 rounded-lg border border-warn-edge bg-warn-bg px-3 py-2 text-[12.5px] text-warn">
             These hosts run a binary that predates fleet defaults and will keep deciding from their own env:{" "}

@@ -2654,7 +2654,7 @@ func (a prActor) SetFleet(ctx context.Context, change serve.FleetChange, preview
 func fleetSettingsOf(view crq.FleetView) *serve.FleetSettings {
 	out := &serve.FleetSettings{
 		Recorded: view.Recorded, MinInterval: view.MinInterval, WeeklyLimit: view.WeeklyLimit,
-		AutofixDefault: view.AutofixDefault, Sources: view.Sources,
+		AutofixDefault: view.AutofixDefault, Sources: view.Sources, Overriding: view.Overriding,
 		By: view.By, UpdatedAt: view.UpdatedAt, Lagging: hostsOfWriters(view.Lagging),
 	}
 	for _, r := range view.Reviewers {

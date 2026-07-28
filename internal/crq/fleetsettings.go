@@ -28,6 +28,10 @@ type FleetView struct {
 	// this host's env — the distinction that decides whether changing it here
 	// will actually change anything for the other hosts.
 	Sources map[string]string `json:"sources"`
+	// Overriding names the repositories that have their own answer, so a fleet
+	// default can say who it does NOT reach. A count with no names is a number
+	// you cannot act on.
+	Overriding []string `json:"overriding,omitempty"`
 
 	By        string   `json:"by,omitempty"`
 	UpdatedAt string   `json:"updated_at,omitempty"`
@@ -99,6 +103,12 @@ func (s *Service) fleetViewOf(st State) FleetView {
 			Login: r.Login, Budget: string(r.Budget), Required: r.Required, Trigger: string(r.Trigger),
 		})
 	}
+	for repo := range st.Repos {
+		if ov, ok := st.RepoOverride(repo); ok && (ov.SetCoBots || ov.SetRequired || ov.PrimaryOff) {
+			view.Overriding = append(view.Overriding, repo)
+		}
+	}
+	sort.Strings(view.Overriding)
 	if st.Fleet.UpdatedAt != nil {
 		view.By = st.Fleet.By
 		view.UpdatedAt = st.Fleet.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z")

@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 )
 
 // EnvKey describes one setting: what it means, what shape its value has, and —
@@ -76,6 +78,9 @@ var envKeys = []EnvKey{
 	{Key: "CRQ_AUTOREVIEW_SKIP_MARKER", Kind: "text", Group: "review", Label: "Skip marker",
 		Help: "A pull-request body containing this is left alone by fleet auto-review."},
 
+	// Per-bot trigger policy. Generated rather than listed, so adding a
+	// co-reviewer to the registry adds its settings here too — the alternative
+	// is a catalogue that silently stops covering the fleet it describes.
 	{Key: "CRQ_WATCH_INTERVAL", Kind: "duration", Group: "autofix", Label: "Watch interval",
 		Help: "How often the watcher looks for pull requests needing a fix session."},
 	{Key: "CRQ_DISPATCH_MAX_ATTEMPTS", Kind: "int", Group: "autofix", Label: "Max attempts",
@@ -112,12 +117,31 @@ var envKeys = []EnvKey{
 		Help: "The session script this machine runs. Written by crq autofix install.", PerHost: true},
 }
 
-// EnvKeys returns the settings catalogue, in display order.
-func EnvKeys() []EnvKey { return append([]EnvKey(nil), envKeys...) }
+// EnvKeys returns the settings catalogue, in display order, including the
+// per-co-reviewer trigger settings derived from the registry.
+func EnvKeys() []EnvKey {
+	out := append([]EnvKey(nil), envKeys...)
+	for _, co := range dialect.KnownCoReviewers() {
+		up := strings.ToUpper(co.Name)
+		out = append(out,
+			EnvKey{Key: "CRQ_COBOT_" + up + "_TRIGGER", Kind: "text", Group: "review",
+				Label: co.Name + " trigger",
+				Help: "never (crq stays out of its way) · selfheal (ask only if it has not shown up) · " +
+					"always (ask on every round)."},
+			EnvKey{Key: "CRQ_COBOT_" + up + "_GRACE", Kind: "duration", Group: "review",
+				Label: co.Name + " self-heal grace",
+				Help:  "How long to wait for " + co.Name + " to review on its own before asking."},
+			EnvKey{Key: "CRQ_COBOT_" + up + "_CMD", Kind: "text", Group: "review",
+				Label: co.Name + " command",
+				Help:  "The comment crq posts to ask " + co.Name + " for a review."},
+		)
+	}
+	return out
+}
 
 // envKeyByName indexes the catalogue.
 func envKeyByName(key string) (EnvKey, bool) {
-	for _, k := range envKeys {
+	for _, k := range EnvKeys() {
 		if k.Key == key {
 			return k, true
 		}
@@ -161,6 +185,13 @@ func validateEnvValue(key, value string) error {
 			return fmt.Errorf("%s takes 0 or 1", key)
 		}
 	}
+	if strings.HasSuffix(key, "_TRIGGER") {
+		switch value {
+		case "never", "selfheal", "always":
+		default:
+			return fmt.Errorf("%s takes never, selfheal or always", key)
+		}
+	}
 	return nil
 }
 
@@ -180,8 +211,9 @@ type EnvSetting struct {
 // EnvSettings reports every setting with its effective value and source.
 func (s *Service) EnvSettings(st State) []EnvSetting {
 	host := s.cfg.Env()
-	out := make([]EnvSetting, 0, len(envKeys))
-	for _, k := range envKeys {
+	keys := EnvKeys()
+	out := make([]EnvSetting, 0, len(keys))
+	for _, k := range keys {
 		set := EnvSetting{EnvKey: k, Value: strings.TrimSpace(host[k.Key]), Source: "env"}
 		if set.Value == "" {
 			set.Source = "default"
