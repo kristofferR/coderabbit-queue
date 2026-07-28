@@ -84,7 +84,7 @@ var envKeys = []EnvKey{
 	{Key: "CRQ_WATCH_INTERVAL", Kind: "duration", Group: "autofix", Label: "Watch interval",
 		Help: "How often the watcher looks for pull requests needing a fix session."},
 	{Key: "CRQ_DISPATCH_MAX_ATTEMPTS", Kind: "int", Group: "autofix", Label: "Max attempts",
-		Help: "Fix sessions per head before crq stops trying. Also settable per repository."},
+		Help: "Failed code-fix sessions per head before crq stops. Provider outages do not count. Also settable per repository."},
 	{Key: "CRQ_DISPATCH_FORKS", Kind: "bool", Group: "autofix", Label: "Fix fork PRs",
 		Help: "Allow sessions on pull requests from another repository. Off by default."},
 	{Key: "CRQ_DISPATCH_CONCURRENCY", Kind: "int", Group: "autofix", Label: "Concurrency",

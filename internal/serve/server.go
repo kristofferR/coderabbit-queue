@@ -58,6 +58,9 @@ type Options struct {
 	Now    func() time.Time
 	// Fleet is the configuration the settings and setup pages display.
 	Fleet FleetConfig
+	// FleetFor derives the effective fleet settings from the state already
+	// loaded for this snapshot. Nil retains the Actor fallback for embedders.
+	FleetFor func(st state.State) *FleetSettings
 	// Host names the machine this server runs on, so the tool list can say
 	// whose PATH it describes.
 	Host string
@@ -248,10 +251,14 @@ func (s *Server) refresh(ctx context.Context) {
 	// is how two people overwrite each other.
 	var fleet *FleetSettings
 	var env []EnvSetting
-	if s.actor != nil {
+	if s.opts.FleetFor != nil {
+		fleet = s.opts.FleetFor(st)
+	} else if s.actor != nil {
 		if f, err := s.actor.Fleet(ctx); err == nil {
 			fleet = f
 		}
+	}
+	if s.actor != nil {
 		env = s.actor.EnvSettings(st)
 	}
 	snap := BuildFleet(st, s.opts.Fleet, ov, s.tools, s.opts.Host, now, botsFor, s.opts.EnrollFor, fleet, s.opts.SolverFor, env)

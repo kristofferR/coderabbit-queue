@@ -45,10 +45,19 @@ func TestHandlersRefuseUntilTheFirstLoadSucceeds(t *testing.T) {
 			t.Errorf("%s = %d before any load, want 503 rather than a null-filled snapshot", path, rec.Code)
 		}
 	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/pr/o/r/1", nil)
+	req.SetPathValue("owner", "o")
+	req.SetPathValue("name", "r")
+	req.SetPathValue("pr", "1")
+	srv.handlePR(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("/api/pr = %d before any load, want 503 rather than a false empty PR", rec.Code)
+	}
 
 	// Health must not read as ok either: a check that passes here passes against
 	// a server that has never reached the state ref.
-	rec := httptest.NewRecorder()
+	rec = httptest.NewRecorder()
 	srv.handleHealth(rec, httptest.NewRequest(http.MethodGet, "/api/health", nil))
 	var health map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &health); err != nil {
@@ -60,7 +69,7 @@ func TestHandlersRefuseUntilTheFirstLoadSucceeds(t *testing.T) {
 
 	// And the SSE stream sends nothing until there is something real to send.
 	rec = httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/events", nil)
 	ctx, cancel := context.WithCancel(req.Context())
 	cancel()
 	srv.handleEvents(rec, req.WithContext(ctx))
@@ -233,5 +242,32 @@ func TestAPrimarysAnswerStaysWithThePrimaryThatGaveIt(t *testing.T) {
 	st.Rounds["o/repo#1"] = legacy
 	if got := macroscope(st); got.LastSeen == nil || !got.LastSeen.Equal(answered) {
 		t.Errorf("an unattributed answer must still count for the running primary: %+v", got)
+	}
+}
+
+func TestBotCardsUseTheEffectiveFleetPrimary(t *testing.T) {
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	cfg := FleetConfig{Reviewers: []ReviewerCfg{
+		{Login: "coderabbitai[bot]", Name: "coderabbit", Primary: true, Metered: true},
+		{Login: "cursor[bot]", Name: "bugbot"},
+	}}
+	running := []BotName{
+		{Login: "cursor[bot]", Name: "bugbot", Primary: true, Required: true},
+	}
+	cards := botCards(state.State{}, cfg, running, now)
+	primary := ""
+	for _, card := range cards {
+		if card.Primary {
+			if primary != "" {
+				t.Fatalf("multiple primary cards: %q and %q", primary, card.Login)
+			}
+			primary = card.Login
+		}
+		if card.Login == "coderabbitai[bot]" && card.Primary {
+			t.Fatal("the retired startup primary is still marked primary")
+		}
+	}
+	if primary != "cursor[bot]" {
+		t.Fatalf("primary card = %q, want the effective fleet primary", primary)
 	}
 }

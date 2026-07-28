@@ -64,11 +64,61 @@ func TestDispatchClaim(t *testing.T) {
 	} else if why == "" {
 		t.Error("the bound's refusal must say why")
 	}
+	if ok, why := round.ClaimDispatch("host-c", "tok-recovered", stale.Add(time.Hour+time.Second), 3); !ok {
+		t.Fatalf("the attempt bound permanently dead-lettered the head: %s", why)
+	}
+	if round.Dispatch.Attempts != 1 || round.Dispatch.Exhaustions != 1 {
+		t.Fatalf("recovered cycle = %#v, want attempt 1 after one cooldown", round.Dispatch)
+	}
 
 	// A new head is a fresh start: the previous attempt achieved something.
 	fresh := &Round{Repo: "o/r", PR: 1, Head: "bbbbbbbb2"}
 	if ok, _ := fresh.ClaimDispatch("host-c", "tok-e", stale, 3); !ok {
 		t.Error("a new head must be dispatchable again")
+	}
+}
+
+func TestDispatchModelFallbackRefundsProviderOutages(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	reset := now.Add(time.Hour)
+	round := &Round{Repo: "o/r", PR: 1, Head: "aaaaaaaa1"}
+	models := []string{"opus", "sonnet"}
+
+	if ok, why := round.ClaimDispatchModels("host", "one", now, 5, models); !ok {
+		t.Fatal(why)
+	}
+	if round.Dispatch.Model != "opus" || round.Dispatch.Attempts != 1 {
+		t.Fatalf("first claim = %#v, want opus attempt 1", round.Dispatch)
+	}
+	if !round.MarkDispatchUnavailable("one", reset, "provider unavailable") {
+		t.Fatal("owner could not mark its selected model unavailable")
+	}
+	round.ReleaseDispatch("one")
+	if round.Dispatch.Attempts != 0 {
+		t.Fatalf("provider outage spent an attempt: %#v", round.Dispatch)
+	}
+
+	if ok, why := round.ClaimDispatchModels("host", "two", now.Add(time.Minute), 5, models); !ok {
+		t.Fatal(why)
+	}
+	if round.Dispatch.Model != "sonnet" || round.Dispatch.Attempts != 1 {
+		t.Fatalf("fallback claim = %#v, want sonnet attempt 1", round.Dispatch)
+	}
+	if !round.MarkDispatchUnavailable("two", reset.Add(time.Hour), "provider unavailable") {
+		t.Fatal("fallback could not be marked unavailable")
+	}
+	round.ReleaseDispatch("two")
+
+	if ok, why := round.ClaimDispatchModels("host", "three", now.Add(2*time.Minute), 5, models); ok {
+		t.Fatal("all parked models should wait")
+	} else if why == "" {
+		t.Fatal("the wait must explain itself")
+	}
+	if ok, why := round.ClaimDispatchModels("host", "four", reset.Add(time.Second), 5, models); !ok {
+		t.Fatalf("expired model outage permanently blocked the head: %s", why)
+	}
+	if round.Dispatch.Model != "opus" {
+		t.Fatalf("model after reset = %q, want opus", round.Dispatch.Model)
 	}
 }
 

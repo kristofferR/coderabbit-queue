@@ -99,6 +99,7 @@ export type Session = {
   pr: number;
   head?: string;
   host?: string;
+  model?: string;
   attempt?: number;
   max_attempts?: number;
   findings?: number;
@@ -268,6 +269,7 @@ export type KV = { key: string; value: string; detail?: string };
 export type RepoSolver = {
   overridden: boolean;
   agent?: string;
+  models: string[];
   model?: string;
   effort?: string;
   prompt?: string;

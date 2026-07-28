@@ -344,6 +344,12 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 	repo := owner + "/" + name
 
 	s.mu.RLock()
+	if !s.loaded {
+		err := s.loadErr
+		s.mu.RUnlock()
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": firstLoadError(err)})
+		return
+	}
 	st := s.lastState
 	s.mu.RUnlock()
 

@@ -83,8 +83,8 @@ type WatchEvent struct {
 // does, and why it is off unless asked for.
 //
 // Every dispatch is claimed under CAS, so two watchers cannot both spawn a
-// session for one PR, and bounded per head, so a fix that keeps not working
-// stops instead of spending a review round each time.
+// session for one PR, and bounded in cooldown-backed cycles, so a fix that keeps
+// not working neither spins nor permanently dead-letters the head.
 func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchEvent) error) error {
 	if opts.MaxAttempts <= 0 {
 		opts.MaxAttempts = s.cfg.DispatchMaxAttempts
@@ -406,6 +406,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				Action: report.Action, Reason: report.Reason,
 				Findings: len(report.Findings), At: s.clock().UTC(),
 			}
+			report.Fork = forkPull(repo, pull)
 			var result <-chan dispatchResult
 			if opts.dispatching() && report.Action == string(engine.ActionFix) && autofixOff[NormalizeRepo(repo)] {
 				event.Skipped = "autofix is off for this repository (crq autofix on " + NormalizeRepo(repo) + ")"
@@ -496,11 +497,15 @@ func (s *Service) mayDispatch(cfg Config, repo string, pull ghapi.Pull) bool {
 	if cfg.DispatchForks {
 		return true
 	}
+	return !forkPull(repo, pull)
+}
+
+func forkPull(repo string, pull ghapi.Pull) bool {
 	head := NormalizeRepo(pull.Head.Repo.FullName)
 	// An unreadable head repository is not evidence that it is ours. A deleted
 	// fork answers with an empty name, and defaulting to "same repository" would
 	// hand exactly the untrusted case the permission it is missing.
-	return head != "" && head == NormalizeRepo(repo)
+	return head == "" || head != NormalizeRepo(repo)
 }
 
 // noteDispatchHealth records whether fix sessions are starting, and says so
@@ -596,7 +601,12 @@ func (s *Service) queueDispatch(
 	}
 	token := randomToken()
 	maxAttempts := s.recordedMaxAttempts(ctx, report.Repo, opts.MaxAttempts)
-	claimed, why, byDesign := s.claimDispatch(ctx, report, token, maxAttempts)
+	solver := s.repoCfg(ctx, report.Repo)
+	models := append([]string(nil), solver.FixModels...)
+	if len(models) == 0 && solver.FixModel != "" {
+		models = []string{solver.FixModel}
+	}
+	claimed, why, byDesign := s.claimDispatchModels(ctx, report, token, maxAttempts, models)
 	if !claimed {
 		pool.release()
 		// A round another watcher already holds, or one that has spent its
@@ -759,6 +769,10 @@ func (s *Service) dispatchWithStart(
 	// session script reads them; a script from an older install ignores them
 	// and runs exactly as it did.
 	solver := s.repoCfg(runCtx, report.Repo)
+	model := solver.FixModel
+	if claimedModel, found := s.claimedDispatchModel(runCtx, report, token); found {
+		model = claimedModel
+	}
 	cmd.Env = append(os.Environ(),
 		"CRQ_DISPATCH_REPO="+report.Repo,
 		fmt.Sprintf("CRQ_DISPATCH_PR=%d", report.PR),
@@ -766,7 +780,7 @@ func (s *Service) dispatchWithStart(
 		"CRQ_DISPATCH_FINDINGS="+findingsPath,
 		// The agent and prompt come from the unit's environment and are already
 		// in os.Environ(); only the per-repository half is added here.
-		"CRQ_FIX_MODEL="+solver.FixModel,
+		"CRQ_FIX_MODEL="+model,
 		"CRQ_FIX_EFFORT="+solver.FixEffort,
 		"CRQ_FIX_PROMPT="+solver.FixPrompt,
 	)
@@ -803,6 +817,17 @@ func (s *Service) dispatchWithStart(
 	// would have left the pull request unfixable at that commit while `crq next`
 	// went on asking for a fix.
 	attempted := ctx.Err() == nil
+	if runErr != nil && attempted {
+		_ = logFile.Sync()
+		if failure := dialect.ClassifyAgentFailure(readLogTail(logPath, 256<<10), s.clock()); failure.Unavailable {
+			s.releaseDispatchUnavailable(context.WithoutCancel(ctx), report, token, failure)
+			if lost() {
+				return false, "another watcher took this round; the session was stopped"
+			}
+			return false, fmt.Sprintf("%s; fallback will retry after %s (log: %s)",
+				failure.Reason, failure.RetryAt.Format(time.RFC3339), logPath)
+		}
+	}
 	s.releaseDispatch(context.WithoutCancel(ctx), report, token, attempted)
 	if lost() {
 		return false, "another watcher took this round; the session was stopped"
@@ -895,6 +920,16 @@ func (s *Service) writeFindings(report NextReport) (string, error) {
 // already running for this PR, or a head that has spent its attempt budget —
 // rather than evidence about whether fix sessions can start at all.
 func (s *Service) claimDispatch(ctx context.Context, report NextReport, token string, maxAttempts int) (bool, string, bool) {
+	return s.claimDispatchModels(ctx, report, token, maxAttempts, nil)
+}
+
+func (s *Service) claimDispatchModels(
+	ctx context.Context,
+	report NextReport,
+	token string,
+	maxAttempts int,
+	models []string,
+) (bool, string, bool) {
 	reason, byDesign := "", false
 	var seen string
 	_, err := s.store.Update(ctx, func(st *State) error {
@@ -912,6 +947,10 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 		// the click or of no snapshot at all.
 		if !s.reviewsRepo(*st, report.Repo) {
 			reason, byDesign = "crq is not reviewing this repository", true
+			return ErrNoChange
+		}
+		if report.Fork && !s.cfgFor(*st, report.Repo).DispatchForks {
+			reason, byDesign = "the head branch is a fork and current solver policy forbids fixing it", true
 			return ErrNoChange
 		}
 		round := st.Round(report.Repo, report.PR)
@@ -983,7 +1022,7 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 				round.Note = "adopted to fix feedback carried from an earlier head"
 			}
 		}
-		ok, why := round.ClaimDispatch(s.cfg.Host, token, s.clock(), maxAttempts)
+		ok, why := round.ClaimDispatchModels(s.cfg.Host, token, s.clock(), maxAttempts, models)
 		if !ok {
 			reason, byDesign = why, true
 			return ErrNoChange
@@ -1041,10 +1080,73 @@ func (s *Service) releaseDispatch(ctx context.Context, report NextReport, token 
 		}
 		if !attempted && round.Dispatch != nil && round.Dispatch.Attempts > 0 {
 			round.Dispatch.Attempts--
+			round.Dispatch.AttemptResetAt = nil
 		}
 		st.PutRound(*round)
 		return nil
 	})
+}
+
+// releaseDispatchUnavailable refunds an attempt that never reached the code
+// problem: the provider/model could not serve it. The selected model is parked
+// until its retry time while the already-advanced cursor makes the next claim
+// choose a fallback.
+func (s *Service) releaseDispatchUnavailable(
+	ctx context.Context,
+	report NextReport,
+	token string,
+	failure dialect.AgentFailure,
+) {
+	_, _ = s.store.Update(ctx, func(st *State) error {
+		round := st.Round(report.Repo, report.PR)
+		if round == nil || !round.MarkDispatchUnavailable(token, failure.RetryAt, failure.Reason) {
+			return ErrNoChange
+		}
+		if !round.ReleaseDispatch(token) {
+			return ErrNoChange
+		}
+		st.ReleaseArchivedDispatch(report.Repo, report.PR, token)
+		st.PutRound(*round)
+		return nil
+	})
+}
+
+func (s *Service) claimedDispatchModel(
+	ctx context.Context,
+	report NextReport,
+	token string,
+) (string, bool) {
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return "", false
+	}
+	if round := st.Round(report.Repo, report.PR); round != nil &&
+		round.Dispatch != nil && round.Dispatch.Token == token {
+		return round.Dispatch.Model, true
+	}
+	if claim, ok := st.Dispatches[QueueKey(report.Repo, report.PR)]; ok && claim.Token == token {
+		return claim.Model, true
+	}
+	return "", false
+}
+
+func readLogTail(path string, limit int64) []byte {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil
+	}
+	start := info.Size() - limit
+	if start < 0 {
+		start = 0
+	}
+	body := make([]byte, info.Size()-start)
+	n, _ := file.ReadAt(body, start)
+	return body[:n]
 }
 
 // beatDispatch refreshes the claim while the session runs, so a session that

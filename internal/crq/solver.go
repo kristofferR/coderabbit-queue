@@ -20,6 +20,7 @@ type SolverView struct {
 	// and effort below are being handed to.
 	Agent string `json:"agent,omitempty"`
 
+	Models      []string `json:"models"`
 	Model       string   `json:"model,omitempty"`
 	Effort      string   `json:"effort,omitempty"`
 	Prompt      string   `json:"prompt,omitempty"`
@@ -55,7 +56,8 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 
 	view := SolverView{
 		Repo: repo, Overridden: has && !own.Empty(),
-		Model: cfg.FixModel, Effort: cfg.FixEffort, Prompt: cfg.FixPrompt,
+		Models: append([]string(nil), cfg.FixModels...),
+		Model:  cfg.FixModel, Effort: cfg.FixEffort, Prompt: cfg.FixPrompt,
 		MaxAttempts: cfg.DispatchMaxAttempts, Forks: cfg.DispatchForks,
 		SkipAuthors: sortedKeys(cfg.SkipAuthors),
 		Sources:     map[string]string{},
@@ -73,7 +75,9 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 			view.Sources[key] = "env"
 		}
 	}
-	source("model", own.Model != "", fleet.Model != "")
+	source("models", own.SetModels || len(own.Models) > 0 || own.Model != "",
+		fleet.SetModels || len(fleet.Models) > 0 || fleet.Model != "")
+	view.Sources["model"] = view.Sources["models"]
 	source("effort", own.Effort != "", fleet.Effort != "")
 	source("prompt", own.Prompt != "", fleet.Prompt != "")
 	source("max_attempts", own.MaxAttempts != nil, fleet.MaxAttempts != nil)
@@ -111,6 +115,7 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 // SolverChange is a proposed edit. Absent fields are left alone, so a form
 // posting its whole state cannot clobber a setting changed a second earlier.
 type SolverChange struct {
+	Models      []string `json:"models"`
 	Model       *string  `json:"model"`
 	Effort      *string  `json:"effort"`
 	Prompt      *string  `json:"prompt"`
@@ -123,6 +128,7 @@ type SolverChange struct {
 	// false is a real fork policy and an empty author list is "skip nobody", so
 	// without this a repository that once set either could only follow the fleet
 	// again by clearing every solver setting it had.
+	UnsetModels      bool `json:"unset_models,omitempty"`
 	UnsetForks       bool `json:"unset_forks,omitempty"`
 	UnsetSkipAuthors bool `json:"unset_skip_authors,omitempty"`
 	// Clear drops the whole record, returning every setting to the fleet default.
@@ -217,8 +223,34 @@ func (s *Service) SetFleetSolver(ctx context.Context, change SolverChange) (Solv
 
 // applySolverChange folds a change onto a record, validating it.
 func applySolverChange(sv SolverSettings, change SolverChange) (SolverSettings, error) {
-	if change.Model != nil {
-		sv.Model = strings.TrimSpace(*change.Model)
+	if change.UnsetModels {
+		sv.Models, sv.SetModels, sv.Model = nil, false, ""
+	} else if change.Models != nil {
+		models := make([]string, 0, len(change.Models))
+		seen := map[string]bool{}
+		for _, model := range change.Models {
+			model = strings.TrimSpace(model)
+			if model != "" && !seen[model] {
+				seen[model] = true
+				models = append(models, model)
+			}
+		}
+		if len(models) > 8 {
+			return sv, errors.New("model ranking is limited to 8 entries")
+		}
+		sv.Models, sv.SetModels = models, true
+		sv.Model = ""
+		if len(models) > 0 {
+			sv.Model = models[0]
+		}
+	} else if change.Model != nil {
+		// Legacy single-model clients still produce a valid one-entry ranking.
+		model := strings.TrimSpace(*change.Model)
+		if model == "" {
+			sv.Models, sv.SetModels, sv.Model = nil, false, ""
+		} else {
+			sv.Models, sv.SetModels, sv.Model = []string{model}, true, model
+		}
 	}
 	if change.Effort != nil {
 		effort := strings.ToLower(strings.TrimSpace(*change.Effort))

@@ -70,11 +70,14 @@ type Config struct {
 	// which is not the same as any particular agent.
 	FixAgent            string
 	DispatchMaxAttempts int
-	// FixModel/FixEffort/FixPrompt are the per-repository solver settings, put
+	// FixModels/FixEffort/FixPrompt are the per-repository solver settings, put
 	// into the fix session's ENVIRONMENT rather than its argv. Argv is fixed
 	// when the watcher starts; the environment is built per dispatch, which is
 	// the only layer that can differ between two repositories the same watcher
 	// is handling.
+	FixModels []string
+	// FixModel is the preferred entry, retained for the session environment and
+	// older callers that only understand one model.
 	FixModel  string
 	FixEffort string
 	FixPrompt string
@@ -322,7 +325,11 @@ func BuildConfig(env map[string]string) (Config, error) {
 		WatchInterval:       durationEnv(env, "CRQ_WATCH_INTERVAL", 2*time.Minute),
 		DispatchCommand:     SplitArgv(env["CRQ_DISPATCH_CMD"]),
 		FixAgent:            strings.TrimSpace(env["CRQ_FIX_AGENT"]),
-		DispatchMaxAttempts: positiveIntEnv(env, "CRQ_DISPATCH_MAX_ATTEMPTS", 3),
+		FixModels:           configuredModels(env["CRQ_FIX_MODELS"], env["CRQ_FIX_MODEL"]),
+		FixModel:            strings.TrimSpace(env["CRQ_FIX_MODEL"]),
+		FixEffort:           strings.TrimSpace(env["CRQ_FIX_EFFORT"]),
+		FixPrompt:           strings.TrimSpace(env["CRQ_FIX_PROMPT"]),
+		DispatchMaxAttempts: positiveIntEnv(env, "CRQ_DISPATCH_MAX_ATTEMPTS", 5),
 		DispatchForks:       boolEnv(env, "CRQ_DISPATCH_FORKS", false),
 		DispatchConcurrency: intEnv(env, "CRQ_DISPATCH_CONCURRENCY", 0),
 		WorkspaceRoot:       env["CRQ_WORKSPACE"],
@@ -361,7 +368,27 @@ func BuildConfig(env map[string]string) (Config, error) {
 		// back to work over a reviewer nobody asked for.
 		cfg.FeedbackBots = cfg.reviewerLogins(func(r Reviewer) bool { return r.Required || !r.Metered() })
 	}
+	if len(cfg.FixModels) > 0 {
+		cfg.FixModel = cfg.FixModels[0]
+	}
 	return cfg, nil
+}
+
+func configuredModels(ranked, legacy string) []string {
+	raw := ranked
+	if strings.TrimSpace(raw) == "" {
+		raw = legacy
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	for _, model := range strings.Split(raw, ",") {
+		model = strings.TrimSpace(model)
+		if model != "" && !seen[model] {
+			seen[model] = true
+			out = append(out, model)
+		}
+	}
+	return out
 }
 
 func (c Config) RequireState() error {
@@ -545,13 +572,18 @@ func parseAllCoBots(env map[string]string) []CoBotConfig {
 func parseCoBots(env map[string]string, requiredBots []string) ([]CoBotConfig, error) {
 	enabled := map[string]bool{}
 	var unknown []string
-	// Default to NONE. Enabling every registry co-reviewer meant a fresh install
-	// asked bots the operator had never signed up for — crq posted a trigger
-	// comment on every round, waited out a grace period, and nothing ever
-	// answered. A co-reviewer is opt-in, from the Bots page or CRQ_COBOTS;
-	// anything named in CRQ_REQUIRED_BOTS is still enabled, since requiring a
-	// reviewer crq never asks would hang the round.
-	for _, item := range splitList(stringEnvAllowEmpty(env, "CRQ_COBOTS", "")) {
+	// Preserve the pre-registry contract: absent means every built-in
+	// co-reviewer, while explicitly empty disables all. Treating both as empty
+	// silently disabled working reviewers on upgrade.
+	items := []string{}
+	if raw, exists := env["CRQ_COBOTS"]; exists {
+		items = splitList(raw)
+	} else {
+		for _, co := range dialect.KnownCoReviewers() {
+			items = append(items, co.Name)
+		}
+	}
+	for _, item := range items {
 		co, ok := dialect.CoReviewerByName(item)
 		if !ok {
 			// Refuse rather than skip: silently dropping a typo disables the

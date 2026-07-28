@@ -483,7 +483,14 @@ func withoutBot(list []string, login string) []string {
 // exactly the sessions it ran before.
 func (c Config) withSolver(sv SolverSettings) Config {
 	out := c
-	out.FixModel, out.FixEffort, out.FixPrompt = sv.Model, sv.Effort, sv.Prompt
+	if sv.SetModels || len(sv.Models) > 0 || sv.Model != "" {
+		out.FixModels = sv.RankedModels()
+		out.FixModel = ""
+		if len(out.FixModels) > 0 {
+			out.FixModel = out.FixModels[0]
+		}
+	}
+	out.FixEffort, out.FixPrompt = sv.Effort, sv.Prompt
 	if sv.MaxAttempts != nil {
 		out.DispatchMaxAttempts = *sv.MaxAttempts
 	}

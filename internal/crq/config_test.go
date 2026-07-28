@@ -46,15 +46,12 @@ func TestLoadConfigFeedbackBotsIncludeCodexByDefault(t *testing.T) {
 	if has(cfg.RequiredBots, "chatgpt-codex-connector[bot]") {
 		t.Fatalf("Codex must not be a required (convergence-gating) bot, got %#v", cfg.RequiredBots)
 	}
-	// The primary always surfaces its findings. Codex does too once it is
-	// ENABLED — but a co-reviewer is opt-in now, so a default configuration
-	// surfaces the primary alone. Enabling every registry bot by default meant
-	// asking bots the operator had never signed up for.
+	// The primary and the documented default co-reviewers surface findings.
 	if !has(cfg.FeedbackBots, "coderabbitai[bot]") {
 		t.Fatalf("feedback bots should include the primary, got %#v", cfg.FeedbackBots)
 	}
-	if has(cfg.FeedbackBots, "chatgpt-codex-connector[bot]") {
-		t.Fatalf("a co-reviewer nobody enabled must not surface findings, got %#v", cfg.FeedbackBots)
+	if !has(cfg.FeedbackBots, "chatgpt-codex-connector[bot]") {
+		t.Fatalf("default Codex findings must remain enabled across upgrades, got %#v", cfg.FeedbackBots)
 	}
 }
 
@@ -256,10 +253,26 @@ func TestLoadConfigDispatchMaxAttemptsStaysBounded(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cfg.DispatchMaxAttempts != 3 {
-				t.Errorf("DispatchMaxAttempts = %d, want the bounded default 3", cfg.DispatchMaxAttempts)
+			if cfg.DispatchMaxAttempts != 5 {
+				t.Errorf("DispatchMaxAttempts = %d, want the bounded default 5", cfg.DispatchMaxAttempts)
 			}
 		})
+	}
+}
+
+func TestLoadConfigRankedModels(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_FIX_MODELS", "opus, sonnet, opus")
+	t.Setenv("CRQ_FIX_MODEL", "ignored-legacy")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.FixModels, ","); got != "opus,sonnet" {
+		t.Fatalf("models = %q, want ordered and deduplicated", got)
+	}
+	if cfg.FixModel != "opus" {
+		t.Fatalf("preferred model = %q, want the first ranked model", cfg.FixModel)
 	}
 }
 func TestLoadConfigTidyIsOptIn(t *testing.T) {
@@ -316,12 +329,10 @@ func TestLoadConfigCoBotsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// NONE by default. Enabling every registry co-reviewer meant a fresh
-	// install posted trigger comments for bots the operator had never signed up
-	// for, waited out their grace periods, and got no answer — which looks
-	// exactly like a bot that is set up and slow.
-	if len(cfg.CoBots) != 0 {
-		t.Fatalf("default CoBots = %#v, want none: a co-reviewer is opt-in", cfg.CoBots)
+	// Preserve the documented pre-registry default on upgrade. Explicit empty
+	// below remains the way to disable all.
+	if len(cfg.CoBots) != len(dialect.KnownCoReviewers()) {
+		t.Fatalf("default CoBots = %#v, want every built-in co-reviewer", cfg.CoBots)
 	}
 
 	// Naming one enables it, with the registry's own defaults.

@@ -20,8 +20,15 @@ import (
 // would mean the watcher could not know what it was about to run until it ran
 // it. Model and effort ARE per repo, because every agent has them.
 type SolverSettings struct {
-	Model  string `json:"model,omitempty"`
-	Effort string `json:"effort,omitempty"`
+	// Models is the preferred model followed by ordered fallbacks. SetModels
+	// distinguishes an explicit "agent default" (an empty list) from inherit.
+	//
+	// Model is retained for state written by v2.0 binaries. New writers keep it
+	// equal to the first model so older readers still run the preferred choice.
+	Models    []string `json:"models,omitempty"`
+	SetModels bool     `json:"set_models,omitempty"`
+	Model     string   `json:"model,omitempty"`
+	Effort    string   `json:"effort,omitempty"`
 	// Prompt is extra instruction appended to the fix prompt, for the standing
 	// context a repository needs every time ("this project uses bun, never npm").
 	Prompt string `json:"prompt,omitempty"`
@@ -53,7 +60,8 @@ type SolverSettings struct {
 // record — or collapse the fleet defaults around it — and take a newer binary's
 // solver setting with it.
 func (s SolverSettings) Empty() bool {
-	return s.Model == "" && s.Effort == "" && s.Prompt == "" &&
+	return !s.SetModels && len(s.Models) == 0 && s.Model == "" &&
+		s.Effort == "" && s.Prompt == "" &&
 		s.MaxAttempts == nil && s.Forks == nil && !s.SetSkipAuthors &&
 		len(s.unknown) == 0
 }
@@ -64,7 +72,14 @@ func (s SolverSettings) Empty() bool {
 // other.
 func (s SolverSettings) Merge(over SolverSettings) SolverSettings {
 	out := s
-	if over.Model != "" {
+	if over.SetModels || len(over.Models) > 0 {
+		out.Models = append([]string(nil), over.Models...)
+		out.SetModels = true
+		out.Model = firstModel(out.Models)
+	} else if over.Model != "" {
+		// A legacy record is a one-entry ranking.
+		out.Models = []string{over.Model}
+		out.SetModels = true
 		out.Model = over.Model
 	}
 	if over.Effort != "" {
@@ -86,6 +101,25 @@ func (s SolverSettings) Merge(over SolverSettings) SolverSettings {
 		out.By, out.UpdatedAt = over.By, over.UpdatedAt
 	}
 	return out
+}
+
+// RankedModels returns the effective ordered model list. A nil/empty result
+// means "use the agent's own default".
+func (s SolverSettings) RankedModels() []string {
+	if s.SetModels || len(s.Models) > 0 {
+		return append([]string(nil), s.Models...)
+	}
+	if s.Model != "" {
+		return []string{s.Model}
+	}
+	return nil
+}
+
+func firstModel(models []string) string {
+	if len(models) == 0 {
+		return ""
+	}
+	return models[0]
 }
 
 // Solver returns repo's own solver record, and whether one exists.

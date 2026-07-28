@@ -117,6 +117,12 @@ func (s *Service) fleetViewOf(st State) FleetView {
 	return view
 }
 
+// FleetSettingsIn resolves the fleet view from an already-loaded state so one
+// dashboard snapshot cannot mix two revisions or pay for the state ref twice.
+func (s *Service) FleetSettingsIn(st State) FleetView {
+	return s.fleetViewOf(st)
+}
+
 // FleetChange is a proposed edit. Every field is a pointer or a nil slice
 // meaning "leave this one alone": a form that posts its whole state would
 // otherwise overwrite a setting another host changed a second earlier.
@@ -427,12 +433,9 @@ func (s *Service) fleetReposWhere(st State, keep func(repo string) bool) []strin
 		if !keep(repo) {
 			return
 		}
-		// A repository turned off follows nothing. It still has an enrollment
-		// record and it still has completed rounds, so it reached this list twice
-		// over — and a fleet reviewer change then requeued its open pull requests
-		// for Pump to fire, spending quota in a repository somebody explicitly
-		// stopped. An "off" that an unrelated setting can undo is not an off.
-		if rec, ok := st.Enrollment(repo); ok && !rec.Enabled {
+		// Use the complete effective decision: shared enrollment, the host's
+		// absolute exclusion list, scope, and gate-repository protection.
+		if !s.reviewsRepo(st, repo) {
 			return
 		}
 		seen[repo] = true

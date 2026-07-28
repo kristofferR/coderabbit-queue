@@ -110,6 +110,76 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	})
 }
 
+func TestProviderOutageUsesFallbackWithoutSpendingAnAttempt(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.AllowRepos = map[string]bool{repo: true}
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := svc.SetSolver(context.Background(), repo, SolverChange{
+		Models: []string{"opus", "sonnet"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, repo, 18, sha, PhaseQueued, time.Now().UTC(), 0)
+
+	record := filepath.Join(t.TempDir(), "models")
+	script := filepath.Join(t.TempDir(), "agent.sh")
+	body := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$CRQ_FIX_MODEL\" >> " + record + "\n" +
+		"if test \"$CRQ_FIX_MODEL\" = opus; then\n" +
+		"  printf '%s\\n' '{\"error\":\"rate_limit\",\"resetsAt\":4102444800}'\n" +
+		"  exit 1\n" +
+		"fi\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	report := NextReport{Repo: repo, PR: 18, Head: sha, Action: "fix"}
+	opts := WatchOptions{Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 5}
+
+	if ok, why, _ := svc.claimDispatchModels(context.Background(), report, "first", 5, []string{"opus", "sonnet"}); !ok {
+		t.Fatalf("first claim: %s", why)
+	}
+	if ok, why := svc.dispatch(context.Background(), opts, report, "first"); ok || !strings.Contains(why, "temporarily unavailable") {
+		t.Fatalf("provider outage = ok %v reason %q", ok, why)
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Round(repo, 18).Dispatch.Attempts; got != 0 {
+		t.Fatalf("provider outage spent %d attempts, want 0", got)
+	}
+
+	if ok, why, _ := svc.claimDispatchModels(context.Background(), report, "second", 5, []string{"opus", "sonnet"}); !ok {
+		t.Fatalf("fallback claim: %s", why)
+	}
+	if ok, why := svc.dispatch(context.Background(), opts, report, "second"); !ok {
+		t.Fatalf("fallback did not run: %s", why)
+	}
+	models, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(models)); got != "opus\nsonnet" {
+		t.Fatalf("models tried = %q, want ranked fallback", got)
+	}
+	st, _, err = store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Round(repo, 18).Dispatch.Attempts; got != 1 {
+		t.Fatalf("successful fallback left %d attempts, want only its real attempt", got)
+	}
+}
+
 // Dispatching is the default, so a machine with no fix agent configured must
 // still be able to watch: refusing to start would make the default setting
 // break the plain command. It observes instead — and says so, because an autofix watcher
@@ -1018,6 +1088,29 @@ func TestDispatchSkipsAForkUnlessAllowed(t *testing.T) {
 	allowed.DispatchForks = true
 	if !NewService(allowed, newFakeGitHub(), NewMemoryStore(allowed), nil).mayDispatch(allowed, "owner/thing", fork) {
 		t.Error("CRQ_DISPATCH_FORKS did not allow a fork")
+	}
+}
+
+func TestForkPolicyIsRecheckedInsideTheClaim(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/thing": true}
+	cfg.DispatchForks = true // the pass-level snapshot was permissive
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	ctx := context.Background()
+	report := NextReport{
+		Repo: "owner/thing", PR: 9, Head: "aaaaaaaa1", Action: "fix", Fork: true,
+	}
+	seedRound(t, store, cfg, report.Repo, report.PR, report.Head, PhaseQueued, time.Now().UTC(), 0)
+
+	off := false
+	if _, err := svc.SetSolver(ctx, report.Repo, SolverChange{Forks: &off}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, why, byDesign := svc.claimDispatch(ctx, report, "token", 5); ok {
+		t.Fatal("a stale permissive fork decision started a session after policy was turned off")
+	} else if !byDesign || !strings.Contains(why, "current solver policy") {
+		t.Fatalf("claim refusal = %q byDesign=%v", why, byDesign)
 	}
 }
 

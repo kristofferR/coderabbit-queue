@@ -22,6 +22,10 @@ type NextReport struct {
 	Repo   string `json:"repo"`
 	PR     int    `json:"pr"`
 	Head   string `json:"head,omitempty"`
+	// Fork is watch-only trust context. It is deliberately not part of the
+	// `crq next` wire contract: Next does not fetch the head repository, while
+	// watch already has the Pull object and must carry that fact into the CAS.
+	Fork bool `json:"-"`
 
 	// RecheckAfter is when to call `crq next` again — the ONE time field, set
 	// for both hold and wait so there is never a question of which to read. crq

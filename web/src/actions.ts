@@ -47,6 +47,7 @@ export type ActionBody = {
   value?: string;
   /** A fix-session change; an empty repo means the fleet default. */
   solver?: {
+    models?: string[];
     model?: string;
     effort?: string;
     prompt?: string;
@@ -58,6 +59,7 @@ export type ActionBody = {
      * their own values, but `false` is a real fork policy and an empty author
      * list means "skip nobody", so those two need their own instruction.
      */
+    unset_models?: boolean;
     unset_forks?: boolean;
     unset_skip_authors?: boolean;
     clear?: boolean;

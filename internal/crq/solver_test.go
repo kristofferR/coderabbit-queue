@@ -64,6 +64,22 @@ func TestSolverLayering(t *testing.T) {
 	if got := svc.cfgFor(st, "o/special"); got.FixModel != "opus" || got.DispatchMaxAttempts != 5 {
 		t.Errorf("cfg = model %q attempts %d, want the record applied", got.FixModel, got.DispatchMaxAttempts)
 	}
+	if _, err := svc.SetSolver(ctx, "o/special", SolverChange{
+		Models: []string{"opus", "sonnet", "opus"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	v, _ = svc.Solver(ctx, "o/special")
+	if got := strings.Join(v.Models, ","); got != "opus,sonnet" {
+		t.Errorf("ranked models = %q, want ordered and deduplicated", got)
+	}
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.cfgFor(st, "o/special"); strings.Join(got.FixModels, ",") != "opus,sonnet" {
+		t.Errorf("dispatch config models = %v, want the ranking", got.FixModels)
+	}
 	if got := svc.cfgFor(st, "o/plain"); got.DispatchMaxAttempts != 3 {
 		t.Errorf("attempts = %d, want another repository unaffected", got.DispatchMaxAttempts)
 	}

@@ -25,7 +25,9 @@ export function SolverEditor({
   solver: RepoSolver;
   onSnapshot?: (s: Snapshot) => void;
 }) {
-  const [model, setModel] = useState(solver.model ?? "");
+  const [models, setModels] = useState(
+    solver.models?.length ? solver.models : solver.model ? [solver.model] : [""],
+  );
   const [effort, setEffort] = useState(solver.effort ?? "");
   const [prompt, setPrompt] = useState(solver.prompt ?? "");
   const [attempts, setAttempts] = useState(String(solver.max_attempts));
@@ -35,7 +37,7 @@ export function SolverEditor({
   const [error, setError] = useState<string | null>(null);
 
   const server = {
-    model: solver.model ?? "",
+    models: solver.models?.length ? solver.models : solver.model ? [solver.model] : [""],
     effort: solver.effort ?? "",
     prompt: solver.prompt ?? "",
     attempts: String(solver.max_attempts),
@@ -48,7 +50,7 @@ export function SolverEditor({
   // dependency is the settings' own VALUES: they change when the settings do.
   const serverRev = JSON.stringify(server);
   useEffect(() => {
-    setModel(server.model);
+    setModels(server.models);
     setEffort(server.effort);
     setPrompt(server.prompt);
     setAttempts(server.attempts);
@@ -58,7 +60,7 @@ export function SolverEditor({
   }, [repo, serverRev]);
 
   const changed = {
-    model: model !== server.model,
+    models: JSON.stringify(models) !== JSON.stringify(server.models),
     effort: effort !== server.effort,
     prompt: prompt !== server.prompt,
     attempts: attempts !== server.attempts,
@@ -84,8 +86,14 @@ export function SolverEditor({
   // values — an empty model, 0 attempts — but "Blocked" is a real fork policy
   // and an empty author list means "skip nobody", so these two can only return
   // to inheritance by asking for it.
-  const inherit = (field: "forks" | "skip_authors") =>
-    void post(field === "forks" ? { unset_forks: true } : { unset_skip_authors: true });
+  const inherit = (field: "models" | "forks" | "skip_authors") =>
+    void post(
+      field === "models"
+        ? { unset_models: true }
+        : field === "forks"
+          ? { unset_forks: true }
+          : { unset_skip_authors: true },
+    );
 
   // Only what was actually edited. The values shown here are EFFECTIVE ones,
   // resolved through env, fleet and repository — so posting all six recorded
@@ -98,7 +106,7 @@ export function SolverEditor({
       clear
         ? { clear: true }
         : {
-            ...(changed.model ? { model } : {}),
+            ...(changed.models ? { models } : {}),
             ...(changed.effort ? { effort } : {}),
             ...(changed.prompt ? { prompt } : {}),
             ...(changed.attempts ? { max_attempts: Number(attempts) || 0 } : {}),
@@ -115,6 +123,21 @@ export function SolverEditor({
     );
 
   const src = (key: string) => solver.sources?.[key] ?? "env";
+  const modelChoices = choicesFor(solver.agent, models);
+  const setRankedModel = (index: number, model: string) =>
+    setModels((current) => current.map((value, i) => (i === index ? model : value)));
+  const moveModel = (index: number, direction: -1 | 1) =>
+    setModels((current) => {
+      const next = [...current];
+      const target = index + direction;
+      if (target < 0 || target >= next.length) return current;
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  const addFallback = () => {
+    const unused = modelChoices.find((model) => model !== "" && !models.includes(model));
+    if (unused !== undefined) setModels((current) => [...current, unused]);
+  };
 
   return (
     <Card
@@ -167,13 +190,75 @@ export function SolverEditor({
 
         <table className="mt-2.5 w-full border-collapse">
           <tbody>
-            <Row label="Model" source={src("model")}>
-              <input
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder="the agent's own default"
-                className="w-56 rounded-lg border border-edge bg-[#FBFBFC] px-2 py-1 font-mono text-[12.5px]"
-              />
+            <Row label="Models" source={src("models")}>
+              <div className="space-y-1.5">
+                {models.map((model, index) => (
+                  <div key={`${index}-${model}`} className="flex items-center gap-1.5">
+                    <span className="w-4 text-right font-mono text-[11px] text-faint">{index + 1}</span>
+                    <select
+                      value={model}
+                      onChange={(e) => setRankedModel(index, e.target.value)}
+                      className="w-56 rounded-lg border border-edge bg-[#FBFBFC] px-2 py-1 font-mono text-[12.5px]"
+                    >
+                      {modelChoices.map((choice) => (
+                        <option
+                          key={choice || "default"}
+                          value={choice}
+                          disabled={choice !== model && models.includes(choice)}
+                        >
+                          {choice || "the agent's own default"}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      aria-label="Move model up"
+                      disabled={index === 0}
+                      onClick={() => moveModel(index, -1)}
+                      className="rounded border border-edge px-1.5 py-0.5 text-[12px] text-mut disabled:opacity-30"
+                    >
+                      ↑
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="Move model down"
+                      disabled={index === models.length - 1}
+                      onClick={() => moveModel(index, 1)}
+                      className="rounded border border-edge px-1.5 py-0.5 text-[12px] text-mut disabled:opacity-30"
+                    >
+                      ↓
+                    </button>
+                    {models.length > 1 && (
+                      <button
+                        type="button"
+                        aria-label="Remove model"
+                        onClick={() => setModels((current) => current.filter((_, i) => i !== index))}
+                        className="rounded px-1.5 py-0.5 text-[12px] text-bad hover:bg-bad-bg"
+                      >
+                        remove
+                      </button>
+                    )}
+                  </div>
+                ))}
+                <div className="flex items-center gap-2 pl-[22px]">
+                  <button
+                    type="button"
+                    disabled={!modelChoices.some((model) => model !== "" && !models.includes(model))}
+                    onClick={addFallback}
+                    className="text-[12px] font-semibold text-acc hover:underline disabled:opacity-40"
+                  >
+                    + add fallback
+                  </button>
+                  <span className="text-[12px] text-faint">
+                    provider outages advance without spending an attempt
+                  </span>
+                  <Inherit
+                    shown={src("models") === "repo"}
+                    busy={busy}
+                    onClick={() => inherit("models")}
+                  />
+                </div>
+              </div>
             </Row>
             <Row label="Effort" source={src("effort")}>
               <select
@@ -197,7 +282,7 @@ export function SolverEditor({
                 className="w-16 rounded-lg border border-edge bg-[#FBFBFC] px-2 py-1 font-mono text-[12.5px]"
               />
               <span className="ml-2 text-[12px] text-faint">
-                fix sessions per head before crq stops trying; 0 inherits
+                failures per cycle; outages do not count, exhausted cycles cool down and retry
               </span>
             </Row>
             <Row label="Fork PRs" source={src("forks")}>
@@ -275,6 +360,19 @@ export function SolverEditor({
         </p>
       </div>
     </Card>
+  );
+}
+
+function choicesFor(agent: string | undefined, selected: string[]): string[] {
+  const name = agent?.split("/").pop()?.toLowerCase();
+  const known =
+    name === "claude"
+      ? ["opus", "sonnet", "haiku", "fable"]
+      : name === "codex"
+        ? ["gpt-5.6-sol", "gpt-5.6-terra", "codex-auto-review"]
+        : ["gpt-5.6-sol", "gpt-5.6-terra", "codex-auto-review", "opus", "sonnet", "haiku", "fable"];
+  return ["", ...selected.filter(Boolean), ...known].filter(
+    (model, index, all) => all.indexOf(model) === index,
   );
 }
 

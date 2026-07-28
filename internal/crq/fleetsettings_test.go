@@ -186,7 +186,8 @@ func TestSetEnvClearsTypedFleetSettings(t *testing.T) {
 func TestReposFollowingFleetExcludesDisabledRepositories(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
-	cfg.AllowRepos = map[string]bool{"o/on": true, "o/off": true}
+	cfg.AllowRepos = map[string]bool{"o/on": true, "o/off": true, "o/excluded": true}
+	cfg.ExcludeRepos = map[string]bool{"o/excluded": true}
 	store := NewMemoryStore(cfg)
 	svc := NewService(cfg, newFakeGitHub(), store, nil)
 
@@ -198,8 +199,8 @@ func TestReposFollowingFleetExcludesDisabledRepositories(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, repo := range svc.reposFollowingFleet(st) {
-		if repo == "o/off" {
-			t.Fatalf("following = %v, want the disabled repository excluded", svc.reposFollowingFleet(st))
+		if repo == "o/off" || repo == "o/excluded" {
+			t.Fatalf("following = %v, want disabled and host-excluded repositories omitted", svc.reposFollowingFleet(st))
 		}
 	}
 }

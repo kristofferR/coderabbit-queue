@@ -588,7 +588,7 @@ const SchemaVersion = 4
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 5
+const WriterCaps = 6
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
@@ -620,7 +620,7 @@ const CapsFleetDefaults = 4
 // CapsSolver is the capability that makes solver settings safe to act on. A
 // host below it runs every fix session with its own install-time settings, so a
 // per-repository model or attempt limit recorded here is simply not applied.
-const CapsSolver = 5
+const CapsSolver = 6
 
 // writerTTL is how long a host counts as still active for capability purposes.
 const writerTTL = 30 * time.Minute
@@ -1217,10 +1217,21 @@ type DispatchClaim struct {
 	Token     string    `json:"token"`
 	At        time.Time `json:"at"`
 	Heartbeat time.Time `json:"heartbeat"`
-	// Attempts counts dispatches for THIS head, so a fix that keeps failing
-	// stops instead of looping. It survives release; only a new head clears it,
-	// because a new head means the previous attempt achieved something.
+	// Attempts counts dispatches in THIS head's current attempt cycle. It
+	// survives release; the cycle resets after a cooldown or on a new head.
 	Attempts int `json:"attempts,omitempty"`
+	// Model is the model selected for this claim. ModelCursor points at the next
+	// ranked fallback, so ordinary failures rotate rather than hammering one
+	// model. UnavailableModels parks provider/model outages until their retry
+	// time without spending the head's fix-attempt budget.
+	Model             string               `json:"model,omitempty"`
+	ModelCursor       int                  `json:"model_cursor,omitempty"`
+	UnavailableModels map[string]time.Time `json:"unavailable_models,omitempty"`
+	LastFailure       string               `json:"last_failure,omitempty"`
+	// AttemptResetAt makes the safety bound a cooldown rather than a permanent
+	// dead letter. Exhaustions lengthens repeated cooldowns, capped at a day.
+	AttemptResetAt *time.Time `json:"attempt_reset_at,omitempty"`
+	Exhaustions    int        `json:"exhaustions,omitempty"`
 	// Findings is how many the session set out to fix, and Log is where its
 	// output is going. Both are for the reader: "attempt 2" says nothing about
 	// whether that is nearly the last one, and a session with no visible log is
@@ -1337,20 +1348,116 @@ func (c DispatchClaim) Live(now time.Time) bool {
 // claim past its TTL is taken over, keeping the attempt count: that session died,
 // but its attempt still happened.
 func (r *Round) ClaimDispatch(host, token string, now time.Time, maxAttempts int) (bool, string) {
+	return r.ClaimDispatchModels(host, token, now, maxAttempts, nil)
+}
+
+// ClaimDispatchModels claims a fix session and selects the first currently
+// available model in ranking order. An empty ranking is one selectable entry:
+// the agent's own default.
+func (r *Round) ClaimDispatchModels(host, token string, now time.Time, maxAttempts int, models []string) (bool, string) {
 	now = now.UTC()
 	attempts := 0
+	cursor := 0
+	unavailable := map[string]time.Time{}
+	lastFailure := ""
+	var attemptResetAt *time.Time
+	exhaustions := 0
 	if r.Dispatch != nil {
 		if r.DispatchHeld(now) {
 			return false, "another watcher is already fixing this round"
 		}
 		attempts = r.Dispatch.Attempts
+		cursor = r.Dispatch.ModelCursor
+		lastFailure = r.Dispatch.LastFailure
+		attemptResetAt = r.Dispatch.AttemptResetAt
+		exhaustions = r.Dispatch.Exhaustions
+		for model, until := range r.Dispatch.UnavailableModels {
+			if until.After(now) {
+				unavailable[model] = until.UTC()
+			}
+		}
 	}
 	if maxAttempts > 0 && attempts >= maxAttempts {
-		return false, fmt.Sprintf("%d dispatch attempts already made for this head", attempts)
+		resetAt := r.Dispatch.At.Add(dispatchAttemptCooldown(exhaustions))
+		if attemptResetAt != nil {
+			resetAt = attemptResetAt.UTC()
+		}
+		if now.Before(resetAt) {
+			return false, fmt.Sprintf(
+				"%d dispatch attempts already made in this cycle; retries resume at %s",
+				attempts, resetAt.Format(time.RFC3339),
+			)
+		}
+		attempts = 0
+		attemptResetAt = nil
+		exhaustions++
+	}
+	if len(models) == 0 {
+		models = []string{""}
+	}
+	if cursor < 0 || cursor >= len(models) {
+		cursor = 0
+	}
+	selected, selectedAt := "", -1
+	var earliest time.Time
+	for step := 0; step < len(models); step++ {
+		i := (cursor + step) % len(models)
+		model := strings.TrimSpace(models[i])
+		if until, blocked := unavailable[model]; blocked {
+			if earliest.IsZero() || until.Before(earliest) {
+				earliest = until
+			}
+			continue
+		}
+		selected, selectedAt = model, i
+		break
+	}
+	if selectedAt < 0 {
+		return false, fmt.Sprintf("all configured models are temporarily unavailable until %s", earliest.Format(time.RFC3339))
 	}
 	r.beginDispatchHold(now)
-	r.Dispatch = &DispatchClaim{Host: host, Token: token, At: now, Heartbeat: now, Attempts: attempts + 1}
+	r.Dispatch = &DispatchClaim{
+		Host: host, Token: token, At: now, Heartbeat: now,
+		Attempts: attempts + 1, Model: selected,
+		ModelCursor:       (selectedAt + 1) % len(models),
+		UnavailableModels: unavailable, LastFailure: lastFailure,
+		AttemptResetAt: attemptResetAt, Exhaustions: exhaustions,
+	}
+	if maxAttempts > 0 && r.Dispatch.Attempts >= maxAttempts {
+		resetAt := now.Add(dispatchAttemptCooldown(exhaustions))
+		r.Dispatch.AttemptResetAt = &resetAt
+	}
 	return true, ""
+}
+
+func dispatchAttemptCooldown(exhaustions int) time.Duration {
+	cooldown := time.Hour
+	for i := 0; i < exhaustions && cooldown < 24*time.Hour; i++ {
+		cooldown *= 2
+	}
+	if cooldown > 24*time.Hour {
+		return 24 * time.Hour
+	}
+	return cooldown
+}
+
+// MarkDispatchUnavailable records a provider/model outage against the selected
+// claim and refunds its attempt. It deliberately leaves ModelCursor advanced,
+// so the next claim tries the next ranked model.
+func (r *Round) MarkDispatchUnavailable(token string, until time.Time, reason string) bool {
+	if r.Dispatch == nil || r.Dispatch.Token != token {
+		return false
+	}
+	if r.Dispatch.UnavailableModels == nil {
+		r.Dispatch.UnavailableModels = map[string]time.Time{}
+	}
+	r.Dispatch.UnavailableModels[r.Dispatch.Model] = until.UTC()
+	r.Dispatch.LastFailure = reason
+	if r.Dispatch.Attempts > 0 {
+		r.Dispatch.Attempts--
+	}
+	r.Dispatch.AttemptResetAt = nil
+	return true
 }
 
 // beginDispatchHold mirrors the new dispatch exclusion into queue state every

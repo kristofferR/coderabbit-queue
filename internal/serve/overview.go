@@ -166,6 +166,7 @@ type Session struct {
 	PR      int    `json:"pr"`
 	Head    string `json:"head,omitempty"`
 	Host    string `json:"host,omitempty"`
+	Model   string `json:"model,omitempty"`
 	Attempt int    `json:"attempt,omitempty"`
 	// MaxAttempts is the budget this repository allows, so "attempt 2" can be
 	// read as nearly-done or barely-started.
@@ -386,7 +387,7 @@ func autofixView(st state.State, now time.Time, maxAttempts func(repo string) in
 			continue
 		}
 		repo, pr := splitKey(key)
-		s := Session{Key: key, Repo: repo, PR: pr, Host: hostOf(d.Host), Attempt: d.Attempts,
+		s := Session{Key: key, Repo: repo, PR: pr, Host: hostOf(d.Host), Model: d.Model, Attempt: d.Attempts,
 			Findings: d.Findings, Log: d.Log, Since: d.At}
 		if maxAttempts != nil {
 			s.MaxAttempts = maxAttempts(repo)

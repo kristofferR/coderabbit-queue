@@ -61,7 +61,7 @@ func (s *Service) Reviewers(ctx context.Context, repo string) (ReviewerView, err
 		return ReviewerView{}, err
 	}
 	cfg := s.cfgFor(st, repo)
-	view := ReviewerView{Repo: repo, Reviewers: []ReviewerDetail{}, Primary: s.cfg.Bot}
+	view := ReviewerView{Repo: repo, Reviewers: []ReviewerDetail{}, Primary: cfg.Bot}
 	view.Lagging = st.LaggingWriters(CapsRepoOverrides, s.clock().UTC())
 	if ov, ok := st.RepoOverride(repo); ok {
 		view.Overridden = true
@@ -112,7 +112,7 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 	// because two hosts setting different halves would otherwise derive from the
 	// same snapshot and the later write would drop the earlier one's half — and
 	// a retry that reuses an already-merged value cannot fix that.
-	var setCoBots, setRequired []string
+	var setCoBots []string
 	if coBots != nil {
 		resolved, err := resolveCoBotLogins(coBots)
 		if err != nil {
@@ -127,11 +127,6 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 			// never review at all.
 			return ReviewerView{}, errors.New("--required cannot be empty: a round that gates on nobody converges before any reviewer runs (crq reviewers clear <repo> to drop the override)")
 		}
-		resolved, err := resolveRequiredLogins(required, s.cfg.Bot)
-		if err != nil {
-			return ReviewerView{}, err
-		}
-		setRequired = resolved
 	}
 
 	// Read before the write: the requeue below may only touch live pull requests,
@@ -150,7 +145,14 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 			ov.CoBots, ov.SetCoBots = setCoBots, true
 		}
 		if required != nil {
-			ov.Required, ov.SetRequired = setRequired, true
+			// Resolve against the fleet primary from the SAME state revision
+			// this override is written to. The process's startup primary may
+			// have been replaced through shared settings.
+			resolved, err := resolveRequiredLogins(required, s.cfgFor(*st, repo).Bot)
+			if err != nil {
+				return err
+			}
+			ov.Required, ov.SetRequired = resolved, true
 		}
 		if primary != nil {
 			ov.PrimaryOff = !*primary

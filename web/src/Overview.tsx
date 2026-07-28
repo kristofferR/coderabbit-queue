@@ -351,6 +351,7 @@ export function OverviewPage({
             </span>
             <span className="text-faint">
               {s.host}
+              {s.model ? ` · ${s.model}` : ""}
               {s.attempt ? ` · attempt ${s.attempt}` : ""}
               {s.heartbeat ? ` · heartbeat ${clock(s.heartbeat)}` : ""}
             </span>

@@ -246,7 +246,7 @@ command from `CRQ_DISPATCH_CMD` (or after `--`) runs in a crq-made worktree chec
 head, with `CRQ_DISPATCH_REPO`, `CRQ_DISPATCH_PR`, `CRQ_DISPATCH_HEAD` and `CRQ_DISPATCH_FINDINGS`
 (a JSON file) in its environment. The command is run directly, not through a shell; quoted
 arguments in `CRQ_DISPATCH_CMD` are kept whole. Dispatch is bounded per head by
-`CRQ_DISPATCH_MAX_ATTEMPTS` (default 3) and uncapped in parallel unless
+`CRQ_DISPATCH_MAX_ATTEMPTS` (default 5) and uncapped in parallel unless
 `CRQ_DISPATCH_CONCURRENCY` sets a valve — fixing findings spends no account quota, so it does not
 queue. While a session holds a PR its round leaves the fire queue (and no second session is started
 for that PR, even after its own push supersedes the round): the review would be of a head about to
@@ -302,21 +302,27 @@ Change how fix sessions run, per repository or fleet-wide:
 
 ```bash
 crq solver REPO                                       # effective settings + where each came from
-crq solver set REPO --model opus --effort high --attempts 5
+crq solver set REPO --models opus,sonnet,haiku --effort high --attempts 5
 crq solver set REPO --prompt "This project uses bun, never npm."
 crq solver set --fleet --effort medium                # the default every repository inherits
-crq solver set REPO --inherit forks,skip-authors      # those two back to the layer beneath
+crq solver set REPO --inherit models,forks,skip-authors
 crq solver clear REPO | crq solver clear --fleet
 ```
 
-`--inherit` exists for the two settings whose own values cannot say it: `off` is a real fork policy
-and an empty author list means "skip nobody". The others express it directly — an empty `--model` or
-`--effort`, `--attempts 0`.
+`--models` is an ordered ranking. A provider/model outage parks that entry until its reported reset
+time and immediately tries the next one. These outages do not consume the attempt budget; ordinary
+failed fix sessions do, and rotate through the ranking. Exhausting a fix-attempt cycle starts an
+increasing cooldown (one hour up to one day), then automatically opens a fresh cycle. If every model
+is parked, crq waits for the earliest reset instead of permanently exhausting the PR.
+
+`--inherit` hands a setting back to the layer beneath. It is required for models, forks and skipped
+authors because an empty model ranking means "use the agent default", `off` is a real fork policy,
+and an empty author list means "skip nobody". Empty `--effort` and `--attempts 0` inherit directly.
 
 Three layers again — env, fleet, repository — with `.sources` naming which answered. The AGENT is
 not per repository: it is baked into the session script by `crq autofix install`, because switching
-between claude and codex is a different command line rather than a different flag. Model, effort and
-the extra prompt reach the session through its ENVIRONMENT (`CRQ_FIX_MODEL`, `CRQ_FIX_EFFORT`,
+between claude and codex is a different command line rather than a different flag. The selected
+model, effort and the extra prompt reach the session through its ENVIRONMENT (`CRQ_FIX_MODEL`, `CRQ_FIX_EFFORT`,
 `CRQ_FIX_PROMPT`), since the watcher's argv is fixed when it starts and one watcher handles every
 repository — so **reinstall autofix** to pick up a session script that reads them.
 

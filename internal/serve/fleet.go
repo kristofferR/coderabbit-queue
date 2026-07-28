@@ -127,6 +127,7 @@ type RepoRow struct {
 type RepoSolver struct {
 	Overridden  bool              `json:"overridden"`
 	Agent       string            `json:"agent,omitempty"`
+	Models      []string          `json:"models"`
 	Model       string            `json:"model,omitempty"`
 	Effort      string            `json:"effort,omitempty"`
 	Prompt      string            `json:"prompt,omitempty"`
@@ -536,6 +537,13 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Tim
 	// ago. The primary counts towards it like any other reviewer now that its
 	// answer is recorded rather than inferred from the phase.
 	answerLog := false
+	effectivePrimary := cfg.primaryLogin()
+	for _, bot := range fleetBots {
+		if bot.Primary {
+			effectivePrimary = bot.Login
+			break
+		}
+	}
 	scan := func(r state.Round) {
 		for login, co := range r.CoBots {
 			if co.AnsweredAt != nil {
@@ -558,7 +566,7 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Tim
 		// review evidence labelled a reviewer as working on the strength of its
 		// own acknowledgement.
 		if r.FiredAt != nil && !r.CoOnly {
-			noteAsked(cfg.primaryLogin(), r.FiredAt)
+			noteAsked(effectivePrimary, r.FiredAt)
 		}
 		if r.PrimaryAnsweredAt != nil {
 			answerLog = true
@@ -570,7 +578,7 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Tim
 			// the running primary is the best guess left for those.
 			by := r.PrimaryAnsweredBy
 			if by == "" {
-				by = cfg.primaryLogin()
+				by = effectivePrimary
 			}
 			note(by, r.PrimaryAnsweredAt, r.Repo, r.PR)
 		}
@@ -637,10 +645,29 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Tim
 		out = append(out, card)
 	}
 	seenCard := map[string]bool{}
+	// Start with the effective fleet set, including its current primary. The
+	// startup config is metadata and fallback only; it must not keep the retired
+	// primary marked primary after shared settings replace it.
+	for _, b := range fleetBots {
+		key := dialect.NormalizeBotName(b.Login)
+		seenCard[key] = true
+		var from *ReviewerCfg
+		for i := range cfg.Reviewers {
+			if dialect.NormalizeBotName(cfg.Reviewers[i].Login) == key {
+				from = &cfg.Reviewers[i]
+				break
+			}
+		}
+		add(b.Login, b.Name, b.Primary, b.Primary, from)
+	}
 	for i := range cfg.Reviewers {
 		r := cfg.Reviewers[i]
-		seenCard[dialect.NormalizeBotName(r.Login)] = true
-		add(r.Login, r.Name, r.Primary, r.Metered, &r)
+		key := dialect.NormalizeBotName(r.Login)
+		if seenCard[key] {
+			continue
+		}
+		seenCard[key] = true
+		add(r.Login, r.Name, false, false, &r)
 	}
 	for _, co := range dialect.KnownCoReviewers() {
 		if seenCard[dialect.NormalizeBotName(co.Login)] {

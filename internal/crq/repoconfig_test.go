@@ -769,6 +769,32 @@ func TestOverrideAddsTheSilencedPrimaryEntryTheFleetLacked(t *testing.T) {
 	}
 }
 
+func TestRequiredReviewersResolveAgainstTheCurrentFleetPrimary(t *testing.T) {
+	ctx := context.Background()
+	repo := "o/repo"
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_REPO": "o/gate", "CRQ_REPOS": repo, "CRQ_COBOTS": "",
+	})
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	const current = "replacement-reviewer[bot]"
+	if _, err := svc.SetEnv(ctx, "CRQ_BOT", current, false); err != nil {
+		t.Fatal(err)
+	}
+	view, err := svc.SetReviewers(ctx, repo, nil, []string{current}, nil)
+	if err != nil {
+		t.Fatalf("current fleet primary was rejected using the process's retired startup primary: %v", err)
+	}
+	found := false
+	for _, reviewer := range view.Reviewers {
+		found = found || (sameBot(reviewer.Login, current) && reviewer.Required)
+	}
+	if !found {
+		t.Fatalf("reviewers = %+v, want the current fleet primary required", view.Reviewers)
+	}
+}
+
 // An operator who sets CRQ_COBOT_<NAME>_TRIGGER=never has disabled that bot's
 // command everywhere: the fleet parse already lets that value win over the
 // registry's required trigger. A repository requiring the bot must not be able

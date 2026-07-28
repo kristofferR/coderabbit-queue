@@ -636,7 +636,7 @@ func run(ctx context.Context, args []string) int {
 		solverFor := func(st crq.State, repo string) serve.RepoSolver {
 			v := service.SolverIn(st, repo)
 			out := serve.RepoSolver{
-				Overridden: v.Overridden, Agent: v.Agent, Model: v.Model, Effort: v.Effort,
+				Overridden: v.Overridden, Agent: v.Agent, Models: v.Models, Model: v.Model, Effort: v.Effort,
 				Prompt: v.Prompt, MaxAttempts: v.MaxAttempts, Forks: v.Forks,
 				SkipAuthors: v.SkipAuthors, Sources: v.Sources, By: v.By,
 				Lagging: hostsOfWriters(v.Lagging),
@@ -739,10 +739,13 @@ func run(ctx context.Context, args []string) int {
 					WeeklyLimit: c.WeeklyReviewLimit,
 				}
 			},
-			Bots:       bots,
-			Resolve:    resolve,
-			EnrollFor:  enrollFor,
-			SolverFor:  solverFor,
+			Bots:      bots,
+			Resolve:   resolve,
+			EnrollFor: enrollFor,
+			SolverFor: solverFor,
+			FleetFor: func(st crq.State) *serve.FleetSettings {
+				return fleetSettingsOf(service.FleetSettingsIn(st))
+			},
 			Discoverer: repoDiscoverer{service},
 			Previewer:  enrollPreviewer{service},
 			Poll:       *poll,
@@ -1205,9 +1208,9 @@ every agent rejects differently and none ignores.
 `)
 	case "solver":
 		fmt.Print(`crq solver <repo>
-crq solver set <repo> [--model <m>] [--effort <e>] [--prompt <text>]
+crq solver set <repo> [--models <first,next,...>] [--effort <e>] [--prompt <text>]
                       [--attempts <n>] [--forks on|off] [--skip-authors <a,b>]
-                      [--inherit forks,skip-authors]
+                      [--inherit models,forks,skip-authors]
 crq solver set --fleet [...]           (the default every repository inherits)
 crq solver clear <repo> | crq solver clear --fleet
 
@@ -1217,20 +1220,25 @@ it, and the limits crq itself enforces.
 Three layers, least specific first: this host's env, the fleet default, then
 this repository. .sources says which layer answered for each setting.
 
-  --model         handed to the agent; empty keeps the agent's own default
+  --models        preferred model followed by ordered fallbacks
+  --model         legacy spelling for a one-entry model ranking
   --effort        low | medium | high | xhigh | max
   --prompt        standing instruction appended to every fix session here
                   ("this project uses bun, never npm")
-  --attempts      fix sessions per head before crq stops trying; 0 inherits
+  --attempts      failed code-fix sessions per head before crq stops; provider
+                  outages do not count; 0 inherits
   --forks         allow sessions on pull requests from another repository.
                   Off by default: a session runs an agent over somebody else's
                   code with approvals bypassed and a write token in reach
   --skip-authors  pull-request authors crq does not enqueue here
-  --inherit       hand one setting back to the layer beneath: forks,
-                  skip-authors. The others say it in their own values (an empty
-                  --model or --effort, --attempts 0), but 'off' is a real fork
-                  policy and an empty author list means "skip nobody", so those
-                  two need saying separately
+  --inherit       hand models, forks or skip-authors back to the layer beneath
+
+Models are tried in order. A provider/model outage is parked until its reset
+time, the next model is tried, and no attempt is spent. Ordinary failed fixes
+consume an attempt and rotate models. An exhausted attempt cycle cools down,
+then automatically opens a fresh cycle with increasing backoff. If all models
+are parked, crq waits for the earliest reset instead of permanently exhausting
+the pull request.
 
 The AGENT itself is not per repository. It is chosen by 'crq autofix install'
 and baked into the session script, because switching between claude and codex
@@ -1381,7 +1389,7 @@ review in one queue.
 crq still does not decide which findings are real — it starts the session and
 says which PR to look at; the session judges. Every dispatch is claimed under
 compare-and-swap, so two watchers cannot both work one PR, and bounded per head
-(CRQ_DISPATCH_MAX_ATTEMPTS, default 3) so a fix that keeps not working stops
+(CRQ_DISPATCH_MAX_ATTEMPTS, default 5) so a fix that keeps not working stops
 instead of spending a review round each time.
 
 Repositories default to CRQ_REPOS.
@@ -2805,12 +2813,14 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 		switch name {
 		case "--fleet":
 			fleet = true
-		case "--model", "--effort", "--prompt":
+		case "--models", "--model", "--effort", "--prompt":
 			v, ok := value()
 			if !ok {
 				return 1
 			}
 			switch name {
+			case "--models":
+				change.Models = splitList(&v)
 			case "--model":
 				change.Model = &v
 			case "--effort":
@@ -2856,12 +2866,14 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 			}
 			for _, field := range splitList(&v) {
 				switch strings.ToLower(field) {
+				case "models", "model":
+					change.UnsetModels = true
 				case "forks":
 					change.UnsetForks = true
 				case "skip-authors", "skip_authors":
 					change.UnsetSkipAuthors = true
 				default:
-					fatal(fmt.Errorf("--inherit: %q is not a solver setting that can be unset (forks, skip-authors)", field))
+					fatal(fmt.Errorf("--inherit: %q is not a solver setting that can be unset (models, forks, skip-authors)", field))
 					return 1
 				}
 			}
@@ -2923,10 +2935,11 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 
 func (a prActor) SetSolver(ctx context.Context, repo string, change serve.SolverChange) error {
 	c := crq.SolverChange{
-		Model: change.Model, Effort: change.Effort, Prompt: change.Prompt,
+		Models: change.Models, Model: change.Model, Effort: change.Effort, Prompt: change.Prompt,
 		MaxAttempts: change.MaxAttempts, Forks: change.Forks,
 		SkipAuthors: change.SkipAuthors, Clear: change.Clear,
-		UnsetForks: change.UnsetForks, UnsetSkipAuthors: change.UnsetSkipAuthors,
+		UnsetModels: change.UnsetModels, UnsetForks: change.UnsetForks,
+		UnsetSkipAuthors: change.UnsetSkipAuthors,
 	}
 	// An empty repo means the fleet default, the same convention the CLI's
 	// --fleet flag expresses.
