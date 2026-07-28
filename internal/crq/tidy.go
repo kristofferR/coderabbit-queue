@@ -96,6 +96,7 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 	if err != nil {
 		return result, err
 	}
+	cfg = s.cfgFor(st, repo)
 	posted := collectPosted(st, repo, pr)
 
 	// A deleted comment stays on its round for ever, so without this every later

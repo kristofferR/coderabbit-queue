@@ -5,6 +5,37 @@ import (
 	"strings"
 )
 
+const (
+	SeverityCritical  = "critical"
+	SeverityMajor     = "major"
+	SeverityPotential = "potential"
+	SeverityMinor     = "minor"
+	SeverityUnknown   = "unknown"
+)
+
+var severities = [...]string{
+	SeverityCritical,
+	SeverityMajor,
+	SeverityPotential,
+	SeverityMinor,
+	SeverityUnknown,
+}
+
+// KnownSeverities returns the normalized severity vocabulary emitted by review
+// bots and accepted by autofix configuration.
+func KnownSeverities() []string {
+	return append([]string(nil), severities[:]...)
+}
+
+func IsSeverity(severity string) bool {
+	for _, known := range severities {
+		if severity == known {
+			return true
+		}
+	}
+	return false
+}
+
 var (
 	boldTitleRE   = regexp.MustCompile(`(?m)^\*\*([^*\n]+)\*\*`)
 	crCommentRE   = regexp.MustCompile(`<!--\s*cr-comment:v1:([a-f0-9]+)\s*-->`)
@@ -16,15 +47,15 @@ func SeverityOf(text string) string {
 	lower := strings.ToLower(text)
 	switch {
 	case strings.Contains(lower, "critical"), strings.Contains(lower, "🔴"):
-		return "critical"
+		return SeverityCritical
 	case strings.Contains(lower, "major"), strings.Contains(lower, "high"), strings.Contains(lower, "🟠"):
-		return "major"
+		return SeverityMajor
 	case strings.Contains(lower, "potential issue"), strings.Contains(lower, "medium"), strings.Contains(lower, "🟡"):
-		return "potential"
+		return SeverityPotential
 	case strings.Contains(lower, "nitpick"), strings.Contains(lower, "minor"), strings.Contains(lower, "low"), strings.Contains(lower, "🔵"):
-		return "minor"
+		return SeverityMinor
 	default:
-		return "unknown"
+		return SeverityUnknown
 	}
 }
 
@@ -48,13 +79,13 @@ func FloorSeverity(sev, floor string) string {
 
 func RankSeverity(sev string) int {
 	switch sev {
-	case "critical":
+	case SeverityCritical:
 		return 5
-	case "major":
+	case SeverityMajor:
 		return 4
-	case "potential":
+	case SeverityPotential:
 		return 3
-	case "minor":
+	case SeverityMinor:
 		return 2
 	default:
 		return 1

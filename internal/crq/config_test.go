@@ -260,6 +260,13 @@ func TestLoadConfigDispatchMaxAttemptsStaysBounded(t *testing.T) {
 	}
 }
 
+func TestBuildConfigRejectsUnknownFixSeverity(t *testing.T) {
+	_, err := BuildConfig(map[string]string{"CRQ_FIX_SEVERITIES": "major,majro"})
+	if err == nil || !strings.Contains(err.Error(), `severity "majro"`) {
+		t.Fatalf("BuildConfig error = %v, want unknown severity rejected", err)
+	}
+}
+
 func TestLoadConfigRankedModels(t *testing.T) {
 	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
 	t.Setenv("CRQ_FIX_MODELS", "opus, sonnet, opus")

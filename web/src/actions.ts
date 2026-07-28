@@ -142,11 +142,42 @@ export async function refreshSetup(): Promise<Snapshot> {
     }
     throw new Error(message);
   }
-  const parsed = JSON.parse(text) as { snapshot?: Snapshot };
-  if (!parsed.snapshot) {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("server returned an invalid setup snapshot");
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("snapshot" in parsed) ||
+    !isSnapshot(parsed.snapshot)
+  ) {
     throw new Error("server returned an invalid setup snapshot");
   }
   return parsed.snapshot;
+}
+
+function isSnapshot(value: unknown): value is Snapshot {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  return (
+    "overview" in value &&
+    typeof value.overview === "object" &&
+    value.overview !== null &&
+    "repos" in value &&
+    Array.isArray(value.repos) &&
+    "bots" in value &&
+    Array.isArray(value.bots) &&
+    "setup" in value &&
+    typeof value.setup === "object" &&
+    value.setup !== null &&
+    "settings" in value &&
+    typeof value.settings === "object" &&
+    value.settings !== null &&
+    "events" in value &&
+    Array.isArray(value.events)
+  );
 }
 
 function isFleetPreviewResult(value: object): value is FleetPreviewResult {

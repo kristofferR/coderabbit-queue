@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // ServeInstall is the plan for keeping a crq service running across a logout
@@ -134,7 +134,7 @@ func (s *Service) installUnit(ctx context.Context, service, addr string, allowHo
 			return plan, err
 		}
 	}
-	if err := writeAutofixFile(plan.Unit, serveUnitBody(plan), 0o644); err != nil {
+	if err := writeAutofixFile(plan.Unit, serveUnitBody(plan), 0o600); err != nil {
 		return plan, err
 	}
 
@@ -283,7 +283,7 @@ func serveUnitBody(plan ServeInstall) string {
 
 	var lines strings.Builder
 	for _, k := range keys {
-		fmt.Fprintf(&lines, "Environment=%s\n", strconv.Quote(strings.ReplaceAll(k+"="+env[k], "%", "%%")))
+		fmt.Fprintf(&lines, "Environment=%s\n", systemdEnvironment(strings.ReplaceAll(k+"="+env[k], "%", "%%")))
 	}
 	words := make([]string, 0, 4)
 	for _, a := range serveArgv(plan) {
@@ -305,6 +305,46 @@ StandardError=append:%s/%s.err
 WantedBy=default.target
 `, unitDescription(plan.Service), lines.String(), strings.Join(words, " "),
 		plan.LogDir, plan.Service, plan.LogDir, plan.Service)
+}
+
+// systemdEnvironment quotes one Environment= assignment using systemd.syntax
+// escapes while leaving printable UTF-8 intact. strconv.Quote can emit Go-only
+// escapes for arbitrary shell values that older systemd versions reject.
+func systemdEnvironment(value string) string {
+	var quoted strings.Builder
+	quoted.WriteByte('"')
+	for len(value) > 0 {
+		r, size := utf8.DecodeRuneInString(value)
+		if r == utf8.RuneError && size == 1 {
+			fmt.Fprintf(&quoted, `\x%02x`, value[0])
+			value = value[1:]
+			continue
+		}
+		value = value[size:]
+		switch r {
+		case '\a':
+			quoted.WriteString(`\a`)
+		case '\b':
+			quoted.WriteString(`\b`)
+		case '\f':
+			quoted.WriteString(`\f`)
+		case '\n':
+			quoted.WriteString(`\n`)
+		case '\r':
+			quoted.WriteString(`\r`)
+		case '\t':
+			quoted.WriteString(`\t`)
+		case '\v':
+			quoted.WriteString(`\v`)
+		case '\\', '"', '\'':
+			quoted.WriteByte('\\')
+			quoted.WriteRune(r)
+		default:
+			quoted.WriteRune(r)
+		}
+	}
+	quoted.WriteByte('"')
+	return quoted.String()
 }
 
 // serveEnvironment carries configuration that may have reached the install

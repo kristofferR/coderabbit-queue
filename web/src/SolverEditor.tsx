@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { RepoSolver, Snapshot } from "./api";
 import { act } from "./actions";
 import { Card, Pill } from "./ui";
+import { sameSet } from "./sets";
 
 /**
  * How this repository's fix sessions run.
@@ -71,7 +72,7 @@ export function SolverEditor({
     effort: effort !== server.effort,
     prompt: prompt !== server.prompt,
     attempts: attempts !== server.attempts,
-    severities: JSON.stringify(severities) !== JSON.stringify(server.severities),
+    severities: !sameSet(severities, server.severities),
     askMode: askMode !== server.askMode,
     forks: forks !== server.forks,
     authors: authors !== server.authors,

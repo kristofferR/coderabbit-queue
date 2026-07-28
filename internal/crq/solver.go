@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 )
 
 // SolverView is how one repository's fix sessions will actually be run.
@@ -180,7 +182,6 @@ type SolverChange struct {
 // as a flag value, and a session that dies on its first argument is a fix that
 // silently never happens.
 var knownEfforts = []string{"low", "medium", "high", "xhigh", "max"}
-var knownSeverities = []string{"critical", "major", "potential", "minor", "unknown"}
 var knownAskModes = []string{"blocked", "uncertain", "ambiguous"}
 
 // SetSolver records how repo's fix sessions should run.
@@ -351,8 +352,8 @@ func applySolverChange(sv SolverSettings, change SolverChange) (SolverSettings, 
 		severities := make([]string, 0, len(change.Severities))
 		for _, severity := range change.Severities {
 			severity = strings.ToLower(strings.TrimSpace(severity))
-			if !containsString(knownSeverities, severity) {
-				return sv, fmt.Errorf("severity %q is not one of %s", severity, strings.Join(knownSeverities, ", "))
+			if !dialect.IsSeverity(severity) {
+				return sv, fmt.Errorf("severity %q is not one of %s", severity, strings.Join(dialect.KnownSeverities(), ", "))
 			}
 			if !seen[severity] {
 				seen[severity] = true

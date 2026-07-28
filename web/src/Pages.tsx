@@ -47,6 +47,9 @@ export function ReposPage({
   const now = useNow(5000);
   const [picked, setPicked] = useState<string | null>(null);
   const [adding, setAdding] = useState(startAdding);
+  useEffect(() => {
+    setAdding(startAdding);
+  }, [startAdding]);
   const selected = repos.find((r) => r.repo === picked) ?? repos[0];
   return (
     <main className="mx-auto grid max-w-[1400px] grid-cols-[320px_minmax(0,1fr)] items-start gap-4.5 px-6 pt-4.5 pb-16 max-[1400px]:grid-cols-[minmax(0,1fr)]">
@@ -165,7 +168,14 @@ export function ReposPage({
           )}
         </div>
       )}
-      <AddRepo open={adding} onClose={() => setAdding(false)} onSnapshot={onSnapshot} />
+      <AddRepo
+        open={adding}
+        onClose={() => {
+          setAdding(false);
+          if (location.hash === "#/repos/add") location.hash = "#/repos";
+        }}
+        onSnapshot={onSnapshot}
+      />
     </main>
   );
 }

@@ -919,7 +919,7 @@ const clarificationMarker = "CRQ_NEEDS_CLARIFICATION:"
 func appendAutofixPolicy(prompt string, severities map[string]bool, askMode string) string {
 	allowed := sortedKeys(severities)
 	if len(allowed) == 0 {
-		allowed = append([]string(nil), knownSeverities...)
+		allowed = dialect.KnownSeverities()
 	}
 	instruction := "Autofix policy:\n- Work only on findings passed to this session (configured severities: " +
 		strings.Join(allowed, ", ") + ").\n"
@@ -951,7 +951,7 @@ func clarificationFromLog(body string) string {
 	question = strings.TrimSpace(question)
 	question = strings.ReplaceAll(question, `\n`, " ")
 	question = strings.ReplaceAll(question, `\"`, `"`)
-	question = strings.Trim(question, `\"' }\t\r\n`)
+	question = strings.Trim(question, "\"' }\t\r\n")
 	if len(question) > 500 {
 		question = question[:500]
 	}

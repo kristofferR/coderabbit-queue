@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { BotCard, Check, HostInfo, HostTools, RepoRow, SetupView, Snapshot, Tool } from "./api";
 import { refreshSetup } from "./actions";
 import { BotIcon, Pill, RepoIcon, Td, Th } from "./ui";
@@ -380,14 +380,28 @@ function shortVersion(version?: string): string {
 }
 
 function CopyCommand({ command }: { command: string }) {
-  const [copied, setCopied] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const resetTimer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (resetTimer.current !== null) window.clearTimeout(resetTimer.current);
+    },
+    [],
+  );
   const copy = async () => {
+    if (resetTimer.current !== null) {
+      window.clearTimeout(resetTimer.current);
+      resetTimer.current = null;
+    }
     try {
       await navigator.clipboard.writeText(command);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1400);
+      setCopyState("copied");
+      resetTimer.current = window.setTimeout(() => {
+        resetTimer.current = null;
+        setCopyState("idle");
+      }, 1400);
     } catch {
-      setCopied(false);
+      setCopyState("failed");
     }
   };
   return (
@@ -398,7 +412,7 @@ function CopyCommand({ command }: { command: string }) {
         onClick={() => void copy()}
         className="shrink-0 rounded-md border border-acc-edge bg-acc-bg px-2 py-0.5 text-[11px] font-semibold text-acc"
       >
-        {copied ? "copied" : "copy"}
+        {copyState === "copied" ? "copied" : copyState === "failed" ? "select it" : "copy"}
       </button>
     </div>
   );
@@ -446,10 +460,10 @@ function HostsAndServices({ setup, now }: { setup: SetupView; now: number }) {
 
 function HostCard({ host, report, now }: { host: HostInfo; report?: HostTools; now: number }) {
   const roles = new Set([...(host.roles ?? []), ...(report?.roles ?? [])]);
-  const health = host.health ?? (report?.stale ? "unknown" : "healthy");
+  const health = host.health ?? (report && !report.stale ? "healthy" : "unknown");
   const reviewRole = roles.has("leader") ? "leader" : roles.has("autoreview") ? "standby" : "not reporting";
   const autofixRole = roles.has("autofix")
-    ? host.health === "unhealthy"
+    ? health === "unhealthy"
       ? `${host.failures ?? 0} failures`
       : report?.agent
         ? `running · ${report.agent}`

@@ -573,7 +573,16 @@ func (s *Service) AdoptEnv(ctx context.Context, dryRun bool) ([]AdoptedSetting, 
 			applied[key] = true
 			changed = true
 		}
+		// Required-reviewer aliases are resolved against the effective primary.
+		// Apply a newly adopted primary first instead of letting map iteration
+		// decide which primary CRQ_REQUIRED_BOTS sees.
+		if value, ok := take["CRQ_BOT"]; ok {
+			set("CRQ_BOT", value)
+		}
 		for key, value := range take {
+			if key == "CRQ_BOT" {
+				continue
+			}
 			// Four settings have a typed home with their own validation and
 			// impact preview. Adopting them into the generic map as well would
 			// give one setting two places to live, one of them shadowed.

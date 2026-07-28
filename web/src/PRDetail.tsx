@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Cost as CostView, Finding, PRView } from "./api";
@@ -552,7 +552,7 @@ function FindingRow({
   const [open, setOpen] = useState(false);
   const sev = f.severity || "unknown";
   const threaded = Boolean(f.thread_id);
-  const content = open ? findingContent(f) : null;
+  const content = useMemo(() => (open ? findingContent(f) : null), [open, f]);
   // Only threadless findings can be dismissed — a threaded one is closed by
   // resolving or declining it, which is visible on the pull request.
   const dismissible = !threaded && DISMISSIBLE.has(f.source ?? "");

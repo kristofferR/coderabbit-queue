@@ -121,12 +121,8 @@ func (s *Service) SetEnrollment(ctx context.Context, repo string, enabled bool, 
 		if cur, ok := st.Enrollment(repo); ok && cur.Enabled == enabled && cur.Reason == reason {
 			return ErrNoChange
 		}
-		if !enabled {
-			for _, round := range st.Rounds {
-				if NormalizeRepo(round.Repo) == repo && triggerPostClaimed(&round) {
-					return errors.New("a review trigger is already being posted; wait for it to finish before turning the repository off")
-				}
-			}
+		if !enabled && claimedTriggerRepo(st, repo) {
+			return errors.New("a review trigger is already being posted; wait for it to finish before turning the repository off")
 		}
 		// Edited, not rebuilt. A record carries the members a NEWER binary wrote
 		// inside it, and a fresh value starts with none: constructing one here
@@ -152,6 +148,15 @@ func (s *Service) SetEnrollment(ctx context.Context, repo string, enabled bool, 
 		}
 	}
 	return s.enrollmentOf(st, repo), nil
+}
+
+func claimedTriggerRepo(st *State, repo string) bool {
+	for _, round := range st.Rounds {
+		if NormalizeRepo(round.Repo) == repo && triggerPostClaimed(&round) {
+			return true
+		}
+	}
+	return false
 }
 
 // abandonPendingRounds drops the rounds a repository being turned off would
@@ -207,10 +212,8 @@ func (s *Service) ClearEnrollment(ctx context.Context, repo string) (EnrollmentV
 		// they do when the switch is thrown explicitly — resolved from the state
 		// the write lands on, not from the one before the clear.
 		if !s.enrollmentOf(*st, repo).Enabled {
-			for _, round := range st.Rounds {
-				if NormalizeRepo(round.Repo) == repo && triggerPostClaimed(&round) {
-					return errors.New("a review trigger is already being posted; wait for it to finish before turning the repository off")
-				}
+			if claimedTriggerRepo(st, repo) {
+				return errors.New("a review trigger is already being posted; wait for it to finish before turning the repository off")
 			}
 			s.abandonPendingRounds(st, repo)
 		}

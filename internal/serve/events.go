@@ -178,19 +178,15 @@ func diffStates(prev, next state.State, now time.Time) []Event {
 		}
 	}
 
-	for repo, cur := range next.Repos {
-		old, had := prev.Repos[repo]
-		if had && sameTime(old.UpdatedAt, cur.UpdatedAt) {
-			continue
-		}
+	for _, repo := range changedSettings(prev.Repos, next.Repos,
+		func(v state.RepoReviewers) *time.Time { return v.UpdatedAt }) {
+		cur := next.Repos[repo]
 		out = append(out, Event{At: now, Kind: "settings", Level: "info", Repo: repo,
 			Text: "Reviewer override changed", Detail: "by " + cur.By})
 	}
-	for repo, cur := range next.RepoAutofix {
-		old, had := prev.RepoAutofix[repo]
-		if had && sameTime(old.UpdatedAt, cur.UpdatedAt) {
-			continue
-		}
+	for _, repo := range changedSettings(prev.RepoAutofix, next.RepoAutofix,
+		func(v state.RepoAutofixSwitch) *time.Time { return v.UpdatedAt }) {
+		cur := next.RepoAutofix[repo]
 		text := "Autofix turned off"
 		if cur.Enabled {
 			text = "Autofix turned on"
@@ -206,11 +202,9 @@ func diffStates(prev, next state.State, now time.Time) []Event {
 		out = append(out, Event{At: now, Kind: "settings", Level: "info",
 			Text: text, Detail: detail})
 	}
-	for repo, cur := range next.Enrolled {
-		old, had := prev.Enrolled[repo]
-		if had && sameTime(old.UpdatedAt, cur.UpdatedAt) {
-			continue
-		}
+	for _, repo := range changedSettings(prev.Enrolled, next.Enrolled,
+		func(v state.RepoEnrollment) *time.Time { return v.UpdatedAt }) {
+		cur := next.Enrolled[repo]
 		text := "Repository removed from review"
 		if cur.Enabled {
 			text = "Repository enrolled for review"
@@ -218,43 +212,54 @@ func diffStates(prev, next state.State, now time.Time) []Event {
 		out = append(out, Event{At: now, Kind: "settings", Level: "info", Repo: repo,
 			Text: text, Detail: cur.Reason})
 	}
-	for repo, cur := range next.RepoSolver {
-		old, had := prev.RepoSolver[repo]
-		if had && sameTime(old.UpdatedAt, cur.UpdatedAt) {
-			continue
-		}
+	for _, repo := range changedSettings(prev.RepoSolver, next.RepoSolver,
+		func(v state.SolverSettings) *time.Time { return v.UpdatedAt }) {
+		cur := next.RepoSolver[repo]
 		out = append(out, Event{At: now, Kind: "settings", Level: "info", Repo: repo,
 			Text: "Fix-session settings changed", Detail: "by " + cur.By})
 	}
 
 	// Clearing an override is as much a change as setting one — it hands the
 	// repo back to the fleet default, which is rarely what was there before.
-	for repo := range prev.Repos {
-		if _, still := next.Repos[repo]; !still {
-			out = append(out, Event{At: now, Kind: "settings", Level: "info", Repo: repo,
-				Text: "Reviewer override cleared — back to the fleet default"})
-		}
+	for _, repo := range clearedSettings(prev.Repos, next.Repos) {
+		out = append(out, Event{At: now, Kind: "settings", Level: "info", Repo: repo,
+			Text: "Reviewer override cleared — back to the fleet default"})
 	}
-	for repo := range prev.RepoAutofix {
-		if _, still := next.RepoAutofix[repo]; !still {
-			out = append(out, Event{At: now, Kind: "settings", Level: "info", Repo: repo,
-				Text: "Autofix override cleared — back to the fleet default"})
-		}
+	for _, repo := range clearedSettings(prev.RepoAutofix, next.RepoAutofix) {
+		out = append(out, Event{At: now, Kind: "settings", Level: "info", Repo: repo,
+			Text: "Autofix override cleared — back to the fleet default"})
 	}
-	for repo := range prev.Enrolled {
-		if _, still := next.Enrolled[repo]; !still {
-			out = append(out, Event{At: now, Kind: "settings", Level: "info", Repo: repo,
-				Text: "Enrollment decision cleared — back to this host's configuration"})
-		}
+	for _, repo := range clearedSettings(prev.Enrolled, next.Enrolled) {
+		out = append(out, Event{At: now, Kind: "settings", Level: "info", Repo: repo,
+			Text: "Enrollment decision cleared — back to this host's configuration"})
 	}
-	for repo := range prev.RepoSolver {
-		if _, still := next.RepoSolver[repo]; !still {
-			out = append(out, Event{At: now, Kind: "settings", Level: "info", Repo: repo,
-				Text: "Fix-session settings cleared — back to the fleet default"})
-		}
+	for _, repo := range clearedSettings(prev.RepoSolver, next.RepoSolver) {
+		out = append(out, Event{At: now, Kind: "settings", Level: "info", Repo: repo,
+			Text: "Fix-session settings cleared — back to the fleet default"})
 	}
 
 	return out
+}
+
+func changedSettings[T any](prev, next map[string]T, updatedAt func(T) *time.Time) []string {
+	var changed []string
+	for key, cur := range next {
+		old, had := prev[key]
+		if !had || !sameTime(updatedAt(old), updatedAt(cur)) {
+			changed = append(changed, key)
+		}
+	}
+	return changed
+}
+
+func clearedSettings[T any](prev, next map[string]T) []string {
+	var cleared []string
+	for key := range prev {
+		if _, still := next[key]; !still {
+			cleared = append(cleared, key)
+		}
+	}
+	return cleared
 }
 
 func sameTime(a, b *time.Time) bool {

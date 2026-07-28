@@ -73,7 +73,8 @@ type SolverSettings struct {
 func (s SolverSettings) Empty() bool {
 	return !s.SetModels && len(s.Models) == 0 && s.Model == "" &&
 		!s.SetEffort && s.Effort == "" && s.Prompt == "" &&
-		s.MaxAttempts == nil && !s.SetSeverities && len(s.Severities) == 0 && !s.SetAskMode &&
+		s.MaxAttempts == nil && !s.SetSeverities && len(s.Severities) == 0 &&
+		!s.SetAskMode && s.AskMode == "" &&
 		s.Forks == nil && !s.SetSkipAuthors &&
 		len(s.unknown) == 0
 }

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -808,5 +809,110 @@ func TestViewerLoginRetriesAfterATransientFailureButNotARefusal(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&denials); got != asked {
 		t.Errorf("asked %d more times, want the refusal remembered", got-asked)
+	}
+}
+
+func TestViewerLoginDoesNotOverwriteConcurrentIdentity(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "t")
+	firstEntered := make(chan struct{})
+	secondEntered := make(chan struct{})
+	releaseDenied := make(chan struct{})
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		switch atomic.AddInt32(&calls, 1) {
+		case 1:
+			close(firstEntered)
+			<-secondEntered
+			_, _ = w.Write([]byte(`{"login":"alice"}`))
+		case 2:
+			close(secondEntered)
+			<-releaseDenied
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+		}
+	}))
+	defer srv.Close()
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 1, maxWait: time.Millisecond, backoffBase: time.Millisecond, networkMaxWait: time.Millisecond}
+
+	var firstLogin string
+	var firstErr error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		firstLogin, firstErr = g.viewerLogin(t.Context())
+	}()
+	<-firstEntered
+	secondResult := make(chan struct {
+		login string
+		err   error
+	}, 1)
+	go func() {
+		login, err := g.viewerLogin(t.Context())
+		secondResult <- struct {
+			login string
+			err   error
+		}{login, err}
+	}()
+	wg.Wait()
+	close(releaseDenied)
+	second := <-secondResult
+
+	if firstErr != nil || firstLogin != "alice" {
+		t.Fatalf("successful viewer lookup = %q, %v", firstLogin, firstErr)
+	}
+	if second.err != nil || second.login != "alice" {
+		t.Fatalf("concurrent refusal returned %q, %v; want cached identity", second.login, second.err)
+	}
+	if got, err := g.viewerLogin(t.Context()); err != nil || got != "alice" {
+		t.Fatalf("cached viewer = %q, %v; successful identity was overwritten", got, err)
+	}
+}
+
+func TestViewerLoginConcurrentIdentityReplacesRefusal(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "t")
+	successEntered := make(chan struct{})
+	releaseSuccess := make(chan struct{})
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		switch atomic.AddInt32(&calls, 1) {
+		case 1:
+			close(successEntered)
+			<-releaseSuccess
+			_, _ = w.Write([]byte(`{"login":"alice"}`))
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+		}
+	}))
+	defer srv.Close()
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 1, maxWait: time.Millisecond, backoffBase: time.Millisecond, networkMaxWait: time.Millisecond}
+
+	successResult := make(chan struct {
+		login string
+		err   error
+	}, 1)
+	go func() {
+		login, err := g.viewerLogin(t.Context())
+		successResult <- struct {
+			login string
+			err   error
+		}{login, err}
+	}()
+	<-successEntered
+	if login, err := g.viewerLogin(t.Context()); err != nil || login != "" {
+		t.Fatalf("concurrent refusal = %q, %v; want an unreadable identity", login, err)
+	}
+	close(releaseSuccess)
+	success := <-successResult
+
+	if success.err != nil || success.login != "alice" {
+		t.Fatalf("successful viewer lookup = %q, %v", success.login, success.err)
+	}
+	if got, err := g.viewerLogin(t.Context()); err != nil || got != "alice" {
+		t.Fatalf("cached viewer = %q, %v; successful identity did not replace refusal", got, err)
 	}
 }

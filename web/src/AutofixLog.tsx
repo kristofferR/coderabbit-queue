@@ -16,19 +16,23 @@ export function AutofixLog({ repo, pr }: { repo: string; pr: number }) {
   useEffect(() => {
     if (!open) return;
     let stopped = false;
+    setTail(null);
+    setError(null);
+    let latest = 0;
     const refresh = async () => {
+      const id = ++latest;
       try {
         const response = await fetch(`/api/autofix-log/${repo}/${pr}`, {
           headers: { "X-CRQ-Dashboard": "1" },
         });
         const body = (await response.json()) as Tail & { error?: string };
         if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
-        if (!stopped) {
+        if (!stopped && id === latest) {
           setTail(body);
           setError(null);
         }
       } catch (cause) {
-        if (!stopped) setError((cause as Error).message);
+        if (!stopped && id === latest) setError((cause as Error).message);
       }
     };
     void refresh();

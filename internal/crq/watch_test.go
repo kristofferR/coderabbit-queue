@@ -1145,6 +1145,9 @@ func TestAutofixPolicyFiltersAndExtractsClarification(t *testing.T) {
 	if got := clarificationFromLog(log); got != "Which API behavior should remain compatible?" {
 		t.Fatalf("clarification = %q", got)
 	}
+	if got := clarificationFromLog(clarificationMarker + ` Should this return`); got != "Should this return" {
+		t.Fatalf("clarification ending in severity-like letters = %q", got)
+	}
 }
 
 // A fork PR's branch lives in the contributor's repository, so the session

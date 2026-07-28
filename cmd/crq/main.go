@@ -1233,11 +1233,11 @@ every agent rejects differently and none ignores.
 `)
 	case "solver":
 		fmt.Print(`crq solver <repo>
-	crq solver set <repo> [--models <first,next,...>] [--effort <e>] [--prompt <text>]
-	                      [--severities <critical,major,potential,minor,unknown>]
-	                      [--ask blocked|uncertain|ambiguous]
-	                      [--attempts <n>] [--forks on|off] [--skip-authors <a,b>]
-	                      [--inherit models,effort,severities,ask,forks,skip-authors]
+crq solver set <repo> [--models <first,next,...>] [--effort <e>] [--prompt <text>]
+                      [--severities <critical,major,potential,minor,unknown>]
+                      [--ask blocked|uncertain|ambiguous]
+                      [--attempts <n>] [--forks on|off] [--skip-authors <a,b>]
+                      [--inherit models,effort,severities,ask,forks,skip-authors]
 crq solver set --fleet [...]           (the default every repository inherits)
 crq solver clear <repo> | crq solver clear --fleet
 

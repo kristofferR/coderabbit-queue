@@ -639,16 +639,7 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Tim
 		out = append(out, card)
 	}
 	seenCard := map[string]bool{}
-	primaryKey := ""
-	for _, b := range fleetBots {
-		if b.Primary {
-			primaryKey = dialect.NormalizeBotName(b.Login)
-			break
-		}
-	}
-	if primaryKey == "" {
-		primaryKey = dialect.NormalizeBotName(cfg.primaryLogin())
-	}
+	primaryKey := dialect.NormalizeBotName(effectivePrimary)
 	// Start with the effective fleet set, including its current primary. The
 	// startup config is metadata and fallback only; it must not keep the retired
 	// primary marked primary after shared settings replace it.

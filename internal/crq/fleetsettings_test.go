@@ -588,6 +588,36 @@ func TestAdoptEnvResolvesRequiredBotsAgainstTheFleetPrimary(t *testing.T) {
 	}
 }
 
+func TestAdoptEnvAppliesPrimaryBeforeRequiredBotsInOneWrite(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":          "owner/gate",
+		"CRQ_HOST":          "testhost",
+		"CRQ_COBOTS":        "",
+		"CRQ_BOT":           "replacement-reviewer[bot]",
+		"CRQ_REQUIRED_BOTS": "replacement-reviewer[bot]",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if _, err := svc.AdoptEnv(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Fleet.Env["CRQ_BOT"] != "replacement-reviewer[bot]" {
+		t.Fatalf("primary = %q, want replacement reviewer", st.Fleet.Env["CRQ_BOT"])
+	}
+	if got := strings.Join(st.Fleet.Required, ","); got != "replacement-reviewer[bot]" {
+		t.Fatalf("required = %q, want newly adopted primary", got)
+	}
+}
+
 func findAdopted(list []AdoptedSetting, key string) (AdoptedSetting, bool) {
 	for _, a := range list {
 		if a.Key == key {

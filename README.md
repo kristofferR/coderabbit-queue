@@ -409,7 +409,7 @@ crq hold                                                    # list held PRs
 
 crq tidy <repo> <pr>      # delete crq's own spent review-trigger comments (--dry-run previews)
 
-crq serve                 # ⭐ the live web dashboard (crq serve install keeps it running)
+crq serve                 # ⭐ the live web dashboard (crq serve install enables a reboot-persistent service)
 
 crq cost <repo> <pr>      # what one more review round there would cost, before firing it
                           # (CRQ_WEEKLY_LIMIT sets the fair-use threshold the dashboard forecasts)

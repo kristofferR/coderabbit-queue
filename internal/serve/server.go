@@ -298,12 +298,7 @@ func (s *Server) refresh(ctx context.Context) {
 // snapshot. Ordinary state polls deliberately reuse the tool inventory;
 // operators use this after installing a tool or repairing a service PATH.
 func (s *Server) handleSetupRefresh(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("X-CRQ-Dashboard") != "1" {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "missing dashboard header"})
-		return
-	}
-	if err := s.addressedHere(r); err != nil {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+	if !s.allowDashboardRead(w, r) {
 		return
 	}
 

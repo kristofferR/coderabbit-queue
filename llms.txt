@@ -218,8 +218,9 @@ that need one:
 crq autofix install            # prompt + wrapper + service, started; --dry-run to preview
 ```
 
-Session output goes to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log`. Three dispatch attempts in a
-row that start nothing put `dispatch failing` on the dashboard and the status line.
+Session output goes to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log`. Three consecutive
+failures to start a session put `dispatch failing` on the dashboard and status line. That host-health
+threshold is independent of `CRQ_DISPATCH_MAX_ATTEMPTS`, which bounds started fix sessions per head.
 
 The service does not inherit your shell. The unit names the config file the install read
 (`CRQ_CONFIG`, or `~/.config/crq/env`) and the queue's identity, and the credential has to be one

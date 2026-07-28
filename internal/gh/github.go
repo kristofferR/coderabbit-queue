@@ -1129,7 +1129,14 @@ func (g *GitHub) viewerLogin(ctx context.Context) (string, error) {
 		return "", err
 	}
 	g.viewerMu.Lock()
-	g.viewer = login
+	// Another first caller may have completed while this request was in
+	// flight. Keep its answer rather than letting a later refusal overwrite a
+	// successfully identified viewer (or vice versa).
+	if g.viewer == "" || (g.viewer == "-" && login != "-") {
+		g.viewer = login
+	} else {
+		login = g.viewer
+	}
 	g.viewerMu.Unlock()
 	if login == "-" {
 		return "", nil

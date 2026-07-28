@@ -1,9 +1,12 @@
 package serve
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // LogTail is a bounded suffix of a fix session log.
@@ -43,13 +46,19 @@ func (s *Server) handleAutofixLog(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no live autofix log for this pull request"})
 		return
 	}
-	tail, err := s.opts.TailLog(r.Context(), repo, path, 128<<10)
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	tail, err := s.opts.TailLog(ctx, repo, path, 128<<10)
 	if err != nil {
+		status := http.StatusNotFound
+		if errors.Is(err, context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+		}
 		message := err.Error()
 		if host != "" && !strings.EqualFold(host, s.opts.Host) {
 			message = "log is on autofix host " + host + ", not dashboard host " + s.opts.Host + ": " + message
 		}
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": message})
+		writeJSON(w, status, map[string]string{"error": message})
 		return
 	}
 	tail.Host = host

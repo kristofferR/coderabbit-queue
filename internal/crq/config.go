@@ -290,6 +290,13 @@ func BuildConfig(env map[string]string) (Config, error) {
 	for _, cb := range coBots {
 		coLogins = append(coLogins, cb.Login)
 	}
+	fixSeverities := severitySet(stringEnv(env, "CRQ_FIX_SEVERITIES", strings.Join(dialect.KnownSeverities(), ",")))
+	for severity := range fixSeverities {
+		if !dialect.IsSeverity(severity) {
+			return Config{}, fmt.Errorf("CRQ_FIX_SEVERITIES: severity %q is not one of %s",
+				severity, strings.Join(dialect.KnownSeverities(), ", "))
+		}
+	}
 	cfg := Config{
 		GateRepo:          env["CRQ_REPO"],
 		DashboardIssue:    intEnv(env, "CRQ_ISSUE", 0),
@@ -333,7 +340,7 @@ func BuildConfig(env map[string]string) (Config, error) {
 		FixModel:            strings.TrimSpace(env["CRQ_FIX_MODEL"]),
 		FixEffort:           strings.TrimSpace(env["CRQ_FIX_EFFORT"]),
 		FixPrompt:           strings.TrimSpace(env["CRQ_FIX_PROMPT"]),
-		FixSeverities:       severitySet(stringEnv(env, "CRQ_FIX_SEVERITIES", "critical,major,potential,minor,unknown")),
+		FixSeverities:       fixSeverities,
 		FixAskMode:          askModeEnv(env["CRQ_FIX_ASK"]),
 		DispatchMaxAttempts: positiveIntEnv(env, "CRQ_DISPATCH_MAX_ATTEMPTS", 5),
 		DispatchForks:       boolEnv(env, "CRQ_DISPATCH_FORKS", false),
