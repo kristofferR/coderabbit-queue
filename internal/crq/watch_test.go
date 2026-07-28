@@ -1002,21 +1002,21 @@ func TestDispatchSkipsAForkUnlessAllowed(t *testing.T) {
 	own.Head.Repo.FullName = "Owner/Thing" // case differs; the repository does not
 	fork.Head.Repo.FullName = "contributor/thing"
 
-	if !svc.mayDispatch("owner/thing", own) {
+	if !svc.mayDispatch(svc.cfg, "owner/thing", own) {
 		t.Error("a branch in the repository itself must be dispatchable")
 	}
-	if svc.mayDispatch("owner/thing", fork) {
+	if svc.mayDispatch(svc.cfg, "owner/thing", fork) {
 		t.Error("a fork was dispatched without CRQ_DISPATCH_FORKS")
 	}
 	// A deleted fork answers with no repository at all. Reading that as "ours"
 	// would grant exactly the untrusted case the permission it lacks.
-	if svc.mayDispatch("owner/thing", ghapi.Pull{}) {
+	if svc.mayDispatch(svc.cfg, "owner/thing", ghapi.Pull{}) {
 		t.Error("an unreadable head repository was treated as our own")
 	}
 
 	allowed := cfg
 	allowed.DispatchForks = true
-	if !NewService(allowed, newFakeGitHub(), NewMemoryStore(allowed), nil).mayDispatch("owner/thing", fork) {
+	if !NewService(allowed, newFakeGitHub(), NewMemoryStore(allowed), nil).mayDispatch(allowed, "owner/thing", fork) {
 		t.Error("CRQ_DISPATCH_FORKS did not allow a fork")
 	}
 }

@@ -418,6 +418,10 @@ crq fleet                 # the defaults every repository inherits (env → flee
 crq fleet set [--bots <a,b>] [--required <a,b>] [--min-interval <dur>] [--weekly-limit <n>]
               [--autofix-default on|off] [--dry-run]   # --dry-run reports the impact, writes nothing
 
+crq solver <repo>         # how fix sessions run here (model, effort, attempts, forks, prompt)
+crq solver set <repo> [--model <m>] [--effort <e>] [--attempts <n>] [--forks on|off] [--prompt <text>]
+crq solver set --fleet [...]                          # the default every repository inherits
+
 crq repos                 # which projects crq reviews, and where each answer comes from
 crq repos add <repo> | crq repos remove <repo> --reason "<why>" | crq repos default <repo>
 

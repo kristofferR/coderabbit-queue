@@ -1,6 +1,7 @@
 package crq
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -340,7 +341,7 @@ func containsBot(logins []string, login string) bool {
 // per-host file that predates any of this; the fleet record is one answer every
 // host shares; the repository override is the most specific and wins outright.
 func (s *Service) cfgFor(st State, repo string) Config {
-	base := s.cfg.WithFleet(st.Fleet)
+	base := s.cfg.WithFleet(st.Fleet).withSolver(st.EffectiveSolver(repo))
 	ov, ok := st.RepoOverride(repo)
 	if !ok {
 		return base
@@ -430,4 +431,40 @@ func withoutBot(list []string, login string) []string {
 		}
 	}
 	return out
+}
+
+// withSolver applies the resolved fix-session settings — the fleet default with
+// this repository's own record already layered over it by EffectiveSolver.
+//
+// An absent field keeps the env value, so a fleet that records nothing runs
+// exactly the sessions it ran before.
+func (c Config) withSolver(sv SolverSettings) Config {
+	out := c
+	out.FixModel, out.FixEffort, out.FixPrompt = sv.Model, sv.Effort, sv.Prompt
+	if sv.MaxAttempts != nil {
+		out.DispatchMaxAttempts = *sv.MaxAttempts
+	}
+	if sv.Forks != nil {
+		out.DispatchForks = *sv.Forks
+	}
+	if sv.SetSkipAuthors {
+		out.SkipAuthors = authorSet(strings.Join(sv.SkipAuthors, ","))
+	}
+	return out
+}
+
+// repoCfg is cfgFor for a caller that has no state in hand. It reads the ref,
+// so it belongs on paths that act on ONE repository at a time — a dispatch, a
+// fork check — never inside a loop over the fleet.
+//
+// A read failure falls back to this host's own configuration rather than
+// failing the operation: the settings it would have applied are refinements,
+// and refusing to fix a pull request because a setting could not be read would
+// turn a cosmetic outage into a functional one.
+func (s *Service) repoCfg(repo string) Config {
+	st, _, err := s.store.Load(context.Background())
+	if err != nil {
+		return s.cfg
+	}
+	return s.cfgFor(st, repo)
 }

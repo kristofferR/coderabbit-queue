@@ -36,8 +36,20 @@ type FleetDefaults struct {
 	// fixed. Absent means yes, which is what crq has always done.
 	AutofixDefault *bool `json:"autofix_default,omitempty"`
 
+	// Solver is the fleet's fix-session default, which a repository's own record
+	// is layered over.
+	Solver SolverSettings `json:"solver,omitempty"`
+
 	By        string     `json:"by,omitempty"`
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+}
+
+// Empty reports whether the record says nothing at all. A record that has been
+// emptied field by field must not keep reading as "recorded": every setting
+// would show its env value while the fleet claimed to have an answer.
+func (f FleetDefaults) Empty() bool {
+	return !f.SetCoBots && !f.SetRequired && f.MinInterval == "" &&
+		f.WeeklyLimit == nil && f.AutofixDefault == nil && f.Solver.Empty()
 }
 
 // AutofixDefaultOn is the answer for a repository with no explicit switch.
@@ -50,6 +62,10 @@ func (s *State) AutofixDefaultOn() bool {
 
 // SetFleetDefaults records the fleet defaults, stamping who and when.
 func (s *State) SetFleetDefaults(fd FleetDefaults, by string, now time.Time) {
+	if fd.Empty() {
+		s.Fleet = FleetDefaults{}
+		return
+	}
 	at := now.UTC()
 	fd.By, fd.UpdatedAt = by, &at
 	s.Fleet = fd

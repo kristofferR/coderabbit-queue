@@ -64,6 +64,14 @@ type Config struct {
 	WatchInterval       time.Duration
 	DispatchCommand     []string
 	DispatchMaxAttempts int
+	// FixModel/FixEffort/FixPrompt are the per-repository solver settings, put
+	// into the fix session's ENVIRONMENT rather than its argv. Argv is fixed
+	// when the watcher starts; the environment is built per dispatch, which is
+	// the only layer that can differ between two repositories the same watcher
+	// is handling.
+	FixModel  string
+	FixEffort string
+	FixPrompt string
 	// DispatchForks allows fix sessions on pull requests whose head branch lives
 	// in another repository. Off by default: a session runs an agent over that
 	// branch's code with approvals bypassed and a write token in reach.

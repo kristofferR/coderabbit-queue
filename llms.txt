@@ -297,6 +297,23 @@ own subscriptions. The diff basis is the whole head, so this is exact on a PR's 
 review and an upper bound after that. `.prices_checked_at` is when the published figures were last
 verified against the vendors.
 
+Change how fix sessions run, per repository or fleet-wide:
+
+```bash
+crq solver REPO                                       # effective settings + where each came from
+crq solver set REPO --model opus --effort high --attempts 5
+crq solver set REPO --prompt "This project uses bun, never npm."
+crq solver set --fleet --effort medium                # the default every repository inherits
+crq solver clear REPO | crq solver clear --fleet
+```
+
+Three layers again — env, fleet, repository — with `.sources` naming which answered. The AGENT is
+not per repository: it is baked into the session script by `crq autofix install`, because switching
+between claude and codex is a different command line rather than a different flag. Model, effort and
+the extra prompt reach the session through its ENVIRONMENT (`CRQ_FIX_MODEL`, `CRQ_FIX_EFFORT`,
+`CRQ_FIX_PROMPT`), since the watcher's argv is fixed when it starts and one watcher handles every
+repository — so **reinstall autofix** to pick up a session script that reads them.
+
 Change what every repository inherits:
 
 ```bash

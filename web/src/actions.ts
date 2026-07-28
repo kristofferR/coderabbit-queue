@@ -7,6 +7,7 @@ export type ActionName =
   | "autofix"
   | "enroll"
   | "fleet"
+  | "solver"
   | "reviewers"
   | "resolve"
   | "decline"
@@ -40,6 +41,16 @@ export type ActionBody = {
   };
   /** Ask what a change would do without making it. */
   preview?: boolean;
+  /** A fix-session change; an empty repo means the fleet default. */
+  solver?: {
+    model?: string;
+    effort?: string;
+    prompt?: string;
+    max_attempts?: number;
+    forks?: boolean;
+    skip_authors?: string[];
+    clear?: boolean;
+  };
 };
 
 /** A save can succeed and still be ignored by a host on an older binary. */

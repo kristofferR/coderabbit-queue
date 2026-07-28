@@ -6,6 +6,7 @@ import { BotIcon, Card, Empty, Pill, PRLink, RepoIcon, Td, Th } from "./ui";
 import { ago, clock, useNow } from "./time";
 import { AddRepo, EnrollmentEditor } from "./AddRepo";
 import { FleetEditor } from "./FleetEditor";
+import { SolverEditor } from "./SolverEditor";
 
 /* ------------------------------------------------------------------ Repos */
 
@@ -139,6 +140,14 @@ export function ReposPage({
           />
           <ReviewerEditor key={selected.repo} repo={selected} bots={bots} onSnapshot={onSnapshot} />
           <AutofixEditor key={`${selected.repo}-autofix`} repo={selected} now={now} onSnapshot={onSnapshot} />
+          {selected.solver && (
+            <SolverEditor
+              key={`${selected.repo}-solver`}
+              repo={selected.repo}
+              solver={selected.solver}
+              onSnapshot={onSnapshot}
+            />
+          )}
         </div>
       )}
       <AddRepo open={adding} onClose={() => setAdding(false)} onSnapshot={onSnapshot} />

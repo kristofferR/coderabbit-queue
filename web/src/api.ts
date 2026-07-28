@@ -145,6 +145,7 @@ export type RepoRow = {
   reviewers: string[];
   required: string[];
   primary_off?: boolean;
+  solver?: RepoSolver;
   override: boolean;
   override_by?: string;
   override_at?: string;
@@ -219,6 +220,21 @@ export type FleetConfig = {
 };
 
 export type KV = { key: string; value: string; detail?: string };
+/** How one repository's fix sessions run, resolved env → fleet → repo. */
+export type RepoSolver = {
+  overridden: boolean;
+  agent?: string;
+  model?: string;
+  effort?: string;
+  prompt?: string;
+  max_attempts: number;
+  forks: boolean;
+  skip_authors: string[];
+  sources: Record<string, string>;
+  by?: string;
+  lagging_hosts?: string[];
+};
+
 export type FleetSettings = {
   recorded: boolean;
   reviewers: { login: string; budget: string; required: boolean; trigger?: string }[];

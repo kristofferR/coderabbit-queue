@@ -28,6 +28,9 @@ type Actor interface {
 	// not a nicety — it is how someone finds out that adding a required reviewer
 	// reopens nineteen completed rounds before they click.
 	Fleet(ctx context.Context) (*FleetSettings, error)
+	// SetSolver records how one repository's fix sessions run, or with an empty
+	// repo the fleet default every repository inherits.
+	SetSolver(ctx context.Context, repo string, change SolverChange) error
 	SetFleet(ctx context.Context, change FleetChange, preview bool) (FleetImpact, error)
 	// SetReviewers returns the hosts that will not honour the override, so the
 	// UI can say so rather than reporting a save that some daemon ignores.
@@ -61,6 +64,9 @@ type actionRequest struct {
 	Fleet json.RawMessage `json:"fleet"`
 	// Preview asks what a change would do without making it.
 	Preview bool `json:"preview"`
+	// Solver carries a fix-session change, raw so its pointer fields keep "not
+	// chosen" distinct from "chosen to be empty".
+	Solver json.RawMessage `json:"solver"`
 
 	ThreadIDs  []string `json:"thread_ids"`
 	FindingIDs []string `json:"finding_ids"`
@@ -95,12 +101,13 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	// Fleet settings are the one action with no repository: they are the answer
 	// for every repository that has not overridden them.
 	req.Repo = strings.TrimSpace(req.Repo)
-	if action := r.PathValue("action"); action != "fleet" && (req.Repo == "" || !strings.Contains(req.Repo, "/")) {
+	action := r.PathValue("action")
+	fleetWide := action == "fleet" || (action == "solver" && req.Repo == "")
+	if !fleetWide && (req.Repo == "" || !strings.Contains(req.Repo, "/")) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo must be owner/name"})
 		return
 	}
 
-	action := r.PathValue("action")
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
@@ -203,6 +210,15 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		snap, _ := s.snapshot()
 		writeJSON(w, http.StatusOK, map[string]any{"snapshot": snap, "impact": impact})
 		return
+	case "solver":
+		var change SolverChange
+		if err := json.Unmarshal(req.Solver, &change); len(req.Solver) > 0 && err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed solver change"})
+			return
+		}
+		// An empty repo is the fleet default, which is why this action is one of
+		// the two that does not require one.
+		err = s.actor.SetSolver(ctx, req.Repo, change)
 	case "resolve":
 		if len(req.ThreadIDs) == 0 {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no thread given"})
@@ -288,4 +304,15 @@ type FleetChange struct {
 	WeeklyLimit    *int     `json:"weekly_limit"`
 	AutofixDefault *bool    `json:"autofix_default"`
 	Clear          bool     `json:"clear"`
+}
+
+// SolverChange mirrors crq.SolverChange on the wire.
+type SolverChange struct {
+	Model       *string  `json:"model"`
+	Effort      *string  `json:"effort"`
+	Prompt      *string  `json:"prompt"`
+	MaxAttempts *int     `json:"max_attempts"`
+	Forks       *bool    `json:"forks"`
+	SkipAuthors []string `json:"skip_authors"`
+	Clear       bool     `json:"clear"`
 }

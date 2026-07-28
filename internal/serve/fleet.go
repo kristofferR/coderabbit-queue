@@ -101,11 +101,35 @@ type RepoRow struct {
 	AutofixBy     string     `json:"autofix_by,omitempty"`
 	AutofixAt     *time.Time `json:"autofix_at,omitempty"`
 
+	// Solver is how a fix session runs here, resolved through env → fleet →
+	// this repository, with a source per setting.
+	Solver *RepoSolver `json:"solver,omitempty"`
+
 	ActiveRounds int `json:"active_rounds"`
 	QueuedRounds int `json:"queued_rounds"`
 	HeldPRs      int `json:"held_prs"`
 	Fixing       int `json:"fixing"`
 }
+
+// RepoSolver mirrors crq.SolverView on the wire.
+type RepoSolver struct {
+	Overridden  bool              `json:"overridden"`
+	Agent       string            `json:"agent,omitempty"`
+	Model       string            `json:"model,omitempty"`
+	Effort      string            `json:"effort,omitempty"`
+	Prompt      string            `json:"prompt,omitempty"`
+	MaxAttempts int               `json:"max_attempts"`
+	Forks       bool              `json:"forks"`
+	SkipAuthors []string          `json:"skip_authors"`
+	Sources     map[string]string `json:"sources"`
+	By          string            `json:"by,omitempty"`
+	Lagging     []string          `json:"lagging_hosts,omitempty"`
+}
+
+// SolverFor resolves one repository's fix-session settings. Supplied by the
+// command layer for the same reason the reviewer resolver is: the layering
+// belongs to internal/crq, and two answers to it would be one too many.
+type SolverFor func(st state.State, repo string) RepoSolver
 
 // BotCard is one reviewer on the Bots page. "Last seen" is deliberately what
 // crq itself recorded — a trigger it posted or a claim it observed — rather
@@ -207,17 +231,17 @@ type KV struct {
 }
 
 // BuildFleet reduces everything the non-overview pages read.
-func BuildFleet(st state.State, cfg FleetConfig, ov Overview, tools []Tool, toolsHost string, now time.Time, botsFor BotsFor, enrollFor EnrollFor, fleet *FleetSettings) Snapshot {
+func BuildFleet(st state.State, cfg FleetConfig, ov Overview, tools []Tool, toolsHost string, now time.Time, botsFor BotsFor, enrollFor EnrollFor, fleet *FleetSettings, solverFor SolverFor) Snapshot {
 	return Snapshot{
 		Overview: ov,
-		Repos:    repoRows(st, cfg, now, botsFor, enrollFor),
+		Repos:    repoRows(st, cfg, now, botsFor, enrollFor, solverFor),
 		Bots:     botCards(st, cfg),
 		Setup:    setupView(st, cfg, ov, tools, toolsHost),
 		Settings: SettingsView{Config: cfg, Quota: ov.Quota, Plumbing: plumbing(st, cfg), Fleet: fleet},
 	}
 }
 
-func repoRows(st state.State, cfg FleetConfig, now time.Time, botsFor BotsFor, enrollFor EnrollFor) []RepoRow {
+func repoRows(st state.State, cfg FleetConfig, now time.Time, botsFor BotsFor, enrollFor EnrollFor, solverFor SolverFor) []RepoRow {
 	rows := map[string]*RepoRow{}
 	get := func(repo string) *RepoRow {
 		key := strings.ToLower(repo)
@@ -294,6 +318,10 @@ func repoRows(st state.State, cfg FleetConfig, now time.Time, botsFor BotsFor, e
 		} else {
 			row.Enrollment = cfg.enrollmentOf(row.Repo)
 			row.Reviewed = row.Enrollment == "env" || row.Enrollment == "scope"
+		}
+		if solverFor != nil {
+			sv := solverFor(st, row.Repo)
+			row.Solver = &sv
 		}
 	}
 

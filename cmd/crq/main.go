@@ -295,6 +295,12 @@ func run(ctx context.Context, args []string) int {
 		}
 		printJSON(est)
 		return 0
+	case "solver":
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		return runSolver(ctx, service, args[1:])
 	case "fleet":
 		if err := cfg.RequireState(); err != nil {
 			fatal(err)
@@ -612,6 +618,17 @@ func run(ctx context.Context, args []string) int {
 			return out
 		}
 		bots := resolve(crq.RepoReviewers{})
+		// Fix-session settings resolve through env, the fleet default and the
+		// repository's own record — all of which live in the service.
+		solverFor := func(st crq.State, repo string) serve.RepoSolver {
+			v := service.SolverIn(st, repo)
+			return serve.RepoSolver{
+				Overridden: v.Overridden, Agent: v.Agent, Model: v.Model, Effort: v.Effort,
+				Prompt: v.Prompt, MaxAttempts: v.MaxAttempts, Forks: v.Forks,
+				SkipAuthors: v.SkipAuthors, Sources: v.Sources, By: v.By,
+				Lagging: hostsOfWriters(v.Lagging),
+			}
+		}
 		// The enrollment rule lives in the service; serve only renders it.
 		enrollFor := func(st crq.State, repo string) serve.Enrollment {
 			v := service.EnrollmentIn(st, repo)
@@ -644,6 +661,7 @@ func run(ctx context.Context, args []string) int {
 			Bots:        bots,
 			Resolve:     resolve,
 			EnrollFor:   enrollFor,
+			SolverFor:   solverFor,
 			Discoverer:  repoDiscoverer{service},
 			Poll:        *poll,
 			Assets:      serve.Assets(),
@@ -1048,6 +1066,39 @@ subscriptions.
 The diff basis is the whole head. Macroscope bills incrementally after its first
 review of a pull request, so this is exact on the first round and an upper bound
 on later ones.
+`)
+	case "solver":
+		fmt.Print(`crq solver <repo>
+crq solver set <repo> [--model <m>] [--effort <e>] [--prompt <text>]
+                      [--attempts <n>] [--forks on|off] [--skip-authors <a,b>]
+crq solver set --fleet [...]           (the default every repository inherits)
+crq solver clear <repo> | crq solver clear --fleet
+
+How a fix session runs here: which model, how hard it thinks, what else to tell
+it, and the limits crq itself enforces.
+
+Three layers, least specific first: this host's env, the fleet default, then
+this repository. .sources says which layer answered for each setting.
+
+  --model         handed to the agent; empty keeps the agent's own default
+  --effort        low | medium | high | xhigh | max
+  --prompt        standing instruction appended to every fix session here
+                  ("this project uses bun, never npm")
+  --attempts      fix sessions per head before crq stops trying; 0 inherits
+  --forks         allow sessions on pull requests from another repository.
+                  Off by default: a session runs an agent over somebody else's
+                  code with approvals bypassed and a write token in reach
+  --skip-authors  pull-request authors crq does not enqueue here
+
+The AGENT itself is not per repository. It is chosen by 'crq autofix install'
+and baked into the session script, because switching between claude and codex
+is a different command line rather than a different flag. Model and effort are
+per repository, because every agent has them.
+
+These reach the session through its environment rather than its arguments: the
+watcher's argv is fixed when it starts, and one watcher handles every
+repository. A session script from an install that predates this ignores them
+and runs exactly as it did, so reinstalling autofix is what turns them on.
 `)
 	case "fleet":
 		fmt.Print(`crq fleet
@@ -2520,4 +2571,143 @@ func hostsOfWriters(writers []string) []string {
 		out = append(out, host)
 	}
 	return out
+}
+
+// runSolver is the fix-session settings CLI, per repository or fleet-wide.
+func runSolver(ctx context.Context, service *crq.Service, args []string) int {
+	action, rest := "show", args
+	if len(args) > 0 && (args[0] == "set" || args[0] == "clear") {
+		action, rest = args[0], args[1:]
+	}
+	var repo string
+	var change crq.SolverChange
+	fleet := false
+	for i := 0; i < len(rest); i++ {
+		arg := rest[i]
+		name, inline, hasInline := strings.Cut(arg, "=")
+		value := func() (string, bool) {
+			if hasInline {
+				return inline, true
+			}
+			if i+1 >= len(rest) {
+				fatal(fmt.Errorf("%s needs a value", name))
+				return "", false
+			}
+			i++
+			return rest[i], true
+		}
+		switch name {
+		case "--fleet":
+			fleet = true
+		case "--model", "--effort", "--prompt":
+			v, ok := value()
+			if !ok {
+				return 1
+			}
+			switch name {
+			case "--model":
+				change.Model = &v
+			case "--effort":
+				change.Effort = &v
+			case "--prompt":
+				change.Prompt = &v
+			}
+		case "--attempts":
+			v, ok := value()
+			if !ok {
+				return 1
+			}
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil {
+				fatal(fmt.Errorf("--attempts: %w", err))
+				return 1
+			}
+			change.MaxAttempts = &n
+		case "--forks":
+			v, ok := value()
+			if !ok {
+				return 1
+			}
+			on := strings.EqualFold(strings.TrimSpace(v), "on")
+			if !on && !strings.EqualFold(strings.TrimSpace(v), "off") {
+				fatal(errors.New("--forks takes on or off"))
+				return 1
+			}
+			change.Forks = &on
+		case "--skip-authors":
+			v, ok := value()
+			if !ok {
+				return 1
+			}
+			change.SkipAuthors = splitList(&v)
+		default:
+			if strings.HasPrefix(arg, "-") {
+				fatal(fmt.Errorf("unknown flag %s (see crq help solver)", arg))
+				return 1
+			}
+			if repo != "" {
+				fatal(fmt.Errorf("unexpected argument %q", arg))
+				return 1
+			}
+			repo = arg
+		}
+	}
+	if !fleet && repo == "" {
+		fatal(errors.New("usage: crq solver [set|clear] <repo> [flags], or --fleet for the default"))
+		return 1
+	}
+	if action == "clear" {
+		change = crq.SolverChange{Clear: true}
+	}
+
+	if fleet {
+		if action == "show" {
+			view, err := service.FleetSettings(ctx)
+			if err != nil {
+				fatal(err)
+				return 1
+			}
+			printJSON(view)
+			return 0
+		}
+		sv, err := service.SetFleetSolver(ctx, change)
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		printJSON(sv)
+		return 0
+	}
+	if action == "show" {
+		view, err := service.Solver(ctx, repo)
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		printJSON(view)
+		return 0
+	}
+	view, err := service.SetSolver(ctx, repo, change)
+	if err != nil {
+		fatal(err)
+		return 1
+	}
+	printJSON(view)
+	return 0
+}
+
+func (a prActor) SetSolver(ctx context.Context, repo string, change serve.SolverChange) error {
+	c := crq.SolverChange{
+		Model: change.Model, Effort: change.Effort, Prompt: change.Prompt,
+		MaxAttempts: change.MaxAttempts, Forks: change.Forks,
+		SkipAuthors: change.SkipAuthors, Clear: change.Clear,
+	}
+	// An empty repo means the fleet default, the same convention the CLI's
+	// --fleet flag expresses.
+	if strings.TrimSpace(repo) == "" {
+		_, err := a.svc.SetFleetSolver(ctx, c)
+		return err
+	}
+	_, err := a.svc.SetSolver(ctx, repo, c)
+	return err
 }

@@ -446,6 +446,8 @@ type State struct {
 	// Fleet is what every repository inherits, recorded once for the whole fleet
 	// rather than in each host's env file. See fleet.go.
 	Fleet FleetDefaults `json:"fleet,omitempty"`
+	// RepoSolver is how a fix session runs, per repository. See solver.go.
+	RepoSolver map[string]SolverSettings `json:"repo_solver,omitempty"`
 	// Enrolled answers "does crq review this project at all?" per repository,
 	// so the decision lives with the fleet rather than in one host's env file.
 	// Absent means the hosts' CRQ_REPOS/CRQ_EXCLUDE decide, as before.
@@ -491,7 +493,7 @@ const SchemaVersion = 4
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 4
+const WriterCaps = 5
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
@@ -512,6 +514,11 @@ const CapsEnrollment = 3
 // host below it keeps deciding from its own env, so a default recorded here is
 // simply not applied there.
 const CapsFleetDefaults = 4
+
+// CapsSolver is the capability that makes solver settings safe to act on. A
+// host below it runs every fix session with its own install-time settings, so a
+// per-repository model or attempt limit recorded here is simply not applied.
+const CapsSolver = 5
 
 // writerTTL is how long a host counts as still active for capability purposes.
 const writerTTL = 30 * time.Minute

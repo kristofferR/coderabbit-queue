@@ -24,6 +24,7 @@ type (
 	RepoReviewers  = crqstate.RepoReviewers
 	RepoEnrollment = crqstate.RepoEnrollment
 	FleetDefaults  = crqstate.FleetDefaults
+	SolverSettings = crqstate.SolverSettings
 	Revision       = crqstate.Revision
 	StateStore     = crqstate.StateStore
 	StoreConfig    = crqstate.StoreConfig
@@ -57,6 +58,8 @@ const (
 	CapsEnrollment = crqstate.CapsEnrollment
 	// CapsFleetDefaults is the capability a host needs to honour fleet defaults.
 	CapsFleetDefaults = crqstate.CapsFleetDefaults
+	// CapsSolver is the capability a host needs to honour solver settings.
+	CapsSolver = crqstate.CapsSolver
 )
 
 var (

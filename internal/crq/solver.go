@@ -1,0 +1,263 @@
+package crq
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+)
+
+// SolverView is how one repository's fix sessions will actually be run.
+type SolverView struct {
+	Repo string `json:"repo"`
+	// Overridden says this repository has its own record rather than following
+	// the fleet default.
+	Overridden bool `json:"overridden"`
+	// Agent is the fleet's, always: it is chosen at install time and baked into
+	// the session script, because switching agents is a different command line
+	// rather than a different flag. Reported so a reader knows what the model
+	// and effort below are being handed to.
+	Agent string `json:"agent,omitempty"`
+
+	Model       string   `json:"model,omitempty"`
+	Effort      string   `json:"effort,omitempty"`
+	Prompt      string   `json:"prompt,omitempty"`
+	MaxAttempts int      `json:"max_attempts"`
+	Forks       bool     `json:"forks"`
+	SkipAuthors []string `json:"skip_authors"`
+
+	// Sources says, per setting, whether the value came from this repository's
+	// record, the fleet default, or this host's env.
+	Sources   map[string]string `json:"sources"`
+	By        string            `json:"by,omitempty"`
+	UpdatedAt string            `json:"updated_at,omitempty"`
+	Lagging   []string          `json:"lagging_hosts,omitempty"`
+}
+
+// Solver reports how repo's fix sessions will run.
+func (s *Service) Solver(ctx context.Context, repo string) (SolverView, error) {
+	repo = NormalizeRepo(repo)
+	if err := checkRepoShape(repo); err != nil {
+		return SolverView{}, err
+	}
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return SolverView{}, err
+	}
+	return s.solverViewOf(st, repo), nil
+}
+
+func (s *Service) solverViewOf(st State, repo string) SolverView {
+	cfg := s.cfgFor(st, repo)
+	own, has := st.Solver(repo)
+	fleet := st.Fleet.Solver
+
+	view := SolverView{
+		Repo: repo, Overridden: has && !own.Empty(),
+		Model: cfg.FixModel, Effort: cfg.FixEffort, Prompt: cfg.FixPrompt,
+		MaxAttempts: cfg.DispatchMaxAttempts, Forks: cfg.DispatchForks,
+		SkipAuthors: sortedKeys(cfg.SkipAuthors),
+		Sources:     map[string]string{},
+	}
+	// Three layers, and the view names which one answered — the same
+	// distinction the fleet settings make, for the same reason: a value showing
+	// "env" is this host's file, and changing it here starts a record.
+	source := func(key string, inRepo, inFleet bool) {
+		switch {
+		case inRepo:
+			view.Sources[key] = "repo"
+		case inFleet:
+			view.Sources[key] = "fleet"
+		default:
+			view.Sources[key] = "env"
+		}
+	}
+	source("model", own.Model != "", fleet.Model != "")
+	source("effort", own.Effort != "", fleet.Effort != "")
+	source("prompt", own.Prompt != "", fleet.Prompt != "")
+	source("max_attempts", own.MaxAttempts != nil, fleet.MaxAttempts != nil)
+	source("forks", own.Forks != nil, fleet.Forks != nil)
+	source("skip_authors", own.SetSkipAuthors, fleet.SetSkipAuthors)
+
+	if len(s.cfg.DispatchCommand) > 0 {
+		view.Agent = s.cfg.DispatchCommand[0]
+	}
+	if has && own.UpdatedAt != nil {
+		view.By = own.By
+		view.UpdatedAt = own.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z")
+		view.Lagging = st.LaggingWriters(CapsSolver, s.clock().UTC())
+	}
+	return view
+}
+
+// SolverChange is a proposed edit. Absent fields are left alone, so a form
+// posting its whole state cannot clobber a setting changed a second earlier.
+type SolverChange struct {
+	Model       *string  `json:"model"`
+	Effort      *string  `json:"effort"`
+	Prompt      *string  `json:"prompt"`
+	MaxAttempts *int     `json:"max_attempts"`
+	Forks       *bool    `json:"forks"`
+	SkipAuthors []string `json:"skip_authors"`
+	Clear       bool     `json:"clear"`
+}
+
+// knownEfforts are the reasoning levels every supported agent understands. An
+// unknown one is refused rather than passed through: it would reach the agent
+// as a flag value, and a session that dies on its first argument is a fix that
+// silently never happens.
+var knownEfforts = []string{"low", "medium", "high", "xhigh", "max"}
+
+// SetSolver records how repo's fix sessions should run.
+func (s *Service) SetSolver(ctx context.Context, repo string, change SolverChange) (SolverView, error) {
+	repo = NormalizeRepo(repo)
+	if err := checkRepoShape(repo); err != nil {
+		return SolverView{}, err
+	}
+	now := s.clock().UTC()
+	st, err := s.store.Update(ctx, func(st *State) error {
+		if change.Clear {
+			if !st.ClearSolver(repo) {
+				return ErrNoChange
+			}
+			return nil
+		}
+		sv, _ := st.Solver(repo)
+		next, err := applySolverChange(sv, change)
+		if err != nil {
+			return err
+		}
+		if next.Empty() {
+			// Setting every field back to nothing IS clearing it: leaving an
+			// empty record behind would report the repository as overridden
+			// while overriding nothing.
+			if !st.ClearSolver(repo) {
+				return ErrNoChange
+			}
+			return nil
+		}
+		st.SetSolver(repo, next, s.cfg.Host, now)
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrNoChange) {
+		return SolverView{}, err
+	}
+	if err == nil {
+		s.sync(ctx, st)
+	} else {
+		st, _, err = s.store.Load(ctx)
+		if err != nil {
+			return SolverView{}, err
+		}
+	}
+	return s.solverViewOf(st, repo), nil
+}
+
+// SetFleetSolver records the fleet-wide default every repository inherits.
+func (s *Service) SetFleetSolver(ctx context.Context, change SolverChange) (SolverSettings, error) {
+	now := s.clock().UTC()
+	st, err := s.store.Update(ctx, func(st *State) error {
+		if change.Clear {
+			if st.Fleet.Solver.Empty() {
+				return ErrNoChange
+			}
+			fd := st.Fleet
+			fd.Solver = SolverSettings{}
+			st.SetFleetDefaults(fd, s.cfg.Host, now)
+			return nil
+		}
+		next, err := applySolverChange(st.Fleet.Solver, change)
+		if err != nil {
+			return err
+		}
+		at := now
+		next.By, next.UpdatedAt = s.cfg.Host, &at
+		fd := st.Fleet
+		fd.Solver = next
+		st.SetFleetDefaults(fd, s.cfg.Host, now)
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrNoChange) {
+		return SolverSettings{}, err
+	}
+	if err == nil {
+		s.sync(ctx, st)
+	} else if st, _, err = s.store.Load(ctx); err != nil {
+		return SolverSettings{}, err
+	}
+	return st.Fleet.Solver, nil
+}
+
+// applySolverChange folds a change onto a record, validating it.
+func applySolverChange(sv SolverSettings, change SolverChange) (SolverSettings, error) {
+	if change.Model != nil {
+		sv.Model = strings.TrimSpace(*change.Model)
+	}
+	if change.Effort != nil {
+		effort := strings.ToLower(strings.TrimSpace(*change.Effort))
+		if effort != "" && !containsString(knownEfforts, effort) {
+			return sv, fmt.Errorf("effort %q is not one of %s", effort, strings.Join(knownEfforts, ", "))
+		}
+		sv.Effort = effort
+	}
+	if change.Prompt != nil {
+		prompt := strings.TrimSpace(*change.Prompt)
+		// The prompt is appended to every fix session's instructions, so a
+		// runaway one is a runaway cost on every pull request in the repository.
+		if len(prompt) > 4000 {
+			return sv, errors.New("extra instructions are limited to 4000 characters — they are appended to every fix session")
+		}
+		sv.Prompt = prompt
+	}
+	if change.MaxAttempts != nil {
+		n := *change.MaxAttempts
+		if n < 0 || n > 20 {
+			return sv, errors.New("max attempts must be between 0 and 20")
+		}
+		if n == 0 {
+			sv.MaxAttempts = nil // back to inherited
+		} else {
+			sv.MaxAttempts = &n
+		}
+	}
+	if change.Forks != nil {
+		forks := *change.Forks
+		sv.Forks = &forks
+	}
+	if change.SkipAuthors != nil {
+		authors := make([]string, 0, len(change.SkipAuthors))
+		for _, a := range change.SkipAuthors {
+			if a = strings.TrimSpace(a); a != "" {
+				authors = append(authors, a)
+			}
+		}
+		sort.Strings(authors)
+		sv.SkipAuthors, sv.SetSkipAuthors = authors, true
+	}
+	return sv, nil
+}
+
+func containsString(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+func sortedKeys(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// SolverIn answers for an already-loaded state, so a caller rendering many
+// repositories does not re-read the ref once per row.
+func (s *Service) SolverIn(st State, repo string) SolverView {
+	return s.solverViewOf(st, NormalizeRepo(repo))
+}

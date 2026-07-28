@@ -66,6 +66,10 @@ type Options struct {
 	// Coster estimates what a round would cost. Optional: without it the PR page
 	// simply shows no price, rather than a wrong one.
 	Coster Coster
+	// SolverFor resolves a repository's fix-session settings. Nil leaves the
+	// repository page without a solver card rather than showing env values that
+	// no repository record could change.
+	SolverFor SolverFor
 	// Observer supplies the per-PR findings. Optional: without it the PR page
 	// still renders its state layer.
 	Observer Observer
@@ -192,7 +196,7 @@ func (s *Server) refresh(ctx context.Context) {
 			fleet = f
 		}
 	}
-	snap := BuildFleet(st, s.opts.Fleet, ov, s.tools, s.opts.Host, now, botsFor, s.opts.EnrollFor, fleet)
+	snap := BuildFleet(st, s.opts.Fleet, ov, s.tools, s.opts.Host, now, botsFor, s.opts.EnrollFor, fleet, s.opts.SolverFor)
 	snap.Events = s.events.list()
 
 	s.mu.Lock()

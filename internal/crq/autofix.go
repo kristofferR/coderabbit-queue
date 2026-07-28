@@ -25,9 +25,12 @@ var fixPrompt string
 // AutofixInstall describes what an install would do, so --dry-run can print it and
 // the result can be reported.
 type AutofixInstall struct {
-	Platform  string `json:"platform"`
-	Prompt    string `json:"prompt"`
+	Platform string `json:"platform"`
+	Prompt   string `json:"prompt"`
+	// Wrapper starts the watcher; Session is the one fix session it runs per
+	// pull request, and the only one that sees the repository's settings.
 	Wrapper   string `json:"wrapper"`
+	Session   string `json:"session"`
 	Unit      string `json:"unit"`
 	LogDir    string `json:"log_dir"`
 	Workspace string `json:"workspace,omitempty"`
@@ -35,9 +38,12 @@ type AutofixInstall struct {
 	// Invocation is the exact command the wrapper runs, so --dry-run shows what
 	// the fix session will actually be — including the model, which is the
 	// agent's business and not crq's to hardcode.
-	Invocation string   `json:"invocation,omitempty"`
-	Repos      []string `json:"repos"`
-	Commands   []string `json:"commands"`
+	Invocation string `json:"invocation,omitempty"`
+	// AgentArgs are the operator's extra arguments, carried so the session
+	// script can be regenerated from the plan alone.
+	AgentArgs []string `json:"agent_args,omitempty"`
+	Repos     []string `json:"repos"`
+	Commands  []string `json:"commands"`
 	// Retire is the pre-rename watcher this install shuts down, when one is
 	// still on disk. Empty when there is nothing to retire.
 	Retire  string `json:"retire,omitempty"`
@@ -108,13 +114,15 @@ func AutofixPlan(cfg Config, agent string, agentArgs []string, repos []string, d
 	// silent nothing this command exists to prevent.
 	logDir := filepath.Join(home, ".local", "state", "crq")
 	plan := AutofixInstall{
-		Platform: runtime.GOOS,
-		LogDir:   logDir,
-		Prompt:   filepath.Join(home, ".local", "share", "crq", "fix-prompt.txt"),
-		Wrapper:  filepath.Join(home, ".local", "bin", "crq-autofix"),
-		Agent:    agent,
-		Repos:    repos,
-		DryRun:   dryRun,
+		Platform:  runtime.GOOS,
+		LogDir:    logDir,
+		Prompt:    filepath.Join(home, ".local", "share", "crq", "fix-prompt.txt"),
+		Wrapper:   filepath.Join(home, ".local", "bin", "crq-autofix"),
+		Session:   filepath.Join(home, ".local", "bin", "crq-fix-session"),
+		Agent:     agent,
+		AgentArgs: agentArgs,
+		Repos:     repos,
+		DryRun:    dryRun,
 	}
 	if root := strings.TrimSpace(cfg.WorkspaceRoot); root != "" {
 		plan.Workspace, err = filepath.Abs(root)
@@ -166,7 +174,7 @@ func AutofixPlan(cfg Config, agent string, agentArgs []string, repos []string, d
 
 // applyAutofix writes the plan to disk and starts the service.
 func (s *Service) applyAutofix(ctx context.Context, plan AutofixInstall) (AutofixInstall, error) {
-	invocation, logDir := plan.Invocation, plan.LogDir
+	logDir := plan.LogDir
 	self, err := os.Executable()
 	if err != nil {
 		return plan, err
@@ -178,14 +186,38 @@ func (s *Service) applyAutofix(ctx context.Context, plan AutofixInstall) (Autofi
 		return plan, err
 	}
 
-	// Known agents receive their non-interactive flags. Any other executable is
-	// treated as a self-contained prompt-taking wrapper.
+	// Two scripts, not one. The wrapper starts the watcher; the SESSION script
+	// is what the watcher runs per pull request, and it is separate precisely so
+	// the per-repository settings can reach it — argv is fixed when the watcher
+	// starts, the session's environment is built per dispatch. Reading the
+	// prompt here rather than in the wrapper also means editing the prompt takes
+	// effect on the next session instead of the next restart.
+	session := fmt.Sprintf(`#!/usr/bin/env bash
+# Installed by "crq autofix install". One fix session.
+#
+# crq sets these per pull request, from the repository's solver settings:
+#   CRQ_FIX_MODEL   the model to use, empty for the agent's own default
+#   CRQ_FIX_EFFORT  reasoning effort, empty for the agent's own default
+#   CRQ_FIX_PROMPT  extra standing instruction for this repository
+set -uo pipefail
+
+prompt="$(cat %s)"
+if [ -n "${CRQ_FIX_PROMPT:-}" ]; then
+  prompt="$prompt
+
+Additional instructions for this repository:
+$CRQ_FIX_PROMPT"
+fi
+
+%s
+`, shellQuote(plan.Prompt), sessionInvocation(plan.Agent, plan.AgentArgs))
+
 	wrapper := fmt.Sprintf(`#!/usr/bin/env bash
 # Installed by "crq autofix install". Runs autofix: crq decides, and a
 # fix session is started for each PR that needs one.
 set -uo pipefail
 exec %s watch -- %s
-`, shellQuote(self), invocation)
+`, shellQuote(self), shellQuote(plan.Session))
 
 	for _, f := range []struct {
 		path string
@@ -193,6 +225,7 @@ exec %s watch -- %s
 		mode os.FileMode
 	}{
 		{plan.Prompt, fixPrompt, 0o644},
+		{plan.Session, session, 0o755},
 		{plan.Wrapper, wrapper, 0o755},
 		{plan.Unit, s.autofixUnit(plan), 0o644},
 	} {
@@ -579,4 +612,43 @@ func sortedRepoList(set map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// sessionInvocation is the agent command inside the session script.
+//
+// Unlike agentInvocation — which builds a single fixed command line at install
+// time — this one is generated as shell that reads CRQ_FIX_MODEL and
+// CRQ_FIX_EFFORT when the session starts. An unset variable adds no flag at
+// all, so the agent keeps its own default rather than being handed an empty
+// one, which every agent rejects differently and none ignores.
+func sessionInvocation(agent string, extra []string) string {
+	quoted := make([]string, 0, len(extra))
+	for _, a := range extra {
+		quoted = append(quoted, shellQuote(a))
+	}
+	args := strings.Join(quoted, " ")
+
+	switch filepath.Base(agent) {
+	case "claude":
+		return fmt.Sprintf(`opts=()
+[ -n "${CRQ_FIX_MODEL:-}" ] && opts+=(--model "$CRQ_FIX_MODEL")
+[ -n "${CRQ_FIX_EFFORT:-}" ] && opts+=(--effort "$CRQ_FIX_EFFORT")
+# stream-json so the session log fills as it works rather than only at the end,
+# where a hung session would leave an empty file.
+exec %s -p "$prompt" --permission-mode bypassPermissions --output-format stream-json --verbose "${opts[@]}" %s`,
+			shellQuote(agent), args)
+	case "codex":
+		return fmt.Sprintf(`opts=()
+[ -n "${CRQ_FIX_MODEL:-}" ] && opts+=(--model "$CRQ_FIX_MODEL")
+[ -n "${CRQ_FIX_EFFORT:-}" ] && opts+=(-c "model_reasoning_effort=\"$CRQ_FIX_EFFORT\"")
+# exec is codex's non-interactive form; the prompt is its final positional
+# argument. --skip-git-repo-check because the session runs in a detached
+# worktree crq created.
+exec %s exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox "${opts[@]}" %s "$prompt"`,
+			shellQuote(agent), args)
+	default:
+		// An unknown executable is a self-contained prompt-taking wrapper. It
+		// gets no flags invented for it, but the environment still reaches it.
+		return fmt.Sprintf(`exec %s %s "$prompt"`, shellQuote(agent), args)
+	}
 }

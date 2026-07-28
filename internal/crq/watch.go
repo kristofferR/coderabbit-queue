@@ -350,7 +350,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			var result <-chan dispatchResult
 			if opts.dispatching() && report.Action == string(engine.ActionFix) && autofixOff[NormalizeRepo(repo)] {
 				event.Skipped = "autofix is off for this repository (crq autofix on " + NormalizeRepo(repo) + ")"
-			} else if opts.dispatching() && report.Action == string(engine.ActionFix) && !s.mayDispatch(repo, pull) {
+			} else if opts.dispatching() && report.Action == string(engine.ActionFix) && !s.mayDispatch(s.repoCfg(repo), repo, pull) {
 				event.Skipped = "the head branch is a fork; set CRQ_DISPATCH_FORKS=1 to fix contributor pull requests"
 			} else if opts.dispatching() && report.Action == string(engine.ActionFix) {
 				// Claim here and hand preparation to the pool. Checkout and
@@ -433,8 +433,8 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 // sandbox and does not claim to be one — it is the line between code the
 // operator wrote and code somebody else did. Reviewing a fork is unaffected:
 // reading a pull request runs nothing.
-func (s *Service) mayDispatch(repo string, pull ghapi.Pull) bool {
-	if s.cfg.DispatchForks {
+func (s *Service) mayDispatch(cfg Config, repo string, pull ghapi.Pull) bool {
+	if cfg.DispatchForks {
 		return true
 	}
 	head := NormalizeRepo(pull.Head.Repo.FullName)
@@ -536,7 +536,14 @@ func (s *Service) queueDispatch(
 		return false, why, nil, nil
 	}
 	token := randomToken()
-	claimed, why, byDesign := s.claimDispatch(ctx, report, token, opts.MaxAttempts)
+	// Per repository, not per watcher: the attempt budget is a property of the
+	// project being fixed, and one that keeps needing a fourth try should not
+	// have to raise the limit for every other repository the watcher handles.
+	maxAttempts := opts.MaxAttempts
+	if repoCfg := s.repoCfg(report.Repo); repoCfg.DispatchMaxAttempts > 0 {
+		maxAttempts = repoCfg.DispatchMaxAttempts
+	}
+	claimed, why, byDesign := s.claimDispatch(ctx, report, token, maxAttempts)
 	if !claimed {
 		pool.release()
 		// A round another watcher already holds, or one that has spent its
@@ -656,11 +663,19 @@ func (s *Service) dispatchWithStart(
 	cmd.Dir = co.Dir
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	// The repository's solver settings travel in the ENVIRONMENT, because argv
+	// is fixed when the watcher starts and these differ per repository. The
+	// session script reads them; a script from an older install ignores them
+	// and runs exactly as it did.
+	solver := s.repoCfg(report.Repo)
 	cmd.Env = append(os.Environ(),
 		"CRQ_DISPATCH_REPO="+report.Repo,
 		fmt.Sprintf("CRQ_DISPATCH_PR=%d", report.PR),
 		"CRQ_DISPATCH_HEAD="+report.Head,
 		"CRQ_DISPATCH_FINDINGS="+findingsPath,
+		"CRQ_FIX_MODEL="+solver.FixModel,
+		"CRQ_FIX_EFFORT="+solver.FixEffort,
+		"CRQ_FIX_PROMPT="+solver.FixPrompt,
 	)
 	// The session's push is a plain `git push`, and git reads no GITHUB_TOKEN of
 	// its own. The mirror carries a credential helper that reads this variable
