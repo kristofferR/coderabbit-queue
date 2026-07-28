@@ -562,8 +562,29 @@ func run(ctx context.Context, args []string) int {
 		addr := fs.String("addr", "127.0.0.1:7777", "address to listen on")
 		readOnly := fs.Bool("read-only", false, "refuse every write from the dashboard")
 		poll := fs.Duration("poll", 5*time.Second, "how often to re-read the state ref")
-		if err := fs.Parse(args[1:]); err != nil {
+		dryRun := fs.Bool("dry-run", false, "with install: print the plan, write nothing")
+		// `crq serve install` keeps the dashboard running across a logout and a
+		// reboot. Split before the flags are parsed so the subcommand word does
+		// not have to be a flag value.
+		serveArgs, install := args[1:], false
+		if len(serveArgs) > 0 && serveArgs[0] == "install" {
+			serveArgs, install = serveArgs[1:], true
+		}
+		if err := fs.Parse(serveArgs); err != nil {
 			return 1
+		}
+		if install {
+			if err := cfg.RequireState(); err != nil {
+				fatal(err)
+				return 1
+			}
+			plan, ierr := service.InstallServe(ctx, *addr, *readOnly, *dryRun)
+			if ierr != nil {
+				fatal(ierr)
+				return 1
+			}
+			printJSON(plan)
+			return 0
 		}
 		if err := cfg.RequireState(); err != nil {
 			fatal(err)
@@ -970,6 +991,30 @@ replies contesting the decline, crq re-surfaces that reply as its own finding.
 
 Pass --keep-open to leave it unresolved anyway (an on-the-record disagreement you
 intend to keep working). Thread IDs come from .findings[].thread_id.
+`)
+	case "serve":
+		fmt.Print(`crq serve [--addr host:port] [--read-only] [--poll <dur>]
+crq serve install [--addr host:port] [--read-only] [--dry-run]
+
+The live web dashboard: the queue, the repositories, the bots and the settings,
+in a page that updates itself. The GitHub issue dashboard is unaffected and
+stays exactly as it was.
+
+State is pushed over server-sent events whenever the state ref moves, and
+countdowns tick in the browser between pushes, so the page is live without
+polling and without a request per second. The expensive per-pull-request GitHub
+read is a separate layer, fetched when you open a PR and cached by head — the
+cheap state layer always renders immediately, and a GitHub failure costs one
+card rather than the page.
+
+  --addr       default 127.0.0.1:7777. Bind 0.0.0.0 to reach it from another
+               machine on a private network; there is NO authentication, so do
+               not put it on one you do not trust.
+  --read-only  refuse every write, for pointing at a fleet you do not administer.
+  install      write a service definition (systemd user unit, or a launchd
+               agent) and start it, so the dashboard survives a reboot. It
+               carries only the path to your config file, so editing that file
+               changes the dashboard by restarting it, not by reinstalling.
 `)
 	case "cost":
 		fmt.Print(`crq cost <repo> <pr>
