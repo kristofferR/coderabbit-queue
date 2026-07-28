@@ -412,6 +412,21 @@ func IsThrottled(err error) bool {
 	return errors.As(err, &rl)
 }
 
+// IsRecoverableRead reports a failure local to one resource that a bounded
+// multi-PR preview can count as unexamined while continuing. Authentication,
+// permission, validation and state errors are deliberately excluded.
+func IsRecoverableRead(err error) bool {
+	if errors.Is(err, ErrNotFound) {
+		return true
+	}
+	var api *APIError
+	if errors.As(err, &api) {
+		return api.Status == http.StatusNotFound || api.Status >= 500
+	}
+	var network net.Error
+	return errors.As(err, &network)
+}
+
 // ThrottleWait returns how long to wait before retrying a rate-limited error.
 // The bool is true when err is a rate limit; the duration is 0 when GitHub gave
 // no reset hint (the caller should apply its own default backoff).
@@ -1294,13 +1309,13 @@ type Repo struct {
 }
 
 // ListOwnerRepos lists the repositories an owner has, following pagination up
-// to max. It resolves user-vs-organization the same way the PR search does, and
+// to limit. It resolves user-vs-organization the same way the PR search does, and
 // through the same cache — the two ask the identical question about a login.
 //
 // Archived repositories are kept rather than filtered: the caller decides, and a
 // picker that silently omits a repository somebody is looking for is worse than
 // one that shows it greyed out.
-func (g *GitHub) ListOwnerRepos(ctx context.Context, owner string, max int) ([]Repo, error) {
+func (g *GitHub) ListOwnerRepos(ctx context.Context, owner string, limit int) ([]Repo, error) {
 	qualifier, err := g.searchOwnerQualifier(ctx, owner)
 	if err != nil {
 		return nil, err
@@ -1317,11 +1332,11 @@ func (g *GitHub) ListOwnerRepos(ctx context.Context, owner string, max int) ([]R
 		// one that answers for the token's own private repositories.
 		base = "/user/repos?affiliation=owner"
 	}
-	if max <= 0 {
-		max = 200
+	if limit <= 0 {
+		limit = 200
 	}
-	out := make([]Repo, 0, max)
-	for page := 1; len(out) < max && page <= 10; page++ {
+	out := make([]Repo, 0, limit)
+	for page := 1; len(out) < limit && page <= 10; page++ {
 		var batch []Repo
 		sep := "?"
 		if strings.Contains(base, "?") {
@@ -1336,8 +1351,8 @@ func (g *GitHub) ListOwnerRepos(ctx context.Context, owner string, max int) ([]R
 			break
 		}
 	}
-	if len(out) > max {
-		out = out[:max]
+	if len(out) > limit {
+		out = out[:limit]
 	}
 	return out, nil
 }

@@ -124,7 +124,7 @@ export function AddRepo({
           ) ?? cur,
       );
     } catch (e) {
-      setError((e as Error).message);
+      setPending({ repo, impact: pending?.impact, error: (e as Error).message });
     } finally {
       setBusy(null);
     }

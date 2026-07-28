@@ -68,6 +68,32 @@ func TestUnknownRoundFieldsSurviveARewrite(t *testing.T) {
 	}
 }
 
+func TestSetEnrollmentCarriesUnknownFields(t *testing.T) {
+	var st State
+	if err := json.Unmarshal([]byte(`{
+	  "v": 4,
+	  "enrolled": {
+	    "owner/repo": {"enabled": true, "future_enrollment_policy": {"mode": "audit"}}
+	  }
+	}`), &st); err != nil {
+		t.Fatal(err)
+	}
+
+	st.SetEnrollment("owner/repo", RepoEnrollment{Enabled: false, Reason: "paused"})
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	enrolled := back["enrolled"].(map[string]any)["owner/repo"].(map[string]any)
+	if _, ok := enrolled["future_enrollment_policy"]; !ok {
+		t.Fatalf("SetEnrollment dropped a future field: %s", out)
+	}
+}
+
 // FireSlot is nested beneath a known State field, so top-level tolerance cannot
 // carry additions made to the slot itself.
 func TestUnknownFireSlotFieldsSurviveARewrite(t *testing.T) {

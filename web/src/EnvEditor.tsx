@@ -20,6 +20,9 @@ const SOURCE: Record<string, { tone: "ok" | "acc" | "mut"; note: string }> = {
   default: { tone: "mut", note: "nothing sets it, so crq's built-in default applies" },
 };
 
+const booleanDraft = (value: string) =>
+  ["1", "true", "on", "yes"].includes(value.trim().toLowerCase()) ? "1" : "0";
+
 /**
  * Every setting, with the layer that decided it.
  *
@@ -149,7 +152,7 @@ export function EnvEditor({
                               type="button"
                               onClick={() => {
                                 setEditing(e.key);
-                                setDraft(e.value);
+                                setDraft(e.kind === "bool" ? booleanDraft(e.value) : e.value);
                               }}
                               className="text-acc hover:underline"
                             >

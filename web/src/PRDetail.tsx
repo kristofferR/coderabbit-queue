@@ -67,7 +67,7 @@ export function PRDetailPage({ repo, pr, rev }: { repo: string; pr: number; rev?
 
   const load = (refresh = false) => {
     setRefreshing(refresh);
-    fetch(`/api/pr/${repo}/${pr}${refresh ? "?refresh=1" : ""}`)
+    return fetch(`/api/pr/${repo}/${pr}${refresh ? "?refresh=1" : ""}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((v: PRView) => {
         setView(v);

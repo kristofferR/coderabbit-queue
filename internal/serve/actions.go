@@ -39,7 +39,7 @@ type Actor interface {
 	// layer that decided it. Pure: it reads the state it is handed.
 	EnvSettings(st state.State) []EnvSetting
 	// SetEnv records or clears one fleet-wide setting by its env name.
-	SetEnv(ctx context.Context, key, value string, clear bool) error
+	SetEnv(ctx context.Context, key, value string, unset bool) error
 	// SetSolver records how one repository's fix sessions run, or with an empty
 	// repo the fleet default every repository inherits.
 	SetSolver(ctx context.Context, repo string, change SolverChange) error
@@ -286,7 +286,11 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		status := http.StatusBadGateway
+		if errors.Is(err, errBadPR) {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -423,7 +427,7 @@ func hostsOf(writers []string) []string {
 	out := make([]string, 0, len(writers))
 	seen := map[string]bool{}
 	for _, w := range writers {
-		h := hostOf(w)
+		h := state.WriterHost(w)
 		if seen[h] {
 			continue
 		}

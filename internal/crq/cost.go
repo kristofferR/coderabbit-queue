@@ -137,6 +137,9 @@ func (s *Service) costWith(st State, repo string, pr int, head string, d dialect
 // costSummary renders the figure a person reads first. It never rounds an
 // uncertainty away: a range stays a range, and an incomplete total says so.
 func costSummary(c RoundCost) string {
+	if len(c.Reviewers) > 0 && len(c.Unpriced) == len(c.Reviewers) {
+		return fmt.Sprintf("no basis to price %d reviewer(s)", len(c.Unpriced))
+	}
 	var figure string
 	switch {
 	case c.Exact && c.High == 0:

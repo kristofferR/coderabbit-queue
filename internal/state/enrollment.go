@@ -34,7 +34,11 @@ func (s *State) SetEnrollment(repo string, e RepoEnrollment) {
 	if s.Enrolled == nil {
 		s.Enrolled = map[string]RepoEnrollment{}
 	}
-	s.Enrolled[normalizeRepoKey(repo)] = e
+	key := normalizeRepoKey(repo)
+	if prev, ok := s.Enrolled[key]; ok {
+		e.unknown = carryUnknown(e.unknown, prev.unknown)
+	}
+	s.Enrolled[key] = e
 }
 
 // ClearEnrollment drops the record, handing the repository back to the hosts'

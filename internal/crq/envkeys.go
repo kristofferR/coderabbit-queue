@@ -306,7 +306,7 @@ func fleetValueOf(fd FleetDefaults, key string) (string, bool) {
 	return "", false
 }
 
-// SetEnvTyped routes a write to the typed field when the key has one, so a
+// typedEnvKey reports whether a write routes to a typed field, so a
 // setting never ends up recorded in two places with one of them shadowed.
 func typedEnvKey(key string) bool {
 	switch key {

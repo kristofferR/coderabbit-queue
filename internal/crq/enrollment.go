@@ -462,7 +462,17 @@ func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact,
 			// that is how the daemon runs unless someone passes --no-incremental.
 			need, _, nerr := s.reviewNeeded(ctx, st, repo, pr.Number, true, noAnnounce)
 			if nerr != nil {
-				return false, nerr
+				if ghapi.IsThrottled(nerr) {
+					return false, nerr
+				}
+				if ctx.Err() != nil {
+					return false, ctx.Err()
+				}
+				if !ghapi.IsRecoverableRead(nerr) {
+					return false, nerr
+				}
+				impact.Unexamined++
+				return false, nil
 			}
 			if !need {
 				impact.Skipped["already reviewed at head"]++

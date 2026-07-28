@@ -34,7 +34,7 @@ func TestHandlersRefuseUntilTheFirstLoadSucceeds(t *testing.T) {
 
 	for _, path := range []string{"/api/snapshot", "/api/overview"} {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil)
 		switch path {
 		case "/api/snapshot":
 			srv.handleSnapshot(rec, req)
@@ -46,7 +46,7 @@ func TestHandlersRefuseUntilTheFirstLoadSucceeds(t *testing.T) {
 		}
 	}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/pr/o/r/1", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/pr/o/r/1", nil)
 	req.SetPathValue("owner", "o")
 	req.SetPathValue("name", "r")
 	req.SetPathValue("pr", "1")
@@ -58,7 +58,7 @@ func TestHandlersRefuseUntilTheFirstLoadSucceeds(t *testing.T) {
 	// Health must not read as ok either: a check that passes here passes against
 	// a server that has never reached the state ref.
 	rec = httptest.NewRecorder()
-	srv.handleHealth(rec, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	srv.handleHealth(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/health", nil))
 	var health map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &health); err != nil {
 		t.Fatal(err)
@@ -69,10 +69,10 @@ func TestHandlersRefuseUntilTheFirstLoadSucceeds(t *testing.T) {
 
 	// And the SSE stream sends nothing until there is something real to send.
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/api/events", nil)
-	ctx, cancel := context.WithCancel(req.Context())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	srv.handleEvents(rec, req.WithContext(ctx))
+	req = httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/events", nil)
+	srv.handleEvents(rec, req)
 	if body := rec.Body.String(); body != "" {
 		t.Errorf("the stream sent %q before any load; a browser would take it for live state", body)
 	}
@@ -80,7 +80,7 @@ func TestHandlersRefuseUntilTheFirstLoadSucceeds(t *testing.T) {
 	// Once a load lands, everything answers.
 	srv.refresh(context.Background())
 	rec = httptest.NewRecorder()
-	srv.handleSnapshot(rec, httptest.NewRequest(http.MethodGet, "/api/snapshot", nil))
+	srv.handleSnapshot(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/snapshot", nil))
 	if rec.Code != http.StatusOK {
 		t.Errorf("snapshot = %d after a successful load, want 200", rec.Code)
 	}
@@ -96,10 +96,10 @@ func TestTheStreamSaysWhyThereIsNoStateYet(t *testing.T) {
 	srv.refresh(context.Background())
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
-	ctx, cancel := context.WithCancel(req.Context())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	srv.handleEvents(rec, req.WithContext(ctx))
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/events", nil)
+	srv.handleEvents(rec, req)
 
 	body := rec.Body.String()
 	if !strings.HasPrefix(body, "event: unavailable\n") {
@@ -107,6 +107,15 @@ func TestTheStreamSaysWhyThereIsNoStateYet(t *testing.T) {
 	}
 	if !strings.Contains(body, "bad credentials") {
 		t.Errorf("stream sent %q, want the error that explains the empty page", body)
+	}
+}
+
+func TestBroadcastReplacesAQueuedStaleFrame(t *testing.T) {
+	ch := make(chan []byte, 1)
+	ch <- []byte("old")
+	broadcastFrame([]byte("new"), []chan []byte{ch})
+	if got := string(<-ch); got != "new" {
+		t.Fatalf("queued frame = %q, want the latest frame", got)
 	}
 }
 
@@ -123,7 +132,7 @@ func TestActionsAreRefusedOnANameThatOnlyResolvesHere(t *testing.T) {
 		"atlas", "atlas.local:7777", "atlas.tail1234.ts.net", // the same machine, however it is reached
 		"crq.example.test:7777", // named with --allow-host
 	} {
-		req := httptest.NewRequest(http.MethodPost, "/api/action/hold", nil)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/action/hold", nil)
 		req.Host = host
 		if err := srv.addressedHere(req); err != nil {
 			t.Errorf("Host %q was refused: %v", host, err)
@@ -135,7 +144,7 @@ func TestActionsAreRefusedOnANameThatOnlyResolvesHere(t *testing.T) {
 		// owner controls, pointed here, is the rebinding the check is for.
 		"atlas.attacker.example:7777", "atlas.evil.test",
 	} {
-		req := httptest.NewRequest(http.MethodPost, "/api/action/hold", nil)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/action/hold", nil)
 		req.Host = host
 		if err := srv.addressedHere(req); err == nil {
 			t.Errorf("Host %q was accepted; a page on that name could act on this fleet", host)
@@ -144,7 +153,7 @@ func TestActionsAreRefusedOnANameThatOnlyResolvesHere(t *testing.T) {
 
 	// And an Origin that contradicts the Host is not a same-origin request
 	// whatever it claims, even when the Host itself is one we answer to.
-	req := httptest.NewRequest(http.MethodPost, "/api/action/hold", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/action/hold", nil)
 	req.Host = "localhost:7777"
 	req.Header.Set("Origin", "http://evil.test")
 	if err := srv.addressedHere(req); err == nil {

@@ -366,6 +366,7 @@ func (s *Service) enqueueBatch(ctx context.Context, items []queueCandidate) erro
 					updated.Title = it.Title
 					st.PutRound(updated)
 					r = st.Round(repo, it.PR)
+					added++
 				}
 				if r.Head == it.Head {
 					if requeueIfReviewersChanged(st, r) {

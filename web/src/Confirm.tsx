@@ -32,7 +32,10 @@ export function Confirm({
   const [reason, setReason] = useState("");
   const blocked = needsReason && reason.trim() === "";
   const panel = useRef<HTMLDivElement>(null);
+  const reasonInput = useRef<HTMLInputElement>(null);
   const returnTo = useRef<Element | null>(null);
+  const onCancelRef = useRef(onCancel);
+  onCancelRef.current = onCancel;
 
   // A confirmation that spends quota or archives a round must not leave the
   // row behind it reachable by keyboard: Tab stays inside, Escape cancels, and
@@ -45,12 +48,13 @@ export function Confirm({
           'button:not([disabled]), input:not([disabled]), [href], select, textarea, [tabindex]:not([tabindex="-1"])',
         ) ?? [],
       );
-    focusable()[0]?.focus();
+    (needsReason ? reasonInput.current : null)?.focus();
+    if (!panel.current?.contains(document.activeElement)) focusable()[0]?.focus();
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
-        onCancel();
+        onCancelRef.current();
         return;
       }
       if (e.key !== "Tab") return;
@@ -72,7 +76,7 @@ export function Confirm({
       document.removeEventListener("keydown", onKey);
       (returnTo.current as HTMLElement | null)?.focus?.();
     };
-  }, [onCancel]);
+  }, []);
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-[rgb(27_36_48/0.28)] px-4 pt-[12vh]">
@@ -90,11 +94,18 @@ export function Confirm({
           <label className="mt-3 block">
             <span className="text-[12.5px] font-medium">{reasonLabel ?? "Reason"}</span>
             <input
+              ref={reasonInput}
+              required
+              aria-invalid={blocked}
+              aria-describedby="confirm-reason-hint"
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               placeholder="why — this is what every screen will show"
               className="mt-1 w-full rounded-lg border border-edge bg-[#FBFBFC] px-2.5 py-1.5 text-[13px]"
             />
+            <span id="confirm-reason-hint" className="mt-1 block text-[11.5px] text-faint">
+              A reason is required and will be shown with this decision.
+            </span>
           </label>
         )}
 

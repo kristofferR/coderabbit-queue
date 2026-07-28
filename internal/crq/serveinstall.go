@@ -6,6 +6,7 @@ import (
 	"html"
 	"os"
 	"os/exec"
+	osuser "os/user"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -48,6 +49,8 @@ type ServeInstall struct {
 	Commands      []string `json:"commands"`
 	DryRun        bool     `json:"dry_run,omitempty"`
 	Started       bool     `json:"started,omitempty"`
+	home          string
+	account       string
 }
 
 // InstallServe writes the service definition for `crq serve` and starts it.
@@ -96,25 +99,20 @@ func (s *Service) installUnit(ctx context.Context, service, addr string, allowHo
 		ReadOnly:      readOnly,
 		SkipAuthCheck: skipAuth,
 		DryRun:        dryRun,
+		home:          home,
+	}
+	if current, uerr := osuser.Current(); uerr == nil {
+		plan.account = current.Username
 	}
 	switch runtime.GOOS {
 	case "darwin":
 		plan.Unit = filepath.Join(home, "Library", "LaunchAgents", "no.kristofferr.crq-"+service+".plist")
-		plan.Commands = []string{
-			"launchctl bootout gui/$(id -u)/no.kristofferr.crq-" + service,
-			"launchctl bootstrap gui/$(id -u) " + plan.Unit,
-		}
 	default:
 		plan.Unit = filepath.Join(home, ".config", "systemd", "user", "crq-"+service+".service")
-		plan.Commands = []string{
-			"loginctl enable-linger " + os.Getenv("USER"),
-			"systemctl --user daemon-reload",
-			"systemctl --user enable crq-" + service,
-			// restart rather than "enable --now", which does nothing to a unit
-			// that is already running: reinstalling on a different address would
-			// otherwise report success and keep serving the old one.
-			"systemctl --user restart crq-" + service,
-		}
+	}
+	commands := serveCommands(plan)
+	for _, command := range commands {
+		plan.Commands = append(plan.Commands, command.display)
 	}
 	if dryRun {
 		return plan, nil
@@ -141,8 +139,8 @@ func (s *Service) installUnit(ctx context.Context, service, addr string, allowHo
 	}
 
 	var failed []string
-	for i, line := range plan.Commands {
-		args := serveCommandArgs(plan)[i]
+	for _, command := range commands {
+		line, args := command.display, command.argv
 		if len(args) == 0 {
 			return plan, fmt.Errorf("serve start command %q has no executable", line)
 		}
@@ -168,20 +166,45 @@ func (s *Service) installUnit(ctx context.Context, service, addr string, allowHo
 	return plan, nil
 }
 
-func serveCommandArgs(plan ServeInstall) [][]string {
+type serveCommand struct {
+	display string
+	argv    []string
+}
+
+func serveCommands(plan ServeInstall) []serveCommand {
 	if plan.Platform == "darwin" {
 		domain := "gui/" + currentUID()
-		return [][]string{
-			{"launchctl", "bootout", domain + "/no.kristofferr.crq-" + plan.Service},
-			{"launchctl", "bootstrap", domain, plan.Unit},
+		return []serveCommand{
+			{
+				display: "launchctl bootout " + shellQuote(domain+"/no.kristofferr.crq-"+plan.Service),
+				argv:    []string{"launchctl", "bootout", domain + "/no.kristofferr.crq-" + plan.Service},
+			},
+			{
+				display: "launchctl bootstrap " + shellQuote(domain) + " " + shellQuote(plan.Unit),
+				argv:    []string{"launchctl", "bootstrap", domain, plan.Unit},
+			},
 		}
 	}
-	return [][]string{
-		{"loginctl", "enable-linger", os.Getenv("USER")},
-		{"systemctl", "--user", "daemon-reload"},
-		{"systemctl", "--user", "enable", "crq-" + plan.Service},
-		{"systemctl", "--user", "restart", "crq-" + plan.Service},
+	out := []serveCommand{}
+	if plan.account != "" {
+		out = append(out, serveCommand{
+			display: "loginctl enable-linger " + shellQuote(plan.account),
+			argv:    []string{"loginctl", "enable-linger", plan.account},
+		})
 	}
+	return append(out,
+		serveCommand{display: "systemctl --user daemon-reload", argv: []string{"systemctl", "--user", "daemon-reload"}},
+		serveCommand{
+			display: "systemctl --user enable crq-" + plan.Service,
+			argv:    []string{"systemctl", "--user", "enable", "crq-" + plan.Service},
+		},
+		// restart rather than "enable --now", which does nothing to a unit that
+		// is already running after an address change.
+		serveCommand{
+			display: "systemctl --user restart crq-" + plan.Service,
+			argv:    []string{"systemctl", "--user", "restart", "crq-" + plan.Service},
+		},
+	)
 }
 
 // serveArgv is the command the service runs.
@@ -208,7 +231,11 @@ func unitDescription(service string) string {
 }
 
 func serveUnitBody(plan ServeInstall) string {
-	env := map[string]string{"HOME": os.Getenv("HOME")}
+	home := plan.home
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
+	env := map[string]string{"HOME": home}
 	if plan.Config != "" {
 		env["CRQ_CONFIG"] = plan.Config
 	}

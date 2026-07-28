@@ -297,6 +297,10 @@ func inFlight(st state.State, now time.Time, inflight time.Duration, botsFor Bot
 	sort.Slice(out, func(i, j int) bool {
 		a, b := out[i].FiredAt, out[j].FiredAt
 		switch {
+		case a == nil && b != nil:
+			return false
+		case a != nil && b == nil:
+			return true
 		case a != nil && b != nil && !a.Equal(*b):
 			return a.Before(*b)
 		default:

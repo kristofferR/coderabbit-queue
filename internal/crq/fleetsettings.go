@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -250,34 +251,30 @@ func (s *Service) applyFleetChange(st State, change FleetChange) (FleetDefaults,
 		}
 		fd.Required, fd.SetRequired = resolved, true
 	}
-	if change.UnsetMinInterval {
+	switch {
+	case change.UnsetMinInterval:
 		fd.MinInterval = ""
-	}
-	if change.UnsetWeeklyLimit {
-		fd.WeeklyLimit = nil
-	}
-	if change.MinInterval != nil {
+	case change.MinInterval != nil:
 		text := strings.TrimSpace(*change.MinInterval)
-		if text == "" {
-			fd.MinInterval = ""
-		} else {
-			d, err := time.ParseDuration(text)
-			if err != nil {
-				return fd, fmt.Errorf("min interval: %w", err)
-			}
-			if d < 0 {
-				return fd, errors.New("min interval cannot be negative")
-			}
-			// The pacing floor is the fleet's protection against spending the
-			// account faster than the vendor will refill it. A very small one is
-			// legal but worth refusing to set by accident.
-			if d > 0 && d < 5*time.Second {
-				return fd, errors.New("min interval below 5s would fire faster than any review completes")
-			}
-			fd.MinInterval = d.String()
+		d, err := time.ParseDuration(text)
+		if err != nil {
+			return fd, fmt.Errorf("min interval: %w", err)
 		}
+		if d < 0 {
+			return fd, errors.New("min interval cannot be negative")
+		}
+		// The pacing floor is the fleet's protection against spending the
+		// account faster than the vendor will refill it. A very small one is
+		// legal but worth refusing to set by accident.
+		if d > 0 && d < 5*time.Second {
+			return fd, errors.New("min interval below 5s would fire faster than any review completes")
+		}
+		fd.MinInterval = d.String()
 	}
-	if change.WeeklyLimit != nil {
+	switch {
+	case change.UnsetWeeklyLimit:
+		fd.WeeklyLimit = nil
+	case change.WeeklyLimit != nil:
 		if *change.WeeklyLimit < 0 {
 			return fd, errors.New("weekly limit cannot be negative")
 		}
@@ -351,9 +348,11 @@ func (s *Service) fleetImpact(st State, next FleetDefaults) FleetImpact {
 		}
 	}
 	impact.Repos = len(affected)
-	for _, repo := range all {
-		if !affected[repo] {
-			impact.Overridden++
+	if len(impact.Changes) > 0 {
+		for _, repo := range all {
+			if !affected[repo] {
+				impact.Overridden++
+			}
 		}
 	}
 
@@ -555,6 +554,7 @@ func (s *Service) AdoptEnv(ctx context.Context, dryRun bool) ([]AdoptedSetting, 
 	applied := map[string]bool{}
 	st, err := s.store.Update(ctx, func(st *State) error {
 		fd := st.Fleet
+		fd.Env = maps.Clone(st.Fleet.Env)
 		changed := false
 		clear(applied) // a CAS conflict runs this closure again
 		set := func(key, value string) {
@@ -675,7 +675,7 @@ func defaultValueOf(defaults Config, key string) string {
 }
 
 // SetEnv records or clears one fleet setting.
-func (s *Service) SetEnv(ctx context.Context, key, value string, clear bool) (FleetView, error) {
+func (s *Service) SetEnv(ctx context.Context, key, value string, unset bool) (FleetView, error) {
 	key = strings.TrimSpace(key)
 	if !fleetSettable(key) {
 		if _, known := envKeyByName(key); known {
@@ -683,7 +683,7 @@ func (s *Service) SetEnv(ctx context.Context, key, value string, clear bool) (Fl
 		}
 		return FleetView{}, fmt.Errorf("%s is not a setting crq knows", key)
 	}
-	if !clear {
+	if !unset {
 		if err := validateEnvValue(key, value); err != nil {
 			return FleetView{}, err
 		}
@@ -695,29 +695,29 @@ func (s *Service) SetEnv(ctx context.Context, key, value string, clear bool) (Fl
 		// Unset is its own instruction, not a change to some other value. Encoding
 		// it as one meant a cleared list read as "leave it alone" and a cleared
 		// weekly limit wrote 60 — so a host whose env said 90 never got it back.
-		unset := clear || strings.TrimSpace(value) == ""
+		clearTyped := unset || strings.TrimSpace(value) == ""
 		switch key {
 		case "CRQ_COBOTS":
-			if unset {
+			if clearTyped {
 				change.UnsetCoBots = true
 			} else {
 				change.CoBots = splitCommas(value)
 			}
 		case "CRQ_REQUIRED_BOTS":
-			if unset {
+			if clearTyped {
 				change.UnsetRequired = true
 			} else {
 				change.Required = splitCommas(value)
 			}
 		case "CRQ_MIN_INTERVAL":
-			if unset {
+			if clearTyped {
 				change.UnsetMinInterval = true
 			} else {
 				v := value
 				change.MinInterval = &v
 			}
 		case "CRQ_WEEKLY_LIMIT":
-			if unset {
+			if clearTyped {
 				change.UnsetWeeklyLimit = true
 			} else {
 				n, err := strconv.Atoi(strings.TrimSpace(value))
@@ -743,7 +743,7 @@ func (s *Service) SetEnv(ctx context.Context, key, value string, clear bool) (Fl
 		return FleetView{}, err
 	}
 	after := loaded
-	after.Fleet = fleetEnvSet(loaded.Fleet, key, value, clear)
+	after.Fleet = fleetEnvSet(loaded.Fleet, key, value, unset)
 	open := map[string]map[int]bool{}
 	for _, repo := range s.reposFollowingFleet(loaded) {
 		if sameReviewers(s.cfgFor(loaded, repo), s.cfgFor(after, repo)) {
@@ -758,17 +758,17 @@ func (s *Service) SetEnv(ctx context.Context, key, value string, clear bool) (Fl
 
 	now := s.clock().UTC()
 	st, err := s.store.Update(ctx, func(st *State) error {
-		if _, ok := st.Fleet.Env[key]; clear && !ok {
+		if _, ok := st.Fleet.Env[key]; unset && !ok {
 			return ErrNoChange
 		}
-		if cur, ok := st.Fleet.Env[key]; !clear && ok && cur == value {
+		if cur, ok := st.Fleet.Env[key]; !unset && ok && cur == value {
 			return ErrNoChange
 		}
 		before := map[string]Config{}
 		for repo := range open {
 			before[repo] = s.cfgFor(*st, repo)
 		}
-		st.SetFleetDefaults(fleetEnvSet(st.Fleet, key, value, clear), s.cfg.Host, now)
+		st.SetFleetDefaults(fleetEnvSet(st.Fleet, key, value, unset), s.cfg.Host, now)
 		for repo, was := range before {
 			s.reopenForChangedReviewers(st, repo, was, s.cfgFor(*st, repo), open[repo])
 		}
@@ -790,12 +790,12 @@ func (s *Service) SetEnv(ctx context.Context, key, value string, clear bool) (Fl
 // The map is COPIED rather than written through. A caller comparing the result
 // against the record it came from would otherwise be comparing one map with
 // itself, and the whole point of building it is to ask what the change would do.
-func fleetEnvSet(fd FleetDefaults, key, value string, clear bool) FleetDefaults {
+func fleetEnvSet(fd FleetDefaults, key, value string, unset bool) FleetDefaults {
 	env := make(map[string]string, len(fd.Env)+1)
 	for k, v := range fd.Env {
 		env[k] = v
 	}
-	if clear {
+	if unset {
 		delete(env, key)
 	} else {
 		env[key] = value

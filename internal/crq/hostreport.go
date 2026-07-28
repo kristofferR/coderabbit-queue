@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -13,6 +14,12 @@ import (
 // the dashboard; what matters here is the list, and that every host probes the
 // same one so two reports can be compared.
 var probedTools = []string{"crq", "git", "gh", "claude", "codex", "coderabbit", "macroscope"}
+
+var toolProbeCache struct {
+	sync.Mutex
+	at    time.Time
+	tools []ToolReport
+}
 
 // ReportHost records what THIS machine can reach, so the fleet can be read as a
 // fleet rather than as whichever host you happened to ask.
@@ -38,16 +45,12 @@ func (s *Service) ReportHost(ctx context.Context, roles ...string) {
 		Roles:   roles,
 		Agent:   agent,
 	}
-	for _, name := range probedTools {
-		t := ToolReport{Name: name}
-		if path, err := exec.LookPath(name); err == nil {
-			t.Path = path
-			t.Version = toolVersion(ctx, path)
-		}
-		report.Tools = append(report.Tools, t)
-	}
+	report.Tools = cachedToolReports(ctx, s.clock().UTC())
 
 	now := s.clock().UTC()
+	if s.cfg.DryRun {
+		return
+	}
 	if _, err := s.store.Update(ctx, func(st *State) error {
 		// Compared against what the merge WOULD produce, not against this
 		// process's own view: another service on this host may have added a
@@ -71,6 +74,26 @@ func (s *Service) ReportHost(ctx context.Context, roles ...string) {
 	}); err != nil && !errors.Is(err, ErrNoChange) && s.log != nil {
 		s.log.Printf("warning: reporting host tools: %v", err)
 	}
+}
+
+func cachedToolReports(ctx context.Context, now time.Time) []ToolReport {
+	toolProbeCache.Lock()
+	defer toolProbeCache.Unlock()
+	if len(toolProbeCache.tools) > 0 && toolProbeCache.at.After(now.Add(-HostReportTTL/2)) {
+		return append([]ToolReport(nil), toolProbeCache.tools...)
+	}
+	tools := make([]ToolReport, 0, len(probedTools))
+	for _, name := range probedTools {
+		t := ToolReport{Name: name}
+		if path, err := exec.LookPath(name); err == nil {
+			t.Path = path
+			t.Version = toolVersion(ctx, path)
+		}
+		tools = append(tools, t)
+	}
+	toolProbeCache.at = now
+	toolProbeCache.tools = append(toolProbeCache.tools[:0], tools...)
+	return tools
 }
 
 // toolVersion asks a tool what it is, briefly. Anything that does not answer in

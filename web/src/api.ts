@@ -211,6 +211,7 @@ export type HostInfo = {
 };
 export type HostTools = {
   host: string;
+  agent?: string;
   version?: string;
   caps?: number;
   roles?: string[];
@@ -443,7 +444,7 @@ export type Live = "connecting" | "live" | "reconnecting";
 export function subscribe(
   onData: (snap: Snapshot) => void,
   onLive: (live: Live) => void,
-  onUnavailable?: (error: string) => void,
+  onUnavailable?: (error: string | null) => void,
 ): () => void {
   let source: EventSource | null = null;
   let closed = false;
@@ -463,6 +464,7 @@ export function subscribe(
     source.onmessage = (e) => {
       try {
         onData(JSON.parse(e.data) as Snapshot);
+        onUnavailable?.(null);
         onLive("live");
       } catch {
         /* a malformed frame is not worth tearing the stream down for */

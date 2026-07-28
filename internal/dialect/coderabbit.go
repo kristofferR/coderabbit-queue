@@ -473,11 +473,9 @@ type CLIError struct {
 	UsageBasedEnabled bool
 }
 
-// mentionsUsageBased reports whether the guidance is INVITING the reader to
-// switch usage-based reviews on — which means they are currently off. The
-// distinction matters for cost: with them off, an exhausted allowance costs
-// nothing and simply waits.
-func mentionsUsageBased(guidance string) bool {
+// usageBasedAlreadyEnabled reports whether the guidance does not invite the
+// reader to enable usage-based reviews.
+func usageBasedAlreadyEnabled(guidance string) bool {
 	if guidance == "" {
 		return false
 	}
@@ -502,7 +500,7 @@ func ParseCLIError(event map[string]any) CLIError {
 			out.ProUser = v
 		}
 		out.PolicyGuidance = cliStringField(meta, "policyGuidance")
-		out.UsageBasedEnabled = mentionsUsageBased(out.PolicyGuidance)
+		out.UsageBasedEnabled = usageBasedAlreadyEnabled(out.PolicyGuidance)
 	}
 	return out
 }

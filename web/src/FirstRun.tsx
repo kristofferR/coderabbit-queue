@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { Snapshot } from "./api";
 
 /**
@@ -34,13 +35,15 @@ export function FirstRun({ snap }: { snap: Snapshot }) {
   const setup = snap.setup;
   const bots = snap.bots.filter((b) => b.enabled);
   const working = snap.bots.filter((b) => b.status === "working").length;
-  const agent = snap.repos[0]?.solver?.agent ?? "";
+  const agent =
+    snap.repos.some((repo) => repo.solver?.agent) ||
+    (setup.fleet ?? []).some((host) => host.agent);
   const hosts = setup.fleet?.length ?? 0;
 
   // The steps are the real ones, in order, each answering itself from live
   // state — a checklist that cannot tell you whether it is done is a to-do
   // list somebody else wrote.
-  const steps: { title: string; done: boolean; body: React.ReactNode }[] = [
+  const steps: { title: string; done: boolean; body: ReactNode }[] = [
     {
       title: "A place for the queue to live",
       done: setup.checks.some((c) => c.key === "state" && c.status === "ok"),
@@ -77,7 +80,7 @@ export function FirstRun({ snap }: { snap: Snapshot }) {
     },
     {
       title: "An agent to fix what they find",
-      done: agent !== "",
+      done: agent,
       body: (
         <>
           Optional, and the half most people skip: crq can run a coding agent over the findings and

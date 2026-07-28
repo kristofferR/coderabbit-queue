@@ -3,6 +3,7 @@ import type { BotCard, FleetSettings, Snapshot } from "./api";
 import { act, type ActionBody } from "./actions";
 import { BotIcon, Card, Pill, Toggle } from "./ui";
 import { Confirm } from "./Confirm";
+import { sameSet } from "./sets";
 
 /**
  * The fleet defaults, editable.
@@ -55,8 +56,8 @@ export function FleetEditor({
   }, [fleet.updated_at, fleet.recorded, fleet.min_interval, fleet.weekly_limit, fleet.autofix_default]);
 
   const dirty =
-    runs.join() !== fleetRuns.join() ||
-    required.join() !== fleetRequired.join() ||
+    !sameSet(runs, fleetRuns) ||
+    !sameSet(required, fleetRequired) ||
     minInterval !== fleet.min_interval ||
     weekly !== String(fleet.weekly_limit) ||
     autofix !== fleet.autofix_default;
@@ -69,8 +70,8 @@ export function FleetEditor({
   // because "explicitly none" is a change like any other.
   const change = (): NonNullable<ActionBody["fleet"]> => {
     const c: NonNullable<ActionBody["fleet"]> = {};
-    if (runs.join() !== fleetRuns.join()) c.cobots = runs;
-    if (required.join() !== fleetRequired.join()) c.required = required;
+    if (!sameSet(runs, fleetRuns)) c.cobots = runs;
+    if (!sameSet(required, fleetRequired)) c.required = required;
     if (minInterval !== fleet.min_interval) c.min_interval = minInterval;
     if (weekly !== String(fleet.weekly_limit)) c.weekly_limit = Number(weekly);
     if (autofix !== fleet.autofix_default) c.autofix_default = autofix;
@@ -84,14 +85,8 @@ export function FleetEditor({
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/action/fleet", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-CRQ-Dashboard": "1" },
-        body: JSON.stringify({ fleet: change(), preview: true }),
-      });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-      setImpact(body.impact);
+      const res = await act("fleet", { fleet: change(), preview: true });
+      setImpact(res.impact);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -164,6 +159,7 @@ export function FleetEditor({
                     <span className="ml-1 flex items-center gap-1.5">
                       <Toggle
                         on={b.primary || runs.includes(b.name)}
+                        label={`Runs ${b.name}`}
                         locked={b.primary}
                         title={
                           b.primary
@@ -183,6 +179,7 @@ export function FleetEditor({
                     <span className="flex items-center gap-1.5">
                       <Toggle
                         on={required.includes(b.name)}
+                        label={`Requires ${b.name}`}
                         title="convergence waits for it"
                         onClick={() =>
                           setRequired((cur) => {

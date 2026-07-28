@@ -559,36 +559,6 @@ func systemdExecWord(word string) string {
 	return strconv.Quote(word)
 }
 
-// agentInvocation renders the shell words that run one fix session.
-//
-// crq knows how to CALL the agents it ships support for, and nothing about which
-// model they should use — that belongs in the agent's own configuration or in
-// --agent-args, not baked into a queue. Both known agents are given the two
-// things a session needs: the prompt, and permission to act without a human
-// there to approve each step.
-func agentInvocation(agent, promptPath string, extra []string) (string, error) {
-	quoted := make([]string, 0, len(extra))
-	for _, a := range extra {
-		quoted = append(quoted, shellQuote(a))
-	}
-	args := strings.Join(quoted, " ")
-	switch filepath.Base(agent) {
-	case "claude":
-		// stream-json so the session log fills as it works rather than only at
-		// the end, where a hung session would leave an empty file.
-		return fmt.Sprintf(`%s -p "$(cat %s)" --permission-mode bypassPermissions --output-format stream-json --verbose %s`,
-			shellQuote(agent), shellQuote(promptPath), args), nil
-	case "codex":
-		// exec is codex's non-interactive form; the prompt is its final
-		// positional argument. --skip-git-repo-check because the session runs in
-		// a detached worktree crq created.
-		return fmt.Sprintf(`%s exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox %s "$(cat %s)"`,
-			shellQuote(agent), args, shellQuote(promptPath)), nil
-	default:
-		return fmt.Sprintf(`%s %s "$(cat %s)"`, shellQuote(agent), args, shellQuote(promptPath)), nil
-	}
-}
-
 // shellQuote makes one literal POSIX shell word. The generated wrapper is Bash,
 // so single quotes prevent parameter, command and backtick expansion; an
 // embedded single quote is represented by ending and reopening the quoted word.
@@ -606,45 +576,6 @@ func sortedRepoList(set map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// sessionInvocation is the agent command inside the session script.
-//
-// Unlike agentInvocation — which builds a single fixed command line at install
-// time — this one is generated as shell that reads CRQ_FIX_MODEL and
-// CRQ_FIX_EFFORT when the session starts. An unset variable adds no flag at
-// all, so the agent keeps its own default rather than being handed an empty
-// one, which every agent rejects differently and none ignores.
-func sessionInvocation(agent string, extra []string) string {
-	quoted := make([]string, 0, len(extra))
-	for _, a := range extra {
-		quoted = append(quoted, shellQuote(a))
-	}
-	args := strings.Join(quoted, " ")
-
-	switch filepath.Base(agent) {
-	case "claude":
-		return fmt.Sprintf(`opts=()
-[ -n "${CRQ_FIX_MODEL:-}" ] && opts+=(--model "$CRQ_FIX_MODEL")
-[ -n "${CRQ_FIX_EFFORT:-}" ] && opts+=(--effort "$CRQ_FIX_EFFORT")
-# stream-json so the session log fills as it works rather than only at the end,
-# where a hung session would leave an empty file.
-exec %s -p "$prompt" --permission-mode bypassPermissions --output-format stream-json --verbose "${opts[@]}" %s`,
-			shellQuote(agent), args)
-	case "codex":
-		return fmt.Sprintf(`opts=()
-[ -n "${CRQ_FIX_MODEL:-}" ] && opts+=(--model "$CRQ_FIX_MODEL")
-[ -n "${CRQ_FIX_EFFORT:-}" ] && opts+=(-c "model_reasoning_effort=\"$CRQ_FIX_EFFORT\"")
-# exec is codex's non-interactive form; the prompt is its final positional
-# argument. --skip-git-repo-check because the session runs in a detached
-# worktree crq created.
-exec %s exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox "${opts[@]}" %s "$prompt"`,
-			shellQuote(agent), args)
-	default:
-		// An unknown executable is a self-contained prompt-taking wrapper. It
-		// gets no flags invented for it, but the environment still reaches it.
-		return fmt.Sprintf(`exec %s %s "$prompt"`, shellQuote(agent), args)
-	}
 }
 
 // plistArgv renders a command line as launchd's ProgramArguments entries.

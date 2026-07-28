@@ -69,6 +69,9 @@ export type ActionBody = {
 
 /** A save can succeed and still be ignored by a host on an older binary. */
 export type ActionResult = { snapshot: Snapshot; warning?: string };
+export type FleetPreviewResult = {
+  impact: { summary: string; changes: string[]; reopened: number };
+};
 
 /**
  * Runs one action and returns the refreshed snapshot. The server re-reads state
@@ -79,7 +82,12 @@ export type ActionResult = { snapshot: Snapshot; warning?: string };
  * server is unauthenticated on the tailnet, and a browser cannot set a custom
  * header cross-origin without a preflight the server never approves.
  */
-export async function act(action: ActionName, body: ActionBody): Promise<ActionResult> {
+export function act(action: "fleet", body: ActionBody & { preview: true }): Promise<FleetPreviewResult>;
+export function act(action: ActionName, body: ActionBody): Promise<ActionResult>;
+export async function act(
+  action: ActionName,
+  body: ActionBody,
+): Promise<ActionResult | FleetPreviewResult> {
   const res = await fetch(`/api/action/${action}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-CRQ-Dashboard": "1" },
@@ -95,6 +103,34 @@ export async function act(action: ActionName, body: ActionBody): Promise<ActionR
     }
     throw new Error(message);
   }
-  const parsed = JSON.parse(text) as Snapshot | ActionResult;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("server returned an invalid JSON response");
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("server returned an invalid JSON response");
+  }
+  if (body.preview && "impact" in parsed) {
+    if (!isFleetPreviewResult(parsed)) {
+      throw new Error("server returned an invalid JSON response");
+    }
+    return parsed;
+  }
   return "snapshot" in parsed ? (parsed as ActionResult) : { snapshot: parsed as Snapshot };
+}
+
+function isFleetPreviewResult(value: object): value is FleetPreviewResult {
+  if (!("impact" in value) || value.impact === null || typeof value.impact !== "object") return false;
+  const impact = value.impact;
+  return (
+    "summary" in impact &&
+    typeof impact.summary === "string" &&
+    "changes" in impact &&
+    Array.isArray(impact.changes) &&
+    impact.changes.every((change) => typeof change === "string") &&
+    "reopened" in impact &&
+    typeof impact.reopened === "number"
+  );
 }

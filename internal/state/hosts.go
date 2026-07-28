@@ -2,8 +2,21 @@ package state
 
 import (
 	"sort"
+	"strings"
 	"time"
 )
+
+// WriterHost reduces a writer key ("host=X pid=… run=…") to its machine name.
+// Plain host names pass through unchanged for records written before keys
+// carried process identity.
+func WriterHost(writer string) string {
+	for _, field := range strings.Fields(writer) {
+		if host, ok := strings.CutPrefix(field, "host="); ok {
+			return host
+		}
+	}
+	return writer
+}
 
 // HostReport is what one machine says about itself: which crq it runs, and
 // which tools it can actually reach.

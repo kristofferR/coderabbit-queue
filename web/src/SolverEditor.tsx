@@ -35,6 +35,7 @@ export function SolverEditor({
   const [authors, setAuthors] = useState((solver.skip_authors ?? []).join(", "));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
 
   const server = {
     models: solver.models?.length ? solver.models : solver.model ? [solver.model] : [""],
@@ -72,9 +73,11 @@ export function SolverEditor({
   const post = async (edited: NonNullable<Parameters<typeof act>[1]["solver"]>) => {
     setBusy(true);
     setError(null);
+    setWarning(null);
     try {
       const res = await act("solver", { repo, solver: edited });
       onSnapshot?.(res.snapshot);
+      setWarning(res.warning ?? null);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -140,6 +143,12 @@ export function SolverEditor({
   };
 
   return (
+    <>
+      {warning && (
+        <div className="mb-3 rounded-lg border border-warn-edge bg-warn-bg px-3 py-2 text-[12.5px] text-warn">
+          {warning}
+        </div>
+      )}
     <Card
       title="Fix sessions"
       end={solver.overridden ? `override${solver.by ? ` by ${solver.by}` : ""}` : "following the fleet"}
@@ -360,6 +369,7 @@ export function SolverEditor({
         </p>
       </div>
     </Card>
+    </>
   );
 }
 

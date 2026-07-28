@@ -434,7 +434,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			var result <-chan dispatchResult
 			if opts.dispatching() && report.Action == string(engine.ActionFix) && autofixOff[NormalizeRepo(repo)] {
 				event.Skipped = "autofix is off for this repository (crq autofix on " + NormalizeRepo(repo) + ")"
-			} else if opts.dispatching() && report.Action == string(engine.ActionFix) && !s.mayDispatch(s.repoCfg(ctx, repo), repo, pull) {
+			} else if opts.dispatching() && report.Action == string(engine.ActionFix) && !s.mayDispatch(skipCfg, repo, pull) {
 				event.Skipped = "the head branch is a fork; set CRQ_DISPATCH_FORKS=1 to fix contributor pull requests"
 			} else if opts.dispatching() && report.Action == string(engine.ActionFix) {
 				// Claim here and hand preparation to the pool. Checkout and

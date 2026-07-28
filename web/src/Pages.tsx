@@ -8,6 +8,7 @@ import { AddRepo, EnrollmentEditor } from "./AddRepo";
 import { FleetEditor } from "./FleetEditor";
 import { SolverEditor } from "./SolverEditor";
 import { EnvEditor } from "./EnvEditor";
+import { sameSet, setKey } from "./sets";
 
 /* ------------------------------------------------------------------ Repos */
 
@@ -24,6 +25,11 @@ const ENROLLMENT: Record<
   excluded: { tone: "mut", label: "Excluded", note: "CRQ_EXCLUDE on this host, or the gate repo — a kill switch state cannot override" },
   off: { tone: "mut", label: "Not reviewed", note: "no record, and this host's allow-list omits it" },
 };
+
+function enrollmentLabel(enrollment: string, reviewed: boolean) {
+  const entry = ENROLLMENT[enrollment] ?? ENROLLMENT.off;
+  return enrollment === "state" && !reviewed ? { ...entry, tone: "mut" as const, label: "Turned off" } : entry;
+}
 
 export function ReposPage({
   repos,
@@ -61,9 +67,7 @@ export function ReposPage({
         ) : (
           <ul>
             {repos.map((r) => {
-              const e = ENROLLMENT[r.enrollment] ?? ENROLLMENT.off;
-              const label = r.enrollment === "state" && !r.reviewed ? "Turned off" : e.label;
-              const tone = r.enrollment === "state" && !r.reviewed ? "mut" : e.tone;
+              const e = enrollmentLabel(r.enrollment, r.reviewed);
               const on = selected?.repo === r.repo;
               return (
                 <li key={r.repo} className="border-t border-[#EEF0F3]">
@@ -77,7 +81,7 @@ export function ReposPage({
                       <RepoIcon repo={r.repo} />
                       {short(r.repo)}
                       <span className="ml-auto">
-                        <Pill tone={tone}>{label}</Pill>
+                        <Pill tone={e.tone}>{e.label}</Pill>
                       </span>
                     </div>
                     <div className="mt-0.5 ml-6 text-xs text-faint">
@@ -104,15 +108,11 @@ export function ReposPage({
           <div className="mb-3.5 flex flex-wrap items-center gap-3.5 rounded-[10px] border border-edge bg-card px-5 py-4 shadow-card">
             <RepoIcon repo={selected.repo} size={26} />
             <h1 className="font-mono text-[18px] font-[650] tracking-tight">{selected.repo}</h1>
-            <Pill tone={selected.reviewed ? (ENROLLMENT[selected.enrollment] ?? ENROLLMENT.off).tone : "mut"}>
-              {selected.reviewed
-                ? (ENROLLMENT[selected.enrollment] ?? ENROLLMENT.off).label
-                : selected.enrollment === "state"
-                  ? "Turned off"
-                  : (ENROLLMENT[selected.enrollment] ?? ENROLLMENT.off).label}
+            <Pill tone={enrollmentLabel(selected.enrollment, selected.reviewed).tone}>
+              {enrollmentLabel(selected.enrollment, selected.reviewed).label}
             </Pill>
             <span className="text-[12px] text-faint">
-              {(ENROLLMENT[selected.enrollment] ?? ENROLLMENT.off).note}
+              {enrollmentLabel(selected.enrollment, selected.reviewed).note}
             </span>
             {selected.override && <Pill tone="warn">Override</Pill>}
             {selected.primary_off && <Pill tone="bad">Primary off</Pill>}
@@ -327,8 +327,8 @@ function ReviewerEditor({
   // revision rebuilds the row objects, so the identity dependency reset the
   // toggles — discarding a half-made selection — whenever anything unrelated in
   // the queue moved.
-  const runsRev = repo.reviewers.join();
-  const requiredRev = repo.required.join();
+  const runsRev = setKey(repo.reviewers);
+  const requiredRev = setKey(repo.required);
   useEffect(() => {
     setRuns(repo.reviewers);
     setRequired(repo.required);
@@ -342,8 +342,7 @@ function ReviewerEditor({
   const primaryOn = primaryBot ? runs.includes(primaryBot.name) : false;
   const primaryWas = primaryBot ? repo.reviewers.includes(primaryBot.name) : false;
 
-  const dirty =
-    runs.join() !== repo.reviewers.join() || required.join() !== repo.required.join();
+  const dirty = !sameSet(runs, repo.reviewers) || !sameSet(required, repo.required);
   const newlyOn = runs.filter((b) => !repo.reviewers.includes(b) && b !== primaryBot?.name);
 
   const toggleRuns = (name: string) => {
@@ -434,12 +433,17 @@ function ReviewerEditor({
                 <Td className="text-center">
                   <Toggle
                     on={runs.includes(b.name)}
+                    label={`Runs ${b.name}`}
                     title={b.primary ? "the metered reviewer — turning it off spends no quota here" : undefined}
                     onClick={() => toggleRuns(b.name)}
                   />
                 </Td>
                 <Td className="text-center">
-                  <Toggle on={required.includes(b.name)} onClick={() => toggleRequired(b.name)} />
+                  <Toggle
+                    on={required.includes(b.name)}
+                    label={`Requires ${b.name}`}
+                    onClick={() => toggleRequired(b.name)}
+                  />
                 </Td>
                 <Td className="c-host text-[12.5px] text-faint">
                   {b.primary
@@ -587,7 +591,7 @@ function AutofixEditor({
                   choice === v ? "bg-ok-bg font-medium text-ok" : "text-mut hover:bg-bg"
                 }`}
               >
-                {v === "default" ? "Default (on)" : v}
+                {v === "default" ? "Default" : v}
               </button>
             ))}
           </span>
@@ -686,6 +690,7 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
       <div className="mt-4 grid grid-cols-2 gap-4 max-[940px]:grid-cols-1">
         {bots.map((b) => {
           const st = STATUS[b.status] ?? STATUS.off;
+          const seen = seenOn(b.seen_on);
           return (
             <section
               key={b.login}
@@ -731,10 +736,10 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
 
                 <p className="mt-2.5 text-[12.5px] text-faint">
                   {st.note}
-                  {b.last_seen && b.seen_on && (
+                  {b.last_seen && seen && (
                     <>
                       {" — last on "}
-                      <PRLink repo={b.seen_on.split("#")[0]} pr={Number(b.seen_on.split("#")[1] ?? 0)} />{" "}
+                      <PRLink repo={seen.repo} pr={seen.pr} />{" "}
                       {ago(b.last_seen, now)}
                     </>
                   )}
@@ -790,6 +795,17 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
       </p>
     </main>
   );
+}
+
+function seenOn(value?: string): { repo: string; pr: number } | null {
+  if (!value) return null;
+  const split = value.lastIndexOf("#");
+  if (split <= 0) return null;
+  const repo = value.slice(0, split);
+  const rawPR = value.slice(split + 1);
+  if (!/^[1-9]\d*$/.test(rawPR)) return null;
+  const pr = Number(rawPR);
+  return repo.includes("/") && Number.isSafeInteger(pr) ? { repo, pr } : null;
 }
 
 /* ------------------------------------------------------------------ Setup */

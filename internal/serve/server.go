@@ -1,6 +1,7 @@
 package serve
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -67,6 +68,9 @@ type Options struct {
 	// Token authenticates icon fetches. Repository favicons live in private
 	// repos too, and the browser must never hold this.
 	Token string
+	// LookupToken refreshes a rotated credential after an authenticated icon
+	// request is rejected. Nil keeps Token fixed.
+	LookupToken func(context.Context) string
 	// EnrollFor resolves whether crq reviews one repository. Nil falls back to
 	// reading the env lists alone, which is what the dashboard did before
 	// enrollment records existed.
@@ -165,7 +169,7 @@ func New(loader Loader, opts Options) *Server {
 		opts.Now = time.Now
 	}
 	return &Server{opts: opts, loader: loader, subs: map[chan []byte]struct{}{},
-		tools: LocalTools(), icons: NewIcons(opts.Token), observer: opts.Observer,
+		tools: LocalTools(), icons: NewIcons(opts.Token, opts.LookupToken), observer: opts.Observer,
 		observations: &observeCache{}, actor: opts.Actor,
 		events: newEventLog(300), discovered: &discoverCache{}, costs: &costCache{}}
 }
@@ -190,6 +194,7 @@ func (s *Server) Run(ctx context.Context) error {
 		Addr:              s.opts.Addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 	go func() {
 		<-ctx.Done()
@@ -388,7 +393,18 @@ func broadcastFrame(frame []byte, subs []chan []byte) {
 	for _, ch := range subs {
 		select {
 		case ch <- frame:
-		default: // a browser that cannot keep up gets the next one
+		default:
+			// The channel holds one complete frame. Replace an unread old one
+			// with the current state so a browser that catches up never paints a
+			// snapshot the server already superseded.
+			select {
+			case <-ch:
+			default:
+			}
+			select {
+			case ch <- frame:
+			default:
+			}
 		}
 	}
 }
@@ -538,11 +554,16 @@ func (s *Server) assets() http.Handler {
 }
 
 func writeJSON(w http.ResponseWriter, code int, body any) {
+	var payload bytes.Buffer
+	enc := json.NewEncoder(&payload)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(body); err != nil {
+		http.Error(w, "could not encode response", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	_ = enc.Encode(body)
+	_, _ = w.Write(payload.Bytes())
 }
 
 const unbuiltPage = `<!doctype html><meta charset="utf-8">

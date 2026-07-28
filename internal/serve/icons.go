@@ -18,8 +18,9 @@ import (
 // spend the shared REST budget on nothing. The browser never talks to GitHub
 // itself — that would leak the token or fail on private repos.
 type Icons struct {
-	token  string
-	client *http.Client
+	token       string
+	lookupToken func(context.Context) string
+	client      *http.Client
 
 	mu    sync.Mutex
 	cache map[string]*icon
@@ -35,8 +36,9 @@ type icon struct {
 }
 
 const (
-	iconTTL = 6 * time.Hour
-	missTTL = 1 * time.Hour
+	iconTTL  = 6 * time.Hour
+	missTTL  = 1 * time.Hour
+	maxIcons = 512
 )
 
 // candidatePaths are where projects actually keep a favicon, most likely first.
@@ -60,11 +62,12 @@ var candidatePaths = []string{
 	".github/logo.png",
 }
 
-func NewIcons(token string) *Icons {
+func NewIcons(token string, lookupToken func(context.Context) string) *Icons {
 	return &Icons{
-		token:  token,
-		client: &http.Client{Timeout: 10 * time.Second},
-		cache:  map[string]*icon{},
+		token:       token,
+		lookupToken: lookupToken,
+		client:      &http.Client{Timeout: 10 * time.Second},
+		cache:       map[string]*icon{},
 	}
 }
 
@@ -81,11 +84,31 @@ func (ic *Icons) get(key string) (*icon, bool) {
 func (ic *Icons) put(key string, got *icon) {
 	ic.mu.Lock()
 	defer ic.mu.Unlock()
+	now := time.Now()
+	for k, cached := range ic.cache {
+		if now.After(cached.expires) {
+			delete(ic.cache, k)
+		}
+	}
+	if len(ic.cache) >= maxIcons {
+		var oldestKey string
+		var oldest time.Time
+		for k, cached := range ic.cache {
+			if oldestKey == "" || cached.expires.Before(oldest) {
+				oldestKey, oldest = k, cached.expires
+			}
+		}
+		delete(ic.cache, oldestKey)
+	}
 	ic.cache[key] = got
 }
 
 // Repo returns a repository's favicon, or nil when it has none.
 func (ic *Icons) Repo(ctx context.Context, repo string) *icon {
+	owner, name, ok := strings.Cut(repo, "/")
+	if !ok || !plainName(owner) || !plainName(name) || strings.Contains(name, "/") {
+		return nil
+	}
 	key := "repo:" + strings.ToLower(repo)
 	if got, ok := ic.get(key); ok {
 		return got
@@ -93,7 +116,11 @@ func (ic *Icons) Repo(ctx context.Context, repo string) *icon {
 	for _, path := range candidatePaths {
 		// raw.githubusercontent honours the token, so private repos work and we
 		// avoid the contents API's base64 envelope.
-		raw := "https://raw.githubusercontent.com/" + repo + "/HEAD/" + path
+		segments := []string{url.PathEscape(owner), url.PathEscape(name), "HEAD"}
+		for _, segment := range strings.Split(path, "/") {
+			segments = append(segments, url.PathEscape(segment))
+		}
+		raw := "https://raw.githubusercontent.com/" + strings.Join(segments, "/")
 		if body, ctype, ok := ic.fetch(ctx, raw); ok {
 			got := &icon{body: body, contentType: ctype, expires: time.Now().Add(iconTTL)}
 			ic.put(key, got)
@@ -108,6 +135,9 @@ func (ic *Icons) Repo(ctx context.Context, repo string) *icon {
 // OAuth apps, but a GitHub App's avatar lives under /in/<id> and is only
 // reachable through the users API, so both routes are tried.
 func (ic *Icons) Bot(ctx context.Context, login string) *icon {
+	if !plainBotLogin(login) {
+		return nil
+	}
 	key := "bot:" + strings.ToLower(login)
 	if got, ok := ic.get(key); ok {
 		return got
@@ -117,7 +147,14 @@ func (ic *Icons) Bot(ctx context.Context, login string) *icon {
 		if avatar == "" {
 			continue
 		}
-		if body, ctype, ok := ic.fetch(ctx, avatar+"&s=96"); ok {
+		avatarURL, err := url.Parse(avatar)
+		if err != nil {
+			continue
+		}
+		query := avatarURL.Query()
+		query.Set("s", "96")
+		avatarURL.RawQuery = query.Encode()
+		if body, ctype, ok := ic.fetch(ctx, avatarURL.String()); ok {
 			got := &icon{body: body, contentType: ctype, expires: time.Now().Add(iconTTL)}
 			ic.put(key, got)
 			return got
@@ -135,7 +172,7 @@ func (ic *Icons) avatarURL(ctx context.Context, login string) string {
 	}
 	ic.auth(req)
 	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := ic.client.Do(req)
+	resp, err := ic.do(req)
 	if err != nil {
 		return ""
 	}
@@ -167,7 +204,7 @@ func (ic *Icons) fetch(ctx context.Context, rawURL string) ([]byte, string, bool
 		return nil, "", false
 	}
 	ic.auth(req)
-	resp, err := ic.client.Do(req)
+	resp, err := ic.do(req)
 	if err != nil {
 		return nil, "", false
 	}
@@ -192,10 +229,74 @@ func (ic *Icons) fetch(ctx context.Context, rawURL string) ([]byte, string, bool
 }
 
 func (ic *Icons) auth(req *http.Request) {
-	if ic.token != "" {
-		req.Header.Set("Authorization", "Bearer "+ic.token)
+	if req.URL.Host == "api.github.com" || req.URL.Host == "raw.githubusercontent.com" {
+		token := ic.currentToken(req.Context())
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
 	}
 	req.Header.Set("User-Agent", "crq-dashboard")
+}
+
+func (ic *Icons) currentToken(ctx context.Context) string {
+	ic.mu.Lock()
+	token, lookup := ic.token, ic.lookupToken
+	ic.mu.Unlock()
+	if token != "" || lookup == nil {
+		return token
+	}
+	token = lookup(ctx)
+	if token == "" {
+		return ""
+	}
+	ic.mu.Lock()
+	if ic.token == "" {
+		ic.token = token
+	}
+	token = ic.token
+	ic.mu.Unlock()
+	return token
+}
+
+func (ic *Icons) do(req *http.Request) (*http.Response, error) {
+	ic.auth(req)
+	resp, err := ic.client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden ||
+		ic.lookupToken == nil || req.Header.Get("Authorization") == "" {
+		return resp, err
+	}
+	resp.Body.Close()
+	token := ic.lookupToken(req.Context())
+	if token == "" {
+		return resp, nil
+	}
+	ic.mu.Lock()
+	ic.token = token
+	ic.mu.Unlock()
+	retry := req.Clone(req.Context())
+	retry.Header = req.Header.Clone()
+	retry.Header.Del("Authorization")
+	ic.auth(retry)
+	return ic.client.Do(retry)
+}
+
+func plainName(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	for _, r := range name {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
+			r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func plainBotLogin(login string) bool {
+	login = strings.TrimSuffix(login, "[bot]")
+	return plainName(login)
 }
 
 // sniff decides a content type when the origin serves everything as text,

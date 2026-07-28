@@ -88,18 +88,41 @@ type discoverCache struct {
 	at      time.Time
 	listing Listing
 	err     error
+	flight  chan struct{}
 }
 
 const discoverTTL = 10 * time.Minute
 
 func (c *discoverCache) get(ctx context.Context, d Discoverer, now time.Time, force bool) (Listing, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if !force && c.at.After(now.Add(-discoverTTL)) && c.err == nil {
-		return c.listing, nil
+		listing := c.listing
+		c.mu.Unlock()
+		return listing, nil
 	}
+	if c.flight != nil {
+		flight := c.flight
+		c.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return Listing{}, ctx.Err()
+		case <-flight:
+			c.mu.Lock()
+			listing, err := c.listing, c.err
+			c.mu.Unlock()
+			return listing, err
+		}
+	}
+	c.flight = make(chan struct{})
+	flight := c.flight
+	c.mu.Unlock()
+
 	listing, err := d.Discover(ctx)
+	c.mu.Lock()
 	c.at, c.listing, c.err = now, listing, err
+	c.flight = nil
+	close(flight)
+	c.mu.Unlock()
 	return listing, err
 }
 
@@ -128,10 +151,11 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 	// here is where that answer came from".
 	s.mu.RLock()
 	st := s.lastState
+	loaded := s.loaded
 	s.mu.RUnlock()
 	out := make([]Candidate, 0, len(rows))
 	for _, c := range rows {
-		if s.opts.EnrollFor != nil {
+		if loaded && s.opts.EnrollFor != nil {
 			e := s.opts.EnrollFor(st, c.Repo)
 			c.Enrollment = &e
 		}

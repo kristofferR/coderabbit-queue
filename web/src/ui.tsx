@@ -226,11 +226,13 @@ export function Td({ children, className = "" }: { children?: ReactNode; classNa
  */
 export function Toggle({
   on,
+  label,
   locked,
   title,
   onClick,
 }: {
   on: boolean;
+  label: string;
   locked?: boolean;
   title?: string;
   onClick?: () => void;
@@ -240,6 +242,7 @@ export function Toggle({
       type="button"
       role="switch"
       aria-checked={on}
+      aria-label={label}
       disabled={locked}
       onClick={onClick}
       title={title}

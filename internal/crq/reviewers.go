@@ -548,23 +548,6 @@ func (s *Service) fleetCfg(ctx context.Context) Config {
 	return s.cfgFor(st, "")
 }
 
-// repoSolver is the fix-session RECORD for one repository — the fleet default
-// with the repository's own layered over it — for a caller that has to tell
-// "somebody recorded this" from "this is the built-in default". repoCfg cannot
-// answer that: it merges the record into a configuration whose fields are
-// already populated, so every absent setting reads as a stated one.
-//
-// A read failure answers with an empty record, which is exactly "nothing
-// recorded" — the same fall-back-to-env choice repoCfg makes, for the same
-// reason, and it takes the caller's context for the same reason too.
-func (s *Service) repoSolver(ctx context.Context, repo string) SolverSettings {
-	st, _, err := s.store.Load(ctx)
-	if err != nil {
-		return SolverSettings{}
-	}
-	return st.EffectiveSolver(repo)
-}
-
 // ConfigIn is the configuration for one repository against an already-loaded
 // state — cfgFor, exported for callers that render many repositories from one
 // read. An empty repo answers for the fleet: env with the fleet record applied

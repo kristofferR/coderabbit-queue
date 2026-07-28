@@ -9,6 +9,28 @@ import (
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
+func TestFleetUnsetInstructionsWinOverValues(t *testing.T) {
+	minimum := "10m"
+	savedWeekly := 60
+	weekly := 80
+	service := &Service{}
+	got, err := service.applyFleetChange(State{Fleet: FleetDefaults{
+		MinInterval: "5m",
+		WeeklyLimit: &savedWeekly,
+	}}, FleetChange{
+		MinInterval:      &minimum,
+		UnsetMinInterval: true,
+		WeeklyLimit:      &weekly,
+		UnsetWeeklyLimit: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MinInterval != "" || got.WeeklyLimit != nil {
+		t.Fatalf("unset did not take precedence: %+v", got)
+	}
+}
+
 // The three layers are the whole feature, so this pins their order and — just
 // as importantly — that an absent fleet setting changes nothing at all. A fleet
 // that never writes a record must behave exactly as it did before the record

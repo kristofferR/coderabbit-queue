@@ -31,6 +31,7 @@ export function App() {
     addEventListener("hashchange", onHash);
     return () => removeEventListener("hashchange", onHash);
   }, []);
+  const pr = prRoute(route);
 
   return (
     <div className="min-w-[820px]">
@@ -44,6 +45,7 @@ export function App() {
             <a
               key={n.href}
               href={n.href}
+              aria-current={route === n.href ? "page" : undefined}
               className={`rounded-lg px-3 py-1.5 text-[13.5px] font-medium ${
                 route === n.href ? "bg-bg text-ink" : "text-mut hover:bg-bg"
               }`}
@@ -91,10 +93,10 @@ export function App() {
         </div>
       )}
 
-      {prRoute(route) ? (
-        <PRDetailPage repo={prRoute(route)!.repo} pr={prRoute(route)!.pr} rev={snap?.overview.rev} />
-      ) : !snap ? (
+      {!snap ? (
         <Loading live={live} error={unavailable} />
+      ) : pr ? (
+        <PRDetailPage repo={pr.repo} pr={pr.pr} rev={snap.overview.rev} />
       ) : route === "#/repos" ? (
         <ReposPage repos={snap.repos} bots={snap.bots} held={snap.overview.held} onSnapshot={setSnap} />
       ) : route === "#/bots" ? (

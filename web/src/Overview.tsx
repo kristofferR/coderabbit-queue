@@ -247,7 +247,7 @@ export function OverviewPage({
 
       <Card
         title="Queue"
-        count={`${ov.counts.queued} waiting`}
+        count={`${countLabel(queued.length, ov.counts.queued, narrowed)} waiting`}
         end="only the front row carries a time — later starts are unknowable"
       >
         {queued.length === 0 ? (
@@ -357,7 +357,7 @@ export function OverviewPage({
 
       <Card
         title="Autofix"
-        count={`${ov.autofix.sessions.length} running · ${ov.autofix.hosts.length} hosts`}
+        count={`${countLabel(fixing.length, ov.autofix.sessions.length, narrowed)} running · ${ov.autofix.hosts.length} hosts`}
       >
         {fixing.map((s) => (
           <div key={s.key} className="flex flex-wrap items-center gap-4 border-b border-[#EEF0F3] px-[18px] py-3 text-[13px]">
@@ -401,7 +401,7 @@ export function OverviewPage({
         </div>
       </Card>
 
-      <Card title="Recently finished" count={ov.finished.length}>
+      <Card title="Recently finished" count={countLabel(finished.length, ov.finished.length, narrowed)}>
         {finished.length === 0 ? (
           <Empty>Nothing has finished yet.</Empty>
         ) : (
@@ -567,7 +567,7 @@ function RowActions({
   onSettings?: () => void;
 }) {
   return (
-    <span className="flex justify-end gap-2.5 whitespace-nowrap opacity-0 transition-opacity group-hover:opacity-100">
+    <span className="flex justify-end gap-2.5 whitespace-nowrap opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
       {onPrioritize && (
         <button
           type="button"

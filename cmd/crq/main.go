@@ -22,6 +22,7 @@ import (
 	"github.com/kristofferR/coderabbit-queue/internal/crq"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 	"github.com/kristofferR/coderabbit-queue/internal/serve"
+	"github.com/kristofferR/coderabbit-queue/internal/state"
 )
 
 type stderrLogger struct{}
@@ -598,6 +599,10 @@ func run(ctx context.Context, args []string) int {
 		if err := fs.Parse(serveArgs); err != nil {
 			return 1
 		}
+		if !install && (*dryRun || *skipAuth) {
+			fatal(errors.New("--dry-run and --skip-auth-check apply to `crq serve install` only"))
+			return 1
+		}
 		if install {
 			if err := cfg.RequireState(); err != nil {
 				fatal(err)
@@ -657,10 +662,7 @@ func run(ctx context.Context, args []string) int {
 				return out
 			}
 			for _, r := range st.HostReportList() {
-				has := serve.HostHas{Host: r.Host}
-				if i := strings.Index(has.Host, "host="); i >= 0 {
-					has.Host = strings.SplitN(has.Host[i+len("host="):], " ", 2)[0]
-				}
+				has := serve.HostHas{Host: state.WriterHost(r.Host)}
 				for _, t := range r.Tools {
 					if t.Name != agent {
 						continue
@@ -746,17 +748,17 @@ func run(ctx context.Context, args []string) int {
 			FleetFor: func(st crq.State) *serve.FleetSettings {
 				return fleetSettingsOf(service.FleetSettingsIn(st))
 			},
-			Discoverer: repoDiscoverer{service},
-			Previewer:  enrollPreviewer{service},
-			Poll:       *poll,
-			Assets:     serve.Assets(),
-			Log:        stderrLogger{},
-			Host:       host,
-			Token:      ghapi.LookupToken(ctx),
-			Observer:   prObserver{service},
-			Coster:     prCoster{service},
-			Actor:      prActor{service},
-			ReadOnly:   *readOnly,
+			Discoverer:  repoDiscoverer{service},
+			Previewer:   enrollPreviewer{service},
+			Poll:        *poll,
+			Assets:      serve.Assets(),
+			Log:         stderrLogger{},
+			Host:        host,
+			LookupToken: ghapi.LookupToken,
+			Observer:    prObserver{service},
+			Coster:      prCoster{service},
+			Actor:       prActor{service},
+			ReadOnly:    *readOnly,
 			Fleet: serve.FleetConfig{
 				GateRepo:       cfg.GateRepo,
 				StateRef:       cfg.StateRef,
@@ -2572,7 +2574,7 @@ func parseStamp(s string) *time.Time {
 	if s == "" {
 		return nil
 	}
-	at, err := time.Parse("2006-01-02T15:04:05Z", s)
+	at, err := time.Parse(time.RFC3339, s)
 	if err != nil {
 		return nil
 	}
@@ -2636,12 +2638,16 @@ func runFleet(ctx context.Context, service *crq.Service, args []string) int {
 			fatal(fmt.Errorf("%s is not a setting crq knows", key))
 			return 1
 		}
-		clear := rest[1] == "--clear"
+		unset := rest[1] == "--clear"
+		if unset && len(rest) != 2 {
+			fatal(errors.New(`usage: crq fleet env <KEY> [<value>|--clear]`))
+			return 1
+		}
 		value := ""
-		if !clear {
+		if !unset {
 			value = strings.Join(rest[1:], " ")
 		}
-		view, err := service.SetEnv(ctx, rest[0], value, clear)
+		view, err := service.SetEnv(ctx, rest[0], value, unset)
 		if err != nil {
 			fatal(err)
 			return 1
@@ -2798,13 +2804,7 @@ func hostsOfWriters(writers []string) []string {
 	out := make([]string, 0, len(writers))
 	seen := map[string]bool{}
 	for _, w := range writers {
-		host := w
-		if i := strings.Index(w, "host="); i >= 0 {
-			host = w[i+len("host="):]
-			if j := strings.IndexByte(host, ' '); j >= 0 {
-				host = host[:j]
-			}
-		}
+		host := state.WriterHost(w)
 		if seen[host] {
 			continue
 		}
@@ -2990,8 +2990,8 @@ func (a prActor) EnvSettings(st crq.State) []serve.EnvSetting {
 	return out
 }
 
-func (a prActor) SetEnv(ctx context.Context, key, value string, clear bool) error {
-	_, err := a.svc.SetEnv(ctx, key, value, clear)
+func (a prActor) SetEnv(ctx context.Context, key, value string, unset bool) error {
+	_, err := a.svc.SetEnv(ctx, key, value, unset)
 	return err
 }
 

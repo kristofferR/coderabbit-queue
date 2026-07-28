@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { BotCard, RepoRow, Snapshot } from "./api";
 import { act } from "./actions";
 import { BotIcon, Pill, Toggle } from "./ui";
+import { sameSet, setKey } from "./sets";
 
 /**
  * A repository's reviewers, reachable from any row that mentions it.
@@ -44,8 +45,16 @@ export function QuickSettings({
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  const runsRev = setKey(repo.reviewers);
+  const requiredRev = setKey(repo.required);
+  useEffect(() => {
+    setRuns(repo.reviewers);
+    setRequired(repo.required);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repo.repo, runsRev, requiredRev]);
+
   const primary = bots.find((b) => b.primary);
-  const dirty = runs.join() !== repo.reviewers.join() || required.join() !== repo.required.join();
+  const dirty = !sameSet(runs, repo.reviewers) || !sameSet(required, repo.required);
   const newlyOn = runs.filter((n) => !repo.reviewers.includes(n));
 
   const save = async () => {
@@ -112,6 +121,7 @@ export function QuickSettings({
                   <td className="py-2 text-center">
                     <Toggle
                       on={runs.includes(b.name)}
+                      label={`Runs ${b.name}`}
                       title={b.primary ? "the metered reviewer — off here spends no quota on this repo" : undefined}
                       onClick={() =>
                         setRuns((cur) => {
@@ -126,6 +136,7 @@ export function QuickSettings({
                   <td className="py-2 text-center">
                     <Toggle
                       on={required.includes(b.name)}
+                      label={`Requires ${b.name}`}
                       onClick={() =>
                         setRequired((cur) => {
                           const on = cur.includes(b.name);

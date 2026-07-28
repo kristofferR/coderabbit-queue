@@ -15,8 +15,9 @@ export function useNow(intervalMs = 1000): number {
 
 /** Absolute wall-clock time, the format the Markdown dashboard also uses. */
 export function clock(iso?: string): string {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleTimeString([], {
+  const at = validTime(iso);
+  if (at === null) return "—";
+  return new Date(at).toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
@@ -39,24 +40,33 @@ function hms(totalSeconds: number): string {
  * pretending otherwise makes every other number on the page less trustworthy.
  */
 export function countdown(iso: string | undefined, now: number): string {
-  if (!iso) return "—";
-  const left = (new Date(iso).getTime() - now) / 1000;
+  const at = validTime(iso);
+  if (at === null) return "—";
+  const left = (at - now) / 1000;
   if (left <= 0) return "due";
   return `−${hms(left)}`;
 }
 
 /** Time elapsed since `iso`, for things that are running right now. */
 export function elapsed(iso: string | undefined, now: number): string {
-  if (!iso) return "—";
-  return hms((now - new Date(iso).getTime()) / 1000);
+  const at = validTime(iso);
+  if (at === null) return "—";
+  return hms((now - at) / 1000);
 }
 
 /** Coarse "3m ago" for timestamps where precision would be noise. */
 export function ago(iso: string | undefined, now: number): string {
-  if (!iso) return "—";
-  const s = Math.max(0, (now - new Date(iso).getTime()) / 1000);
+  const at = validTime(iso);
+  if (at === null) return "—";
+  const s = Math.max(0, (now - at) / 1000);
   if (s < 90) return `${Math.round(s)}s ago`;
   if (s < 5400) return `${Math.round(s / 60)}m ago`;
   if (s < 172800) return `${Math.round(s / 3600)}h ago`;
   return `${Math.round(s / 86400)}d ago`;
+}
+
+function validTime(iso?: string): number | null {
+  if (!iso || iso.startsWith("0001-01-01T00:00:00")) return null;
+  const at = Date.parse(iso);
+  return Number.isFinite(at) ? at : null;
 }

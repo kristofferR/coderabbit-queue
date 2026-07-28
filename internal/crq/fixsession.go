@@ -72,6 +72,9 @@ func fixSessionPrompt() (string, error) {
 	if extra := strings.TrimSpace(os.Getenv("CRQ_FIX_PROMPT")); extra != "" {
 		prompt += "\n\nAdditional instructions for this repository:\n" + extra
 	}
+	if strings.TrimSpace(prompt) == "" {
+		return "", fmt.Errorf("fix prompt %q is empty", path)
+	}
 	return prompt, nil
 }
 

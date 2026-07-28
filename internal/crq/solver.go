@@ -203,6 +203,15 @@ func (s *Service) SetFleetSolver(ctx context.Context, change SolverChange) (Solv
 		if err != nil {
 			return err
 		}
+		if next.Empty() {
+			if st.Fleet.Solver.Empty() {
+				return ErrNoChange
+			}
+			fd := st.Fleet
+			fd.Solver = SolverSettings{}
+			st.SetFleetDefaults(fd, s.cfg.Host, now)
+			return nil
+		}
 		at := now
 		next.By, next.UpdatedAt = s.cfg.Host, &at
 		fd := st.Fleet

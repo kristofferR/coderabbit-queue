@@ -6,10 +6,11 @@
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
     "strict": true,
+    "isolatedModules": true,
     "noUnusedLocals": true,
     "noEmit": true,
     "skipLibCheck": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["src"]
+  "include": ["src", "vite.config.ts"]
 }

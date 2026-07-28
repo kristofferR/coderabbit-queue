@@ -28,12 +28,7 @@ func splitKey(key string) (string, int) {
 // hostOf reduces "host=mbp pid=42 run=abc" to "mbp". The pid and run id matter
 // when reading a state dump; on screen they are noise.
 func hostOf(by string) string {
-	for _, field := range strings.Fields(by) {
-		if name, ok := strings.CutPrefix(field, "host="); ok {
-			return name
-		}
-	}
-	return by
+	return state.WriterHost(by)
 }
 
 // nextForRound says what happens next in words. The phase vocabulary stays

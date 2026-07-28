@@ -161,6 +161,7 @@ type SolverFor func(st state.State, repo string) RepoSolver
 // HostTools is one machine's self-report.
 type HostTools struct {
 	Host    string     `json:"host"`
+	Agent   string     `json:"agent,omitempty"`
 	Version string     `json:"version,omitempty"`
 	Caps    int        `json:"caps,omitempty"`
 	Roles   []string   `json:"roles,omitempty"`
@@ -491,16 +492,6 @@ func (c FleetConfig) enrollmentOf(repo string) string {
 	return "unknown"
 }
 
-func (c FleetConfig) fleetReviewers() (bots []string, required []string) {
-	for _, r := range c.Reviewers {
-		bots = append(bots, r.Name)
-		if r.Required {
-			required = append(required, r.Name)
-		}
-	}
-	return bots, required
-}
-
 func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Time) []BotCard {
 	seen := map[string]*time.Time{}
 	asked := map[string]*time.Time{}
@@ -754,9 +745,11 @@ func setupView(st state.State, cfg FleetConfig, ov Overview, tools []Tool, tools
 	}
 	for id, w := range st.Writers {
 		h := get(hostOf(id))
-		at := w.At
-		h.LastSeen = &at
-		h.Caps = w.Caps
+		if h.LastSeen == nil || w.At.After(*h.LastSeen) {
+			at := w.At
+			h.LastSeen = &at
+			h.Caps = w.Caps
+		}
 	}
 	for _, ah := range ov.Autofix.Hosts {
 		h := get(ah.Name)
@@ -853,25 +846,7 @@ func LocalTools() []Tool {
 }
 
 func itoa(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var b [20]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		b[i] = '-'
-	}
-	return string(b[i:])
+	return strconv.FormatInt(n, 10)
 }
 
 // botStatus is what crq can say about a bot's setup WITHOUT asking the vendor,
@@ -922,7 +897,7 @@ func hostTools(st state.State, now time.Time) []HostTools {
 	for _, r := range reports {
 		at := r.At
 		row := HostTools{
-			Host: hostOf(r.Host), Version: r.Version, Caps: r.Caps, Roles: r.Roles,
+			Host: hostOf(r.Host), Version: r.Version, Caps: r.Caps, Roles: r.Roles, Agent: r.Agent,
 			At: &at, Stale: now.Sub(r.At) > state.HostReportTTL,
 			// Behind is "not the newest crq in the fleet", so it only has to be
 			// as right as newest is. That is why newest is picked numerically:
