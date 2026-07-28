@@ -214,3 +214,44 @@ export function Th({ children, className = "" }: { children?: ReactNode; classNa
 export function Td({ children, className = "" }: { children?: ReactNode; className?: string }) {
   return <td className={`border-b border-[#EEF0F3] px-[18px] py-2.5 align-top ${className}`}>{children}</td>;
 }
+
+/**
+ * The one on/off control. Everything that turns a thing on or off uses this,
+ * so the gesture never changes between a repository's autofix switch and a
+ * bot's — a checkbox in one place and a labelled button in another reads as
+ * two different kinds of decision when it is the same one.
+ *
+ * locked disables it. Callers pass their own title, because "why can I not
+ * change this" is specific to what is locked.
+ */
+export function Toggle({
+  on,
+  locked,
+  title,
+  onClick,
+}: {
+  on: boolean;
+  locked?: boolean;
+  title?: string;
+  onClick?: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      disabled={locked}
+      onClick={onClick}
+      title={title}
+      className={`relative inline-block h-[19px] w-[34px] shrink-0 rounded-full transition-colors ${
+        on ? "bg-ok" : "bg-[#D6DAE0]"
+      } ${locked ? "opacity-55" : ""}`}
+    >
+      <span
+        className={`absolute top-0.5 size-[15px] rounded-full bg-white shadow transition-all ${
+          on ? "left-[17px]" : "left-0.5"
+        }`}
+      />
+    </button>
+  );
+}

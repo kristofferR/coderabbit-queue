@@ -2,7 +2,7 @@ import type { BotCard, RepoRow, SetupView, SettingsView, Snapshot } from "./api"
 import { useEffect, useState } from "react";
 import { act } from "./actions";
 import { Confirm } from "./Confirm";
-import { BotIcon, Card, Empty, Pill, PRLink, RepoIcon, Td, Th } from "./ui";
+import { BotIcon, Card, Empty, Pill, PRLink, RepoIcon, Td, Th, Toggle } from "./ui";
 import { ago, clock, useNow } from "./time";
 import { AddRepo, EnrollmentEditor } from "./AddRepo";
 import { FleetEditor } from "./FleetEditor";
@@ -251,7 +251,11 @@ function ReviewerEditor({
                   </span>
                 </Td>
                 <Td className="text-center">
-                  <Toggle on={runs.includes(b.name)} onClick={() => toggleRuns(b.name)} />
+                  <Toggle
+                    on={runs.includes(b.name)}
+                    title={b.primary ? "the metered reviewer — turning it off spends no quota here" : undefined}
+                    onClick={() => toggleRuns(b.name)}
+                  />
                 </Td>
                 <Td className="text-center">
                   <Toggle on={required.includes(b.name)} onClick={() => toggleRequired(b.name)} />
@@ -446,26 +450,6 @@ function AutofixEditor({
 }
 
 /** A switch that can be locked — the primary always runs, and says so. */
-function Toggle({ on, locked, onClick }: { on: boolean; locked?: boolean; onClick?: () => void }) {
-  return (
-    <button
-      type="button"
-      disabled={locked}
-      onClick={onClick}
-      title={locked ? "the primary reviewer always runs" : undefined}
-      className={`relative inline-block h-[19px] w-[34px] rounded-full transition-colors ${
-        on ? "bg-ok" : "bg-[#D6DAE0]"
-      } ${locked ? "opacity-55" : ""}`}
-    >
-      <span
-        className={`absolute top-0.5 size-[15px] rounded-full bg-white shadow transition-all ${
-          on ? "left-[17px]" : "left-0.5"
-        }`}
-      />
-    </button>
-  );
-}
-
 /* ------------------------------------------------------------------- Bots */
 
 export function BotsPage({
@@ -530,25 +514,18 @@ export function BotsPage({
               </div>
               <span className="ml-auto flex items-center gap-2">
                 {b.last_seen ? <Pill tone="ok">Seen {ago(b.last_seen, now)}</Pill> : <Pill tone="mut">Not seen yet</Pill>}
-                {b.primary ? (
-                  <Pill tone="acc">Primary</Pill>
-                ) : (
-                  <button
-                    type="button"
-                    disabled={busy === b.name}
-                    onClick={() => void setEnabled(b.name, !b.enabled)}
-                    title={
-                      b.enabled
+                <Toggle
+                  on={b.enabled}
+                  locked={b.primary || busy === b.name}
+                  title={
+                    b.primary
+                      ? "the primary runs everywhere by default — turn it off for one project on that project's page"
+                      : b.enabled
                         ? "runs on every repository that has not overridden its reviewers"
                         : "not run anywhere unless a repository names it"
-                    }
-                    className={`rounded-lg border px-2.5 py-0.5 text-[12px] font-semibold disabled:opacity-45 ${
-                      b.enabled ? "border-ok-edge bg-ok-bg text-ok" : "border-edge text-mut"
-                    }`}
-                  >
-                    {busy === b.name ? "…" : b.enabled ? "Runs" : "Off"}
-                  </button>
-                )}
+                  }
+                  onClick={() => void setEnabled(b.name, !b.enabled)}
+                />
               </span>
             </header>
             <div className="flex-1 px-5 pt-3 text-[13px] text-mut">

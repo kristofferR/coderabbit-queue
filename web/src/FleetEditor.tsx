@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { BotCard, FleetSettings, Snapshot } from "./api";
 import { act } from "./actions";
-import { BotIcon, Card, Pill } from "./ui";
+import { BotIcon, Card, Pill, Toggle } from "./ui";
 import { Confirm } from "./Confirm";
 
 /**
@@ -124,36 +124,46 @@ export function FleetEditor({
             <Row label="Reviewers" source={source("reviewers")}>
               <div className="flex flex-wrap items-center gap-3">
                 {bots.map((b) => (
-                  <label key={b.login} className="flex items-center gap-1.5 text-[12.5px]">
+                  <div
+                    key={b.login}
+                    className="flex items-center gap-2.5 rounded-lg border border-edge px-2.5 py-1.5"
+                  >
                     <BotIcon login={b.login} name={b.name} size={18} />
-                    <span className="font-[550]">{b.name}</span>
-                    <input
-                      type="checkbox"
-                      checked={b.primary || runs.includes(b.name)}
-                      disabled={b.primary}
-                      title={b.primary ? "the primary always runs by default; turn it off per repository" : "runs"}
-                      onChange={() =>
-                        setRuns((cur) => {
-                          const on = cur.includes(b.name);
-                          if (on) setRequired((r) => r.filter((n) => n !== b.name));
-                          return on ? cur.filter((n) => n !== b.name) : [...cur, b.name];
-                        })
-                      }
-                    />
-                    <span className="text-faint">runs</span>
-                    <input
-                      type="checkbox"
-                      checked={required.includes(b.name)}
-                      onChange={() =>
-                        setRequired((cur) => {
-                          const on = cur.includes(b.name);
-                          if (!on && !b.primary) setRuns((r) => (r.includes(b.name) ? r : [...r, b.name]));
-                          return on ? cur.filter((n) => n !== b.name) : [...cur, b.name];
-                        })
-                      }
-                    />
-                    <span className="text-faint">required</span>
-                  </label>
+                    <span className="text-[12.5px] font-[550]">{b.name}</span>
+                    <span className="ml-1 flex items-center gap-1.5">
+                      <Toggle
+                        on={b.primary || runs.includes(b.name)}
+                        locked={b.primary}
+                        title={
+                          b.primary
+                            ? "the primary runs everywhere by default — turn it off for one project on that project's page"
+                            : "runs on every repository that has not overridden its reviewers"
+                        }
+                        onClick={() =>
+                          setRuns((cur) => {
+                            const on = cur.includes(b.name);
+                            if (on) setRequired((r) => r.filter((n) => n !== b.name));
+                            return on ? cur.filter((n) => n !== b.name) : [...cur, b.name];
+                          })
+                        }
+                      />
+                      <span className="text-[12px] text-faint">runs</span>
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                      <Toggle
+                        on={required.includes(b.name)}
+                        title="convergence waits for it"
+                        onClick={() =>
+                          setRequired((cur) => {
+                            const on = cur.includes(b.name);
+                            if (!on && !b.primary) setRuns((r) => (r.includes(b.name) ? r : [...r, b.name]));
+                            return on ? cur.filter((n) => n !== b.name) : [...cur, b.name];
+                          })
+                        }
+                      />
+                      <span className="text-[12px] text-faint">required</span>
+                    </span>
+                  </div>
                 ))}
               </div>
             </Row>
