@@ -452,13 +452,25 @@ function AutofixEditor({
 /** A switch that can be locked — the primary always runs, and says so. */
 /* ------------------------------------------------------------------- Bots */
 
-const STATUS: Record<string, { tone: "ok" | "warn" | "mut" | "acc"; label: string; note: string }> = {
-  working: { tone: "ok", label: "Working", note: "crq has seen it review here in the last week" },
-  quiet: { tone: "warn", label: "Quiet", note: "crq saw it once, but not lately" },
+const STATUS: Record<
+  string,
+  { tone: "ok" | "warn" | "bad" | "mut" | "acc"; label: string; note: string }
+> = {
+  working: { tone: "ok", label: "Working", note: "crq saw it answer here in the last week" },
+  quiet: { tone: "warn", label: "Quiet", note: "crq saw it answer once, but not lately" },
+  silent: {
+    tone: "bad",
+    label: "Never answered",
+    note:
+      "crq has asked it and never seen an answer — most likely it is not set up on this account, " +
+      "and every trigger crq posts for it is a comment nobody reads",
+  },
   unverified: {
-    tone: "warn",
+    tone: "mut",
     label: "Not verified",
-    note: "enabled, but crq has never seen it do anything here — it may not be set up",
+    note:
+      "enabled, but crq has no evidence either way yet — it records a bot's answers only as it " +
+      "observes rounds, so this is normal for a while after an upgrade",
   },
   off: { tone: "mut", label: "Not enabled", note: "crq does not ask for its review on this fleet" },
 };
@@ -539,6 +551,14 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
                   )}
                   {b.repo_count > 0 && ` · ${b.repo_count} repo override(s) name it`}
                 </p>
+
+                {b.status === "silent" && b.last_asked && (
+                  <p className="mt-2 rounded-lg border border-bad-edge bg-bad-bg px-2.5 py-1.5 text-[12.5px] text-bad">
+                    Last asked {ago(b.last_asked, now)} and it has never answered. Turn it off on the
+                    repositories that use it, or finish setting it up — until then crq posts a
+                    trigger comment on every round and waits out the grace period for nothing.
+                  </p>
+                )}
 
                 {b.status !== "working" && (b.setup?.length ?? 0) > 0 && (
                   <details className="mt-2.5 rounded-lg border border-edge bg-[#FBFBFC] px-2.5 py-1.5">

@@ -135,25 +135,32 @@ type SolverFor func(st state.State, repo string) RepoSolver
 // crq itself recorded — a trigger it posted or a claim it observed — rather
 // than a vendor status we would have to guess at.
 type BotCard struct {
-	Login     string     `json:"login"`
-	Name      string     `json:"name"`
-	Primary   bool       `json:"primary"`
-	Metered   bool       `json:"metered"`
-	Enabled   bool       `json:"enabled"`
-	Required  bool       `json:"required"`
-	Command   string     `json:"command,omitempty"`
-	Trigger   string     `json:"trigger,omitempty"`
-	Grace     Dur        `json:"grace,omitempty"`
+	Login    string `json:"login"`
+	Name     string `json:"name"`
+	Primary  bool   `json:"primary"`
+	Metered  bool   `json:"metered"`
+	Enabled  bool   `json:"enabled"`
+	Required bool   `json:"required"`
+	Command  string `json:"command,omitempty"`
+	Trigger  string `json:"trigger,omitempty"`
+	Grace    Dur    `json:"grace,omitempty"`
+	// LastSeen is when crq observed this bot ANSWER; LastAsked is when crq last
+	// posted its trigger. A bot that has been asked and never answered is the
+	// case worth surfacing, and needs both to state it.
 	LastSeen  *time.Time `json:"last_seen,omitempty"`
+	LastAsked *time.Time `json:"last_asked,omitempty"`
 	SeenOn    string     `json:"seen_on,omitempty"`
 	RepoCount int        `json:"repo_count"`
 
 	// Status is what crq can honestly say about setup, from its OWN records —
 	// a trigger it posted, a claim it saw — never a status read from the vendor:
 	//
-	//	working    seen within the week
-	//	quiet      seen once, but not lately
-	//	unverified enabled, but crq has never seen it do anything here
+	//	working    crq saw it answer within the week
+	//	quiet      it answered once, but not lately
+	//	silent     crq has asked it and never seen an answer — the case that
+	//	           matters, and the whole reason answering is tracked apart
+	//	           from asking
+	//	unverified enabled, but crq has never even asked it here
 	//	off        not enabled on this fleet
 	Status string `json:"status"`
 
@@ -391,7 +398,17 @@ func (c FleetConfig) fleetReviewers() (bots []string, required []string) {
 
 func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Time) []BotCard {
 	seen := map[string]*time.Time{}
+	asked := map[string]*time.Time{}
 	where := map[string]string{}
+	noteAsked := func(login string, at *time.Time) {
+		if at == nil {
+			return
+		}
+		key := dialect.NormalizeBotName(login)
+		if cur, ok := asked[key]; !ok || cur == nil || at.After(*cur) {
+			asked[key] = at
+		}
+	}
 	note := func(login string, at *time.Time, repo string, pr int) {
 		if at == nil {
 			return
@@ -402,16 +419,39 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Tim
 			where[key] = state.Key(repo, pr)
 		}
 	}
+	// Two different facts, kept apart on purpose. AnsweredAt is the BOT: crq
+	// observed it review this head. CommandedAt/ClaimedAt are crq: what it
+	// posted and what it claimed the right to post. Reading the second as the
+	// first is how a bot nobody has an account for reads as working — crq asks,
+	// records that it asked, and nothing ever answers.
+	// Whether the answer log has anything in it AT ALL. It is written only when
+	// crq observes a round, so on a fleet that has just upgraded it is empty —
+	// and "no answer recorded" then means "not looked yet", not "never
+	// answered". Claiming the second would accuse a working bot of being
+	// unconfigured on the strength of a field introduced five minutes ago.
+	coEvidence := false
 	scan := func(r state.Round) {
 		for login, co := range r.CoBots {
-			if co.CommandedAt != nil {
-				note(login, co.CommandedAt, r.Repo, r.PR)
+			if co.AnsweredAt != nil {
+				coEvidence = true
+			}
+			if co.AnsweredAt != nil {
+				note(login, co.AnsweredAt, r.Repo, r.PR)
+			}
+			if at := co.CommandedAt; at != nil {
+				noteAsked(login, at)
 			} else if co.ClaimedAt != nil {
-				note(login, co.ClaimedAt, r.Repo, r.PR)
+				noteAsked(login, co.ClaimedAt)
 			}
 		}
+		// The primary is different: its round holds no per-bot entry, and a
+		// FiredAt is only crq's command going out. A round that COMPLETED is the
+		// evidence, since Completion is what waits for its review.
 		if r.FiredAt != nil && !r.CoOnly {
-			note(cfg.primaryLogin(), r.FiredAt, r.Repo, r.PR)
+			noteAsked(cfg.primaryLogin(), r.FiredAt)
+			if r.Phase == state.PhaseCompleted {
+				note(cfg.primaryLogin(), r.FiredAt, r.Repo, r.PR)
+			}
 		}
 	}
 	for _, r := range st.Rounds {
@@ -446,8 +486,9 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Tim
 		card := BotCard{
 			Login: login, Name: name, Primary: primary, Metered: metered,
 			Enabled: on, Required: on && b.Required,
-			LastSeen: seen[key], SeenOn: where[key], RepoCount: repoCount[key],
-			Status: botStatus(on, seen[key], now),
+			LastSeen: seen[key], LastAsked: asked[key], SeenOn: where[key],
+			RepoCount: repoCount[key],
+			Status:    botStatus(on, seen[key], asked[key], now, primary || coEvidence),
 		}
 		if v, ok := dialect.VendorFor(login); ok {
 			card.Site, card.Docs = v.Site, v.Docs
@@ -646,10 +687,18 @@ func itoa(n int64) string {
 // "Enabled" and "working" are different claims and the page must not merge
 // them: a bot enabled by a default nobody chose, on an account nobody has, is
 // exactly the case that looks configured and reviews nothing.
-func botStatus(enabled bool, lastSeen *time.Time, now time.Time) string {
+func botStatus(enabled bool, lastSeen, lastAsked *time.Time, now time.Time, logWarm bool) string {
 	switch {
 	case !enabled:
 		return "off"
+	case lastSeen == nil && !logWarm:
+		// Nothing has been observed since crq started recording answers, so
+		// there is no basis to say this bot has never answered.
+		return "unverified"
+	case lastSeen == nil && lastAsked != nil:
+		// Asked and never answered. The most useful thing the page can say, and
+		// the reason answering is tracked separately from asking at all.
+		return "silent"
 	case lastSeen == nil:
 		return "unverified"
 	case now.Sub(*lastSeen) <= 7*24*time.Hour:

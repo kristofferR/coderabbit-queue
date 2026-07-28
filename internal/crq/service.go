@@ -963,6 +963,7 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 		return st, nil
 	}
 	s.selfHealCoReviewers(ctx, cfg, *target, obs.eng, now)
+	s.noteCoAnswers(ctx, cfg, *target, obs.eng, now)
 	tr := engine.Progress(*target, st.Account, obs.eng, now, cfg.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return st, nil
@@ -2497,4 +2498,57 @@ func (s *Service) sweepParkedClosed(ctx context.Context, st State) (PumpResult, 
 	}
 	res, err := s.abandonRound(ctx, *target, "pr closed", "skipped")
 	return res, true, err
+}
+
+// noteCoAnswers records which co-reviewers have actually answered for this
+// head, from an observation crq has already paid for.
+//
+// It exists because nothing else in the round says a bot did anything. The
+// trigger bookkeeping — the command crq posted, the claim it took — is all
+// about crq, so a bot with no account behind it looks identical to one working
+// perfectly: crq asks, records that it asked, and nothing answers. This is the
+// only field that can tell those apart, which is what the bot guide's setup
+// status is read from.
+func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, obs engine.Observation, now time.Time) {
+	var answered []string
+	for _, cb := range cfg.CoBots {
+		if engine.CoReviewedHead(obs, cb.Login) {
+			answered = append(answered, cb.Login)
+		}
+	}
+	if len(answered) == 0 {
+		return
+	}
+	if _, err := s.store.Update(ctx, func(st *State) error {
+		r := st.Round(round.Repo, round.PR)
+		if r == nil || !sameRound(r, round) {
+			return ErrNoChange
+		}
+		before := r.CoBots
+		for _, login := range answered {
+			r.NoteCoAnswer(login, now)
+		}
+		if sameCoAnswers(before, r.CoBots) {
+			return ErrNoChange
+		}
+		st.PutRound(*r)
+		return nil
+	}); err != nil && !errors.Is(err, ErrNoChange) && s.log != nil {
+		// Display-only bookkeeping: worth a line, never worth failing a round.
+		s.log.Printf("warning: recording co-reviewer answers for %s#%d: %v", round.Repo, round.PR, err)
+	}
+}
+
+func sameCoAnswers(before, after map[string]CoBotRound) bool {
+	for login, a := range after {
+		b := before[login]
+		switch {
+		case a.AnsweredAt == nil && b.AnsweredAt == nil:
+		case a.AnsweredAt == nil || b.AnsweredAt == nil:
+			return false
+		case !a.AnsweredAt.Equal(*b.AnsweredAt):
+			return false
+		}
+	}
+	return true
 }

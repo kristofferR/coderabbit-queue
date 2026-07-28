@@ -172,7 +172,8 @@ export type BotCard = {
   last_seen?: string;
   seen_on?: string;
   repo_count: number;
-  status: "working" | "quiet" | "unverified" | "off";
+  status: "working" | "quiet" | "silent" | "unverified" | "off";
+  last_asked?: string;
   site?: string;
   docs?: string;
   pitch?: string;

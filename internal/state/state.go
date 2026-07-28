@@ -183,10 +183,19 @@ type CoBotRound struct {
 	CommandID   int64      `json:"command_id,omitempty"`
 	CommandedAt *time.Time `json:"commanded_at,omitempty"`
 	ClaimedAt   *time.Time `json:"claimed_at,omitempty"`
+	// AnsweredAt is when crq last OBSERVED this bot produce head evidence — a
+	// review, a clean summary at the SHA, a completed check run.
+	//
+	// The three fields above are all crq's own bookkeeping: what it posted and
+	// what it claimed the right to post. None of them says the bot did
+	// anything, and treating them as evidence of that is how a bot nobody has
+	// an account for reads as working — crq asks, records that it asked, and
+	// nothing ever answers. Only this field is about the bot.
+	AnsweredAt *time.Time `json:"answered_at,omitempty"`
 }
 
 func (c CoBotRound) empty() bool {
-	return c.CommandID == 0 && c.CommandedAt == nil && c.ClaimedAt == nil
+	return c.CommandID == 0 && c.CommandedAt == nil && c.ClaimedAt == nil && c.AnsweredAt == nil
 }
 
 // codexCoBotKey is dialect.CodexBotLogin under coBotKey. The literal is
@@ -247,6 +256,19 @@ func (r *Round) ClaimCo(login string, now time.Time) {
 	c := r.Co(login)
 	t := now.UTC()
 	c.ClaimedAt = &t
+	r.setCo(login, c)
+}
+
+// NoteCoAnswer records that login was OBSERVED producing head evidence. Only
+// moves forward, so a later observation of the same answer does not make an old
+// bot look freshly active.
+func (r *Round) NoteCoAnswer(login string, at time.Time) {
+	c := r.Co(login)
+	t := at.UTC()
+	if c.AnsweredAt != nil && !t.After(*c.AnsweredAt) {
+		return
+	}
+	c.AnsweredAt = &t
 	r.setCo(login, c)
 }
 

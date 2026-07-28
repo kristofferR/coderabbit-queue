@@ -25,6 +25,7 @@ type (
 	RepoEnrollment = crqstate.RepoEnrollment
 	FleetDefaults  = crqstate.FleetDefaults
 	SolverSettings = crqstate.SolverSettings
+	CoBotRound     = crqstate.CoBotRound
 	Revision       = crqstate.Revision
 	StateStore     = crqstate.StateStore
 	StoreConfig    = crqstate.StoreConfig
