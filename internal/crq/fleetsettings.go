@@ -257,6 +257,15 @@ func (s *Service) fleetImpact(st State, next FleetDefaults) FleetImpact {
 	}
 
 	beforeCfg, afterCfg := s.cfg.WithFleet(st.Fleet), s.cfg.WithFleet(next)
+	// Which reviewers RUN and which of them GATE are separate questions and
+	// both are changes: turning a bot off stops its findings arriving at all,
+	// which is not the same as it merely no longer holding the round open.
+	beforeCo := beforeCfg.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
+	afterCo := afterCfg.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
+	if !sameLogins(beforeCo, afterCo) {
+		impact.Changes = append(impact.Changes, fmt.Sprintf("co-reviewers running: %s → %s",
+			shortBots(beforeCo), shortBots(afterCo)))
+	}
 	if !sameLogins(beforeCfg.RequiredBots, afterCfg.RequiredBots) {
 		impact.Changes = append(impact.Changes, fmt.Sprintf("required reviewers: %s → %s",
 			shortBots(beforeCfg.RequiredBots), shortBots(afterCfg.RequiredBots)))
@@ -279,7 +288,12 @@ func (s *Service) fleetImpact(st State, next FleetDefaults) FleetImpact {
 	// be reopened — which is the consequence worth stating before the click.
 	for _, repo := range following {
 		wasCfg, isCfg := s.cfgFor(st, repo), s.cfgFor(after, repo)
-		if sameLogins(wasCfg.RequiredBots, isCfg.RequiredBots) {
+		wasCo := wasCfg.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
+		isCo := isCfg.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
+		// reopenForChangedReviewers requeues on EITHER list changing, so the
+		// count has to ask the same question or it under-reports the very
+		// consequence it exists to warn about.
+		if sameLogins(wasCfg.RequiredBots, isCfg.RequiredBots) && sameLogins(wasCo, isCo) {
 			continue
 		}
 		for _, r := range st.Rounds {

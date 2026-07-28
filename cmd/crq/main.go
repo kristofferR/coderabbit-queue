@@ -604,8 +604,8 @@ func run(ctx context.Context, args []string) int {
 		}
 		// One resolver for both: the fleet list is just the resolver applied to a
 		// repository with no override, so the two can never drift.
-		resolve := func(ov crq.RepoReviewers) []serve.BotName {
-			rc := cfg.ForRepo(ov)
+		resolve := func(st crq.State, repo string) []serve.BotName {
+			rc := service.ConfigIn(st, repo)
 			out := []serve.BotName{}
 			if primary, ok := rc.Primary(); ok {
 				out = append(out, serve.BotName{
@@ -617,7 +617,7 @@ func run(ctx context.Context, args []string) int {
 			}
 			return out
 		}
-		bots := resolve(crq.RepoReviewers{})
+		bots := resolve(crq.DefaultState(cfg), "")
 		// Fix-session settings resolve through env, the fleet default and the
 		// repository's own record — all of which live in the service.
 		solverFor := func(st crq.State, repo string) serve.RepoSolver {

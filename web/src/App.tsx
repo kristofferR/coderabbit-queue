@@ -77,7 +77,7 @@ export function App() {
       ) : route === "#/repos" ? (
         <ReposPage repos={snap.repos} bots={snap.bots} onSnapshot={setSnap} />
       ) : route === "#/bots" ? (
-        <BotsPage bots={snap.bots} />
+        <BotsPage bots={snap.bots} onSnapshot={setSnap} />
       ) : route === "#/setup" ? (
         <SetupPage setup={snap.setup} />
       ) : route === "#/settings" ? (

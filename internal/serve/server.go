@@ -32,10 +32,12 @@ type Options struct {
 	Inflight    time.Duration
 	// Bots is the fleet's reviewer list, used only when Resolve is nil.
 	Bots []BotName
-	// Resolve answers which reviewers run on one repository, given its stored
-	// override. Supplied by the command layer because Config.ForRepo owns that
-	// question; without it every repository shows the fleet list.
-	Resolve func(ov state.RepoReviewers) []BotName
+	// Resolve answers which reviewers run on one repository. It takes the whole
+	// state, not just that repository's override, because the answer also
+	// depends on the fleet's recorded defaults — resolving from the override
+	// alone showed this host's env list however the fleet had been configured.
+	// An empty repo asks for the fleet's own answer.
+	Resolve func(st state.State, repo string) []BotName
 	// WeeklyLimit is the vendor's weekly fair-use threshold. 0 counts without
 	// forecasting.
 	WeeklyLimit int
@@ -353,7 +355,6 @@ func (s *Server) botsFor(st *state.State) BotsFor {
 		if s.opts.Resolve == nil {
 			return s.opts.Bots
 		}
-		ov, _ := st.RepoOverride(repo)
-		return s.opts.Resolve(ov)
+		return s.opts.Resolve(*st, repo)
 	}
 }

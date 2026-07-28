@@ -468,3 +468,12 @@ func (s *Service) repoCfg(repo string) Config {
 	}
 	return s.cfgFor(st, repo)
 }
+
+// ConfigIn is the configuration for one repository against an already-loaded
+// state — cfgFor, exported for callers that render many repositories from one
+// read. An empty repo answers for the fleet: env with the fleet record applied
+// and no repository override, which is exactly what a repository that has never
+// been ruled on gets.
+func (s *Service) ConfigIn(st State, repo string) Config {
+	return s.cfgFor(st, repo)
+}

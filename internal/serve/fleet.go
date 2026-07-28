@@ -235,7 +235,7 @@ func BuildFleet(st state.State, cfg FleetConfig, ov Overview, tools []Tool, tool
 	return Snapshot{
 		Overview: ov,
 		Repos:    repoRows(st, cfg, now, botsFor, enrollFor, solverFor),
-		Bots:     botCards(st, cfg),
+		Bots:     botCards(st, cfg, botsFor("")),
 		Setup:    setupView(st, cfg, ov, tools, toolsHost),
 		Settings: SettingsView{Config: cfg, Quota: ov.Quota, Plumbing: plumbing(st, cfg), Fleet: fleet},
 	}
@@ -371,7 +371,7 @@ func (c FleetConfig) fleetReviewers() (bots []string, required []string) {
 	return bots, required
 }
 
-func botCards(st state.State, cfg FleetConfig) []BotCard {
+func botCards(st state.State, cfg FleetConfig, fleetBots []BotName) []BotCard {
 	seen := map[string]*time.Time{}
 	where := map[string]string{}
 	note := func(login string, at *time.Time, repo string, pr int) {
@@ -410,16 +410,42 @@ func botCards(st state.State, cfg FleetConfig) []BotCard {
 		}
 	}
 
-	out := make([]BotCard, 0, len(cfg.Reviewers))
-	for _, r := range cfg.Reviewers {
-		key := dialect.NormalizeBotName(r.Login)
+	// The EFFECTIVE reviewer set, which is env plus whatever the fleet recorded
+	// — not cfg.Reviewers, which is this server's startup environment and would
+	// keep showing the old answer after a fleet default changed it.
+	running := map[string]BotName{}
+	for _, b := range fleetBots {
+		running[dialect.NormalizeBotName(b.Login)] = b
+	}
+
+	// Every registry bot gets a card, running here or not. A page that lists
+	// only the enabled ones cannot answer "why is Bugbot not reviewing this",
+	// and it cannot offer the switch that would change the answer.
+	out := make([]BotCard, 0, len(cfg.Reviewers)+len(dialect.KnownCoReviewers()))
+	add := func(login, name string, primary, metered bool, from *ReviewerCfg) {
+		key := dialect.NormalizeBotName(login)
+		b, on := running[key]
 		card := BotCard{
-			Login: r.Login, Name: r.Name, Primary: r.Primary, Metered: r.Metered,
-			Enabled: true, Required: r.Required, Command: r.Command,
-			Trigger: r.Trigger, Grace: r.Grace,
+			Login: login, Name: name, Primary: primary, Metered: metered,
+			Enabled: on, Required: on && b.Required,
 			LastSeen: seen[key], SeenOn: where[key], RepoCount: repoCount[key],
 		}
+		if from != nil {
+			card.Command, card.Trigger, card.Grace = from.Command, from.Trigger, from.Grace
+		}
 		out = append(out, card)
+	}
+	seenCard := map[string]bool{}
+	for i := range cfg.Reviewers {
+		r := cfg.Reviewers[i]
+		seenCard[dialect.NormalizeBotName(r.Login)] = true
+		add(r.Login, r.Name, r.Primary, r.Metered, &r)
+	}
+	for _, co := range dialect.KnownCoReviewers() {
+		if seenCard[dialect.NormalizeBotName(co.Login)] {
+			continue
+		}
+		add(co.Login, co.Name, false, false, nil)
 	}
 	return out
 }

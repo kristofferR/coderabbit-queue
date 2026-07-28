@@ -468,18 +468,57 @@ function Toggle({ on, locked, onClick }: { on: boolean; locked?: boolean; onClic
 
 /* ------------------------------------------------------------------- Bots */
 
-export function BotsPage({ bots }: { bots: BotCard[] }) {
+export function BotsPage({
+  bots,
+  onSnapshot,
+}: {
+  bots: BotCard[];
+  onSnapshot?: (s: Snapshot) => void;
+}) {
   const now = useNow(5000);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // Turning one off writes the fleet's whole co-reviewer list, because that is
+  // what the setting IS — "these bots run" rather than a flag per bot. The
+  // primary is absent from it: it is not a co-reviewer, and turning it off is a
+  // per-repository decision (a private repo on a free plan) rather than a fleet
+  // one.
+  const setEnabled = async (name: string, on: boolean) => {
+    setBusy(name);
+    setError(null);
+    try {
+      const co = bots.filter((b) => !b.primary && b.enabled).map((b) => b.name);
+      const next = on ? [...new Set([...co, name])] : co.filter((n) => n !== name);
+      const res = await act("fleet", { fleet: { cobots: next } });
+      onSnapshot?.(res.snapshot);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <main className="mx-auto max-w-[1120px] px-6 pt-5 pb-16">
       <h1 className="text-xl font-[650] tracking-tight">Review bots</h1>
       <p className="mt-1 max-w-[760px] text-[13.5px] text-mut">
-        The reviewers this fleet is configured to orchestrate. “Last seen” is what crq itself recorded —
-        a trigger it posted, or a claim it observed — not a status read from the vendor.
+        Every reviewer crq knows how to drive, running here or not. “Last seen” is what crq itself
+        recorded — a trigger it posted, or a claim it observed — not a status read from the vendor.
       </p>
+      {error && (
+        <div className="mt-3 rounded-lg border border-bad-edge bg-bad-bg px-3 py-2 text-[12.5px] text-bad">
+          {error}
+        </div>
+      )}
       <div className="mt-4 grid grid-cols-2 gap-4 max-[940px]:grid-cols-1">
         {bots.map((b) => (
-          <section key={b.login} className="flex flex-col rounded-[10px] border border-edge bg-card shadow-card">
+          <section
+            key={b.login}
+            className={`flex flex-col rounded-[10px] border bg-card shadow-card ${
+              b.enabled ? "border-edge" : "border-dashed border-edge opacity-70"
+            }`}
+          >
             <header className="flex items-center gap-3 px-5 pt-3.5">
               <BotIcon login={b.login} name={b.name} size={36} />
               <div>
@@ -489,14 +528,39 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
                   {b.metered ? "spends the shared quota" : "free, no crq quota"}
                 </div>
               </div>
-              <span className="ml-auto">
+              <span className="ml-auto flex items-center gap-2">
                 {b.last_seen ? <Pill tone="ok">Seen {ago(b.last_seen, now)}</Pill> : <Pill tone="mut">Not seen yet</Pill>}
+                {b.primary ? (
+                  <Pill tone="acc">Primary</Pill>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={busy === b.name}
+                    onClick={() => void setEnabled(b.name, !b.enabled)}
+                    title={
+                      b.enabled
+                        ? "runs on every repository that has not overridden its reviewers"
+                        : "not run anywhere unless a repository names it"
+                    }
+                    className={`rounded-lg border px-2.5 py-0.5 text-[12px] font-semibold disabled:opacity-45 ${
+                      b.enabled ? "border-ok-edge bg-ok-bg text-ok" : "border-edge text-mut"
+                    }`}
+                  >
+                    {busy === b.name ? "…" : b.enabled ? "Runs" : "Off"}
+                  </button>
+                )}
               </span>
             </header>
             <div className="flex-1 px-5 pt-3 text-[13px] text-mut">
               <dl className="grid grid-cols-[110px_1fr] gap-y-1.5">
                 <dt className="text-faint">Required</dt>
-                <dd>{b.required ? "convergence waits for it" : "does not gate convergence"}</dd>
+                <dd>
+                  {!b.enabled
+                    ? "not running here"
+                    : b.required
+                      ? "convergence waits for it"
+                      : "does not gate convergence"}
+                </dd>
                 {b.command && (
                   <>
                     <dt className="text-faint">Trigger</dt>
@@ -525,7 +589,9 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
               </dl>
             </div>
             <footer className="px-5 pt-3 pb-4 text-[11.5px] text-faint">
-              Comparison, setup status and signup links are designed but not wired yet.
+              {b.primary
+                ? "The primary runs everywhere by default; turn it off for one project on that project's page."
+                : "This switch is the fleet default. A repository that names its own reviewers is unaffected."}
             </footer>
           </section>
         ))}
