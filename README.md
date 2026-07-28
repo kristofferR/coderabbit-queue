@@ -414,6 +414,10 @@ crq serve                 # ⭐ the live web dashboard (crq serve install keeps 
 crq cost <repo> <pr>      # what one more review round there would cost, before firing it
                           # (CRQ_WEEKLY_LIMIT sets the fair-use threshold the dashboard forecasts)
 
+crq fleet                 # the defaults every repository inherits (env → fleet record → repo override)
+crq fleet set [--bots <a,b>] [--required <a,b>] [--min-interval <dur>] [--weekly-limit <n>]
+              [--autofix-default on|off] [--dry-run]   # --dry-run reports the impact, writes nothing
+
 crq repos                 # which projects crq reviews, and where each answer comes from
 crq repos add <repo> | crq repos remove <repo> --reason "<why>" | crq repos default <repo>
 

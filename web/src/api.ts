@@ -219,7 +219,24 @@ export type FleetConfig = {
 };
 
 export type KV = { key: string; value: string; detail?: string };
-export type SettingsView = { config: FleetConfig; quota: Quota; plumbing: KV[] };
+export type FleetSettings = {
+  recorded: boolean;
+  reviewers: { login: string; budget: string; required: boolean; trigger?: string }[];
+  min_interval: string;
+  weekly_limit: number;
+  autofix_default: boolean;
+  sources: Record<string, string>;
+  by?: string;
+  updated_at?: string;
+  lagging_hosts?: string[];
+};
+
+export type SettingsView = {
+  config: FleetConfig;
+  quota: Quota;
+  plumbing: KV[];
+  fleet?: FleetSettings;
+};
 
 export type Finding = {
   id: string;

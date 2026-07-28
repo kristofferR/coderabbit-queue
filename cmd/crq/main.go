@@ -295,6 +295,12 @@ func run(ctx context.Context, args []string) int {
 		}
 		printJSON(est)
 		return 0
+	case "fleet":
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		return runFleet(ctx, service, args[1:])
 	case "repos":
 		if err := cfg.RequireState(); err != nil {
 			fatal(err)
@@ -1042,6 +1048,31 @@ subscriptions.
 The diff basis is the whole head. Macroscope bills incrementally after its first
 review of a pull request, so this is exact on the first round and an upper bound
 on later ones.
+`)
+	case "fleet":
+		fmt.Print(`crq fleet
+crq fleet set [--bots <a,b>] [--required <a,b>] [--min-interval <dur>]
+              [--weekly-limit <n>] [--autofix-default on|off] [--dry-run]
+crq fleet clear
+
+The defaults every repository inherits, recorded once for the whole fleet
+instead of in each host's env file.
+
+Three layers, least specific first: this host's env, then the fleet record,
+then a repository's own override. A setting absent from the record keeps using
+env, so a fleet that has never run 'fleet set' behaves exactly as before —
+and .sources says, per setting, which layer the current value came from. That
+distinction is the point: changing a value that reads "env" here changes it for
+this host only.
+
+--dry-run reports what the change WOULD do and writes nothing. It is worth
+using: a per-repo save affects the repository you are looking at, and a fleet
+save affects every repository that has not overridden the setting. Adding a
+required reviewer invalidates the "this head was reviewed" marker on every
+completed round that never had it, so those rounds are reopened and reviewed
+again — .reopened counts them before you decide.
+
+'clear' drops the whole record and returns every setting to this host's env.
 `)
 	case "repos":
 		fmt.Print(`crq repos                              (every repository crq knows about)
@@ -2322,4 +2353,171 @@ func (c prCoster) Cost(ctx context.Context, repo string, pr int) (serve.Cost, er
 		})
 	}
 	return out, nil
+}
+
+// runFleet is the fleet-defaults CLI: read, set with an optional dry run, or
+// clear. It mirrors `crq reviewers`, with the flags a fleet-wide default has
+// that a per-repo one does not.
+func runFleet(ctx context.Context, service *crq.Service, args []string) int {
+	action, rest := "show", args
+	if len(args) > 0 && (args[0] == "set" || args[0] == "clear") {
+		action, rest = args[0], args[1:]
+	}
+	var change crq.FleetChange
+	dryRun := false
+	for i := 0; i < len(rest); i++ {
+		arg := rest[i]
+		value := func() (string, bool) {
+			if strings.Contains(arg, "=") {
+				return strings.SplitN(arg, "=", 2)[1], true
+			}
+			if i+1 >= len(rest) {
+				fatal(fmt.Errorf("%s needs a value", arg))
+				return "", false
+			}
+			i++
+			return rest[i], true
+		}
+		switch name := strings.SplitN(arg, "=", 2)[0]; name {
+		case "--dry-run":
+			dryRun = true
+		case "--bots":
+			v, ok := value()
+			if !ok {
+				return 1
+			}
+			change.CoBots = splitList(&v)
+		case "--required":
+			v, ok := value()
+			if !ok {
+				return 1
+			}
+			change.Required = splitList(&v)
+		case "--min-interval":
+			v, ok := value()
+			if !ok {
+				return 1
+			}
+			change.MinInterval = &v
+		case "--weekly-limit":
+			v, ok := value()
+			if !ok {
+				return 1
+			}
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil {
+				fatal(fmt.Errorf("--weekly-limit: %w", err))
+				return 1
+			}
+			change.WeeklyLimit = &n
+		case "--autofix-default":
+			v, ok := value()
+			if !ok {
+				return 1
+			}
+			on := strings.EqualFold(strings.TrimSpace(v), "on")
+			if !on && !strings.EqualFold(strings.TrimSpace(v), "off") {
+				fatal(errors.New("--autofix-default takes on or off"))
+				return 1
+			}
+			change.AutofixDefault = &on
+		default:
+			fatal(fmt.Errorf("unknown flag %s (see crq help fleet)", arg))
+			return 1
+		}
+	}
+
+	switch action {
+	case "clear":
+		change = crq.FleetChange{Clear: true}
+	case "show":
+		view, err := service.FleetSettings(ctx)
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		printJSON(view)
+		return 0
+	}
+	if dryRun {
+		impact, err := service.PreviewFleet(ctx, change)
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		printJSON(impact)
+		return 0
+	}
+	view, impact, err := service.SetFleetSettings(ctx, change)
+	if err != nil {
+		fatal(err)
+		return 1
+	}
+	printJSON(map[string]any{"fleet": view, "impact": impact})
+	return 0
+}
+
+func (a prActor) Fleet(ctx context.Context) (*serve.FleetSettings, error) {
+	view, err := a.svc.FleetSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return fleetSettingsOf(view), nil
+}
+
+func (a prActor) SetFleet(ctx context.Context, change serve.FleetChange, preview bool) (serve.FleetImpact, error) {
+	c := crq.FleetChange{
+		CoBots: change.CoBots, Required: change.Required,
+		MinInterval: change.MinInterval, WeeklyLimit: change.WeeklyLimit,
+		AutofixDefault: change.AutofixDefault, Clear: change.Clear,
+	}
+	var impact crq.FleetImpact
+	var err error
+	if preview {
+		impact, err = a.svc.PreviewFleet(ctx, c)
+	} else {
+		_, impact, err = a.svc.SetFleetSettings(ctx, c)
+	}
+	if err != nil {
+		return serve.FleetImpact{}, err
+	}
+	return serve.FleetImpact{
+		Repos: impact.Repos, Reopened: impact.Reopened, Overridden: impact.Overridden,
+		Changes: impact.Changes, Summary: impact.Summary,
+	}, nil
+}
+
+func fleetSettingsOf(view crq.FleetView) *serve.FleetSettings {
+	out := &serve.FleetSettings{
+		Recorded: view.Recorded, MinInterval: view.MinInterval, WeeklyLimit: view.WeeklyLimit,
+		AutofixDefault: view.AutofixDefault, Sources: view.Sources,
+		By: view.By, UpdatedAt: view.UpdatedAt, Lagging: hostsOfWriters(view.Lagging),
+	}
+	for _, r := range view.Reviewers {
+		out.Reviewers = append(out.Reviewers, serve.FleetReviewer{
+			Login: r.Login, Budget: r.Budget, Required: r.Required, Trigger: r.Trigger,
+		})
+	}
+	return out
+}
+
+// hostsOfWriters reduces writer keys ("host=X pid=… run=…") to machine names.
+func hostsOfWriters(writers []string) []string {
+	out := make([]string, 0, len(writers))
+	seen := map[string]bool{}
+	for _, w := range writers {
+		host := w
+		if i := strings.Index(w, "host="); i >= 0 {
+			host = w[i+len("host="):]
+			if j := strings.IndexByte(host, ' '); j >= 0 {
+				host = host[:j]
+			}
+		}
+		if seen[host] {
+			continue
+		}
+		seen[host] = true
+		out = append(out, host)
+	}
+	return out
 }

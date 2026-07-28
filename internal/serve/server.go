@@ -183,7 +183,16 @@ func (s *Server) refresh(ctx context.Context) {
 
 	botsFor := s.botsFor(&st)
 	ov := BuildOverview(st, now, s.opts.MinInterval, s.opts.Inflight, botsFor, s.opts.WeeklyLimit)
-	snap := BuildFleet(st, s.opts.Fleet, ov, s.tools, s.opts.Host, now, botsFor, s.opts.EnrollFor)
+	// Read alongside the snapshot rather than cached: it is a state read the
+	// server has already paid for, and a settings page showing a stale default
+	// is how two people overwrite each other.
+	var fleet *FleetSettings
+	if s.actor != nil {
+		if f, err := s.actor.Fleet(ctx); err == nil {
+			fleet = f
+		}
+	}
+	snap := BuildFleet(st, s.opts.Fleet, ov, s.tools, s.opts.Host, now, botsFor, s.opts.EnrollFor, fleet)
 	snap.Events = s.events.list()
 
 	s.mu.Lock()

@@ -333,15 +333,52 @@ func containsBot(logins []string, login string) bool {
 	return false
 }
 
-// cfgFor is the configuration crq should use for one repository: the fleet
-// default with that repository's override applied.
+// cfgFor is the configuration crq should use for one repository: this host's
+// env, then the fleet's recorded defaults, then that repository's override.
+//
+// The order is the whole point. Env is the oldest and least specific layer, a
+// per-host file that predates any of this; the fleet record is one answer every
+// host shares; the repository override is the most specific and wins outright.
 func (s *Service) cfgFor(st State, repo string) Config {
+	base := s.cfg.WithFleet(st.Fleet)
 	ov, ok := st.RepoOverride(repo)
 	if !ok {
-		return s.cfg
+		return base
 	}
-	out := s.cfg.ForRepo(ov)
+	out := base.ForRepo(ov)
 	out.OverrideAt = ov.UpdatedAt
+	return out
+}
+
+// WithFleet applies the fleet's recorded defaults to this host's configuration.
+// An absent field keeps the env value, so a fleet that has never written a
+// record behaves exactly as it did before the record existed.
+// Each field decides its own absence, deliberately: gating the whole function
+// on UpdatedAt would make a PROPOSED record — one built for a preview and not
+// yet stamped — read as no change at all, which is the one answer a preview
+// must never give.
+func (c Config) WithFleet(fd FleetDefaults) Config {
+	out := c
+	if d, err := time.ParseDuration(strings.TrimSpace(fd.MinInterval)); err == nil && fd.MinInterval != "" {
+		out.MinInterval = d
+	}
+	if fd.WeeklyLimit != nil {
+		out.WeeklyReviewLimit = *fd.WeeklyLimit
+	}
+	if !fd.SetCoBots && !fd.SetRequired {
+		return out
+	}
+	// Reuse ForRepo's resolution rather than reimplementing it: "which bots run
+	// and which of them gate" is one algorithm, and the fleet default and a
+	// per-repo override are the same question asked at different scopes.
+	out = out.ForRepo(RepoReviewers{
+		CoBots: fd.CoBots, SetCoBots: fd.SetCoBots,
+		Required: fd.Required, SetRequired: fd.SetRequired,
+	})
+	// ForRepo stamps nothing, but this is a DEFAULT, not an override: a
+	// repository with no record of its own must still read as "following the
+	// fleet", and OverrideAt is what says otherwise.
+	out.OverrideAt = nil
 	return out
 }
 

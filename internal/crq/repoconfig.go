@@ -107,35 +107,6 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 		// in-flight fire decision for the repository.
 		return s.Reviewers(ctx, repo)
 	}
-	// Accept either spelling: the login (chatgpt-codex-connector[bot]) or the
-	// short config name (codex), which is what CRQ_COBOTS already takes.
-	// Resolve against the REGISTRY, not the fleet's enabled list. Restricting a
-	// project to bots the fleet already runs would make this feature only ever
-	// subtract, when the point is choosing different reviewers per project.
-	// Either spelling works: the login, or the short name CRQ_COBOTS takes.
-	known := map[string]string{}
-	for _, co := range dialect.KnownCoReviewers() {
-		known[dialect.NormalizeBotName(co.Login)] = co.Login
-		known[strings.ToLower(strings.TrimSpace(co.Name))] = co.Login
-	}
-	resolve := func(allowed map[string]string, list []string, what string) ([]string, error) {
-		out := make([]string, 0, len(list))
-		for _, name := range list {
-			name = strings.TrimSpace(name)
-			if name == "" {
-				continue
-			}
-			login, ok := allowed[dialect.NormalizeBotName(name)]
-			if !ok {
-				login, ok = allowed[strings.ToLower(name)]
-			}
-			if !ok {
-				return nil, fmt.Errorf("%s: unknown reviewer %q (known: %s)", what, name, strings.Join(knownLogins(allowed), ", "))
-			}
-			out = append(out, login)
-		}
-		return out, nil
-	}
 
 	// Both halves are resolved here; the MERGE happens inside the CAS closure,
 	// because two hosts setting different halves would otherwise derive from the
@@ -143,7 +114,7 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 	// a retry that reuses an already-merged value cannot fix that.
 	var setCoBots, setRequired []string
 	if coBots != nil {
-		resolved, err := resolve(known, coBots, "--bots")
+		resolved, err := resolveCoBotLogins(coBots)
 		if err != nil {
 			return ReviewerView{}, err
 		}
@@ -156,12 +127,7 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 			// never review at all.
 			return ReviewerView{}, errors.New("--required cannot be empty: a round that gates on nobody converges before any reviewer runs (crq reviewers clear <repo> to drop the override)")
 		}
-		// The primary may gate here even though it cannot be replaced here.
-		allowed := map[string]string{dialect.NormalizeBotName(s.cfg.Bot): s.cfg.Bot}
-		for k, v := range known {
-			allowed[k] = v
-		}
-		resolved, err := resolve(allowed, required, "--required")
+		resolved, err := resolveRequiredLogins(required, s.cfg.Bot)
 		if err != nil {
 			return ReviewerView{}, err
 		}
@@ -435,4 +401,55 @@ func sameLogins(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// resolveCoBotLogins turns whichever spelling a caller used — the login
+// (chatgpt-codex-connector[bot]) or the short config name (codex) — into
+// logins, rejecting anything the registry does not know.
+//
+// Resolved against the REGISTRY, not the fleet's enabled list: restricting a
+// choice to bots the fleet already runs would make the feature only ever
+// subtract, when the point is choosing DIFFERENT reviewers.
+func resolveCoBotLogins(list []string) ([]string, error) {
+	return resolveBotList(coReviewerNames(), list, "--bots")
+}
+
+// resolveRequiredLogins additionally accepts the primary, which may gate even
+// though it cannot be replaced per repository.
+func resolveRequiredLogins(list []string, primary string) ([]string, error) {
+	allowed := coReviewerNames()
+	if primary != "" {
+		allowed[dialect.NormalizeBotName(primary)] = primary
+	}
+	return resolveBotList(allowed, list, "--required")
+}
+
+// coReviewerNames maps every accepted spelling to its login. Each bot appears
+// twice, which is why knownLogins deduplicates by value.
+func coReviewerNames() map[string]string {
+	known := map[string]string{}
+	for _, co := range dialect.KnownCoReviewers() {
+		known[dialect.NormalizeBotName(co.Login)] = co.Login
+		known[strings.ToLower(strings.TrimSpace(co.Name))] = co.Login
+	}
+	return known
+}
+
+func resolveBotList(allowed map[string]string, list []string, what string) ([]string, error) {
+	out := make([]string, 0, len(list))
+	for _, name := range list {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		login, ok := allowed[dialect.NormalizeBotName(name)]
+		if !ok {
+			login, ok = allowed[strings.ToLower(name)]
+		}
+		if !ok {
+			return nil, fmt.Errorf("%s: unknown reviewer %q (known: %s)", what, name, strings.Join(knownLogins(allowed), ", "))
+		}
+		out = append(out, login)
+	}
+	return out, nil
 }

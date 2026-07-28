@@ -5,6 +5,7 @@ import { Confirm } from "./Confirm";
 import { BotIcon, Card, Empty, Pill, PRLink, RepoIcon, Td, Th } from "./ui";
 import { ago, clock, useNow } from "./time";
 import { AddRepo, EnrollmentEditor } from "./AddRepo";
+import { FleetEditor } from "./FleetEditor";
 
 /* ------------------------------------------------------------------ Repos */
 
@@ -631,16 +632,28 @@ export function SetupPage({ setup }: { setup: SetupView }) {
 
 /* --------------------------------------------------------------- Settings */
 
-export function SettingsPage({ settings }: { settings: SettingsView }) {
+export function SettingsPage({
+  settings,
+  bots,
+  onSnapshot,
+}: {
+  settings: SettingsView;
+  bots: BotCard[];
+  onSnapshot?: (s: Snapshot) => void;
+}) {
   const c = settings.config;
   return (
     <main className="mx-auto max-w-[1120px] px-6 pt-5 pb-16">
       <h1 className="text-xl font-[650] tracking-tight">Fleet settings</h1>
       <p className="mt-1 max-w-[840px] text-[13.5px] text-mut">
-        The defaults every repository inherits. These are read from the environment this server was started
-        with — <b>editing lands with the write endpoints</b>, and the plan is for them to move into shared
-        state so one host's env file stops being the fleet's source of truth.
+        The defaults every repository inherits. The editable ones live in shared state, so one host's env
+        file is no longer the fleet's source of truth; everything below the first card is this server's own
+        environment, shown for reference.
       </p>
+
+      {settings.fleet && (
+        <FleetEditor fleet={settings.fleet} bots={bots} onSnapshot={onSnapshot} />
+      )}
 
       <Card title="CodeRabbit account" end="the metered lane's shared quota">
         <div className="flex flex-wrap gap-4 px-[18px] py-3">

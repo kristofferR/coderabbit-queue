@@ -22,6 +22,13 @@ type Actor interface {
 	// override, they report the hosts that will not honour the record.
 	SetEnrollment(ctx context.Context, repo string, enabled bool, reason string) (lagging []string, err error)
 	ClearEnrollment(ctx context.Context, repo string) error
+	// Fleet reads the recorded defaults; SetFleet applies a change, or with
+	// preview reports what it WOULD do and writes nothing. A fleet save reaches
+	// every repository that has not overridden the setting, so the preview is
+	// not a nicety — it is how someone finds out that adding a required reviewer
+	// reopens nineteen completed rounds before they click.
+	Fleet(ctx context.Context) (*FleetSettings, error)
+	SetFleet(ctx context.Context, change FleetChange, preview bool) (FleetImpact, error)
 	// SetReviewers returns the hosts that will not honour the override, so the
 	// UI can say so rather than reporting a save that some daemon ignores.
 	SetReviewers(ctx context.Context, repo string, coBots, required []string, primary *bool) (lagging []string, err error)
@@ -49,6 +56,11 @@ type actionRequest struct {
 	// whether it runs on this repository at all.
 	Primary *bool `json:"primary"`
 	Clear   bool  `json:"clear"`
+	// Fleet carries a fleet-defaults change, raw so its own pointer fields keep
+	// "not chosen" distinct from "chosen to be zero".
+	Fleet json.RawMessage `json:"fleet"`
+	// Preview asks what a change would do without making it.
+	Preview bool `json:"preview"`
 
 	ThreadIDs  []string `json:"thread_ids"`
 	FindingIDs []string `json:"finding_ids"`
@@ -80,8 +92,10 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed request"})
 		return
 	}
+	// Fleet settings are the one action with no repository: they are the answer
+	// for every repository that has not overridden them.
 	req.Repo = strings.TrimSpace(req.Repo)
-	if req.Repo == "" || !strings.Contains(req.Repo, "/") {
+	if action := r.PathValue("action"); action != "fleet" && (req.Repo == "" || !strings.Contains(req.Repo, "/")) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo must be owner/name"})
 		return
 	}
@@ -168,6 +182,27 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+	case "fleet":
+		var change FleetChange
+		if err := json.Unmarshal(req.Fleet, &change); len(req.Fleet) > 0 && err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed fleet change"})
+			return
+		}
+		impact, ferr := s.actor.SetFleet(ctx, change, req.Preview)
+		if ferr != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": ferr.Error()})
+			return
+		}
+		if req.Preview {
+			// A preview writes nothing, so there is no new snapshot to return
+			// and returning the old one would read as a save that did nothing.
+			writeJSON(w, http.StatusOK, map[string]any{"impact": impact})
+			return
+		}
+		s.refresh(ctx)
+		snap, _ := s.snapshot()
+		writeJSON(w, http.StatusOK, map[string]any{"snapshot": snap, "impact": impact})
+		return
 	case "resolve":
 		if len(req.ThreadIDs) == 0 {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no thread given"})
@@ -241,4 +276,16 @@ func hostsOf(writers []string) []string {
 		out = append(out, h)
 	}
 	return out
+}
+
+// FleetChange mirrors crq.FleetChange on the wire. Pointers throughout so a
+// form that posts its whole state cannot overwrite a setting another host
+// changed a second earlier.
+type FleetChange struct {
+	CoBots         []string `json:"cobots"`
+	Required       []string `json:"required"`
+	MinInterval    *string  `json:"min_interval"`
+	WeeklyLimit    *int     `json:"weekly_limit"`
+	AutofixDefault *bool    `json:"autofix_default"`
+	Clear          bool     `json:"clear"`
 }

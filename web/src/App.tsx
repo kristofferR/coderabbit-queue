@@ -81,7 +81,7 @@ export function App() {
       ) : route === "#/setup" ? (
         <SetupPage setup={snap.setup} />
       ) : route === "#/settings" ? (
-        <SettingsPage settings={snap.settings} />
+        <SettingsPage settings={snap.settings} bots={snap.bots} onSnapshot={setSnap} />
       ) : (
         <OverviewPage ov={snap.overview} events={snap.events} onSnapshot={setSnap} />
       )}

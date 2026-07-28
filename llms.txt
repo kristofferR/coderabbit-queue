@@ -297,6 +297,21 @@ own subscriptions. The diff basis is the whole head, so this is exact on a PR's 
 review and an upper bound after that. `.prices_checked_at` is when the published figures were last
 verified against the vendors.
 
+Change what every repository inherits:
+
+```bash
+crq fleet                                          # effective defaults + where each came from
+crq fleet set --min-interval 2m --dry-run          # what it WOULD do; writes nothing
+crq fleet set --required coderabbitai,codex        # record it for every host
+crq fleet clear                                    # back to this host's env
+```
+
+Three layers, least specific first: this host's env, then the fleet record, then a repository's own
+override. `.sources` says per setting which layer the current value came from, so a value reading
+`env` is this host's file alone. Always `--dry-run` a reviewer change first: adding a required
+reviewer invalidates the "this head was reviewed" marker on every completed round that never had it,
+and `.reopened` counts the rounds that would be requeued and reviewed again.
+
 Choose which projects crq reviews at all:
 
 ```bash

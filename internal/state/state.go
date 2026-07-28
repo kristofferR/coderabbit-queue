@@ -443,6 +443,9 @@ type State struct {
 	// A session may still be resolving threads after its push superseded the
 	// claimed round, and archive eviction must not admit a second session.
 	Dispatches map[string]DispatchClaim `json:"dispatches,omitempty"`
+	// Fleet is what every repository inherits, recorded once for the whole fleet
+	// rather than in each host's env file. See fleet.go.
+	Fleet FleetDefaults `json:"fleet,omitempty"`
 	// Enrolled answers "does crq review this project at all?" per repository,
 	// so the decision lives with the fleet rather than in one host's env file.
 	// Absent means the hosts' CRQ_REPOS/CRQ_EXCLUDE decide, as before.
@@ -488,7 +491,7 @@ const SchemaVersion = 4
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 3
+const WriterCaps = 4
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
@@ -504,6 +507,11 @@ const CapsPrimaryOff = 2
 // host below it decides from its own env alone, so a repository enrolled here
 // is invisible to it and one turned off here keeps being reviewed by it.
 const CapsEnrollment = 3
+
+// CapsFleetDefaults is the capability that makes State.Fleet safe to act on. A
+// host below it keeps deciding from its own env, so a default recorded here is
+// simply not applied there.
+const CapsFleetDefaults = 4
 
 // writerTTL is how long a host counts as still active for capability purposes.
 const writerTTL = 30 * time.Minute

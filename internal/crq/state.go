@@ -23,6 +23,7 @@ type (
 	PostedCommand  = crqstate.PostedCommand
 	RepoReviewers  = crqstate.RepoReviewers
 	RepoEnrollment = crqstate.RepoEnrollment
+	FleetDefaults  = crqstate.FleetDefaults
 	Revision       = crqstate.Revision
 	StateStore     = crqstate.StateStore
 	StoreConfig    = crqstate.StoreConfig
@@ -54,6 +55,8 @@ const (
 	CapsPrimaryOff = crqstate.CapsPrimaryOff
 	// CapsEnrollment is the capability a host needs to honour enrollment records.
 	CapsEnrollment = crqstate.CapsEnrollment
+	// CapsFleetDefaults is the capability a host needs to honour fleet defaults.
+	CapsFleetDefaults = crqstate.CapsFleetDefaults
 )
 
 var (

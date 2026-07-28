@@ -165,6 +165,39 @@ type SettingsView struct {
 	Config   FleetConfig `json:"config"`
 	Quota    Quota       `json:"quota"`
 	Plumbing []KV        `json:"plumbing"`
+	// Fleet is the editable half: the defaults recorded for the whole fleet,
+	// with a source per setting so a reader can tell which values changing here
+	// would actually change everywhere, and which are this host's env alone.
+	Fleet *FleetSettings `json:"fleet,omitempty"`
+}
+
+// FleetSettings mirrors crq.FleetView on the wire.
+type FleetSettings struct {
+	Recorded       bool              `json:"recorded"`
+	Reviewers      []FleetReviewer   `json:"reviewers"`
+	MinInterval    string            `json:"min_interval"`
+	WeeklyLimit    int               `json:"weekly_limit"`
+	AutofixDefault bool              `json:"autofix_default"`
+	Sources        map[string]string `json:"sources"`
+	By             string            `json:"by,omitempty"`
+	UpdatedAt      string            `json:"updated_at,omitempty"`
+	Lagging        []string          `json:"lagging_hosts,omitempty"`
+}
+
+type FleetReviewer struct {
+	Login    string `json:"login"`
+	Budget   string `json:"budget"`
+	Required bool   `json:"required"`
+	Trigger  string `json:"trigger,omitempty"`
+}
+
+// FleetImpact is what a proposed fleet change would do, shown before it is made.
+type FleetImpact struct {
+	Repos      int      `json:"repos"`
+	Reopened   int      `json:"reopened"`
+	Overridden int      `json:"overridden"`
+	Changes    []string `json:"changes"`
+	Summary    string   `json:"summary"`
 }
 
 type KV struct {
@@ -174,13 +207,13 @@ type KV struct {
 }
 
 // BuildFleet reduces everything the non-overview pages read.
-func BuildFleet(st state.State, cfg FleetConfig, ov Overview, tools []Tool, toolsHost string, now time.Time, botsFor BotsFor, enrollFor EnrollFor) Snapshot {
+func BuildFleet(st state.State, cfg FleetConfig, ov Overview, tools []Tool, toolsHost string, now time.Time, botsFor BotsFor, enrollFor EnrollFor, fleet *FleetSettings) Snapshot {
 	return Snapshot{
 		Overview: ov,
 		Repos:    repoRows(st, cfg, now, botsFor, enrollFor),
 		Bots:     botCards(st, cfg),
 		Setup:    setupView(st, cfg, ov, tools, toolsHost),
-		Settings: SettingsView{Config: cfg, Quota: ov.Quota, Plumbing: plumbing(st, cfg)},
+		Settings: SettingsView{Config: cfg, Quota: ov.Quota, Plumbing: plumbing(st, cfg), Fleet: fleet},
 	}
 }
 

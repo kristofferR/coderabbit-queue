@@ -6,13 +6,15 @@ export type ActionName =
   | "cancel"
   | "autofix"
   | "enroll"
+  | "fleet"
   | "reviewers"
   | "resolve"
   | "decline"
   | "dismiss";
 
 export type ActionBody = {
-  repo: string;
+  /** Empty for fleet settings, which are the answer for every repository. */
+  repo?: string;
   pr?: number;
   reason?: string;
   /** Omitted entirely means "back to the fleet default" for autofix. */
@@ -27,6 +29,17 @@ export type ActionBody = {
   finding_ids?: string[];
   /** Decline without resolving, when the disagreement is worth leaving visible. */
   keep_open?: boolean;
+  /** A fleet-defaults change; every field is optional and absent means "leave it". */
+  fleet?: {
+    cobots?: string[];
+    required?: string[];
+    min_interval?: string;
+    weekly_limit?: number;
+    autofix_default?: boolean;
+    clear?: boolean;
+  };
+  /** Ask what a change would do without making it. */
+  preview?: boolean;
 };
 
 /** A save can succeed and still be ignored by a host on an older binary. */
