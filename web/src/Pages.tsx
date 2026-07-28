@@ -879,9 +879,9 @@ export function SetupPage({
 
       <Card title="Command-line tools" end={`on ${setup.tools_host}`}>
         <p className="px-[18px] pt-1 text-[12.5px] text-faint">
-          This machine only — crq keeps no tool inventory for other hosts, so a fleet-wide matrix would be
-          invented rather than reported. A tool also has to be visible to the <i>service</i>, not just your
-          shell.
+          This machine, probed from this server's own PATH. The per-host table above is the reported
+          one — a tool has to be visible to the <i>service</i>, not just to your shell, and only the
+          host itself can say whether it is.
         </p>
         <table className="mt-1.5 w-full border-collapse">
           <thead>
@@ -896,7 +896,22 @@ export function SetupPage({
             {setup.tools.map((t) => (
               <tr key={t.name} className="hover:bg-[#F7F8FA]">
                 <Td className="font-mono text-[13px] font-semibold">{t.name}</Td>
-                <Td className="text-[12.5px] text-mut">{t.purpose}</Td>
+                <Td className="text-[12.5px] text-mut">
+                  {t.purpose}
+                  {!t.found && (t.fix?.length ?? 0) > 0 && (
+                    <details className="mt-1 rounded-lg border border-edge bg-[#FBFBFC] px-2 py-1">
+                      <summary className="cursor-pointer text-[12px] font-[550]">How to fix it</summary>
+                      <pre className="mt-1 overflow-x-auto text-[11.5px] whitespace-pre-wrap">
+                        {t.fix!.join("\n")}
+                      </pre>
+                      <p className="mt-1 text-[11.5px] text-faint">
+                        Installing it for your shell is not enough: the service gets its own PATH. Add
+                        the directory with <code>systemctl --user edit crq-autofix</code> and an{" "}
+                        <code>Environment=PATH=…</code> line, or reinstall so crq writes it for you.
+                      </p>
+                    </details>
+                  )}
+                </Td>
                 <Td>
                   {t.found ? (
                     <Pill tone="ok">found</Pill>

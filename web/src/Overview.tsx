@@ -1,5 +1,6 @@
 import { useState } from "react";
-import type { Event as EventItem, Overview, Snapshot } from "./api";
+import type { BotCard, Event as EventItem, Overview, RepoRow, Snapshot } from "./api";
+import { QuickSettings } from "./QuickSettings";
 import { act } from "./actions";
 import { Confirm } from "./Confirm";
 import { BotMarks, Card, CommitLink, Empty, Pill, PRLink, PRTitle, RepoIcon, Td, Th } from "./ui";
@@ -43,16 +44,22 @@ type Pending =
 export function OverviewPage({
   ov,
   events,
+  repos,
+  bots,
   onSnapshot,
 }: {
   ov: Overview;
   events: EventItem[];
+  repos: RepoRow[];
+  bots: BotCard[];
   onSnapshot?: (s: Snapshot) => void;
 }) {
   const now = useNow();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const [pending, setPending] = useState<Pending | null>(null);
+  // Which repository's quick settings are open, if any.
+  const [settingsFor, setSettingsFor] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -201,6 +208,7 @@ export function OverviewPage({
                   <Td className="c-host font-mono text-[13px] text-mut">{r.host ?? "—"}</Td>
                   <Td>
                     <RowActions
+                      onSettings={() => setSettingsFor(r.repo)}
                       onHold={() => setPending({ kind: "hold", repo: r.repo, pr: r.pr })}
                       onCancel={() =>
                         setPending({
@@ -268,6 +276,7 @@ export function OverviewPage({
                   <Td className="c-host font-mono text-[13px] text-mut">{q.host ?? "—"}</Td>
                   <Td>
                     <RowActions
+                      onSettings={() => setSettingsFor(q.repo)}
                       onHold={() => setPending({ kind: "hold", repo: q.repo, pr: q.pr })}
                       onCancel={() =>
                         setPending({ kind: "cancel", repo: q.repo, pr: q.pr, phase: "queued", slot: false })
@@ -414,6 +423,19 @@ export function OverviewPage({
       <ActivityFeed events={events} now={now} />
       </div>
 
+      {settingsFor &&
+        (() => {
+          const row = repos.find((r) => r.repo.toLowerCase() === settingsFor.toLowerCase());
+          return row ? (
+            <QuickSettings
+              repo={row}
+              bots={bots}
+              onClose={() => setSettingsFor(null)}
+              onSnapshot={onSnapshot}
+            />
+          ) : null;
+        })()}
+
       {pending && (
         <Confirm
           title={
@@ -514,9 +536,27 @@ function ActivityFeed({ events, now }: { events: EventItem[]; now: number }) {
 }
 
 /** Row actions stay hidden until the row is hovered, as in the mockups. */
-function RowActions({ onHold, onCancel }: { onHold: () => void; onCancel: () => void }) {
+function RowActions({
+  onHold,
+  onCancel,
+  onSettings,
+}: {
+  onHold: () => void;
+  onCancel: () => void;
+  onSettings?: () => void;
+}) {
   return (
     <span className="flex justify-end gap-2.5 whitespace-nowrap opacity-0 transition-opacity group-hover:opacity-100">
+      {onSettings && (
+        <button
+          type="button"
+          onClick={onSettings}
+          title="reviewers for this repository"
+          className="text-[12.5px] text-acc hover:underline"
+        >
+          ⚙
+        </button>
+      )}
       <button type="button" onClick={onHold} className="text-[12.5px] text-acc hover:underline">
         Hold
       </button>

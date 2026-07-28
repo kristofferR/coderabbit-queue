@@ -248,6 +248,10 @@ type Tool struct {
 	Required bool   `json:"required"`
 	Found    bool   `json:"found"`
 	Path     string `json:"path,omitempty"`
+	// Fix is what to run when it is missing. A checklist that reports a
+	// problem and leaves you to search for the remedy is a checklist that has
+	// done the easy half.
+	Fix []string `json:"fix,omitempty"`
 }
 
 type HostInfo struct {
@@ -750,18 +754,25 @@ func LocalTools() []Tool {
 	want := []struct {
 		name, purpose string
 		required      bool
+		fix           []string
 	}{
-		{"crq", "the binary itself — every host must run the same version", true},
-		{"git", "repository mirrors and worktrees for fix sessions", true},
-		{"gh", "GitHub CLI — where the token comes from", true},
-		{"claude", "default autofix agent", false},
-		{"codex", "alternative autofix agent", false},
-		{"coderabbit", "local preflight review before pushing", false},
-		{"macroscope", "second local opinion before pushing", false},
+		{"crq", "the binary itself — every host must run the same version", true,
+			[]string{"go build -o ~/.local/bin/crq ./cmd/crq", "crq doctor   # check for a second, older install"}},
+		{"git", "repository mirrors and worktrees for fix sessions", true, nil},
+		{"gh", "GitHub CLI — where the token comes from", true,
+			[]string{"gh auth login", "crq doctor"}},
+		{"claude", "default autofix agent", false,
+			[]string{"npm i -g @anthropic-ai/claude-code", "crq autofix install   # point the service at it"}},
+		{"codex", "alternative autofix agent", false,
+			[]string{"npm i -g @openai/codex", "crq autofix install --agent \"$(command -v codex)\""}},
+		{"coderabbit", "local preflight review before pushing", false,
+			[]string{"curl -fsSL https://cli.coderabbit.ai/install.sh | sh"}},
+		{"macroscope", "second local opinion before pushing", false,
+			[]string{"see https://docs.macroscope.com for the CLI"}},
 	}
 	out := make([]Tool, 0, len(want))
 	for _, w := range want {
-		t := Tool{Name: w.name, Purpose: w.purpose, Required: w.required}
+		t := Tool{Name: w.name, Purpose: w.purpose, Required: w.required, Fix: w.fix}
 		if path, err := exec.LookPath(w.name); err == nil {
 			t.Found, t.Path = true, path
 		}

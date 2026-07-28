@@ -197,7 +197,8 @@ export type BotCard = {
 };
 
 export type Check = { key: string; label: string; status: "ok" | "warn" | "bad" | "unknown"; detail?: string };
-export type Tool = { name: string; purpose: string; required: boolean; found: boolean; path?: string };
+export type Tool = {
+  fix?: string[]; name: string; purpose: string; required: boolean; found: boolean; path?: string };
 export type HostInfo = {
   name: string;
   roles?: string[];

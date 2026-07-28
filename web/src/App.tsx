@@ -86,7 +86,13 @@ export function App() {
       ) : isFirstRun(snap) ? (
         <FirstRun snap={snap} />
       ) : (
-        <OverviewPage ov={snap.overview} events={snap.events} onSnapshot={setSnap} />
+        <OverviewPage
+          ov={snap.overview}
+          events={snap.events}
+          repos={snap.repos}
+          bots={snap.bots}
+          onSnapshot={setSnap}
+        />
       )}
     </div>
   );
