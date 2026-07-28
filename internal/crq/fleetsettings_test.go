@@ -243,3 +243,50 @@ func TestFireUsesTheFleetResolvedPrimary(t *testing.T) {
 		t.Errorf("posted commands = %+v, want one attributed to %s", round.PostedCommands, cfg.Bot)
 	}
 }
+
+// A repository that states ONE half of its reviewers still inherits the other
+// from the fleet. Treating either half as a complete override dropped it from
+// the impact preview and from the requeue: cfgFor handed it the newly required
+// reviewer, its completed round stayed a "this head was reviewed" marker, and
+// the reviewer somebody had just required was never asked there.
+func TestFleetReachesRepositoriesThatOverrideOnlyOneHalf(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = codexCoBots(nil)
+	cfg.AllowRepos = map[string]bool{"o/half": true, "o/whole": true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	// o/half names its co-reviewers and inherits the required set; o/whole
+	// answers both questions itself.
+	if _, err := svc.SetReviewers(ctx, "o/half", []string{"codex"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SetReviewers(ctx, "o/whole", []string{"codex"}, []string{"codex"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	following := map[string]bool{}
+	for _, repo := range svc.reposFollowingFleet(st) {
+		following[repo] = true
+	}
+	if !following["o/half"] {
+		t.Errorf("following = %v, want the half-overridden repository included: it still inherits the required set",
+			svc.reposFollowingFleet(st))
+	}
+	if following["o/whole"] {
+		t.Errorf("following = %v, want the fully-overridden repository excluded", svc.reposFollowingFleet(st))
+	}
+
+	// And the preview counts as "unaffected" only the one that really is.
+	impact, err := svc.PreviewFleet(ctx, FleetChange{Required: []string{"coderabbitai[bot]", "codex"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if impact.Overridden != 1 {
+		t.Errorf("overridden = %d, want only the repository that answers both questions itself", impact.Overridden)
+	}
+}

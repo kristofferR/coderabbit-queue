@@ -294,7 +294,7 @@ func (s *Service) fleetImpact(st State, next FleetDefaults) FleetImpact {
 	following := s.reposFollowingFleet(st)
 	impact.Repos = len(following)
 	for repo := range st.Repos {
-		if ov, ok := st.RepoOverride(repo); ok && (ov.SetCoBots || ov.SetRequired) {
+		if fullyOverridesReviewers(st, repo) {
 			impact.Overridden++
 		}
 	}
@@ -361,8 +361,24 @@ func (s *Service) fleetImpact(st State, next FleetDefaults) FleetImpact {
 	return impact
 }
 
-// reposFollowingFleet is every repository crq knows about that has no reviewer
-// override of its own — the ones a fleet default actually reaches.
+// fullyOverridesReviewers reports whether repo answers BOTH reviewer questions
+// itself, so no fleet reviewer default reaches it.
+//
+// The test is AND, not OR, and that is the whole point: a repository that
+// overrides only its co-reviewers still inherits the fleet's required set, and
+// vice versa. Treating either half as a complete override dropped those
+// repositories from the impact preview and from the requeue — cfgFor handed
+// them the new reviewer, their completed round stayed a "this head was
+// reviewed" marker, and the reviewer somebody had just required was never
+// asked.
+func fullyOverridesReviewers(st State, repo string) bool {
+	ov, ok := st.RepoOverride(repo)
+	return ok && ov.SetCoBots && ov.SetRequired
+}
+
+// reposFollowingFleet is every repository crq knows about that inherits at
+// least one half of the fleet's reviewer default — the ones a change to it can
+// actually reach.
 func (s *Service) reposFollowingFleet(st State) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -371,7 +387,7 @@ func (s *Service) reposFollowingFleet(st State) []string {
 		if repo == "" || seen[repo] {
 			return
 		}
-		if ov, ok := st.RepoOverride(repo); ok && (ov.SetCoBots || ov.SetRequired) {
+		if fullyOverridesReviewers(st, repo) {
 			return
 		}
 		// A repository turned off follows nothing. It still has an enrollment

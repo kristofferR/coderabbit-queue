@@ -485,10 +485,20 @@ func (c Config) withSolver(sv SolverSettings) Config {
 // failing the operation: the settings it would have applied are refinements,
 // and refusing to fix a pull request because a setting could not be read would
 // turn a cosmetic outage into a functional one.
+//
+// DispatchForks is the exception, because it is not a refinement. It is the
+// line between running an agent over code the operator wrote and running it
+// over a stranger's, and the record that turns it off is exactly what a failed
+// read cannot see. Falling back to a permissive env value would re-enable fork
+// dispatches precisely while the shared safety policy is unavailable, so the
+// fallback denies them instead: the cost of being wrong is one contributor pull
+// request left unfixed until the ref reads again.
 func (s *Service) repoCfg(repo string) Config {
 	st, _, err := s.store.Load(context.Background())
 	if err != nil {
-		return s.cfg
+		fallback := s.cfg
+		fallback.DispatchForks = false
+		return fallback
 	}
 	return s.cfgFor(st, repo)
 }

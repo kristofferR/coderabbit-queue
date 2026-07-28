@@ -1197,3 +1197,69 @@ func TestDispatchRefusesADisabledRepositoryUnderTheClaim(t *testing.T) {
 		t.Errorf("refusal = %q, want enrollment named as the reason", why)
 	}
 }
+
+// Enrollment is a fleet-wide record and autoreview already builds its scan list
+// from it. The watcher read only CRQ_REPOS, so a repository enrolled from the
+// dashboard was reviewed but never watched — its findings arrived and no fix
+// session ever started — until somebody edited an env file on this host and
+// reinstalled the service.
+func TestWatchTargetsIncludeRepositoriesEnrolledFromTheDashboard(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/known": true}
+	gh := newFakeGitHub()
+	for _, repo := range []string{"owner/known", "owner/enrolled"} {
+		var pull ghapi.Pull
+		pull.State, pull.Number, pull.Head.SHA = "open", 1, "aaaaaaaa1"
+		gh.pulls[fakeKey(repo, 1)] = pull
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := svc.SetEnrollment(ctx, "owner/enrolled", true, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[string]bool{}
+	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0),
+		func(e WatchEvent) error { seen[NormalizeRepo(e.Repo)] = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !seen["owner/enrolled"] {
+		t.Errorf("watched %v, want the repository the record enrolled", seen)
+	}
+	if !seen["owner/known"] {
+		t.Errorf("watched %v, want this host's own list still honoured", seen)
+	}
+}
+
+// The fork switch is not a refinement of a setting; it is the line between
+// running an agent over the operator's own code and over a stranger's. When the
+// shared record cannot be read, falling back to a permissive host value would
+// re-enable fork dispatches at precisely the moment the safety policy is
+// unavailable, so the fallback denies them instead.
+func TestForkDispatchFallsBackClosedWhenTheRecordCannotBeRead(t *testing.T) {
+	cfg := firingConfig()
+	cfg.DispatchForks = true // this host's env says yes
+	svc := NewService(cfg, newFakeGitHub(), unreadableStore{NewMemoryStore(cfg)}, nil)
+
+	var fork ghapi.Pull
+	fork.Head.Repo.FullName = "contributor/thing"
+	if svc.mayDispatch(svc.repoCfg("owner/thing"), "owner/thing", fork) {
+		t.Error("a fork was dispatched on a permissive env value while the shared policy was unreadable")
+	}
+	// Everything else still falls back to the host's configuration: an
+	// unreadable setting must not stop crq fixing its own branches.
+	var own ghapi.Pull
+	own.Head.Repo.FullName = "owner/thing"
+	if !svc.mayDispatch(svc.repoCfg("owner/thing"), "owner/thing", own) {
+		t.Error("an own-repository pull request must still be dispatchable")
+	}
+}
+
+// unreadableStore is a state ref that cannot be read — a transient outage, a
+// revoked token, a ref that has not been created yet.
+type unreadableStore struct{ StateStore }
+
+func (unreadableStore) Load(context.Context) (State, Revision, error) {
+	return State{}, Revision{}, errors.New("state ref unreadable")
+}

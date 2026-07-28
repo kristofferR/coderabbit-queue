@@ -25,11 +25,12 @@ import (
 type unknownFields map[string]json.RawMessage
 
 var (
-	fireSlotFields = jsonFieldNames(reflect.TypeOf(FireSlot{}))
-	roundFields    = jsonFieldNames(reflect.TypeOf(Round{}))
-	stateFields    = jsonFieldNames(reflect.TypeOf(State{}))
-	fleetFields    = jsonFieldNames(reflect.TypeOf(FleetDefaults{}))
-	solverFields   = jsonFieldNames(reflect.TypeOf(SolverSettings{}))
+	fireSlotFields      = jsonFieldNames(reflect.TypeOf(FireSlot{}))
+	roundFields         = jsonFieldNames(reflect.TypeOf(Round{}))
+	stateFields         = jsonFieldNames(reflect.TypeOf(State{}))
+	fleetFields         = jsonFieldNames(reflect.TypeOf(FleetDefaults{}))
+	solverFields        = jsonFieldNames(reflect.TypeOf(SolverSettings{}))
+	repoReviewersFields = jsonFieldNames(reflect.TypeOf(RepoReviewers{}))
 )
 
 // UnmarshalJSON decodes a fire slot and remembers anything it did not recognise.
@@ -148,6 +149,31 @@ func (s *SolverSettings) UnmarshalJSON(raw []byte) error {
 func (s SolverSettings) MarshalJSON() ([]byte, error) {
 	type plain SolverSettings
 	return mergeUnknown(plain(s), s.unknown)
+}
+
+// UnmarshalJSON decodes one repository's reviewer override and remembers
+// anything it did not recognise. The map around it is not enough: State
+// recognises "repos" by name, so only the record itself can carry a member a
+// newer binary added inside it.
+func (r *RepoReviewers) UnmarshalJSON(raw []byte) error {
+	type plain RepoReviewers
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknown(raw, repoReviewersFields)
+	if err != nil {
+		return err
+	}
+	*r = RepoReviewers(decoded)
+	r.unknown = unknown
+	return nil
+}
+
+// MarshalJSON writes a reviewer override back with the members it did not recognise intact.
+func (r RepoReviewers) MarshalJSON() ([]byte, error) {
+	type plain RepoReviewers
+	return mergeUnknown(plain(r), r.unknown)
 }
 
 // captureUnknown returns the members of raw that known does not name.

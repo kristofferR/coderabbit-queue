@@ -44,7 +44,8 @@ func (s *Service) ReportHost(ctx context.Context, roles ...string) {
 		// role since, and treating that as "nothing changed" would leave the
 		// merged record un-refreshed until it aged out.
 		if prev, ok := st.HostReports[report.Host]; ok && sameHostReport(prev, report) &&
-			coversRoles(prev.Roles, report.Roles) && now.Sub(prev.At) < HostReportTTL/2 {
+			coversRoles(prev.Roles, report.Roles) && !prev.StaleRole(now) &&
+			now.Sub(prev.At) < HostReportTTL/2 {
 			// Nothing changed and the record is still fresh. Rewriting it would
 			// bump the state revision on every pass and make the dashboard's
 			// change feed report a fleet that is constantly doing something.

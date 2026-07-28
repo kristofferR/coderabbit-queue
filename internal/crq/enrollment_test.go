@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 // TestEnrollmentPrecedence pins the order the whole feature rests on. Getting it
@@ -149,5 +151,59 @@ func TestEnrollSummaryNeverPricesAnUnknownAsFree(t *testing.T) {
 	free := enrollSummary(EnrollImpact{Open: 2, Eligible: 2}, false)
 	if !strings.Contains(free, "no per-review cost") {
 		t.Errorf("summary = %q, want a genuinely free backlog unchanged", free)
+	}
+}
+
+// Turning a repository off has to remove the work already queued for it, not
+// merely stop new scans finding more. Pump chooses from Rounds through
+// NextEligible, which asks nothing about enrollment — so a queued round kept its
+// place and spent the shared allowance on a metered review minutes after
+// somebody stopped the repository.
+func TestDisablingEnrollmentDropsTheQueuedRounds(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/stopped": true}
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls["o/stopped#7"] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	if _, err := svc.Enqueue(ctx, "o/stopped", 7); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SetEnrollment(ctx, "o/stopped", false, "stop reviewing this"); err != nil {
+		t.Fatal(err)
+	}
+
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("o/stopped", 7); round != nil {
+		t.Fatalf("round = %+v, want it archived rather than left fire-eligible", round)
+	}
+	if next := st.NextEligible(svc.clock()); next != nil {
+		t.Errorf("next eligible = %+v, want nothing for a repository that was turned off", next)
+	}
+	// The round is archived, never deleted: it says why it stopped.
+	if len(st.Archive) != 1 || st.Archive[0].Phase != PhaseAbandoned ||
+		!strings.Contains(st.Archive[0].Note, "turned off") {
+		t.Errorf("archive = %+v, want the round kept with the reason it ended", st.Archive)
+	}
+
+	// Turning it back on enqueues the head again — an off switch somebody can
+	// undo has to hand the repository back the way it found it.
+	if _, err := svc.SetEnrollment(ctx, "o/stopped", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Enqueue(ctx, "o/stopped", 7); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ = store.Load(ctx)
+	if round := st.Round("o/stopped", 7); round == nil || round.Phase != PhaseQueued {
+		t.Errorf("round = %+v, want a fresh queued round once the repository is back on", round)
 	}
 }

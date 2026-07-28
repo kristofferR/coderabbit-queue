@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Cost as CostView, Finding, PRView } from "./api";
 import { BotIcon, BotMarks, Card, CommitLink, Empty, Pill, PRLink, RepoIcon } from "./ui";
 import { ago, clock, countdown, elapsed, useNow } from "./time";
@@ -14,7 +14,7 @@ const SEV_TONE: Record<string, "bad" | "warn" | "mut"> = {
   unknown: "mut",
 };
 
-export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
+export function PRDetailPage({ repo, pr, rev }: { repo: string; pr: number; rev?: number }) {
   const now = useNow();
   const [view, setView] = useState<PRView | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -83,6 +83,27 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repo, pr]);
+
+  // …and again whenever the stream says the state ref MOVED. A page left open
+  // while its round fires, completes, is held, or starts a fix session showed a
+  // queued round and a dead countdown indefinitely otherwise. This is the cheap
+  // half only: no `refresh`, so the server answers from its current state and
+  // keeps serving the cached observation for this head.
+  //
+  // The first revision seen is recorded rather than loaded on: the mount above
+  // is already fetching it, and a second concurrent request would miss the
+  // observation cache too and pay for a whole second look at GitHub.
+  const loadedRev = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (rev === undefined || loadedRev.current === undefined) {
+      loadedRev.current = rev;
+      return;
+    }
+    if (rev === loadedRev.current) return;
+    loadedRev.current = rev;
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rev]);
 
   if (error) {
     return (

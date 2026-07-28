@@ -119,6 +119,9 @@ func (s *Service) SetEnrollment(ctx context.Context, repo string, enabled bool, 
 		st.SetEnrollment(repo, RepoEnrollment{
 			Enabled: enabled, Reason: reason, By: s.cfg.Host, UpdatedAt: &now,
 		})
+		if !enabled {
+			s.abandonPendingRounds(st, repo)
+		}
 		return nil
 	})
 	if err != nil && !errors.Is(err, ErrNoChange) {
@@ -133,6 +136,41 @@ func (s *Service) SetEnrollment(ctx context.Context, repo string, enabled bool, 
 		}
 	}
 	return s.enrollmentOf(st, repo), nil
+}
+
+// abandonPendingRounds drops the rounds a repository being turned off would
+// otherwise still fire.
+//
+// The off switch is advertised as "crq does not go here", and every SCAN path
+// honours it — but Pump chooses from Rounds through NextEligible, which asks
+// nothing about enrollment. A repository with a queued or awaiting-retry round
+// therefore kept its place in the queue and spent the shared allowance on a
+// metered review minutes after being stopped.
+//
+// Only the phases that have not spent anything are touched. A fired or
+// reviewing round already posted its command and holds the fire slot; the money
+// is gone and the answer is worth having, so it is left to finish.
+func (s *Service) abandonPendingRounds(st *State, repo string) {
+	for _, round := range st.Rounds {
+		if NormalizeRepo(round.Repo) != NormalizeRepo(repo) {
+			continue
+		}
+		switch round.Phase {
+		case PhaseQueued, PhaseAwaitingRetry:
+		default:
+			continue
+		}
+		// EndRound, not a bare Abandon: it archives the round rather than
+		// leaving it in Rounds as a "this head was dealt with" marker. Turning
+		// the repository back on then enqueues its current head again, which is
+		// what an off switch that can be undone has to mean.
+		st.EndRound(round.Repo, round.PR, "repository turned off")
+		releaseSlot(st, QueueKey(round.Repo, round.PR))
+		if s.log != nil {
+			s.log.Printf("enrollment: dropped queued round %s#%d@%s — the repository was turned off",
+				round.Repo, round.PR, round.Head)
+		}
+	}
 }
 
 // ClearEnrollment drops the record, handing the repository back to the hosts'

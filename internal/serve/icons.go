@@ -239,6 +239,14 @@ func (s *Server) handleIcon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", got.contentType)
+	// These bytes come from somebody else's repository, and an SVG is not a
+	// picture — navigated to directly, /api/icon/repo/<owner>/<name> is a
+	// DOCUMENT on the dashboard's own origin, so a scripted favicon.svg could
+	// call the mutation endpoints and set the header handleAction checks for.
+	// The sandbox directive drops it into an opaque origin with scripting off,
+	// which the <img> the dashboard actually renders never needed anyway.
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 	_, _ = w.Write(got.body)
 }

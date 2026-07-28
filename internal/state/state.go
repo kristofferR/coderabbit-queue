@@ -540,9 +540,16 @@ const WriterCaps = 5
 const CapsRepoOverrides = 1
 
 // CapsPrimaryOff is the capability that makes RepoReviewers.PrimaryOff safe to
-// act on. A host below it reads the field, writes it back untouched, and still
-// fires the primary there — so turning the primary off has to say which hosts
-// will not honour it, exactly as the override itself does.
+// act on. A host below it still fires the primary there — so turning the
+// primary off has to say which hosts will not honour it, exactly as the
+// override itself does.
+//
+// Worse here than elsewhere, which is why the warning matters: a binary from
+// before RepoReviewers round-tripped unknown members does not merely ignore the
+// switch, it ERASES it on its next write, and the repository silently resumes
+// metered primary reviews on every host. Nothing can be done about a binary
+// already in the field; the tolerant decoding in tolerant.go is what stops the
+// next one from doing it.
 const CapsPrimaryOff = 2
 
 // CapsEnrollment is the capability that makes State.Enrolled safe to act on. A
@@ -640,6 +647,14 @@ type RepoReviewers struct {
 	SetRequired bool       `json:"set_required,omitempty"`
 	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
 	By          string     `json:"by,omitempty"`
+
+	// unknown carries JSON members this binary has no field for. State
+	// recognises "repos" and hands each value to an ordinary decoder, so the
+	// top-level carrier never sees a member added INSIDE one of these records —
+	// an older binary that knows the map but not PrimaryOff would drop the
+	// switch on its next write and the repository would silently resume metered
+	// primary reviews. See tolerant.go.
+	unknown unknownFields
 }
 
 // RepoOverride returns the override for repo, and whether one exists.

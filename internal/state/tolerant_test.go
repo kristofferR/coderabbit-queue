@@ -300,3 +300,52 @@ func TestUnknownFleetFieldsSurviveARewrite(t *testing.T) {
 		t.Errorf("a repository's own solver record dropped a member: %#v", own)
 	}
 }
+
+// A repository's reviewer override is nested the same way the fleet record is:
+// State recognises "repos" by name and hands each value to an ordinary decoder,
+// so only the record itself can carry a member a newer binary added inside it.
+// Without this, an old binary erased PrimaryOff on its next write and the
+// repository silently resumed metered primary reviews.
+func TestUnknownRepoOverrideFieldsSurviveARewrite(t *testing.T) {
+	foreign := `{
+	  "v": 4, "rev": 3, "next_seq": 1,
+	  "repos": {
+	    "owner/repo": {
+	      "cobots": ["codex"], "set_cobots": true,
+	      "primary_off": true,
+	      "future_reviewer_flag": {"mode": "strict"}
+	    }
+	  },
+	  "account": {"scope": "owner"}
+	}`
+
+	var st State
+	if err := json.Unmarshal([]byte(foreign), &st); err != nil {
+		t.Fatal(err)
+	}
+	ov, ok := st.RepoOverride("owner/repo")
+	if !ok || !ov.PrimaryOff || !ov.SetCoBots {
+		t.Fatalf("known fields must still decode: %+v", ov)
+	}
+
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	repos, _ := back["repos"].(map[string]any)
+	own, _ := repos["owner/repo"].(map[string]any)
+	if own == nil {
+		t.Fatalf("the override vanished:\n%s", out)
+	}
+	if own["primary_off"] != true {
+		t.Errorf("primary_off was not written back: %#v", own)
+	}
+	carried, _ := own["future_reviewer_flag"].(map[string]any)
+	if carried == nil || carried["mode"] != "strict" {
+		t.Errorf("a member this binary does not know was dropped: %#v", own["future_reviewer_flag"])
+	}
+}

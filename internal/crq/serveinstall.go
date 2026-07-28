@@ -35,15 +35,20 @@ type ServeInstall struct {
 	Config   string `json:"config,omitempty"`
 	// ReadOnly installs a dashboard that refuses every write, for pointing at a
 	// fleet you do not administer.
-	ReadOnly bool     `json:"read_only,omitempty"`
-	Commands []string `json:"commands"`
-	DryRun   bool     `json:"dry_run,omitempty"`
-	Started  bool     `json:"started,omitempty"`
+	ReadOnly bool `json:"read_only,omitempty"`
+	// SkipAuthCheck installs without proving the service can authenticate. Same
+	// escape hatch as the autofix install: a macOS host reached over SSH cannot
+	// read the GUI session's keychain, so an expired token and a perfectly good
+	// one look identical from there.
+	SkipAuthCheck bool     `json:"skip_auth_check,omitempty"`
+	Commands      []string `json:"commands"`
+	DryRun        bool     `json:"dry_run,omitempty"`
+	Started       bool     `json:"started,omitempty"`
 }
 
 // InstallServe writes the service definition for `crq serve` and starts it.
-func (s *Service) InstallServe(ctx context.Context, addr string, readOnly, dryRun bool) (ServeInstall, error) {
-	return s.installUnit(ctx, "serve", addr, readOnly, dryRun)
+func (s *Service) InstallServe(ctx context.Context, addr string, readOnly, dryRun, skipAuth bool) (ServeInstall, error) {
+	return s.installUnit(ctx, "serve", addr, readOnly, dryRun, skipAuth)
 }
 
 // InstallAutoReview writes the service definition for `crq autoreview` and
@@ -53,11 +58,11 @@ func (s *Service) InstallServe(ctx context.Context, addr string, readOnly, dryRu
 // Which host runs it is a real choice: it takes the leader lease, so the fleet
 // only fires while that machine is awake. A laptop that sleeps is the wrong
 // host for it, and nothing about the queue says so until reviews quietly stop.
-func (s *Service) InstallAutoReview(ctx context.Context, dryRun bool) (ServeInstall, error) {
-	return s.installUnit(ctx, "autoreview", "", false, dryRun)
+func (s *Service) InstallAutoReview(ctx context.Context, dryRun, skipAuth bool) (ServeInstall, error) {
+	return s.installUnit(ctx, "autoreview", "", false, dryRun, skipAuth)
 }
 
-func (s *Service) installUnit(ctx context.Context, service, addr string, readOnly, dryRun bool) (ServeInstall, error) {
+func (s *Service) installUnit(ctx context.Context, service, addr string, readOnly, dryRun, skipAuth bool) (ServeInstall, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ServeInstall{}, fmt.Errorf("resolving home directory: %w", err)
@@ -77,14 +82,15 @@ func (s *Service) installUnit(ctx context.Context, service, addr string, readOnl
 	// opened, so the directory has to exist before the unit does.
 	logDir := filepath.Join(home, ".local", "state", "crq")
 	plan := ServeInstall{
-		Service:  service,
-		Platform: runtime.GOOS,
-		LogDir:   logDir,
-		Binary:   self,
-		Addr:     addr,
-		Config:   ConfigPath(),
-		ReadOnly: readOnly,
-		DryRun:   dryRun,
+		Service:       service,
+		Platform:      runtime.GOOS,
+		LogDir:        logDir,
+		Binary:        self,
+		Addr:          addr,
+		Config:        ConfigPath(),
+		ReadOnly:      readOnly,
+		SkipAuthCheck: skipAuth,
+		DryRun:        dryRun,
 	}
 	switch runtime.GOOS {
 	case "darwin":
@@ -107,6 +113,17 @@ func (s *Service) installUnit(ctx context.Context, service, addr string, readOnl
 	}
 	if dryRun {
 		return plan, nil
+	}
+
+	// Both units read GitHub on every pass and neither inherits this shell's
+	// variables, so the same check the autofix install makes belongs here.
+	// Without it `systemctl restart` succeeds, the install prints Started, and
+	// the process then fails its state reads for ever — no reviews, no
+	// dashboard, and nothing that says why.
+	if !skipAuth {
+		if err := serviceCanAuthenticate(ctx, service); err != nil {
+			return plan, err
+		}
 	}
 
 	for _, dir := range []string{logDir, filepath.Dir(plan.Unit)} {

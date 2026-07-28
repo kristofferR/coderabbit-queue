@@ -275,6 +275,21 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 	}
 	var candidates []queueCandidate
 	var titles []queueCandidate
+	// The skip rules below are per-repository settings like everything else, and
+	// the enrollment preview already answers with the resolved ones. Reading
+	// s.cfg here instead made this pass enqueue — and spend the shared allowance
+	// on — pull requests the dialog had just promised would be skipped. Memoized
+	// per repository: cfgFor re-parses the merged env, and a scan sees the same
+	// repository many times over.
+	skipCfg := map[string]Config{}
+	repoSkips := func(repo string) Config {
+		cfg, ok := skipCfg[repo]
+		if !ok {
+			cfg = s.cfgFor(state, repo)
+			skipCfg[repo] = cfg
+		}
+		return cfg
+	}
 	lastBeat := time.Now()
 	for _, target := range targets {
 		// Per-target scan budget so one large scope can't consume the whole budget
@@ -294,10 +309,11 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			if !s.reviewsRepo(state, repo) {
 				return false, nil
 			}
-			if s.cfg.SkipAuthors[dialect.NormalizeBotName(strings.ToLower(pr.Author))] {
+			skips := repoSkips(repo)
+			if skips.SkipAuthors[dialect.NormalizeBotName(strings.ToLower(pr.Author))] {
 				return false, nil
 			}
-			if s.cfg.SkipsReview(pr.Body) {
+			if skips.SkipsReview(pr.Body) {
 				return false, nil
 			}
 			scanned++
@@ -311,7 +327,8 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 				if !held {
 					return false, errLostLeadership
 				}
-				state = st // reuse the freshly written snapshot for later candidates
+				state = st     // reuse the freshly written snapshot for later candidates
+				clear(skipCfg) // the memo above answers for the snapshot it was built from
 				lastBeat = time.Now()
 			}
 			// A round that already exists at this head is not a candidate, so it

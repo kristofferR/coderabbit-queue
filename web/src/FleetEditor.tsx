@@ -35,8 +35,15 @@ export function FleetEditor({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const fleetRuns = fleet.reviewers.filter((r) => r.budget !== "account").map((r) => short(r.login));
-  const fleetRequired = fleet.reviewers.filter((r) => r.required).map((r) => short(r.login));
+  // The controls below are keyed by the registry NAME, not the GitHub login:
+  // `codex` is `chatgpt-codex-connector[bot]` and `bugbot` is `cursor[bot]`.
+  // Building the state from logins made every such reviewer render as off, and
+  // clicking the apparent off switch appended a second spelling instead of
+  // removing the first — so they could not be turned off from here at all.
+  const nameOf = (login: string) =>
+    bots.find((b) => short(b.login) === short(login))?.name ?? short(login);
+  const fleetRuns = fleet.reviewers.filter((r) => r.budget !== "account").map((r) => nameOf(r.login));
+  const fleetRequired = fleet.reviewers.filter((r) => r.required).map((r) => nameOf(r.login));
 
   useEffect(() => {
     setRuns(fleetRuns);

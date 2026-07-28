@@ -72,7 +72,7 @@ export function App() {
       )}
 
       {prRoute(route) ? (
-        <PRDetailPage repo={prRoute(route)!.repo} pr={prRoute(route)!.pr} />
+        <PRDetailPage repo={prRoute(route)!.repo} pr={prRoute(route)!.pr} rev={snap?.overview.rev} />
       ) : !snap ? (
         <Loading live={live} />
       ) : route === "#/repos" ? (

@@ -1,0 +1,78 @@
+package state
+
+import (
+	"testing"
+	"time"
+)
+
+// Every crq service on a host writes the SAME record and reports only its own
+// role, which is why roles merge. The merge is also what made a stopped service
+// immortal: the survivor refreshed the record's single timestamp on every pass,
+// so the role it carried forward never aged out and the dashboard reported a
+// dead daemon running for ever.
+func TestStoppedHostRoleExpiresWhileTheOtherKeepsReporting(t *testing.T) {
+	base := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	st := New()
+
+	st.SetHostReport(HostReport{Host: "mac", Roles: []string{"autoreview"}}, base)
+	st.SetHostReport(HostReport{Host: "mac", Roles: []string{"autofix"}}, base)
+	if got := st.HostReports["mac"].Roles; len(got) != 2 {
+		t.Fatalf("roles = %v, want both services merged", got)
+	}
+
+	// autofix stops here. autoreview keeps reporting, well inside the TTL.
+	for at := base.Add(10 * time.Minute); !at.After(base.Add(25 * time.Minute)); at = at.Add(10 * time.Minute) {
+		st.SetHostReport(HostReport{Host: "mac", Roles: []string{"autoreview"}}, at)
+	}
+	if got := st.HostReports["mac"].Roles; len(got) != 2 {
+		t.Fatalf("roles = %v, want autofix still listed inside its own TTL", got)
+	}
+
+	// Past autofix's OWN last sighting it is dropped, even though the record
+	// itself is fresh.
+	st.SetHostReport(HostReport{Host: "mac", Roles: []string{"autoreview"}}, base.Add(HostReportTTL+time.Minute))
+	got := st.HostReports["mac"].Roles
+	if len(got) != 1 || got[0] != "autoreview" {
+		t.Errorf("roles = %v, want only the service still reporting", got)
+	}
+}
+
+// A record an older binary wrote carries roles and no dates. They are exactly
+// as old as the record, which is the honest date to expire them from — anything
+// else either drops a live role or keeps a dead one.
+func TestUndatedRolesExpireFromTheRecordTheyCameWith(t *testing.T) {
+	base := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	st := New()
+	st.HostReports = map[string]HostReport{
+		"linux": {Host: "linux", Roles: []string{"serve"}, At: base},
+	}
+
+	st.SetHostReport(HostReport{Host: "linux", Roles: []string{"autofix"}}, base.Add(time.Minute))
+	if got := st.HostReports["linux"].Roles; len(got) != 2 {
+		t.Fatalf("roles = %v, want the undated role carried while it is still fresh", got)
+	}
+
+	st.SetHostReport(HostReport{Host: "linux", Roles: []string{"autofix"}}, base.Add(HostReportTTL+time.Minute))
+	got := st.HostReports["linux"].Roles
+	if len(got) != 1 || got[0] != "autofix" {
+		t.Errorf("roles = %v, want the undated role expired against the record it came with", got)
+	}
+}
+
+// StaleRole is what a caller skipping a no-change write has to ask: the record
+// is fresh because another service keeps writing it, and skipping is precisely
+// what would leave the dead role listed.
+func TestStaleRoleSeesPastAFreshRecord(t *testing.T) {
+	base := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	st := New()
+	st.SetHostReport(HostReport{Host: "mac", Roles: []string{"autofix"}}, base)
+	st.SetHostReport(HostReport{Host: "mac", Roles: []string{"autoreview"}}, base.Add(20*time.Minute))
+
+	rec := st.HostReports["mac"]
+	if rec.StaleRole(base.Add(20 * time.Minute)) {
+		t.Error("no role has aged out yet")
+	}
+	if !rec.StaleRole(base.Add(HostReportTTL + time.Minute)) {
+		t.Error("autofix has not been heard from in a TTL and the record still names it")
+	}
+}

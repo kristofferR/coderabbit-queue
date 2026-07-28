@@ -3170,3 +3170,52 @@ func TestObservedAccountBlockDoesNotRollTheNoticeWatermarkBackward(t *testing.T)
 			st.Account.RLCommentID, st.Account.RLCommentUpdated)
 	}
 }
+
+// The skip rules are per-repository settings like everything else, and the
+// enrollment preview answers with the resolved ones. Reading this host's
+// startup configuration instead made the daemon enqueue — and spend the shared
+// allowance on — pull requests the dialog had just promised would be skipped.
+func TestAutoReviewScanAppliesTheRepositorysOwnSkipAuthors(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:          "o/gate",
+		Scope:             []string{"o"},
+		Host:              "h",
+		Bot:               "coderabbitai[bot]",
+		ReviewCommand:     "@coderabbitai review",
+		LeaderTTL:         time.Minute,
+		AutoReviewMaxScan: 10,
+	}
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{
+		{Repo: "o/app", Number: 1, Author: "renovate[bot]"},
+		{Repo: "o/app", Number: 2, Author: "alice"},
+	}
+	for pr := 1; pr <= 2; pr++ {
+		var pull ghapi.Pull
+		pull.State = "open"
+		pull.Head.SHA = "abcdef1234567890"
+		gh.pulls[fakeKey("o/app", pr)] = pull
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	// Nothing in this host's env skips renovate; the repository's own record
+	// does, and that is the answer every path has to reach.
+	if _, err := svc.SetSolver(ctx, "o/app", SolverChange{SkipAuthors: []string{"renovate[bot]"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AutoReview(ctx, AutoOptions{Once: true, Incremental: true}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Round("o/app", 1) != nil {
+		t.Errorf("a repository-skipped author was enqueued anyway: %#v", st.Rounds)
+	}
+	if st.FiredMarker("o/app", 2) == "" {
+		t.Errorf("the unaffected pull request must still be reviewed, got rounds=%#v", st.Rounds)
+	}
+}

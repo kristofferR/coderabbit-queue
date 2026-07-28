@@ -583,6 +583,8 @@ func run(ctx context.Context, args []string) int {
 		readOnly := fs.Bool("read-only", false, "refuse every write from the dashboard")
 		poll := fs.Duration("poll", 5*time.Second, "how often to re-read the state ref")
 		dryRun := fs.Bool("dry-run", false, "with install: print the plan, write nothing")
+		skipAuth := fs.Bool("skip-auth-check", false,
+			"with install: install without proving the service can authenticate (a macOS host reached over SSH, where gh's keychain is the GUI session's)")
 		// `crq serve install` keeps the dashboard running across a logout and a
 		// reboot. Split before the flags are parsed so the subcommand word does
 		// not have to be a flag value.
@@ -598,7 +600,7 @@ func run(ctx context.Context, args []string) int {
 				fatal(err)
 				return 1
 			}
-			plan, ierr := service.InstallServe(ctx, *addr, *readOnly, *dryRun)
+			plan, ierr := service.InstallServe(ctx, *addr, *readOnly, *dryRun, *skipAuth)
 			if ierr != nil {
 				fatal(ierr)
 				return 1
@@ -770,7 +772,19 @@ func run(ctx context.Context, args []string) int {
 				fatal(err)
 				return 1
 			}
-			plan, ierr := service.InstallAutoReview(ctx, len(args) > 2 && args[2] == "--dry-run")
+			dryRun, skipAuth := false, false
+			for _, arg := range args[2:] {
+				switch arg {
+				case "--dry-run":
+					dryRun = true
+				case "--skip-auth-check":
+					skipAuth = true
+				default:
+					fatal(fmt.Errorf("unknown flag %q: usage is crq autoreview install [--dry-run] [--skip-auth-check]", arg))
+					return 1
+				}
+			}
+			plan, ierr := service.InstallAutoReview(ctx, dryRun, skipAuth)
 			if ierr != nil {
 				fatal(ierr)
 				return 1
@@ -1094,7 +1108,7 @@ intend to keep working). Thread IDs come from .findings[].thread_id.
 `)
 	case "serve":
 		fmt.Print(`crq serve [--addr host:port] [--read-only] [--poll <dur>]
-crq serve install [--addr host:port] [--read-only] [--dry-run]
+crq serve install [--addr host:port] [--read-only] [--dry-run] [--skip-auth-check]
 
 The live web dashboard: the queue, the repositories, the bots and the settings,
 in a page that updates itself. The GitHub issue dashboard is unaffected and
@@ -1458,13 +1472,15 @@ dismissing only records that you decided to live with it at this head.
 `)
 	case "autoreview", "auto":
 		fmt.Print(`crq autoreview [--once] [--no-incremental]
+crq autoreview install [--dry-run] [--skip-auth-check]
 
 Keep open PRs in CRQ_SCOPE reviewed, using the same account-wide queue and quota.
 Run only one long-lived autoreview daemon. Manual crq loop calls share its idempotent
 queue entry, so they re-attach to the same wait instead of firing a duplicate review.
 
-  --once            scan once and exit
-  --no-incremental  only review PRs that have never been reviewed by CodeRabbit
+  --once             scan once and exit
+  --no-incremental   only review PRs that have never been reviewed by CodeRabbit
+  --skip-auth-check  with install: do not prove the service can authenticate first
 
 Use this instead of CodeRabbit native auto-review. Native auto-review must be off.
 `)

@@ -187,6 +187,11 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		result <-chan dispatchResult
 	}
 	var pending []pendingEvent
+	s.ReportHost(ctx, "autofix")
+	// One snapshot for the pass. It decides both which repositories are watched
+	// at all and which of them may be fixed, so it is read BEFORE the target
+	// list is built.
+	st, _, stateErr := s.store.Load(ctx)
 	// Copied, never appended to in place. `crq watch -- <cmd>` splits argv at
 	// "--", so the flag half keeps CAPACITY reaching into the command half, and
 	// fs.Args() is a sub-slice of it: filling an empty list with append wrote the
@@ -196,8 +201,26 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	repos := make([]string, 0, len(opts.Repos)+len(s.cfg.AllowRepos))
 	repos = append(repos, opts.Repos...)
 	if len(repos) == 0 {
-		for repo := range s.cfg.AllowRepos {
+		// Enrollment is a fleet-wide record, and autoreview already builds its
+		// scan list from it. Reading only CRQ_REPOS here meant a repository
+		// enrolled from the dashboard was reviewed but never watched — its
+		// findings arrived and no fix session ever started — until somebody
+		// edited an env file on this host and reinstalled the service.
+		seen := map[string]bool{}
+		add := func(repo string) {
+			if repo = NormalizeRepo(repo); repo == "" || seen[repo] {
+				return
+			}
+			seen[repo] = true
 			repos = append(repos, repo)
+		}
+		for repo := range s.cfg.AllowRepos {
+			add(repo)
+		}
+		if stateErr == nil {
+			for _, repo := range st.EnrolledRepos() {
+				add(repo)
+			}
 		}
 		sort.Strings(repos) // stable order: a pass must not depend on map iteration
 	}
@@ -217,15 +240,14 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	}
 	var candidates []candidate
 	gate := NormalizeRepo(s.cfg.GateRepo)
-	s.ReportHost(ctx, "autofix")
 	// Which repositories may be FIXED is per repository, read once for the pass.
 	// Watching is unaffected: a repository with autofix off is still observed
 	// and still reviewed, so its feedback arrives for a person to act on.
 	autofixOff := map[string]bool{}
-	// Enrollment is read from the same snapshot: a repository turned off from
-	// the dashboard must stop being watched on the next pass, not on restart.
+	// A repository turned off from the dashboard must stop being watched on the
+	// next pass, not on restart.
 	notEnrolled := map[string]bool{}
-	if st, _, err := s.store.Load(ctx); err == nil {
+	if stateErr == nil {
 		for _, repo := range repos {
 			if !st.AutofixEnabled(repo) {
 				autofixOff[NormalizeRepo(repo)] = true

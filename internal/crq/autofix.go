@@ -193,7 +193,7 @@ func autofixArgv(plan AutofixInstall) []string {
 func (s *Service) applyAutofix(ctx context.Context, plan AutofixInstall) (AutofixInstall, error) {
 	logDir := plan.LogDir
 	if !plan.SkipAuthCheck {
-		if err := autofixCanAuthenticate(ctx); err != nil {
+		if err := serviceCanAuthenticate(ctx, "autofix"); err != nil {
 			return plan, err
 		}
 	}
@@ -319,7 +319,7 @@ func launchdJobAbsent(command string, output []byte) bool {
 	return strings.Contains(text, "no such process") || strings.Contains(text, "could not find service")
 }
 
-// autofixCanAuthenticate reports whether the SERVICE will find a GitHub
+// serviceCanAuthenticate reports whether the named SERVICE will find a GitHub
 // credential — which is not the same question as whether this shell has one.
 //
 // crq resolves a token from GITHUB_TOKEN/GH_TOKEN or `gh auth token`, and the
@@ -337,7 +337,7 @@ func launchdJobAbsent(command string, output []byte) bool {
 // that session, the escape hatch is an explicit flag rather than a guess: an
 // operator typing --skip-auth-check has made a claim, which is not the silent
 // nothing this check exists to prevent.
-func autofixCanAuthenticate(ctx context.Context) error {
+func serviceCanAuthenticate(ctx context.Context, service string) error {
 	if path := ConfigPath(); path != "" {
 		values, err := readEnvFile(path)
 		if err == nil {
@@ -355,7 +355,7 @@ func autofixCanAuthenticate(ctx context.Context) error {
 	if out, err := cmd.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
 		return nil
 	}
-	return fmt.Errorf("the autofix service would have no GitHub credential: a service does not inherit this shell's GITHUB_TOKEN/GH_TOKEN. Run 'gh auth login', or put the token in %s, then install again", ConfigPath())
+	return fmt.Errorf("the %s service would have no GitHub credential: a service does not inherit this shell's GITHUB_TOKEN/GH_TOKEN. Run 'gh auth login', or put the token in %s, then install again", service, ConfigPath())
 }
 
 // autofixPath is the PATH the service runs with: this shell's, plus wherever crq

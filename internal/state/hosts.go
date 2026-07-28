@@ -28,6 +28,11 @@ type HostReport struct {
 	// Roles are the crq services running here ("autoreview", "autofix",
 	// "serve"), so a fleet can be read as who does what.
 	Roles []string `json:"roles,omitempty"`
+	// RoleSeen dates each role separately, because the record as a whole cannot.
+	// Every service on a host writes the SAME record and merges the roles it
+	// found there, so the one still running refreshed the stopped one's claim on
+	// every pass and the table showed a dead service running for ever.
+	RoleSeen map[string]time.Time `json:"role_seen,omitempty"`
 	// Tools is what this host can run, probed on the PATH the reporting process
 	// had. A daemon reports the service's PATH, which is the one that decides
 	// whether a fix session can start.
@@ -58,25 +63,67 @@ const HostReportTTL = 30 * time.Minute
 // service and each reports only its own: the autofix watcher and the review
 // daemon on the same host would otherwise take turns overwriting each other,
 // and the table would show whichever wrote last as the only thing running
-// there. A role is dropped only when the record ages out entirely.
+// there.
+//
+// Each role therefore expires on its OWN last sighting, not on the record's. A
+// shared At cannot answer this: the surviving service refreshes it every pass,
+// so a carried-forward role from a service that stopped was renewed for ever
+// and the dashboard reported it running indefinitely.
 func (s *State) SetHostReport(r HostReport, now time.Time) {
 	if s.HostReports == nil {
 		s.HostReports = map[string]HostReport{}
 	}
-	if prev, ok := s.HostReports[r.Host]; ok && now.Sub(prev.At) <= HostReportTTL {
-		seen := map[string]bool{}
-		for _, role := range r.Roles {
-			seen[role] = true
+	now = now.UTC()
+	seen := map[string]time.Time{}
+	if prev, ok := s.HostReports[r.Host]; ok {
+		for role, at := range prev.RoleSeen {
+			seen[role] = at
 		}
+		// A record written before roles were dated (an older binary, or one
+		// whose write dropped the member): its roles are exactly as old as it
+		// is, which is the honest date to expire them from.
 		for _, role := range prev.Roles {
-			if !seen[role] {
-				r.Roles = append(r.Roles, role)
+			if _, dated := seen[role]; !dated {
+				seen[role] = prev.At
 			}
 		}
-		sort.Strings(r.Roles)
 	}
-	r.At = now.UTC()
+	for _, role := range r.Roles {
+		seen[role] = now
+	}
+	roles := make([]string, 0, len(seen))
+	for role, at := range seen {
+		if now.Sub(at) > HostReportTTL {
+			delete(seen, role)
+			continue
+		}
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	r.Roles = roles
+	if len(seen) == 0 {
+		seen = nil
+	}
+	r.RoleSeen = seen
+	r.At = now
 	s.HostReports[r.Host] = r
+}
+
+// StaleRole reports whether this record still names a role whose own last
+// sighting has aged out. The record itself may be fresh — a second service on
+// the host keeps writing it — which is why a caller deciding "nothing changed,
+// skip the write" has to ask: skipping is what would keep the dead role listed.
+func (r HostReport) StaleRole(now time.Time) bool {
+	for _, role := range r.Roles {
+		at, ok := r.RoleSeen[role]
+		if !ok {
+			at = r.At
+		}
+		if now.Sub(at) > HostReportTTL {
+			return true
+		}
+	}
+	return false
 }
 
 // HostReportList is every host's self-report, most recently heard from first.

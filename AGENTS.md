@@ -42,10 +42,14 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
   dashboard rendering. `Round.CoBots` holds per-
   co-reviewer trigger bookkeeping; Codex's entry is **dual-written** to the
   legacy `Codex*` round fields because the fleet shares one state ref across
-  binary versions (`Normalize` folds them back on load). `Round` and `State` also
-  **round-trip unknown JSON members** (`tolerant.go`), so a field a newer binary
-  added survives being read and rewritten by an older one — which is what makes
-  ordinary additions safe without another dual-write or schema bump. Schema v4
+  binary versions (`Normalize` folds them back on load). `State`, `Round` and
+  every record NESTED inside them — `FireSlot`, `FleetDefaults`, `SolverSettings`,
+  `RepoReviewers` — **round-trip unknown JSON members** (`tolerant.go`), so a
+  field a newer binary added survives being read and rewritten by an older one.
+  Nesting is why each needs its own: the carrier recognises the member by name
+  and hands the whole object to an ordinary decoder, which drops anything inside
+  it. That is what makes ordinary additions safe without another dual-write or
+  schema bump. Schema v4
   is the deliberate exception: older v3 clients refuse it, fencing pumping
   clients that cannot enforce administrative holds.
 - `internal/engine/` — PURE decision logic, `now` passed in, no ctx/gh:
