@@ -91,7 +91,7 @@ func fleetSettings() map[string]fleetSetting {
 			},
 			Show: func(cfg Config) string { return strings.Join(sortedSetKeys(cfg.ExcludeRepos), ",") },
 		},
-		"required-bots": {
+		requiredBotsKey: {
 			Doc:    "logins that must review a head before a round converges",
 			Env:    "CRQ_REQUIRED_BOTS",
 			AltEnv: coBotRequiredEnvs(),
@@ -193,7 +193,7 @@ func fleetSettings() map[string]fleetSetting {
 			},
 			Show: func(cfg Config) string { return strings.Join(sortedSetKeys(cfg.SkipAuthors), ",") },
 		},
-		"cobots": {
+		coBotsKey: {
 			Doc: "co-reviewers crq surfaces and triggers (empty disables all)",
 			Env: "CRQ_COBOTS",
 			// A required bot is enabled whatever CRQ_COBOTS lists, so the per-bot
@@ -439,6 +439,14 @@ func fleetCoBotNames(value string) ([]string, error) {
 // but it never requeues a round.
 const feedbackBotsKey = "feedback-bots"
 
+// requiredBotsKey and coBotsKey are the two membership settings, named because
+// their order relative to each other decides what they resolve to. See
+// fleetApplyOrder.
+const (
+	requiredBotsKey = "required-bots"
+	coBotsKey       = "cobots"
+)
+
 // isReviewerFleetKey reports whether a setting reshapes who reviews, or how a
 // co-reviewer is driven. Those are the ones whose derived views have to be
 // rebuilt, and whose changes existing rounds may have to be reconciled against.
@@ -454,7 +462,7 @@ func isReviewerFleetKey(key string) bool {
 //
 // The distinction matters when the fleet adopts a key, see fleetChange.baseline.
 func isReviewerMembershipFleetKey(key string) bool {
-	return key == "required-bots" || key == "cobots"
+	return key == requiredBotsKey || key == coBotsKey
 }
 
 // FleetKeys lists every setting the fleet owns, in a stable order.
@@ -559,7 +567,7 @@ func fleetRepoSet(value string) (map[string]bool, error) {
 // disagreement surfaces in `crq doctor`, not silently here.
 func applyFleet(cfg Config, fleet map[string]string, warn func(string)) Config {
 	settings := fleetSettings()
-	for _, key := range sortedKeys(fleet) {
+	for _, key := range fleetApplyOrder(fleet) {
 		setting, ok := settings[key]
 		if !ok {
 			if warn != nil {
@@ -597,6 +605,30 @@ func applyFleet(cfg Config, fleet map[string]string, warn func(string)) Config {
 		})
 	}
 	return cfg
+}
+
+// fleetApplyOrder is the order recorded settings are applied in: alphabetical,
+// except that required-bots comes first.
+//
+// The two membership settings are interdependent — `cobots` resolves through
+// ForRepo, where a required bot is enabled whatever the list says. Alphabetical
+// order applies it BEFORE required-bots, so it reads THIS HOST's required set:
+// a fleet that records `required-bots=coderabbitai[bot]` with `cobots=""` has
+// the host's locally required co-reviewer put straight back, and the rebuild
+// below preserves the contaminated set — leaving hosts surfacing and triggering
+// a bot the fleet disabled, from local environment the fleet is meant to
+// override. Resolving the required list first gives both keys one baseline.
+func fleetApplyOrder(fleet map[string]string) []string {
+	keys := make([]string, 0, len(fleet))
+	if _, ok := fleet[requiredBotsKey]; ok {
+		keys = append(keys, requiredBotsKey)
+	}
+	for _, key := range sortedKeys(fleet) {
+		if key != requiredBotsKey {
+			keys = append(keys, key)
+		}
+	}
+	return keys
 }
 
 // touchesReviewers reports whether the recorded policy holds anything the

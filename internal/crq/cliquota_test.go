@@ -146,6 +146,37 @@ func TestRecordCLIQuotaRefusesAChangedFleetAccountAtCommit(t *testing.T) {
 	}
 }
 
+// Only the account the evidence belongs to can invalidate it. Comparing the
+// whole fleet revision meant any unrelated setting moving between the read and
+// the write refused an explicit, organisation-attributed block: the operator was
+// told to run preflight again while the shared quota stayed open, and the daemon
+// could post a metered review inside the window the CLI had just reported.
+func TestRecordCLIQuotaSurvivesAnUnrelatedFleetChange(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	svc, store := cliQuotaService(t, now)
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := svc.fleetCfg(st)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.SetFleetValue("settle", "9m")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	applied, standing, err := svc.applyAccountBlock(
+		context.Background(), now.Add(time.Hour), "coderabbit-cli", snapshot, "kristofferR",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !applied || standing == nil || !standing.Equal(now.Add(time.Hour)) {
+		t.Fatalf("applied=%v standing=%v, want the block recorded across the unrelated change", applied, standing)
+	}
+}
+
 // A window read from a PR comment is authoritative about the whole account; a
 // local reading may be a narrower limit. Extending is safe, shortening is not.
 func TestRecordCLIQuotaNeverShortensAStandingBlock(t *testing.T) {

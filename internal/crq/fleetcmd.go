@@ -474,8 +474,13 @@ func (s *Service) reconcileFleetChange(st *State, change fleetChange, open map[s
 		if !after.ExcludeRepos[NormalizeRepo(round.Repo)] {
 			continue
 		}
+		// A queued round holds no slot, so this releases one only when the round
+		// it retires is the one that took it — which it never is here. An orphaned
+		// hold at the same key stands for a metered command a previous round
+		// posted and is left alone: excluding a repository stops the next review,
+		// it does not answer the one already in flight.
 		st.EndRound(round.Repo, round.PR, "repository excluded by fleet policy")
-		releaseSlot(st, QueueKey(round.Repo, round.PR))
+		releaseSlot(st, QueueKey(round.Repo, round.PR), round.Token)
 	}
 	s.reopenForFleetReviewerChange(st, before, after, open)
 	return nil

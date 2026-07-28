@@ -775,7 +775,15 @@ func (s *Service) applyAccountBlock(
 	applied := false
 	state, err := s.store.Update(ctx, func(st *State) error {
 		current := s.fleetCfg(*st)
-		if current.FleetRevision != expected.FleetRevision || !cliOrgMatches(current, cliOrg) {
+		// Only the SCOPE decides which account this block is evidence about, and
+		// cliOrgMatches asks the sharper form of that question against the policy
+		// the write lands on. Comparing the whole revision instead refused an
+		// explicit, organisation-attributed block because an unrelated setting —
+		// settle, repos, a co-reviewer's command — moved between the read and this
+		// write: the caller was told to run preflight again while the shared quota
+		// stayed open, and the daemon could post a metered review inside the window
+		// the CLI had just reported.
+		if !sameFoldedSet(current.Scope, expected.Scope) || !cliOrgMatches(current, cliOrg) {
 			return errFleetQuotaChanged
 		}
 		if !engine.AcceptAccountBlock(st.Account.BlockedUntil, until) {
@@ -877,6 +885,9 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 // where the state it reads is the state the write lands on.
 func (s *Service) applyTransition(st *State, r *Round, tr engine.Transition, now time.Time, cfg Config) error {
 	key := QueueKey(r.Repo, r.PR)
+	// Captured before the transitions below clear it: this round's claim on the
+	// fire slot is what lets it release the slot at the end.
+	token := r.Token
 	// Completion and retry are the policy-dependent outcomes, so both are dropped
 	// when the policy moved under them. The completed round is the "this head was
 	// reviewed" dedup marker, and reopenForChangedReviewers deliberately leaves an
@@ -917,19 +928,29 @@ func (s *Service) applyTransition(st *State, r *Round, tr engine.Transition, now
 		}
 	case engine.OutAbandon:
 		st.EndRound(r.Repo, r.PR, tr.Reason)
-		releaseSlot(st, key)
+		releaseSlot(st, key, token)
 		return nil
 	default:
 		return nil
 	}
 	st.PutRound(*r)
-	releaseSlot(st, key)
+	releaseSlot(st, key, token)
 	return nil
 }
 
-// releaseSlot clears the fire slot when it points at key.
-func releaseSlot(st *State, key string) {
-	if st.FireSlot != nil && st.FireSlot.Key == key {
+// releaseSlot clears the fire slot when it points at key AND token — the round
+// that took it is the only one that may give it back.
+//
+// The key alone is not enough because the slot outlives the round: a hold left
+// behind for a metered command whose round was superseded belongs to that
+// command, not to the pull request it was posted on. Its replacement round at
+// the same key ending — excluded by fleet policy, cancelled, or abandoned with
+// the PR — would otherwise drop the hold and let a second metered review fire
+// while the first command is still unanswered. Its token is the archived one's,
+// so it releases nothing here. Nobody needs to: the hold is bounded by the
+// in-flight window, and Normalize reaps the slot once it expires.
+func releaseSlot(st *State, key, token string) {
+	if st.FireSlot != nil && st.FireSlot.Key == key && st.FireSlot.Token == token {
 		st.FireSlot = nil
 		st.ClearSlotHold()
 	}
@@ -1122,7 +1143,7 @@ func (s *Service) abandonRound(ctx context.Context, round Round, reason, action 
 			return ErrNoChange
 		}
 		st.EndRound(round.Repo, round.PR, reason)
-		releaseSlot(st, QueueKey(round.Repo, round.PR))
+		releaseSlot(st, QueueKey(round.Repo, round.PR), round.Token)
 		ended = true
 		return nil
 	})
@@ -1314,7 +1335,7 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 			if rerr := r.AwaitRetry(now.Add(postFailureBackoff), "failed to post review command: "+err.Error(), now); rerr != nil {
 				return rerr
 			}
-			releaseSlot(st, key)
+			releaseSlot(st, key, token)
 			st.Warn = "failed to post review command: " + err.Error()
 			st.PutRound(*r)
 			return nil
@@ -1913,11 +1934,13 @@ const triggerClaimTTL = 2 * time.Minute
 func (s *Service) Cancel(ctx context.Context, repo string, pr int) error {
 	repo = NormalizeRepo(repo)
 	state, err := s.store.Update(ctx, func(st *State) error {
-		if st.Round(repo, pr) == nil {
+		r := st.Round(repo, pr)
+		if r == nil {
 			return ErrNoChange
 		}
+		token := r.Token
 		st.EndRound(repo, pr, "cancelled")
-		releaseSlot(st, QueueKey(repo, pr))
+		releaseSlot(st, QueueKey(repo, pr), token)
 		return nil
 	})
 	if err != nil {
@@ -1954,7 +1977,7 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 	if state.Account.CalibAskedAt == nil && state.Account.CheckedAt != nil && now.Sub(*state.Account.CheckedAt) < cfg.CalibrationTTL {
 		return state, nil
 	}
-	quota, err := s.readQuota(ctx, s.calibrationIssue(state), now, state.Account.CalibAskedAt, cfg)
+	quota, readAt, err := s.readQuota(ctx, s.calibrationIssue(state), now, state.Account.CalibAskedAt, cfg)
 	if err != nil {
 		return state, err
 	}
@@ -1975,6 +1998,16 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 		}
 		currentTTL := current.CalibrationTTL
 		if st.Account.CalibAskedAt == nil && st.Account.CheckedAt != nil && now.Sub(*st.Account.CheckedAt) < currentTTL {
+			return ErrNoChange
+		}
+		// The reading is an existing reply adopted under the TTL the read STARTED
+		// with. A fleet that shortened calibrate-ttl in the meantime has already
+		// declared that reply too old to decide from, and committing it stamps
+		// CheckedAt=now — presenting it as fresh for a whole new window, and
+		// letting a metered review fire on an availability result the shorter
+		// window asks crq to re-establish first. Drop it; the next pass reads
+		// under the TTL that is now current, and probes when nothing qualifies.
+		if !readAt.IsZero() && now.Sub(readAt) >= currentTTL {
 			return ErrNoChange
 		}
 		// A fresh reading replaces the whole quota; carry the account-quota comment
@@ -2070,25 +2103,32 @@ func (s *Service) rotateCalibration(ctx context.Context, oldIssue int) (int, err
 	return issue.Number, nil
 }
 
-func (s *Service) readQuota(ctx context.Context, issue int, now time.Time, pendingAsked *time.Time, cfg Config) (AccountQuota, error) {
+// readQuota reads the account quota off the calibration thread, adopting a reply
+// that is still inside the TTL before spending a probe on a fresh one.
+//
+// It also returns when that adopted reply was written, and the zero time when
+// the reading is the answer to a probe this call posted. Only the caller's write
+// knows the TTL in force when the reading is committed, and an adopted reply
+// accepted under a longer one is exactly what a shortened TTL invalidates.
+func (s *Service) readQuota(ctx context.Context, issue int, now time.Time, pendingAsked *time.Time, cfg Config) (AccountQuota, time.Time, error) {
 	quota := AccountQuota{Scope: strings.Join(cfg.Scope, ","), Source: "calibrate", CheckedAt: &now}
 	cutoff := now.Add(-cfg.CalibrationTTL)
 	keepAfter := now.Add(-2 * cfg.CalibrationTTL)
 	if reply, ok, err := s.latestCalibrationReply(ctx, issue, cutoff); err != nil {
-		return quota, err
+		return quota, time.Time{}, err
 	} else if ok {
 		remaining, reset := dialect.ParseQuota(reply.Body, reply.UpdatedAt)
 		quota.Remaining = remaining
 		quota.BlockedUntil = reset
 		s.pruneCalibration(ctx, issue, keepAfter, 80)
-		return quota, nil
+		return quota, reply.UpdatedAt, nil
 	}
 	// A probe from a previous call is still pending and not yet stale, and no
 	// reply to it was found: keep waiting for its (possibly late) reply instead of
 	// posting another probe every cycle.
 	if pendingAsked != nil && pendingAsked.After(cutoff) {
 		quota.CalibAskedAt = pendingAsked
-		return quota, nil
+		return quota, time.Time{}, nil
 	}
 	asked, err := s.gh.PostIssueComment(ctx, s.cfg.GateRepo, issue, s.cfg.RateLimitCommand)
 	if err != nil {
@@ -2112,19 +2152,19 @@ func (s *Service) readQuota(ctx context.Context, issue int, now time.Time, pendi
 			if s.log != nil {
 				s.log.Printf("calibration probe on #%d failed: %v", issue, err)
 			}
-			return quota, err
+			return quota, time.Time{}, err
 		}
 	}
 	quota.CalibAskedAt = &asked.CreatedAt
 	for i := 0; i < 6; i++ {
 		select {
 		case <-ctx.Done():
-			return quota, ctx.Err()
+			return quota, time.Time{}, ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
 		reply, ok, err := s.latestCalibrationReply(ctx, issue, asked.CreatedAt.Add(-time.Second))
 		if err != nil {
-			return quota, err
+			return quota, time.Time{}, err
 		}
 		if ok {
 			remaining, reset := dialect.ParseQuota(reply.Body, reply.UpdatedAt)
@@ -2132,10 +2172,10 @@ func (s *Service) readQuota(ctx context.Context, issue int, now time.Time, pendi
 			quota.BlockedUntil = reset
 			quota.CalibAskedAt = nil
 			s.pruneCalibration(ctx, issue, keepAfter, 80)
-			return quota, nil
+			return quota, time.Time{}, nil
 		}
 	}
-	return quota, nil
+	return quota, time.Time{}, nil
 }
 
 // pruneCalibration deletes crq's old calibration probe comments and CodeRabbit's

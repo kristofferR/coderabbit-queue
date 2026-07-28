@@ -924,7 +924,7 @@ func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, he
 		if err := r.Complete(); err != nil {
 			return err
 		}
-		releaseSlot(st, QueueKey(repo, pr))
+		releaseSlot(st, QueueKey(repo, pr), r.Token)
 		st.PutRound(*r)
 		changed = true
 		return nil

@@ -248,6 +248,41 @@ func TestFleetOwnsTheCoReviewerPolicy(t *testing.T) {
 	}
 }
 
+// The two membership settings are read together or not at all. Applied in
+// alphabetical order, `cobots` resolved against the host's required list — which
+// re-enabled a co-reviewer the fleet had just disabled, and the rebuild kept it,
+// leaving the policy depending on local environment again.
+func TestFleetCoBotsResolveAgainstTheFleetsRequiredBots(t *testing.T) {
+	ctx := context.Background()
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":               "codex",
+		"CRQ_COBOT_CODEX_REQUIRED": "1",
+	})
+	if len(cfg.CoBots) != 1 || cfg.CoBots[0].Name != "codex" {
+		t.Fatalf("this host must start with codex required: %+v", cfg.CoBots)
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if err := svc.SetFleetConfig(ctx, "cobots", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SetFleetConfig(ctx, "required-bots", "coderabbitai[bot]"); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := svc.fleetCfg(st)
+	if len(got.CoBots) != 0 {
+		t.Errorf("CoBots = %+v, want none — the fleet disabled every co-reviewer", got.CoBots)
+	}
+	if containsBot(got.RequiredBots, dialect.CodexBotLogin) {
+		t.Errorf("RequiredBots = %v, want only the fleet's", got.RequiredBots)
+	}
+}
+
 // A value only some hosts can read breaks the fleet from the inside, so the
 // co-reviewer settings are refused where they are set like every other one.
 func TestFleetRefusesCoReviewerPolicyItCannotRead(t *testing.T) {
@@ -445,6 +480,41 @@ func TestFleetExcludeRetiresQueuedRounds(t *testing.T) {
 	}
 	if len(st.Archive) != 1 || st.Archive[0].Phase != PhaseAbandoned {
 		t.Fatalf("excluded round was not archived as abandoned: %+v", st.Archive)
+	}
+}
+
+// The slot outlives the round that took it: a hold left behind for a metered
+// command whose round was superseded by the push it invited belongs to that
+// command. Excluding the repository retires the QUEUED replacement at the same
+// key, and dropping the hold with it would let a second metered review fire
+// while the first command is still unanswered.
+func TestFleetExcludeLeavesAnOrphanedFireSlotHold(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	now := time.Now().UTC()
+	until := now.Add(20 * time.Minute)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.PutRound(Round{
+			Repo: "owner/repo", PR: 7, Head: "beef456",
+			Phase: PhaseQueued, EnqueuedAt: now,
+		})
+		st.FireSlot = &FireSlot{Key: QueueKey("owner/repo", 7), Token: "gone", Since: now}
+		st.HoldSlotUntil(until)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := NewService(cfg, newFakeGitHub(), store, nil).SetFleetConfig(ctx, "exclude", "owner/repo"); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ := store.Load(ctx)
+	if round := st.Round("owner/repo", 7); round != nil {
+		t.Fatalf("excluded round remains fire-eligible: %+v", round)
+	}
+	if !st.SlotHeld(now) {
+		t.Fatalf("exclusion released the unanswered command's hold: %+v", st.FireSlot)
 	}
 }
 

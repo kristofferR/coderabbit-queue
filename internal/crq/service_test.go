@@ -2574,6 +2574,49 @@ func TestRefreshQuotaRecordsABlockAcrossAnUnrelatedFleetChange(t *testing.T) {
 	}
 }
 
+// The other half of that rule: a reading adopted under the TTL the read started
+// with is exactly what a SHORTENED calibrate-ttl invalidates. Committing it
+// would stamp CheckedAt=now over a reply the new window already calls too old,
+// making it fresh for another full TTL and letting a metered review fire on a
+// calibration the fleet has just asked to be redone.
+func TestRefreshQuotaRejectsAReadingAShortenedTTLMakesStale(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CalibrationPR = 77
+	cfg.GateRepo = "o/state"
+	cfg.CalibrationTTL = 10 * time.Minute
+	gh := newFakeGitHub()
+	inner := NewMemoryStore(cfg)
+	store := &hookedStore{StateStore: inner}
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	svc.now = func() time.Time { return now }
+
+	reply := ghapi.IssueComment{
+		ID:        5,
+		Body:      "auto-generated reply by CodeRabbit\n> **6 reviews** remaining",
+		CreatedAt: now.Add(-5 * time.Minute), UpdatedAt: now.Add(-5 * time.Minute),
+	}
+	reply.User.Login = cfg.Bot
+	gh.comments[fakeKey(cfg.GateRepo, 77)] = []ghapi.IssueComment{reply}
+	store.hook = func() {
+		if _, err := inner.Update(ctx, func(st *State) error {
+			st.SetFleetValue("calibrate-ttl", "1m")
+			return nil
+		}); err != nil {
+			t.Error(err)
+		}
+	}
+
+	updated, err := svc.RefreshQuota(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Account.CheckedAt != nil || updated.Account.Remaining != nil {
+		t.Fatalf("account = %+v, want the stale reading refused rather than stamped fresh", updated.Account)
+	}
+}
+
 func TestRefreshQuotaDoesNotProbeOrWriteInDryRun(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{
