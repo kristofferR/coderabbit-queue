@@ -48,9 +48,14 @@ type AutofixInstall struct {
 	Commands  []string `json:"commands"`
 	// Retire is the pre-rename watcher this install shuts down, when one is
 	// still on disk. Empty when there is nothing to retire.
-	Retire  string `json:"retire,omitempty"`
-	DryRun  bool   `json:"dry_run,omitempty"`
-	Started bool   `json:"started,omitempty"`
+	Retire string `json:"retire,omitempty"`
+	DryRun bool   `json:"dry_run,omitempty"`
+	// SkipAuthCheck installs without proving the service can authenticate. For
+	// the one case the check cannot decide: a macOS host reached over SSH,
+	// where gh's keychain is readable by the GUI-domain agent and not by this
+	// session.
+	SkipAuthCheck bool `json:"skip_auth_check,omitempty"`
+	Started       bool `json:"started,omitempty"`
 }
 
 // InstallAutofix sets up unattended autofix: the prompt, a wrapper, a
@@ -61,9 +66,9 @@ type AutofixInstall struct {
 // files, remember `loginctl enable-linger`, and get the environment right — and
 // a setup people get wrong is a setup that silently does nothing, which is the
 // failure this whole feature is about.
-func (s *Service) InstallAutofix(ctx context.Context, agent string, agentArgs []string, repos []string, dryRun bool) (AutofixInstall, error) {
+func (s *Service) InstallAutofix(ctx context.Context, agent string, agentArgs []string, repos []string, dryRun, skipAuth bool) (AutofixInstall, error) {
 	effectiveDryRun := dryRun || s.cfg.DryRun
-	plan, err := AutofixPlan(s.cfg, agent, agentArgs, repos, effectiveDryRun)
+	plan, err := AutofixPlan(s.cfg, agent, agentArgs, repos, effectiveDryRun, skipAuth)
 	if err != nil || effectiveDryRun {
 		return plan, err
 	}
@@ -77,7 +82,7 @@ func (s *Service) InstallAutofix(ctx context.Context, agent string, agentArgs []
 // as a preview and must work for somebody who has not authenticated yet: the
 // plan reads no GitHub state, so requiring a token to see it turned the one
 // command for inspecting the setup into another thing to set up first.
-func AutofixPlan(cfg Config, agent string, agentArgs []string, repos []string, dryRun bool) (AutofixInstall, error) {
+func AutofixPlan(cfg Config, agent string, agentArgs []string, repos []string, dryRun, skipAuth bool) (AutofixInstall, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return AutofixInstall{}, err
@@ -116,13 +121,14 @@ func AutofixPlan(cfg Config, agent string, agentArgs []string, repos []string, d
 	// silent nothing this command exists to prevent.
 	logDir := filepath.Join(home, ".local", "state", "crq")
 	plan := AutofixInstall{
-		Platform:  runtime.GOOS,
-		LogDir:    logDir,
-		Prompt:    filepath.Join(home, ".local", "share", "crq", "fix-prompt.txt"),
-		Agent:     agent,
-		AgentArgs: agentArgs,
-		Repos:     repos,
-		DryRun:    dryRun,
+		Platform:      runtime.GOOS,
+		LogDir:        logDir,
+		Prompt:        filepath.Join(home, ".local", "share", "crq", "fix-prompt.txt"),
+		Agent:         agent,
+		AgentArgs:     agentArgs,
+		Repos:         repos,
+		DryRun:        dryRun,
+		SkipAuthCheck: skipAuth,
 	}
 	if root := strings.TrimSpace(cfg.WorkspaceRoot); root != "" {
 		plan.Workspace, err = filepath.Abs(root)
@@ -186,8 +192,10 @@ func autofixArgv(plan AutofixInstall) []string {
 // applyAutofix writes the plan to disk and starts the service.
 func (s *Service) applyAutofix(ctx context.Context, plan AutofixInstall) (AutofixInstall, error) {
 	logDir := plan.LogDir
-	if err := autofixCanAuthenticate(ctx); err != nil {
-		return plan, err
+	if !plan.SkipAuthCheck {
+		if err := autofixCanAuthenticate(ctx); err != nil {
+			return plan, err
+		}
 	}
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return plan, err
@@ -321,6 +329,14 @@ func launchdJobAbsent(command string, output []byte) bool {
 // nothing this command exists to prevent. Writing the token into the unit is not
 // the answer — that file is readable by every local user — so the credential has
 // to be one the service can resolve itself.
+// A macOS host is the case this cannot decide for itself: gh keeps its token in
+// the login keychain, which a launchd agent in the GUI domain can read and an
+// SSH session cannot. Over SSH, `gh auth status` there reports the account by
+// name and the token as invalid — which is also exactly what a genuinely
+// expired token looks like. Since the two are indistinguishable from outside
+// that session, the escape hatch is an explicit flag rather than a guess: an
+// operator typing --skip-auth-check has made a claim, which is not the silent
+// nothing this check exists to prevent.
 func autofixCanAuthenticate(ctx context.Context) error {
 	if path := ConfigPath(); path != "" {
 		values, err := readEnvFile(path)

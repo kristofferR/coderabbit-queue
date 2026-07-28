@@ -79,7 +79,7 @@ func run(ctx context.Context, args []string) int {
 				fatal(cerr)
 				return 1
 			}
-			plan, ierr := crq.AutofixPlan(cfg, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, true)
+			plan, ierr := crq.AutofixPlan(cfg, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, true, opts.skipAuth)
 			if ierr != nil {
 				fatal(ierr)
 				return 1
@@ -420,7 +420,7 @@ func run(ctx context.Context, args []string) int {
 			fatal(err)
 			return 1
 		}
-		plan, ierr := service.InstallAutofix(ctx, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, opts.dryRun)
+		plan, ierr := service.InstallAutofix(ctx, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, opts.dryRun, opts.skipAuth)
 		if ierr != nil {
 			fatal(ierr)
 			return 1
@@ -2197,6 +2197,7 @@ type autofixArgs struct {
 	agent     string
 	agentArgs string
 	dryRun    bool
+	skipAuth  bool
 	repos     []string
 }
 
@@ -2208,6 +2209,8 @@ func parseAutofixArgs(args []string) (autofixArgs, error) {
 	agent := fs.String("agent", "", "fix agent to run: claude or codex (default: claude on PATH)")
 	agentArgs := fs.String("agent-args", "", "extra flags for the agent, e.g. model and reasoning effort")
 	dryRun := fs.Bool("dry-run", false, "print what would be written and run")
+	skipAuth := fs.Bool("skip-auth-check", false,
+		"install without proving the service can authenticate (a macOS host reached over SSH, where gh's keychain is the GUI session's)")
 	sub, rest := "", args
 	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
 		sub, rest = rest[0], rest[1:]
@@ -2218,7 +2221,7 @@ func parseAutofixArgs(args []string) (autofixArgs, error) {
 	if sub != "install" {
 		return autofixArgs{}, errors.New("usage: crq autofix install [--agent <path>] [--dry-run] [<repo>...]")
 	}
-	return autofixArgs{agent: *agent, agentArgs: *agentArgs, dryRun: *dryRun, repos: fs.Args()}, nil
+	return autofixArgs{agent: *agent, agentArgs: *agentArgs, dryRun: *dryRun, skipAuth: *skipAuth, repos: fs.Args()}, nil
 }
 
 // autofixSubcommand names what `crq autofix ...` was asked to do. An empty string

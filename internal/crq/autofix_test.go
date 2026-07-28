@@ -25,7 +25,7 @@ func TestInstallAutofixPlansWithoutWriting(t *testing.T) {
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
 	agent := fakeAgent(t, "claude")
-	plan, err := svc.InstallAutofix(context.Background(), agent, nil, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), agent, nil, nil, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestAutofixPlanOrdersTheFleetTheSameWayEveryTime(t *testing.T) {
 
 	want := []string{"owner/alpha", "owner/mike", "owner/zulu"}
 	for i := range 8 {
-		plan, err := AutofixPlan(cfg, agent, nil, nil, true)
+		plan, err := AutofixPlan(cfg, agent, nil, nil, true, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -88,7 +88,7 @@ func TestAutofixPlanRetiresThePreRenameWatcher(t *testing.T) {
 	agent := fakeAgent(t, "claude")
 
 	// A host that never ran the old installer must not be told to retire it.
-	clean, err := AutofixPlan(cfg, agent, nil, nil, true)
+	clean, err := AutofixPlan(cfg, agent, nil, nil, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestAutofixPlanRetiresThePreRenameWatcher(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := AutofixPlan(cfg, agent, nil, nil, true)
+	plan, err := AutofixPlan(cfg, agent, nil, nil, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestInstallAutofixHonoursConfiguredDryRun(t *testing.T) {
 	cfg.AllowRepos = map[string]bool{"owner/repo": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, false)
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestInstallAutofixRefusesWithoutAnAgent(t *testing.T) {
 	cfg.AllowRepos = map[string]bool{"owner/name": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	_, err := svc.InstallAutofix(context.Background(), "definitely-not-a-real-binary", nil, nil, true)
+	_, err := svc.InstallAutofix(context.Background(), "definitely-not-a-real-binary", nil, nil, true, false)
 	if err == nil {
 		t.Skip("a binary by that name exists on this machine")
 	}
@@ -217,7 +217,7 @@ func TestAutofixUnitCarriesTheConfigurationTheInstallRead(t *testing.T) {
 	cfg.CalibrationPR = 1
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +326,7 @@ func TestInstallAutofixMakesRelativeWorkspaceAbsolute(t *testing.T) {
 	cfg.WorkspaceRoot = "relative workspace"
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +376,7 @@ func TestInstallAutofixMakesRelativeAgentAbsolute(t *testing.T) {
 	cfg := firingConfig()
 	cfg.AllowRepos = map[string]bool{"owner/name": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
-	plan, err := svc.InstallAutofix(context.Background(), "./bin/wrapper", []string{"--run"}, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), "./bin/wrapper", []string{"--run"}, nil, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +437,7 @@ func TestInstallAutofixNamesALogDirectory(t *testing.T) {
 	cfg.AllowRepos = map[string]bool{"owner/name": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,7 +552,7 @@ func TestInstallAutofixRestartsAnAlreadyRunningService(t *testing.T) {
 	cfg.AllowRepos = map[string]bool{"owner/name": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
