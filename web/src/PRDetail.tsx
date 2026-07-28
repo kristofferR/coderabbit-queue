@@ -421,7 +421,7 @@ function CostCard({ cost, error }: { cost?: CostView; error?: string }) {
     return (
       <Card title="Estimated cost">
         <div className="px-[18px] pb-3.5 pt-1 text-[12.5px] text-faint">
-          Could not work out a price — {error}
+          {error ? `Could not work out a price — ${error}` : "No price could be worked out."}
         </div>
       </Card>
     );

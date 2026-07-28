@@ -53,6 +53,18 @@ export function AddRepo({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  // Escape closes it, as every dialog should. No focus trap here: this one is
+  // a picker with a long scrolling list, and trapping Tab in it would strand a
+  // keyboard user who tabs past the last row.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
   const shown = useMemo(() => {
     if (!rows) return [];
     const q = query.trim().toLowerCase();
@@ -86,7 +98,12 @@ export function AddRepo({
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-[rgb(27_36_48/0.28)] px-4 pt-[8vh]">
-      <div className="flex max-h-[80vh] w-full max-w-[720px] flex-col overflow-hidden rounded-[10px] border border-edge bg-card shadow-[0_16px_48px_rgb(27_36_48/0.24)]">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Add a repository"
+        className="flex max-h-[80vh] w-full max-w-[720px] flex-col overflow-hidden rounded-[10px] border border-edge bg-card shadow-[0_16px_48px_rgb(27_36_48/0.24)]"
+      >
         <div className="flex items-center gap-3 border-b border-edge px-5 py-3.5">
           <h2 className="text-[15px] font-[650]">Add a repository</h2>
           <span className="text-[12.5px] text-faint">

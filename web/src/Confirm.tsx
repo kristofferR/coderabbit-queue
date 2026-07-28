@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 /**
  * A single-step confirmation. Consequences come from live state and are stated
@@ -31,9 +31,58 @@ export function Confirm({
 }) {
   const [reason, setReason] = useState("");
   const blocked = needsReason && reason.trim() === "";
+  const panel = useRef<HTMLDivElement>(null);
+  const returnTo = useRef<Element | null>(null);
+
+  // A confirmation that spends quota or archives a round must not leave the
+  // row behind it reachable by keyboard: Tab stays inside, Escape cancels, and
+  // focus goes back where it came from so the list does not jump to the top.
+  useEffect(() => {
+    returnTo.current = document.activeElement;
+    const focusable = () =>
+      Array.from(
+        panel.current?.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), [href], select, textarea, [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      );
+    focusable()[0]?.focus();
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCancel();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const items = focusable();
+      if (items.length === 0) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && (active === first || !panel.current?.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      (returnTo.current as HTMLElement | null)?.focus?.();
+    };
+  }, [onCancel]);
+
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-[rgb(27_36_48/0.28)] px-4 pt-[12vh]">
-      <div className="w-full max-w-[520px] rounded-[10px] border border-edge bg-card p-5 shadow-[0_16px_48px_rgb(27_36_48/0.24)]">
+      <div
+        ref={panel}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className="w-full max-w-[520px] rounded-[10px] border border-edge bg-card p-5 shadow-[0_16px_48px_rgb(27_36_48/0.24)]"
+      >
         <h2 className={`text-[15px] font-[650] ${danger ? "text-bad" : "text-ink"}`}>{title}</h2>
         <div className="mt-2 text-[13px] text-mut">{body}</div>
 
@@ -41,7 +90,6 @@ export function Confirm({
           <label className="mt-3 block">
             <span className="text-[12.5px] font-medium">{reasonLabel ?? "Reason"}</span>
             <input
-              autoFocus
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               placeholder="why — this is what every screen will show"

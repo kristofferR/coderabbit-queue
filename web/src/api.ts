@@ -338,11 +338,19 @@ export function subscribe(
 ): () => void {
   let source: EventSource | null = null;
   let closed = false;
+  // Backs off so a server that is down for an hour is not asked every three
+  // seconds for an hour. Reset on a successful open, so the common case — a
+  // restart lasting a second or two — still reconnects immediately.
+  let delay = 1000;
+  const maxDelay = 30000;
 
   const open = () => {
     if (closed) return;
     source = new EventSource("/api/events");
-    source.onopen = () => onLive("live");
+    source.onopen = () => {
+      delay = 1000;
+      onLive("live");
+    };
     source.onmessage = (e) => {
       try {
         onData(JSON.parse(e.data) as Snapshot);
@@ -356,7 +364,8 @@ export function subscribe(
       source?.close();
       // EventSource retries on its own, but only for transport errors; an
       // explicit reopen covers the server restarting underneath us.
-      setTimeout(open, 3000);
+      setTimeout(open, delay);
+      delay = Math.min(delay * 2, maxDelay);
     };
   };
 
