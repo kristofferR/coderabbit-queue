@@ -122,6 +122,29 @@ export async function act(
   return "snapshot" in parsed ? (parsed as ActionResult) : { snapshot: parsed as Snapshot };
 }
 
+/** Re-probe this server's service PATH and return the rebuilt setup snapshot. */
+export async function refreshSetup(): Promise<Snapshot> {
+  const res = await fetch("/api/setup/refresh", {
+    method: "POST",
+    headers: { "X-CRQ-Dashboard": "1" },
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    let message = `HTTP ${res.status}`;
+    try {
+      message = (JSON.parse(text) as { error?: string }).error ?? message;
+    } catch {
+      /* keep the status when the server returned a non-JSON error */
+    }
+    throw new Error(message);
+  }
+  const parsed = JSON.parse(text) as { snapshot?: Snapshot };
+  if (!parsed.snapshot) {
+    throw new Error("server returned an invalid setup snapshot");
+  }
+  return parsed.snapshot;
+}
+
 function isFleetPreviewResult(value: object): value is FleetPreviewResult {
   if (!("impact" in value) || value.impact === null || typeof value.impact !== "object") return false;
   const impact = value.impact;

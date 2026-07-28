@@ -86,6 +86,49 @@ func TestHandlersRefuseUntilTheFirstLoadSucceeds(t *testing.T) {
 	}
 }
 
+func TestSetupRefreshReprobesToolsWithoutAnActor(t *testing.T) {
+	loader := &stubLoader{}
+	srv := New(loader, Options{
+		Addr: "127.0.0.1:7777",
+		Host: "test-host",
+		Now:  func() time.Time { return time.Unix(0, 0).UTC() },
+	})
+	// A made-up cached tool proves the handler replaced the inventory rather
+	// than merely returning another copy of the existing snapshot.
+	srv.tools = []Tool{{Name: "definitely-not-a-real-crq-tool", Found: true}}
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "http://127.0.0.1:7777/api/setup/refresh", nil)
+	req.Header.Set("X-CRQ-Dashboard", "1")
+	rec := httptest.NewRecorder()
+	srv.handleSetupRefresh(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh = %d: %s", rec.Code, rec.Body.String())
+	}
+	var result struct {
+		Snapshot struct {
+			Setup SetupView `json:"setup"`
+		} `json:"snapshot"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range result.Snapshot.Setup.Tools {
+		if tool.Name == "definitely-not-a-real-crq-tool" {
+			t.Fatal("refresh returned the stale cached tool inventory")
+		}
+	}
+	if loader.reads != 1 {
+		t.Fatalf("state reads = %d, want one fresh snapshot read", loader.reads)
+	}
+
+	rec = httptest.NewRecorder()
+	srv.handleSetupRefresh(rec, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "http://127.0.0.1:7777/api/setup/refresh", nil))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("refresh without dashboard header = %d, want 403", rec.Code)
+	}
+}
+
 // A first read that FAILS is a different thing from one still running, and the
 // stream is the only thing the page consumes. Sending nothing left a broken
 // credential or state ref looking exactly like a slow one — the dashboard sat on

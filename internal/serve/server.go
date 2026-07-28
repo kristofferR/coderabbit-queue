@@ -187,6 +187,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/pr/{owner}/{name}/{pr}", s.handlePR)
 	mux.HandleFunc("GET /api/discover", s.handleDiscover)
 	mux.HandleFunc("GET /api/enroll-preview", s.handleEnrollPreview)
+	mux.HandleFunc("POST /api/setup/refresh", s.handleSetupRefresh)
 	mux.HandleFunc("POST /api/action/{action}", s.handleAction)
 	mux.Handle("/", s.assets())
 
@@ -286,6 +287,36 @@ func (s *Server) refresh(ctx context.Context) {
 		return
 	}
 	broadcast(snap, subs)
+}
+
+// handleSetupRefresh re-probes the service's own PATH before rebuilding the
+// snapshot. Ordinary state polls deliberately reuse the tool inventory;
+// operators use this after installing a tool or repairing a service PATH.
+func (s *Server) handleSetupRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-CRQ-Dashboard") != "1" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "missing dashboard header"})
+		return
+	}
+	if err := s.addressedHere(r); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+
+	// refresh reads tools while holding refreshMu. Updating under the same lock
+	// keeps this explicit probe from racing the background state poll.
+	s.refreshMu.Lock()
+	s.tools = LocalTools()
+	s.refreshMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	s.refresh(ctx)
+	snap, _, err := s.snapshot()
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"snapshot": snap})
 }
 
 // snapshotDigest fingerprints everything a browser would paint, with the render

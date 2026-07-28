@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import type { Live, Snapshot } from "./api";
 import { subscribe } from "./api";
 import { OverviewPage } from "./Overview";
-import { BotsPage, ReposPage, SettingsPage, SetupPage } from "./Pages";
+import { BotsPage, ReposPage, SettingsPage } from "./Pages";
 import { PRDetailPage } from "./PRDetail";
 import { FirstRun, isFirstRun } from "./FirstRun";
+import { SetupPage } from "./Setup";
 import { ago, useNow } from "./time";
 
 const NAV = [
@@ -45,9 +46,11 @@ export function App() {
             <a
               key={n.href}
               href={n.href}
-              aria-current={route === n.href ? "page" : undefined}
+              aria-current={route === n.href || (n.href === "#/repos" && route.startsWith("#/repos/")) ? "page" : undefined}
               className={`rounded-lg px-3 py-1.5 text-[13.5px] font-medium ${
-                route === n.href ? "bg-bg text-ink" : "text-mut hover:bg-bg"
+                route === n.href || (n.href === "#/repos" && route.startsWith("#/repos/"))
+                  ? "bg-bg text-ink"
+                  : "text-mut hover:bg-bg"
               }`}
             >
               {n.label}
@@ -97,12 +100,18 @@ export function App() {
         <Loading live={live} error={unavailable} />
       ) : pr ? (
         <PRDetailPage repo={pr.repo} pr={pr.pr} rev={snap.overview.rev} />
-      ) : route === "#/repos" ? (
-        <ReposPage repos={snap.repos} bots={snap.bots} held={snap.overview.held} onSnapshot={setSnap} />
+      ) : route === "#/repos" || route === "#/repos/add" ? (
+        <ReposPage
+          repos={snap.repos}
+          bots={snap.bots}
+          held={snap.overview.held}
+          startAdding={route === "#/repos/add"}
+          onSnapshot={setSnap}
+        />
       ) : route === "#/bots" ? (
         <BotsPage bots={snap.bots} />
       ) : route === "#/setup" ? (
-        <SetupPage setup={snap.setup} bots={snap.bots} repos={snap.repos} />
+        <SetupPage setup={snap.setup} bots={snap.bots} repos={snap.repos} onSnapshot={setSnap} />
       ) : route === "#/settings" ? (
         <SettingsPage settings={snap.settings} bots={snap.bots} onSnapshot={setSnap} />
       ) : isFirstRun(snap) ? (
