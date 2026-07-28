@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -122,5 +123,31 @@ func TestEnrollmentDoesNotNarrowAScopeWideHost(t *testing.T) {
 	}
 	if !svc.reviewsRepo(st, "o/other") {
 		t.Error("turning one repository off must not affect the rest of the scope")
+	}
+}
+
+// Enrolling a repository is the one click in the product that spends money, so
+// the dialog's rule is that an unknown price must never read as a free one. A
+// per-PR pricing call that fails — a spent REST quota, an unreadable diff — used
+// to be skipped silently, and a backlog nothing could be priced for was
+// summarised as having "no per-review cost".
+func TestEnrollSummaryNeverPricesAnUnknownAsFree(t *testing.T) {
+	none := enrollSummary(EnrollImpact{Open: 4, Eligible: 4, Unpriced: 4}, false)
+	if strings.Contains(none, "no per-review cost") {
+		t.Errorf("summary = %q, want an unpriced backlog reported as unknown", none)
+	}
+	if !strings.Contains(none, "could not") {
+		t.Errorf("summary = %q, want it to say the cost could not be read", none)
+	}
+	// A partly priced backlog states both: the money it knows about, and how
+	// many pull requests are not in that number.
+	partial := enrollSummary(EnrollImpact{Open: 4, Eligible: 4, Low: 1, High: 2, Unpriced: 2}, false)
+	if !strings.Contains(partial, "$1.00–$2.00") || !strings.Contains(partial, "2 that could not be priced") {
+		t.Errorf("summary = %q, want the known cost and the unpriced count", partial)
+	}
+	// And a fully priced free backlog still says so.
+	free := enrollSummary(EnrollImpact{Open: 2, Eligible: 2}, false)
+	if !strings.Contains(free, "no per-review cost") {
+		t.Errorf("summary = %q, want a genuinely free backlog unchanged", free)
 	}
 }

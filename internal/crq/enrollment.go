@@ -282,10 +282,15 @@ type EnrollImpact struct {
 	Metered int `json:"metered"`
 	// Low/High bound the cost of reviewing the backlog, summed over the
 	// eligible pull requests. Estimates, with the same honesty as crq cost.
-	Low             float64 `json:"low"`
-	High            float64 `json:"high"`
-	Summary         string  `json:"summary"`
-	PricesCheckedAt string  `json:"prices_checked_at"`
+	Low  float64 `json:"low"`
+	High float64 `json:"high"`
+	// Unpriced counts the pull requests whose cost could not be read — a spent
+	// REST quota, an unreadable diff. They are reported rather than dropped:
+	// leaving them out of the total makes an unknown price look like a free one,
+	// which is the one thing this dialog exists to prevent.
+	Unpriced        int    `json:"unpriced,omitempty"`
+	Summary         string `json:"summary"`
+	PricesCheckedAt string `json:"prices_checked_at"`
 }
 
 // PreviewEnroll reports what enrolling repo would do. It costs one pull-request
@@ -335,6 +340,7 @@ func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact,
 	for _, pr := range priced {
 		cost, cerr := s.Cost(ctx, repo, pr)
 		if cerr != nil {
+			impact.Unpriced++
 			continue
 		}
 		impact.Low += cost.Low
@@ -353,15 +359,24 @@ func enrollSummary(i EnrollImpact, partial bool) string {
 	if i.Eligible == 0 {
 		return fmt.Sprintf("%d open pull request(s), none of which would be enqueued", i.Open)
 	}
+	// "no per-review cost" is only ever said about a backlog crq actually
+	// priced. A pull request whose price could not be read is an unknown, and an
+	// unknown that renders as free is the one way this sentence can mislead
+	// somebody into spending money.
 	cost := "no per-review cost"
 	switch {
 	case i.High > 0 && i.Low != i.High:
 		cost = fmt.Sprintf("roughly $%.2f–$%.2f", i.Low, i.High)
 	case i.High > 0:
 		cost = fmt.Sprintf("about $%.2f", i.High)
+	case i.Unpriced > 0:
+		cost = "a cost crq could not read"
 	}
 	out := fmt.Sprintf("would enqueue %d of %d open pull request(s) on the next pass — %s",
 		i.Eligible, i.Open, cost)
+	if i.Unpriced > 0 && i.High > 0 {
+		out += fmt.Sprintf(", plus %d that could not be priced", i.Unpriced)
+	}
 	if partial {
 		out += ", priced over the first 25"
 	}

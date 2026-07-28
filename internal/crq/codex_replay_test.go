@@ -777,3 +777,38 @@ func TestCodexReplayAdoptRecordsExistingCodexCommand(t *testing.T) {
 		t.Fatalf("self-heal must not repost the recorded codex command, got %d", got)
 	}
 }
+
+// A round can go straight from fired to completed on one observation, and a
+// completed round is never looked at again. The co-reviewer bookkeeping was
+// only done in the reviewing sweep, so the evidence that Codex answered was
+// lost with the round that carried it — and the bot guide showed a bot that had
+// just reviewed as one nobody had heard from.
+func TestCodexReplayRecordsAnswerWhenTheSlotRoundCompletes(t *testing.T) {
+	base := time.Date(2026, 7, 17, 9, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = []string{cfg.Bot, codexLogin}
+	})
+	repo, pr := "o/r", 12
+	head := "1111222233334444"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Hour))
+
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected fire, got %+v", res)
+	}
+	// Both reviews land before the next observation, so the slot round is
+	// progressed once, all the way to completed.
+	f.botReview(repo, pr, 501, head, f.clk.now().Add(time.Minute))
+	f.codexReview(repo, pr, 502, head, f.clk.now().Add(time.Minute))
+	f.clk.advance(2 * time.Minute)
+	f.pump()
+
+	r := f.round(repo, pr)
+	if r == nil || r.Phase != PhaseCompleted {
+		t.Fatalf("round must complete once both reviewers answered, got %+v", r)
+	}
+	if r.Co(codexLogin).AnsweredAt == nil {
+		t.Error("the round completed without recording that codex answered — the only field that tells a working bot from a silent one")
+	}
+}

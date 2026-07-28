@@ -821,6 +821,11 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 		return PumpResult{}, err
 	}
 	s.selfHealCoReviewers(ctx, cfg, slot, obs.eng, now)
+	// Here as well as in the reviewing sweep: this observation can take the round
+	// straight from fired to completed, and a completed round is never looked at
+	// again. The co-reviewer that answered it would be lost with it, leaving a
+	// working bot shown as silent for want of the one field that says otherwise.
+	s.noteCoAnswers(ctx, cfg, slot, obs.eng, now)
 	tr := engine.Progress(slot, st.Account, obs.eng, now, cfg.policy())
 	if tr.Outcome == engine.KeepWaiting {
 		return PumpResult{Action: "waiting", Repo: slot.Repo, PR: slot.PR, Reason: tr.Reason}, nil
@@ -1276,7 +1281,12 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 	}
 	s.sync(ctx, reserved)
 
-	comment, err := s.gh.PostIssueComment(ctx, round.Repo, round.PR, s.cfg.ReviewCommand)
+	// cfg, not s.cfg: the decision that reserved the account's quota was made
+	// from the resolved configuration, so the command posted has to be the one it
+	// decided for. Posting this host's startup value instead asked the previous
+	// primary for a review the round is not waiting for, and the round then timed
+	// out waiting for a bot nobody addressed.
+	comment, err := s.gh.PostIssueComment(ctx, round.Repo, round.PR, cfg.ReviewCommand)
 	if err != nil {
 		updated, uerr := s.store.Update(ctx, func(st *State) error {
 			r := st.Round(round.Repo, round.PR)
@@ -1312,7 +1322,7 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 			coPosts = append(coPosts, coPost{login: login, id: id, at: at})
 		}
 	}
-	updated, err := s.recordFire(ctx, round, token, comment.ID, coPosts, firedAt, now)
+	updated, err := s.recordFire(ctx, cfg, round, token, comment.ID, coPosts, firedAt, now)
 	if err != nil {
 		if errors.Is(err, ErrNoChange) {
 			return PumpResult{Action: "lost_race"}, nil
@@ -1321,7 +1331,7 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 	}
 	s.sync(ctx, updated)
 	if s.log != nil {
-		s.log.Printf("fire %s@%s (posted %s)", key, round.Head, strings.TrimSpace(s.cfg.ReviewCommand))
+		s.log.Printf("fire %s@%s (posted %s)", key, round.Head, strings.TrimSpace(cfg.ReviewCommand))
 	}
 	return PumpResult{Action: "fired", Repo: round.Repo, PR: round.PR, Head: round.Head}, nil
 }
@@ -1603,7 +1613,11 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 // on a transient state-write failure so a fired command is never lost. coPosts
 // are the co-reviewer trigger comments posted alongside (empty when none),
 // recorded in the same write.
-func (s *Service) recordFire(ctx context.Context, round Round, token string, commandID int64, coPosts []coPost, firedAt, now time.Time) (State, error) {
+//
+// cfg is the configuration the fire was decided and posted from: the command is
+// attributed to the primary that configuration names, not to whichever one this
+// process happened to start with.
+func (s *Service) recordFire(ctx context.Context, cfg Config, round Round, token string, commandID int64, coPosts []coPost, firedAt, now time.Time) (State, error) {
 	record := func(c context.Context) (State, bool, error) {
 		recorded := false
 		st, err := s.store.Update(c, func(st *State) error {
@@ -1618,7 +1632,7 @@ func (s *Service) recordFire(ctx context.Context, round Round, token string, com
 			// Recorded as crq's own whatever the round then does with it: the
 			// comment is on the PR either way, and the record is the only proof
 			// crq (rather than a person) wrote it.
-			r.RecordPosted(s.cfg.Bot, commandID, firedAt)
+			r.RecordPosted(cfg.Bot, commandID, firedAt)
 			for _, p := range coPosts {
 				r.RecordPosted(p.login, p.id, p.at)
 				if r.Co(p.login).CommandID == 0 {
@@ -2540,6 +2554,9 @@ func (s *Service) sweepParkedClosed(ctx context.Context, st State) (PumpResult, 
 // only field that can tell those apart, which is what the bot guide's setup
 // status is read from.
 func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, obs engine.Observation, now time.Time) {
+	if s.cfg.DryRun {
+		return // DryRun writes nothing, bookkeeping included
+	}
 	var answered []string
 	for _, cb := range cfg.CoBots {
 		if engine.CoReviewedHead(obs, cb.Login) {

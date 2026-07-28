@@ -50,6 +50,8 @@ type GitHub struct {
 	networkMaxWait time.Duration
 	acctTypeMu     sync.Mutex
 	acctType       map[string]string // scope login -> "org:" | "user:" search qualifier
+	viewerMu       sync.Mutex
+	viewer         string // the token's own login, "" until looked up, "-" when unreadable
 	etagMu         sync.Mutex
 	etags          map[string]*etagEntry // GET URL -> last 200 response, replayed on 304
 }
@@ -1072,6 +1074,39 @@ func (g *GitHub) searchOwnerQualifier(ctx context.Context, login string) (string
 	return qualifier, nil
 }
 
+// viewerLogin is the login the token authenticates as, cached for the run, or
+// "" when it cannot be read.
+//
+// Unreadable is a legitimate answer, not an error: a token without the scope to
+// read /user can still list public repositories, and a caller asking "is this
+// owner me" should get "not that I can tell" rather than a failed page.
+func (g *GitHub) viewerLogin(ctx context.Context) string {
+	g.viewerMu.Lock()
+	cached := g.viewer
+	g.viewerMu.Unlock()
+	switch cached {
+	case "":
+	case "-":
+		return ""
+	default:
+		return cached
+	}
+	var me struct {
+		Login string `json:"login"`
+	}
+	login := "-"
+	if err := g.request(ctx, http.MethodGet, "/user", nil, &me); err == nil && me.Login != "" {
+		login = me.Login
+	}
+	g.viewerMu.Lock()
+	g.viewer = login
+	g.viewerMu.Unlock()
+	if login == "-" {
+		return ""
+	}
+	return login
+}
+
 type SearchPR struct {
 	Repo   string
 	Number int
@@ -1240,8 +1275,16 @@ func (g *GitHub) ListOwnerRepos(ctx context.Context, owner string, max int) ([]R
 		return nil, err
 	}
 	base := "/users/" + owner + "/repos"
-	if qualifier == "org:" {
+	switch {
+	case qualifier == "org:":
 		base = "/orgs/" + owner + "/repos"
+	case strings.EqualFold(owner, g.viewerLogin(ctx)):
+		// /users/{owner}/repos lists only what is PUBLIC, whoever is asking. A
+		// personal account is the ordinary case for the paid private workflow, so
+		// the picker showed an empty list — or a partial one — while claiming to
+		// show everything in scope. The authenticated-user endpoint is the only
+		// one that answers for the token's own private repositories.
+		base = "/user/repos?affiliation=owner"
 	}
 	if max <= 0 {
 		max = 200
@@ -1249,7 +1292,11 @@ func (g *GitHub) ListOwnerRepos(ctx context.Context, owner string, max int) ([]R
 	out := make([]Repo, 0, max)
 	for page := 1; len(out) < max && page <= 10; page++ {
 		var batch []Repo
-		path := fmt.Sprintf("%s?per_page=100&page=%d&sort=pushed", base, page)
+		sep := "?"
+		if strings.Contains(base, "?") {
+			sep = "&"
+		}
+		path := fmt.Sprintf("%s%sper_page=100&page=%d&sort=pushed", base, sep, page)
 		if err := g.request(ctx, http.MethodGet, path, nil, &batch); err != nil {
 			return nil, err
 		}

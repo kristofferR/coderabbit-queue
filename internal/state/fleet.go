@@ -52,6 +52,11 @@ type FleetDefaults struct {
 
 	By        string     `json:"by,omitempty"`
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+
+	// unknown carries members a newer binary wrote inside this record. State's
+	// own carrier cannot: it sees "fleet" as a member it knows and hands the
+	// whole object to the ordinary decoder. See tolerant.go.
+	unknown unknownFields
 }
 
 // Empty reports whether the record says nothing at all. A record that has been

@@ -497,6 +497,9 @@ export type EnrollImpact = {
   skipped?: Record<string, number>;
   low: number;
   high: number;
+  /** Pull requests whose cost could not be read, so low/high are a floor. The
+   *  summary says so — an unknown price must never render as a free one. */
+  unpriced?: number;
   summary: string;
   prices_checked_at: string;
 };

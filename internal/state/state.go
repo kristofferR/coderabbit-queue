@@ -291,8 +291,16 @@ func (r *Round) ClearCoClaim(login string) {
 // write only them, new ones dual-write), so they are authoritative in BOTH
 // directions: they overwrite the mirror entry, and an empty legacy set clears
 // a stale mirror (a writer zeroed the legacy fields directly).
+// Authoritative about what they CARRY, which is the three trigger fields.
+// AnsweredAt has no legacy counterpart — it is what crq observed the bot do,
+// not bookkeeping about crq's own post — so no writer of any version can state
+// it there. Overwriting the whole entry therefore erased it on every load, and
+// Codex alone read as a bot that never answers.
 func (r *Round) foldLegacyCodex() {
-	r.setCo(codexCoBotKey, CoBotRound{CommandID: r.CodexCommandID, CommandedAt: r.CodexCommandedAt, ClaimedAt: r.CodexClaimedAt})
+	r.setCo(codexCoBotKey, CoBotRound{
+		CommandID: r.CodexCommandID, CommandedAt: r.CodexCommandedAt, ClaimedAt: r.CodexClaimedAt,
+		AnsweredAt: r.Co(codexCoBotKey).AnsweredAt,
+	})
 }
 
 // inferCoOnly backfills CoOnly for rounds written before the flag existed. The
@@ -1127,7 +1135,7 @@ func (r *Round) DispatchHeld(now time.Time) bool {
 // same worktree generation's work.
 func (s *State) ArchivedDispatchHeld(repo string, pr int, now time.Time) bool {
 	key := Key(repo, pr)
-	if claim, ok := s.Dispatches[key]; ok && claimHeld(claim, now) {
+	if claim, ok := s.Dispatches[key]; ok && claim.Live(now) {
 		return true
 	}
 	for i := range s.Archive {
@@ -1153,7 +1161,7 @@ func (s *State) HeartbeatArchivedDispatch(repo string, pr int, token string, now
 			s.Dispatches[key] = claim
 			return true, false
 		}
-		if claimHeld(claim, now) {
+		if claim.Live(now) {
 			return false, true
 		}
 	}
@@ -1202,8 +1210,12 @@ func (s *State) RememberDispatch(repo string, pr int, claim DispatchClaim) {
 	s.Dispatches[Key(repo, pr)] = claim
 }
 
-func claimHeld(claim DispatchClaim, now time.Time) bool {
-	return !claim.Heartbeat.IsZero() && now.UTC().Sub(claim.Heartbeat) < DispatchTTL
+// Live reports whether a session is still behind this claim: a heartbeat within
+// DispatchTTL. It is the same predicate dispatch ownership uses, exported so a
+// reader — the dashboard — cannot show a crashed watcher's claim as a running
+// session for ever.
+func (c DispatchClaim) Live(now time.Time) bool {
+	return !c.Heartbeat.IsZero() && now.UTC().Sub(c.Heartbeat) < DispatchTTL
 }
 
 // ClaimDispatch takes this round's dispatch claim, or reports why it cannot. A

@@ -414,8 +414,10 @@ func (s *Service) autofixEnv(plan AutofixInstall) map[string]string {
 		"CRQ_DISPATCH_FORKS":         strconv.FormatBool(s.cfg.DispatchForks),
 		"CRQ_AUTOREVIEW_SKIP_MARKER": s.cfg.SkipMarker,
 		// The session reads these; there is no script holding them any more.
-		"CRQ_FIX_AGENT":             plan.Agent,
-		"CRQ_FIX_ARGS":              strings.Join(plan.AgentArgs, " "),
+		"CRQ_FIX_AGENT": plan.Agent,
+		// Quoted, not space-joined: the session splits this back into argv, and
+		// an argument the operator quoted once must not be split a second time.
+		"CRQ_FIX_ARGS":              JoinArgv(plan.AgentArgs),
 		"CRQ_FIX_PROMPT_FILE":       plan.Prompt,
 		"CRQ_BOT":                   s.cfg.Bot,
 		"CRQ_REQUIRED_BOTS":         strings.Join(s.cfg.RequiredBots, ","),

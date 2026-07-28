@@ -126,6 +126,15 @@ type FleetChange struct {
 	MinInterval    *string  `json:"min_interval"`
 	WeeklyLimit    *int     `json:"weekly_limit"`
 	AutofixDefault *bool    `json:"autofix_default"`
+	// Unset* removes one typed field from the record, handing that setting back
+	// to each host's env. "Leave this alone" and "the fleet has no answer" are
+	// different instructions, and a nil pointer or slice can only express the
+	// first — so unsetting a co-reviewer list used to report success and change
+	// nothing.
+	UnsetCoBots      bool `json:"unset_cobots,omitempty"`
+	UnsetRequired    bool `json:"unset_required,omitempty"`
+	UnsetMinInterval bool `json:"unset_min_interval,omitempty"`
+	UnsetWeeklyLimit bool `json:"unset_weekly_limit,omitempty"`
 	// Clear drops the whole record, returning every setting to this host's env.
 	Clear bool `json:"clear"`
 }
@@ -212,14 +221,20 @@ func (s *Service) applyFleetChange(st State, change FleetChange) (FleetDefaults,
 		return FleetDefaults{}, nil
 	}
 	fd := st.Fleet
-	if change.CoBots != nil {
+	switch {
+	case change.UnsetCoBots:
+		fd.CoBots, fd.SetCoBots = nil, false
+	case change.CoBots != nil:
 		resolved, err := resolveCoBotLogins(change.CoBots)
 		if err != nil {
 			return fd, err
 		}
 		fd.CoBots, fd.SetCoBots = resolved, true
 	}
-	if change.Required != nil {
+	switch {
+	case change.UnsetRequired:
+		fd.Required, fd.SetRequired = nil, false
+	case change.Required != nil:
 		if len(change.Required) == 0 {
 			return fd, errors.New("the required set cannot be empty: a round that gates on nobody converges before any reviewer runs")
 		}
@@ -228,6 +243,12 @@ func (s *Service) applyFleetChange(st State, change FleetChange) (FleetDefaults,
 			return fd, err
 		}
 		fd.Required, fd.SetRequired = resolved, true
+	}
+	if change.UnsetMinInterval {
+		fd.MinInterval = ""
+	}
+	if change.UnsetWeeklyLimit {
+		fd.WeeklyLimit = nil
 	}
 	if change.MinInterval != nil {
 		text := strings.TrimSpace(*change.MinInterval)
@@ -351,6 +372,14 @@ func (s *Service) reposFollowingFleet(st State) []string {
 			return
 		}
 		if ov, ok := st.RepoOverride(repo); ok && (ov.SetCoBots || ov.SetRequired) {
+			return
+		}
+		// A repository turned off follows nothing. It still has an enrollment
+		// record and it still has completed rounds, so it reached this list twice
+		// over — and a fleet reviewer change then requeued its open pull requests
+		// for Pump to fire, spending quota in a repository somebody explicitly
+		// stopped. An "off" that an unrelated setting can undo is not an off.
+		if rec, ok := st.Enrollment(repo); ok && !rec.Enabled {
 			return
 		}
 		seen[repo] = true
@@ -564,29 +593,33 @@ func (s *Service) SetEnv(ctx context.Context, key, value string, clear bool) (Fl
 	// with one of them silently shadowed by the other.
 	if typedEnvKey(key) {
 		change := FleetChange{}
+		// Unset is its own instruction, not a change to some other value. Encoding
+		// it as one meant a cleared list read as "leave it alone" and a cleared
+		// weekly limit wrote 60 — so a host whose env said 90 never got it back.
+		unset := clear || strings.TrimSpace(value) == ""
 		switch key {
 		case "CRQ_COBOTS":
-			change.CoBots = splitCommas(value)
-			if clear {
-				change.CoBots = nil
+			if unset {
+				change.UnsetCoBots = true
+			} else {
+				change.CoBots = splitCommas(value)
 			}
 		case "CRQ_REQUIRED_BOTS":
-			change.Required = splitCommas(value)
-			if clear {
-				change.Required = nil
+			if unset {
+				change.UnsetRequired = true
+			} else {
+				change.Required = splitCommas(value)
 			}
 		case "CRQ_MIN_INTERVAL":
-			v := value
-			if clear {
-				v = ""
+			if unset {
+				change.UnsetMinInterval = true
+			} else {
+				v := value
+				change.MinInterval = &v
 			}
-			change.MinInterval = &v
 		case "CRQ_WEEKLY_LIMIT":
-			if clear {
-				// There is no "unset" for a typed pointer through this path, so
-				// clearing means back to the built-in default.
-				n, _ := strconv.Atoi(defaultValueOf(Config{WeeklyReviewLimit: 60}, key))
-				change.WeeklyLimit = &n
+			if unset {
+				change.UnsetWeeklyLimit = true
 			} else {
 				n, err := strconv.Atoi(strings.TrimSpace(value))
 				if err != nil {

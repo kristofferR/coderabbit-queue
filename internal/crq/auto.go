@@ -28,16 +28,28 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 	// as it goes: a fleet's tool inventory is only useful if it is a fleet's,
 	// and a daemon is the only thing that knows the PATH its service runs with.
 	s.ReportHost(ctx, "autoreview")
+	// Pacing is a fleet setting, so it is resolved from the state this loop
+	// already reads rather than frozen at startup: a poll interval the dashboard
+	// records and then reports as the effective fleet value has to actually pace
+	// the daemon reading it. This host's env is the answer until the first read
+	// lands, and whenever one fails.
+	poll := s.cfg.AutoReviewPoll
 	for {
-		held, err := s.acquireLeader(ctx, owner, token)
+		state, held, err := s.acquireLeader(ctx, owner, token)
 		if err != nil {
 			if _, ok := ghapi.ThrottleWait(err); ok {
-				if cont, serr := s.sleepThrottle(ctx, opts, "leader", err); serr != nil || !cont {
+				if cont, serr := s.sleepThrottle(ctx, opts, poll, "leader", err); serr != nil || !cont {
 					return serr
 				}
 				continue
 			}
 			return err
+		}
+		// Positive only. A record of "0s" would otherwise turn every daemon in
+		// the fleet into a spin loop from one save, which is a far worse thing
+		// for one setting to be able to do than to be ignored.
+		if resolved := s.cfg.WithFleet(state.Fleet).AutoReviewPoll; resolved > 0 {
+			poll = resolved
 		}
 		if !held {
 			if opts.Once {
@@ -46,7 +58,7 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(s.cfg.AutoReviewPoll):
+			case <-time.After(poll):
 				continue
 			}
 		}
@@ -61,7 +73,7 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			// sleep out the window instead of immediately pumping and re-scanning,
 			// which would just hammer the quota. Skip Pump entirely in that case.
 			if _, ok := ghapi.ThrottleWait(passErr); ok {
-				if cont, serr := s.sleepThrottle(ctx, opts, "pass", passErr); serr != nil || !cont {
+				if cont, serr := s.sleepThrottle(ctx, opts, poll, "pass", passErr); serr != nil || !cont {
 					if opts.Once {
 						return s.finishAutoReviewOnce(ctx, token, serr)
 					}
@@ -82,7 +94,7 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			}
 			if err != nil {
 				if _, ok := ghapi.ThrottleWait(err); ok {
-					if cont, serr := s.sleepThrottle(ctx, opts, "pump", err); serr != nil || !cont {
+					if cont, serr := s.sleepThrottle(ctx, opts, poll, "pump", err); serr != nil || !cont {
 						if opts.Once {
 							return s.finishAutoReviewOnce(ctx, token, serr)
 						}
@@ -107,7 +119,7 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(s.cfg.AutoReviewPoll):
+		case <-time.After(poll):
 		}
 	}
 }
@@ -124,13 +136,18 @@ func (s *Service) finishAutoReviewOnce(ctx context.Context, token string, err er
 // throttleBackoff bounds how long the autoreview daemon sleeps when GitHub
 // throttles it: at least one poll interval, plus a small buffer past the
 // reset, capped at an hour so a bogus reset header can't wedge the daemon.
-func (s *Service) throttleBackoff(wait time.Duration) time.Duration {
+// poll is the caller's resolved interval, so a fleet-recorded one paces the
+// backoff too.
+func (s *Service) throttleBackoff(wait, poll time.Duration) time.Duration {
+	if poll <= 0 {
+		poll = s.cfg.AutoReviewPoll
+	}
 	if wait <= 0 {
-		wait = s.cfg.AutoReviewPoll
+		wait = poll
 	}
 	wait += 5 * time.Second
-	if wait < s.cfg.AutoReviewPoll {
-		wait = s.cfg.AutoReviewPoll
+	if wait < poll {
+		wait = poll
 	}
 	if wait > time.Hour {
 		wait = time.Hour
@@ -144,9 +161,9 @@ func (s *Service) throttleBackoff(wait time.Duration) time.Duration {
 // be a throttle error (the caller checks ghapi.ThrottleWait first). It returns
 // cont=false (nil error) when opts.Once means we should stop after the wait, and a
 // non-nil error only when the context is cancelled mid-wait.
-func (s *Service) sleepThrottle(ctx context.Context, opts AutoOptions, stage string, cause error) (cont bool, err error) {
+func (s *Service) sleepThrottle(ctx context.Context, opts AutoOptions, poll time.Duration, stage string, cause error) (cont bool, err error) {
 	wait, _ := ghapi.ThrottleWait(cause)
-	wait = s.throttleBackoff(wait)
+	wait = s.throttleBackoff(wait, poll)
 	if s.log != nil {
 		s.log.Printf("autoreview: %s throttled (%v); sleeping %s before next pass", stage, cause, wait.Round(time.Second))
 	}
@@ -161,15 +178,17 @@ func (s *Service) sleepThrottle(ctx context.Context, opts AutoOptions, stage str
 	return true, nil
 }
 
-func (s *Service) acquireLeader(ctx context.Context, owner, token string) (bool, error) {
+// acquireLeader claims or extends the lease and hands back the state it read,
+// so the caller can resolve the fleet's pacing from a read it already paid for.
+func (s *Service) acquireLeader(ctx context.Context, owner, token string) (State, bool, error) {
 	state, held, err := s.renewLeader(ctx, owner, token)
 	if err != nil {
-		return false, err
+		return State{}, false, err
 	}
 	if held {
 		s.sync(ctx, state)
 	}
-	return held, nil
+	return state, held, nil
 }
 
 func (s *Service) releaseLeader(ctx context.Context, token string) error {
@@ -241,6 +260,14 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 	if err != nil {
 		return err
 	}
+	// The scan bound is a fleet setting like the pacing above, resolved from the
+	// snapshot this pass just read rather than from the env the process started
+	// with. Positive only, for the same reason: a recorded 0 would stop the
+	// whole fleet scanning anything, silently.
+	maxScan := s.cfg.AutoReviewMaxScan
+	if resolved := s.cfg.WithFleet(state.Fleet).AutoReviewMaxScan; resolved > 0 {
+		maxScan = resolved
+	}
 	targets := s.cfg.Scope
 	byRepo := false
 	if enrolled := s.scanTargets(state); len(enrolled) > 0 {
@@ -257,7 +284,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 		// excluded/gate-repo results can't crowd out in-scope PRs (a fixed pre-filter
 		// limit would never reach them) while we still don't over-fetch pages.
 		err := s.gh.EachOpenPR(ctx, target, byRepo, func(pr ghapi.SearchPR) (bool, error) {
-			if scanned >= s.cfg.AutoReviewMaxScan {
+			if scanned >= maxScan {
 				return true, nil
 			}
 			repo := NormalizeRepo(pr.Repo)

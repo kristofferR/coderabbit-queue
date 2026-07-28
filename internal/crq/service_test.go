@@ -1587,7 +1587,7 @@ func TestRecordFireResetsRecordedAcrossRetry(t *testing.T) {
 	cfg := firingConfig()
 	svc := NewService(cfg, newFakeGitHub(), retryNoChangeStore{cfg: cfg}, nil)
 	round := Round{Repo: "owner/repo", PR: 12, Head: "abcdef123"}
-	_, err := svc.recordFire(context.Background(), round, "token", 1, nil, time.Now().UTC(), time.Now().UTC())
+	_, err := svc.recordFire(context.Background(), cfg, round, "token", 1, nil, time.Now().UTC(), time.Now().UTC())
 	if !errors.Is(err, ErrNoChange) {
 		t.Fatalf("expected no-change after retry lost the fire slot, got %v", err)
 	}

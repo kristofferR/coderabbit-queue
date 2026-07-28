@@ -246,3 +246,57 @@ func TestRewritePreservesNormalizeAndLegacyFolding(t *testing.T) {
 		t.Errorf("the legacy dual-write must still be emitted:\n%s", out)
 	}
 }
+
+// The fleet record and the solver record nested inside it are extensible by
+// design — their own documentation promises a field a newer binary adds
+// survives an older one reading and rewriting state. They are nested beneath a
+// member State recognises, so the top-level carrier never sees them and only
+// their own round trip can keep that promise.
+func TestUnknownFleetFieldsSurviveARewrite(t *testing.T) {
+	foreign := `{
+	  "v": 3, "rev": 7, "next_seq": 9,
+	  "fleet": {
+	    "min_interval": "90s",
+	    "future_pacing": {"burst": 3},
+	    "solver": {"model": "opus", "future_solver_flag": "sandbox"}
+	  },
+	  "repo_solver": {
+	    "owner/repo": {"effort": "high", "future_repo_flag": true}
+	  },
+	  "account": {"scope": "owner"}
+	}`
+
+	var st State
+	if err := json.Unmarshal([]byte(foreign), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Fleet.MinInterval != "90s" || st.Fleet.Solver.Model != "opus" {
+		t.Fatalf("known fields must still decode: %+v", st.Fleet)
+	}
+
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	fleet, _ := back["fleet"].(map[string]any)
+	if fleet == nil {
+		t.Fatalf("the fleet record vanished:\n%s", out)
+	}
+	pacing, _ := fleet["future_pacing"].(map[string]any)
+	if pacing == nil || pacing["burst"] != float64(3) {
+		t.Errorf("carried fleet member lost its content: %#v", fleet["future_pacing"])
+	}
+	solver, _ := fleet["solver"].(map[string]any)
+	if solver == nil || solver["future_solver_flag"] != "sandbox" {
+		t.Errorf("carried solver member was dropped: %#v", fleet["solver"])
+	}
+	repos, _ := back["repo_solver"].(map[string]any)
+	own, _ := repos["owner/repo"].(map[string]any)
+	if own == nil || own["future_repo_flag"] != true {
+		t.Errorf("a repository's own solver record dropped a member: %#v", own)
+	}
+}

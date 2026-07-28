@@ -39,6 +39,10 @@ type SolverSettings struct {
 
 	By        string     `json:"by,omitempty"`
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+
+	// unknown carries members a newer binary wrote inside this record, for the
+	// same reason FleetDefaults does: it is nested, so no outer carrier sees it.
+	unknown unknownFields
 }
 
 // Empty reports whether this record says nothing at all, which is how a "clear"

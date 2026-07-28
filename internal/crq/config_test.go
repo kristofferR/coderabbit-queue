@@ -538,6 +538,37 @@ func TestSplitArgvKeepsQuotedArgumentsWhole(t *testing.T) {
 	}
 }
 
+// argv makes a round trip through the service unit's environment: the install
+// parses it, writes it as one value, and the session splits it again. Joining on
+// spaces lost the boundaries, so an argument the operator quoted once reached
+// the agent as several words — and every installed session ran with the wrong
+// option, or died on it.
+func TestJoinArgvSurvivesSplitArgv(t *testing.T) {
+	for _, argv := range [][]string{
+		{"--config", "value with space"},
+		{"-p", `he said "hi"`, "--dir", "/tmp/with space"},
+		{"--mixed", `a"b'c`},
+		{"--empty", "", "--after"},
+		{"plain", "--flag"},
+	} {
+		joined := JoinArgv(argv)
+		got := SplitArgv(joined)
+		if len(got) != len(argv) {
+			t.Errorf("SplitArgv(JoinArgv(%q)) = %q via %q, want the same arguments", argv, got, joined)
+			continue
+		}
+		for i := range argv {
+			if got[i] != argv[i] {
+				t.Errorf("argv[%d] = %q, want %q (joined as %q)", i, got[i], argv[i], joined)
+			}
+		}
+	}
+	// A word needing no quoting is left alone, so the unit stays readable.
+	if got := JoinArgv([]string{"--model", "opus"}); got != "--model opus" {
+		t.Errorf("JoinArgv = %q, want plain words unquoted", got)
+	}
+}
+
 func TestLoadConfigParsesDispatchForksAsABoolean(t *testing.T) {
 	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
 	t.Setenv("CRQ_DISPATCH_FORKS", "false")

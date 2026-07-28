@@ -1089,3 +1089,111 @@ func TestWatchHonoursTheExcludedRepositories(t *testing.T) {
 		t.Error("excluding one repository stopped the rest being watched")
 	}
 }
+
+// `crq watch --max-attempts N` has to mean N. The per-repository budget is
+// resolved from the RECORD, not from the merged configuration: that always
+// carries a positive default, so reading it there accepted the flag and then
+// silently replaced it with 3 on every ordinary setup.
+func TestDispatchAttemptBudgetPrefersTheRecordedValue(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.DispatchMaxAttempts = 3
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey(repo, 9)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, repo, 9, sha, PhaseQueued, time.Now().UTC(), 0)
+	spendAttempts(t, store, repo, 9, 3)
+
+	report := NextReport{Repo: repo, PR: 9, Head: sha, Action: "fix"}
+	script := filepath.Join(t.TempDir(), "fix.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nothing recorded: this run's own limit is the one in force.
+	pool := newDispatchPool(0)
+	ok, why := svc.startDispatch(ctx, WatchOptions{Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 5}, pool, report)
+	pool.wait()
+	if !ok {
+		t.Fatalf("dispatch refused with --max-attempts 5 after 3 attempts: %s", why)
+	}
+
+	// A recorded value still outranks it: the budget belongs to the project.
+	spendAttempts(t, store, repo, 9, 1)
+	if _, err := svc.SetSolver(ctx, repo, SolverChange{MaxAttempts: intptr(2)}); err != nil {
+		t.Fatal(err)
+	}
+	pool = newDispatchPool(0)
+	ok, why = svc.startDispatch(ctx, WatchOptions{Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 5}, pool, report)
+	pool.wait()
+	if ok {
+		t.Fatal("dispatch ran past the repository's recorded budget of 2")
+	}
+	if !strings.Contains(why, "dispatch attempts already made") {
+		t.Errorf("refusal = %q, want the attempt bound to be the reason", why)
+	}
+}
+
+// spendAttempts records n finished dispatch attempts on a round, the way a
+// session that ran and released its claim leaves it.
+func spendAttempts(t *testing.T, store StateStore, repo string, pr, n int) {
+	t.Helper()
+	_, err := store.Update(context.Background(), func(st *State) error {
+		r := st.Round(repo, pr)
+		if r == nil {
+			t.Fatalf("no round for %s#%d", repo, pr)
+		}
+		for i := 0; i < n; i++ {
+			if ok, why := r.ClaimDispatch("host", "tok", time.Now().UTC(), 0); !ok {
+				t.Fatalf("seeding attempt %d: %s", i, why)
+			}
+			r.ReleaseDispatch("tok")
+		}
+		st.PutRound(*r)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// "Stop reviewing" has to stop a fix session too, and it has to stop one that
+// is being granted right now. The pass reads enrollment once and best-effort,
+// so a click landing after that read — or a read that failed — would otherwise
+// let a coding agent start on a repository somebody just turned off.
+func TestDispatchRefusesADisabledRepositoryUnderTheClaim(t *testing.T) {
+	ctx := context.Background()
+	repo := "owner/thing"
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{repo: true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	seedRound(t, store, cfg, repo, 9, "abcdef123", PhaseQueued, time.Now().UTC(), 0)
+
+	// Disabled AFTER the pass would have read enrollment, which is the window.
+	if _, err := svc.SetEnrollment(ctx, repo, false, "stopped from the dashboard"); err != nil {
+		t.Fatal(err)
+	}
+	claimed, why, byDesign := svc.claimDispatch(ctx,
+		NextReport{Repo: repo, PR: 9, Head: "abcdef123", Action: "fix"}, "tok", 3)
+	if claimed {
+		t.Fatal("a fix session was granted for a repository crq is not reviewing")
+	}
+	if !byDesign {
+		t.Errorf("refusal %q must count as the gate working, not as a dispatcher failure", why)
+	}
+	if !strings.Contains(why, "not reviewing") {
+		t.Errorf("refusal = %q, want enrollment named as the reason", why)
+	}
+}

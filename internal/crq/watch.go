@@ -543,9 +543,14 @@ func (s *Service) queueDispatch(
 	// Per repository, not per watcher: the attempt budget is a property of the
 	// project being fixed, and one that keeps needing a fourth try should not
 	// have to raise the limit for every other repository the watcher handles.
+	//
+	// A RECORDED value, though — not a merged one. The resolved configuration
+	// always carries a positive default, so reading it here outranked this run's
+	// own `--max-attempts` on every ordinary setup: the flag was accepted and
+	// then silently replaced by 3.
 	maxAttempts := opts.MaxAttempts
-	if repoCfg := s.repoCfg(report.Repo); repoCfg.DispatchMaxAttempts > 0 {
-		maxAttempts = repoCfg.DispatchMaxAttempts
+	if sv := s.repoSolver(report.Repo); sv.MaxAttempts != nil {
+		maxAttempts = *sv.MaxAttempts
 	}
 	claimed, why, byDesign := s.claimDispatch(ctx, report, token, maxAttempts)
 	if !claimed {
@@ -821,6 +826,15 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 		// claim; a concurrent off or a failed earlier Load must fail closed.
 		if !st.AutofixEnabled(report.Repo) {
 			reason, byDesign = "fix sessions are disabled for this repository", true
+			return ErrNoChange
+		}
+		// Enrollment is the same kind of gate and gets the same treatment. The
+		// pass reads it once and can be minutes old, and its load is best-effort —
+		// so "Stop reviewing" could be clicked, and a coding-agent session still
+		// start against the repository, on the strength of a snapshot taken before
+		// the click or of no snapshot at all.
+		if !s.reviewsRepo(*st, report.Repo) {
+			reason, byDesign = "crq is not reviewing this repository", true
 			return ErrNoChange
 		}
 		round := st.Round(report.Repo, report.PR)

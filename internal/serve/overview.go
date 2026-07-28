@@ -370,6 +370,13 @@ func heldRows(st state.State) []HeldRow {
 func autofixView(st state.State, now time.Time, maxAttempts func(repo string) int) AutofixView {
 	v := AutofixView{Sessions: []Session{}, Hosts: []Host{}}
 	for key, d := range st.Dispatches {
+		// A claim past its TTL is a watcher that died without releasing it.
+		// Scheduling already treats it as free; rendering it as a running session
+		// left a dead "Fixing" on the page until something happened to replace the
+		// entry, which on a quiet repository is never.
+		if !d.Live(now) {
+			continue
+		}
 		repo, pr := splitKey(key)
 		s := Session{Key: key, Repo: repo, PR: pr, Host: hostOf(d.Host), Attempt: d.Attempts,
 			Findings: d.Findings, Log: d.Log, Since: d.At}

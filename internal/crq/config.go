@@ -708,6 +708,38 @@ func SplitArgv(value string) []string {
 	return argv
 }
 
+// JoinArgv renders argv as the single string SplitArgv reads back UNCHANGED.
+//
+// It exists because argv makes a round trip through a service unit's
+// environment: an install parses the operator's `--agent-args` into arguments,
+// writes them into the unit as one value, and the session splits them again.
+// Joining on spaces loses the boundaries — `--config "value with space"` came
+// back as three arguments — so every installed session either failed on its
+// first flag or ran with the wrong option.
+func JoinArgv(argv []string) string {
+	parts := make([]string, 0, len(argv))
+	for _, arg := range argv {
+		parts = append(parts, quoteArg(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+// quoteArg wraps one argument so SplitArgv yields it whole.
+//
+// SplitArgv has no escape character — a quote merely toggles — so an argument
+// containing both quote styles is emitted as adjacent quoted runs with nothing
+// between them, which SplitArgv concatenates back into one argument.
+func quoteArg(arg string) string {
+	if arg != "" && !strings.ContainsAny(arg, " \t\n\r\"'") {
+		return arg
+	}
+	parts := strings.Split(arg, `"`)
+	for i, part := range parts {
+		parts[i] = `"` + part + `"`
+	}
+	return strings.Join(parts, `'"'`)
+}
+
 // processRun distinguishes this RUN of crq from an earlier one that happened to
 // get the same pid. Host and pid do not identify a process over time — a
 // containerized daemon restarts as pid 1, and ordinary pids are reused — so

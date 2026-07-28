@@ -701,3 +701,56 @@ func TestListCheckRunsRidesETagCache(t *testing.T) {
 		t.Fatalf("the second call must carry If-None-Match, got %d conditional requests", got)
 	}
 }
+
+// The repository picker offers what is in scope, and /users/{owner}/repos lists
+// only PUBLIC repositories whoever asks. A personal account is the ordinary
+// case for the private workflow, so the picker showed a partial list — or an
+// empty one — while claiming to show everything in scope. Only the
+// authenticated-user endpoint answers for the token's own private repositories.
+func TestListOwnerReposUsesTheAuthenticatedEndpointForItsOwnAccount(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "t")
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/user":
+			_, _ = w.Write([]byte(`{"login":"alice"}`))
+		case "/users/alice", "/users/bob":
+			_, _ = w.Write([]byte(`{"type":"User"}`))
+		case "/user/repos":
+			paths = append(paths, r.URL.String())
+			_, _ = w.Write([]byte(`[{"full_name":"alice/private","private":true}]`))
+		case "/users/bob/repos":
+			paths = append(paths, r.URL.String())
+			_, _ = w.Write([]byte(`[{"full_name":"bob/public"}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 2, maxWait: time.Second, backoffBase: time.Millisecond, networkMaxWait: time.Second}
+
+	own, err := g.ListOwnerRepos(context.Background(), "alice", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(own) != 1 || own[0].FullName != "alice/private" || !own[0].Private {
+		t.Fatalf("repos = %+v, want the token's own private repository", own)
+	}
+	if len(paths) != 1 || !strings.Contains(paths[0], "affiliation=owner") ||
+		!strings.Contains(paths[0], "per_page=100") {
+		t.Fatalf("requested %q, want the authenticated endpoint with both query halves intact", paths)
+	}
+
+	// Somebody else's account is still read the public way: /user/repos cannot
+	// answer for an owner that is not the token.
+	other, err := g.ListOwnerRepos(context.Background(), "bob", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(other) != 1 || other[0].FullName != "bob/public" {
+		t.Fatalf("repos = %+v, want another user's public list", other)
+	}
+	if len(paths) != 2 || !strings.HasPrefix(paths[1], "/users/bob/repos?per_page=100") {
+		t.Fatalf("requested %q, want the public endpoint for another owner", paths)
+	}
+}

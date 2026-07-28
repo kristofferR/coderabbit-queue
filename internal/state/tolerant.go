@@ -28,6 +28,8 @@ var (
 	fireSlotFields = jsonFieldNames(reflect.TypeOf(FireSlot{}))
 	roundFields    = jsonFieldNames(reflect.TypeOf(Round{}))
 	stateFields    = jsonFieldNames(reflect.TypeOf(State{}))
+	fleetFields    = jsonFieldNames(reflect.TypeOf(FleetDefaults{}))
+	solverFields   = jsonFieldNames(reflect.TypeOf(SolverSettings{}))
 )
 
 // UnmarshalJSON decodes a fire slot and remembers anything it did not recognise.
@@ -95,6 +97,56 @@ func (s *State) UnmarshalJSON(raw []byte) error {
 // MarshalJSON writes state back with the members it did not recognise intact.
 func (s State) MarshalJSON() ([]byte, error) {
 	type plain State
+	return mergeUnknown(plain(s), s.unknown)
+}
+
+// Nesting matters: State recognises "fleet" and hands the whole object to an
+// ordinary decoder, so its top-level carrier never sees a member added INSIDE
+// the record. Without their own round trip, a newer binary's fleet or solver
+// setting is dropped the first time an older one rewrites state — which is the
+// rolling-upgrade guarantee the record's own documentation makes.
+
+// UnmarshalJSON decodes fleet defaults and remembers anything it did not recognise.
+func (f *FleetDefaults) UnmarshalJSON(raw []byte) error {
+	type plain FleetDefaults
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknown(raw, fleetFields)
+	if err != nil {
+		return err
+	}
+	*f = FleetDefaults(decoded)
+	f.unknown = unknown
+	return nil
+}
+
+// MarshalJSON writes fleet defaults back with the members it did not recognise intact.
+func (f FleetDefaults) MarshalJSON() ([]byte, error) {
+	type plain FleetDefaults
+	return mergeUnknown(plain(f), f.unknown)
+}
+
+// UnmarshalJSON decodes solver settings and remembers anything it did not recognise.
+func (s *SolverSettings) UnmarshalJSON(raw []byte) error {
+	type plain SolverSettings
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknown(raw, solverFields)
+	if err != nil {
+		return err
+	}
+	*s = SolverSettings(decoded)
+	s.unknown = unknown
+	return nil
+}
+
+// MarshalJSON writes solver settings back with the members it did not recognise intact.
+func (s SolverSettings) MarshalJSON() ([]byte, error) {
+	type plain SolverSettings
 	return mergeUnknown(plain(s), s.unknown)
 }
 

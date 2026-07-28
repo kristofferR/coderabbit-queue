@@ -2,8 +2,11 @@ package crq
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
+
+	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
 // The three layers are the whole feature, so this pins their order and — just
@@ -111,6 +114,132 @@ func TestFleetDefaultsLayering(t *testing.T) {
 	}
 }
 
+// Unsetting a fleet setting has to actually unset it. The typed fields — the
+// two lists and the weekly limit — are the ones where "leave this alone" and
+// "the fleet has no answer" look identical in JSON, so this is where a clear
+// could report success and change nothing.
+func TestSetEnvClearsTypedFleetSettings(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.WeeklyReviewLimit = 90 // this host's env, which a clear must hand back
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	for _, set := range []struct{ key, value string }{
+		{"CRQ_COBOTS", "codex"},
+		{"CRQ_REQUIRED_BOTS", "coderabbitai[bot]"},
+		{"CRQ_WEEKLY_LIMIT", "60"},
+	} {
+		if _, err := svc.SetEnv(ctx, set.key, set.value, false); err != nil {
+			t.Fatalf("recording %s: %v", set.key, err)
+		}
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Fleet.SetCoBots || !st.Fleet.SetRequired || st.Fleet.WeeklyLimit == nil {
+		t.Fatalf("fleet = %+v, want all three recorded before the clear", st.Fleet)
+	}
+
+	for _, key := range []string{"CRQ_COBOTS", "CRQ_REQUIRED_BOTS", "CRQ_WEEKLY_LIMIT"} {
+		if _, err := svc.SetEnv(ctx, key, "", true); err != nil {
+			t.Fatalf("clearing %s: %v", key, err)
+		}
+	}
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Fleet.SetCoBots || st.Fleet.CoBots != nil {
+		t.Errorf("cobots = %v (set=%v), want the record gone", st.Fleet.CoBots, st.Fleet.SetCoBots)
+	}
+	if st.Fleet.SetRequired || st.Fleet.Required != nil {
+		t.Errorf("required = %v (set=%v), want the record gone", st.Fleet.Required, st.Fleet.SetRequired)
+	}
+	if st.Fleet.WeeklyLimit != nil {
+		t.Errorf("weekly limit = %d, want the pointer removed rather than a default written",
+			*st.Fleet.WeeklyLimit)
+	}
+	// The point of removing it: this host's own 90 answers again.
+	if got := svc.cfgFor(st, "o/plain").WeeklyReviewLimit; got != 90 {
+		t.Errorf("weekly limit = %d, want this host's env value back", got)
+	}
+}
+
+// A fleet default reaches the repositories that follow the fleet, and a
+// repository somebody turned off follows nothing. It has both an enrollment
+// record and completed rounds, so it used to reach the requeue set twice over —
+// and saving an unrelated default then spent quota there.
+func TestReposFollowingFleetExcludesDisabledRepositories(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/on": true, "o/off": true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if _, err := svc.SetEnrollment(ctx, "o/off", false, "not reviewing this one"); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, repo := range svc.reposFollowingFleet(st) {
+		if repo == "o/off" {
+			t.Fatalf("following = %v, want the disabled repository excluded", svc.reposFollowingFleet(st))
+		}
+	}
+}
+
 func strptr(s string) *string { return &s }
 func intptr(n int) *int       { return &n }
 func boolptr(b bool) *bool    { return &b }
+
+// A fleet-recorded primary has to be the one crq actually asks. The decision
+// resolves the record; the apply path used to post this host's startup value —
+// so the daemon spent the account's quota reserving a round for one bot and
+// then sent the other bot's command, and waited for a review nobody requested.
+func TestFireUsesTheFleetResolvedPrimary(t *testing.T) {
+	ctx := context.Background()
+	// Built from an env map rather than a literal: the fleet's generic settings
+	// are applied by re-parsing the configuration crq was built from, which is
+	// what a host actually has.
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost",
+		"CRQ_COBOTS": "", "CRQ_MIN_INTERVAL": "0s", "CRQ_POLL": "1ms",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls["owner/repo#12"] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	if _, err := svc.SetEnv(ctx, "CRQ_REVIEW_CMD", "@coderabbitai full review", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Enqueue(ctx, "owner/repo", 12); err != nil {
+		t.Fatal(err)
+	}
+	if pumped, err := svc.Pump(ctx); err != nil || pumped.Action != "fired" {
+		t.Fatalf("pump = %+v, err = %v, want a fired round", pumped, err)
+	}
+	if len(gh.posted) != 1 || !strings.HasSuffix(gh.posted[0], "@coderabbitai full review") {
+		t.Fatalf("posted %q, want the fleet's recorded review command", gh.posted)
+	}
+	// And the round records the command as the primary's, so the wait is for a
+	// bot that was actually asked.
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round("owner/repo", 12)
+	if round == nil || len(round.PostedCommands) != 1 || round.PostedCommands[0].Bot != cfg.Bot {
+		t.Errorf("posted commands = %+v, want one attributed to %s", round.PostedCommands, cfg.Bot)
+	}
+}

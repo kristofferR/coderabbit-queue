@@ -689,7 +689,27 @@ func run(ctx context.Context, args []string) int {
 		// The dashboard is a service on this machine like the others, so the
 		// host table should say which machine serves it — otherwise the one
 		// host you are certainly talking to is the one it cannot name.
+		//
+		// On a timer for the lifetime of the server, the way autoreview and
+		// autofix report from their passes. On a host running nothing else, this
+		// is the only heartbeat there is: reporting once at startup left the
+		// still-running dashboard marking its own host stale after HostReportTTL,
+		// so Setup stopped naming the machine you were looking at it on.
 		service.ReportHost(ctx, "serve")
+		serveCtx, stopReports := context.WithCancel(ctx)
+		defer stopReports()
+		go func() {
+			tick := time.NewTicker(crq.HostReportTTL / 2)
+			defer tick.Stop()
+			for {
+				select {
+				case <-serveCtx.Done():
+					return
+				case <-tick.C:
+					service.ReportHost(serveCtx, "serve")
+				}
+			}
+		}()
 		srv := serve.New(store, serve.Options{
 			Addr:        *addr,
 			MinInterval: cfg.MinInterval,

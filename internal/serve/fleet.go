@@ -375,7 +375,13 @@ func repoRows(st state.State, cfg FleetConfig, now time.Time, botsFor BotsFor, e
 		repo, _ := splitKey(key)
 		get(repo).HeldPRs++
 	}
-	for key := range st.Dispatches {
+	for key, d := range st.Dispatches {
+		// Live claims only, as the sessions table counts them: a crashed watcher's
+		// claim outlives its process and must not leave a repository reading as
+		// permanently under repair.
+		if !d.Live(now) {
+			continue
+		}
 		repo, _ := splitKey(key)
 		get(repo).Fixing++
 	}
