@@ -37,6 +37,9 @@ type GitHubAPI interface {
 	CreateIssue(context.Context, string, string, string) (ghapi.Issue, error)
 	SearchOpenPRs(context.Context, string, bool, int) ([]ghapi.SearchPR, error)
 	EachOpenPR(context.Context, string, bool, func(ghapi.SearchPR) (bool, error)) error
+	// ListOwnerRepos backs the dashboard's repository picker: it is the only
+	// call that asks about repositories crq does not already follow.
+	ListOwnerRepos(context.Context, string, int) ([]ghapi.Repo, error)
 	GraphQL(context.Context, string, map[string]any, any) error
 	// ListPulls finds pull requests, filtered by the query. crq uses it to map a
 	// checkout's branch to the PR it belongs to.
@@ -1168,6 +1171,9 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 			}
 			lf := firedAt
 			st.LastFired = &lf
+			// The rolling fair-use log. Written in the same CAS as the fire it
+			// records, so a count can never include a fire that did not land.
+			st.NoteFire(firedAt)
 			dl := firedAt.Add(s.cfg.FeedbackWaitTimeout)
 			r.WaitDeadline = &dl
 			st.Warn = ""
@@ -1590,6 +1596,9 @@ func (s *Service) recordFire(ctx context.Context, round Round, token string, com
 			}
 			lf := firedAt
 			st.LastFired = &lf
+			// The rolling fair-use log. Written in the same CAS as the fire it
+			// records, so a count can never include a fire that did not land.
+			st.NoteFire(firedAt)
 			dl := firedAt.Add(s.cfg.FeedbackWaitTimeout)
 			r.WaitDeadline = &dl
 			st.Warn = ""

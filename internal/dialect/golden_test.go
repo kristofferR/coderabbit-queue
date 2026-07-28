@@ -632,3 +632,93 @@ func TestGoldenCLIRateLimit(t *testing.T) {
 		}
 	}
 }
+
+// TestGoldenPricing pins the money vocabulary against the same corpus every
+// other classifier is pinned against. Both payloads were already captured and
+// their billing fields discarded; these rows are the spec for reading them.
+func TestGoldenPricing(t *testing.T) {
+	t.Run("macroscope agent credits", func(t *testing.T) {
+		raw, err := os.ReadFile(filepath.Join("testdata", "macroscope", "check-custom.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var run struct {
+			Output struct {
+				Text string `json:"text"`
+			} `json:"output"`
+		}
+		if err := json.Unmarshal(raw, &run); err != nil {
+			t.Fatal(err)
+		}
+		credits, ok := ParseAgentCredits(run.Output.Text)
+		if !ok || credits != 81 {
+			t.Fatalf("credits = %d, %v; want 81, true", credits, ok)
+		}
+		// A body without the line is not zero credits — it is no answer.
+		if _, ok := ParseAgentCredits("no credits line here"); ok {
+			t.Error("a body with no credit line must report absence, not 0")
+		}
+	})
+
+	t.Run("coderabbit cli billing metadata", func(t *testing.T) {
+		raw, err := os.ReadFile(filepath.Join("testdata", "coderabbit", "cli-rate-limit.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var event map[string]any
+		if err := json.Unmarshal(raw, &event); err != nil {
+			t.Fatal(err)
+		}
+		got := ParseCLIError(event)
+		if got.ProUser {
+			t.Error("isProUser is false in this capture")
+		}
+		if !strings.Contains(got.PolicyGuidance, "$0.25/file") {
+			t.Errorf("policy guidance = %q, want the vendor's own overage price kept verbatim", got.PolicyGuidance)
+		}
+		// The guidance INVITES enabling usage-based reviews, so they are off —
+		// which means this block costs nothing and simply waits.
+		if got.UsageBasedEnabled {
+			t.Error("guidance offering to enable usage-based reviews means they are not enabled")
+		}
+	})
+
+	t.Run("estimates", func(t *testing.T) {
+		// Under the 10 KB minimum the floor IS the price, so it is exact.
+		small := EstimateMacroscope(DiffStat{Additions: 40, Deletions: 20, ChangedFiles: 3})
+		if !small.Exact || small.Low != 0.50 || small.High != 0.50 {
+			t.Errorf("small diff = %+v, want an exact $0.50 floor", small)
+		}
+		// A large one is a range, and never above the per-review cap.
+		large := EstimateMacroscope(DiffStat{Additions: 40000, Deletions: 20000, ChangedFiles: 300})
+		if large.High > 10.0 || large.Low > large.High {
+			t.Errorf("large diff = %+v, want a range capped at $10", large)
+		}
+
+		// A co-reviewer on its own subscription is free and says why; an
+		// unknown login is Unknown, never a confident $0.00.
+		if e := EstimateCost(CodexBotLogin, "coderabbitai[bot]", DiffStat{}, Allowance{}); !e.Exact || e.High != 0 || e.Basis == "" {
+			t.Errorf("codex = %+v, want an explained zero", e)
+		}
+		if e := EstimateCost("sonar[bot]", "coderabbitai[bot]", DiffStat{}, Allowance{}); !e.Unknown {
+			t.Errorf("unknown bot = %+v, want Unknown rather than free", e)
+		}
+
+		// The primary is free inside the allowance, unknown without a count,
+		// and priced per file only once past it WITH usage-based billing on.
+		d := DiffStat{ChangedFiles: 8}
+		if e := EstimateCodeRabbit("coderabbitai[bot]", d, Allowance{Remaining: 3, RemainingKnown: true}); !e.Exact || e.High != 0 {
+			t.Errorf("inside allowance = %+v, want free", e)
+		}
+		if e := EstimateCodeRabbit("coderabbitai[bot]", d, Allowance{}); !e.Unknown {
+			t.Errorf("no count = %+v, want Unknown — absent is not exhausted", e)
+		}
+		if e := EstimateCodeRabbit("coderabbitai[bot]", d, Allowance{RemainingKnown: true}); !e.Exact || e.High != 0 {
+			t.Errorf("exhausted with billing off = %+v, want free (it waits instead)", e)
+		}
+		e := EstimateCodeRabbit("coderabbitai[bot]", d, Allowance{RemainingKnown: true, UsageBasedEnabled: true})
+		if e.High != 2.0 {
+			t.Errorf("exhausted with billing on = %+v, want up to 8 files x $0.25", e)
+		}
+	})
+}

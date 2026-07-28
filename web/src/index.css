@@ -1,0 +1,40 @@
+@import "tailwindcss";
+
+/* The Operations Desk palette the mockups settled on. */
+@theme {
+  --color-bg: #f2f3f6;
+  --color-card: #ffffff;
+  --color-edge: #e3e6eb;
+  --color-edge2: #c9cfd8;
+  --color-ink: #1b2430;
+  --color-mut: #5b6472;
+  --color-faint: #8b93a0;
+  --color-ok: #1f7a4d;
+  --color-ok-bg: #eaf4ee;
+  --color-ok-edge: #c7e2d2;
+  --color-warn: #8a5300;
+  --color-warn-fg: #b45d10;
+  --color-warn-bg: #fbf1e2;
+  --color-warn-edge: #ead7b4;
+  --color-bad: #b3362b;
+  --color-bad-bg: #f9ecea;
+  --color-bad-edge: #efcfcb;
+  --color-acc: #2b5faa;
+  --color-acc-bg: #ebf1fa;
+  --color-acc-edge: #c9d8ef;
+  --font-sans: "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --shadow-card: 0 1px 2px rgb(27 36 48 / 0.05), 0 4px 14px rgb(27 36 48 / 0.04);
+}
+
+body {
+  @apply bg-bg text-ink font-sans text-sm;
+}
+
+/* Columns that go first when the window is narrow. Cost and reason never do. */
+@media (max-width: 1150px) {
+  .c-host { display: none; }
+}
+@media (max-width: 940px) {
+  .c-att { display: none; }
+}

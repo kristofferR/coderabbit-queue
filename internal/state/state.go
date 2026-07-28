@@ -329,6 +329,10 @@ type AccountQuota struct {
 	// that extends the window on every bounce.
 	RLCommentID      int64      `json:"rl_comment_id,omitempty"`
 	RLCommentUpdated *time.Time `json:"rl_comment_updated,omitempty"`
+	// Fires is when metered reviews were requested, trimmed to a rolling two
+	// weeks. See firelog.go: it exists to forecast the vendor's WEEKLY fair-use
+	// throttle, which crq can already recognise but never see coming.
+	Fires []time.Time `json:"fires,omitempty"`
 }
 
 type LeaderLease struct {
@@ -439,6 +443,10 @@ type State struct {
 	// A session may still be resolving threads after its push superseded the
 	// claimed round, and archive eviction must not admit a second session.
 	Dispatches map[string]DispatchClaim `json:"dispatches,omitempty"`
+	// Enrolled answers "does crq review this project at all?" per repository,
+	// so the decision lives with the fleet rather than in one host's env file.
+	// Absent means the hosts' CRQ_REPOS/CRQ_EXCLUDE decide, as before.
+	Enrolled map[string]RepoEnrollment `json:"enrolled,omitempty"`
 	// RepoAutofix answers "may crq fix pull requests here?" per repository. Absent
 	// means the default, which is yes — see AutofixEnabled.
 	RepoAutofix map[string]RepoAutofixSwitch `json:"repo_autofix,omitempty"`
@@ -480,11 +488,22 @@ const SchemaVersion = 4
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 1
+const WriterCaps = 3
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
 const CapsRepoOverrides = 1
+
+// CapsPrimaryOff is the capability that makes RepoReviewers.PrimaryOff safe to
+// act on. A host below it reads the field, writes it back untouched, and still
+// fires the primary there — so turning the primary off has to say which hosts
+// will not honour it, exactly as the override itself does.
+const CapsPrimaryOff = 2
+
+// CapsEnrollment is the capability that makes State.Enrolled safe to act on. A
+// host below it decides from its own env alone, so a repository enrolled here
+// is invisible to it and one turned off here keeps being reviewed by it.
+const CapsEnrollment = 3
 
 // writerTTL is how long a host counts as still active for capability purposes.
 const writerTTL = 30 * time.Minute
@@ -554,6 +573,12 @@ type RepoReviewers struct {
 	CoBots []string `json:"cobots,omitempty"`
 	// Required are the logins that gate convergence here.
 	Required []string `json:"required,omitempty"`
+	// PrimaryOff turns the metered primary off for this repository: crq never
+	// posts its review command here, never spends the account quota or the fire
+	// slot on it, and never waits for its review. The co-reviewers resolve the
+	// round alone. There is no "set" companion because false IS the default —
+	// the primary runs unless a repository says otherwise.
+	PrimaryOff bool `json:"primary_off,omitempty"`
 	// SetCoBots/SetRequired record whether each list was set at all, so
 	// "explicitly none" survives a JSON round trip that drops empty slices.
 	SetCoBots   bool       `json:"set_cobots,omitempty"`

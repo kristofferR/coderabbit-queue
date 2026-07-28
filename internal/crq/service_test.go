@@ -48,6 +48,7 @@ type fakeGitHub struct {
 	refReads    int
 	reviewReads int
 	searchPRs   []ghapi.SearchPR
+	ownerRepos  []ghapi.Repo
 	getComment  func(repo string, id int64) (ghapi.IssueComment, error)
 	// now, when set, timestamps posted comments off the same injected clock the
 	// service uses, so a fire's recorded FiredAt tracks the fake wall clock the
@@ -262,6 +263,14 @@ func (f *fakeGitHub) DeleteIssueComment(_ context.Context, repo string, id int64
 
 func (f *fakeGitHub) SearchOpenPRs(context.Context, string, bool, int) ([]ghapi.SearchPR, error) {
 	return nil, nil
+}
+
+// ownerRepos backs ListOwnerRepos; empty is a fine default, since only the
+// repository picker asks and nothing in the queue depends on it.
+func (f *fakeGitHub) ListOwnerRepos(_ context.Context, _ string, _ int) ([]ghapi.Repo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ghapi.Repo(nil), f.ownerRepos...), nil
 }
 
 func (f *fakeGitHub) EachOpenPR(_ context.Context, _ string, _ bool, fn func(ghapi.SearchPR) (bool, error)) error {

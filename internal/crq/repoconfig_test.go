@@ -324,7 +324,7 @@ func TestChangingRequirementsReopensACompletedRound(t *testing.T) {
 	svc := NewService(cfg, gh, store, nil)
 	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 11)
 
-	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	st, _, err := store.Load(ctx)
@@ -357,7 +357,7 @@ func TestChangingRequirementsReopensACompletedRound(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	st, _, _ = store.Load(ctx)
@@ -374,7 +374,7 @@ func TestSettingIdenticalReviewersPreservesOverrideIdentity(t *testing.T) {
 	first := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
 	svc.now = func() time.Time { return first }
 
-	if _, err := svc.SetReviewers(ctx, "o/r", []string{"codex"}, []string{"codex"}); err != nil {
+	if _, err := svc.SetReviewers(ctx, "o/r", []string{"codex"}, []string{"codex"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	before, _, err := store.Load(ctx)
@@ -387,7 +387,7 @@ func TestSettingIdenticalReviewersPreservesOverrideIdentity(t *testing.T) {
 	}
 
 	svc.now = func() time.Time { return first.Add(time.Hour) }
-	if _, err := svc.SetReviewers(ctx, "o/r", []string{"codex"}, []string{"codex"}); err != nil {
+	if _, err := svc.SetReviewers(ctx, "o/r", []string{"codex"}, []string{"codex"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	after, _, err := store.Load(ctx)
@@ -416,7 +416,7 @@ func TestChangingEnabledCoReviewersReopensACompletedRound(t *testing.T) {
 	svc := NewService(cfg, gh, store, nil)
 	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 11)
 
-	if _, err := svc.SetReviewers(ctx, repo, []string{"bugbot"}, nil); err != nil {
+	if _, err := svc.SetReviewers(ctx, repo, []string{"bugbot"}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	st, _, err := store.Load(ctx)
@@ -458,7 +458,7 @@ func TestChangingReviewersForcesExistingActiveRounds(t *testing.T) {
 				}
 			}
 
-			if _, err := svc.SetReviewers(ctx, repo, []string{"bugbot"}, []string{"bugbot"}); err != nil {
+			if _, err := svc.SetReviewers(ctx, repo, []string{"bugbot"}, []string{"bugbot"}, nil); err != nil {
 				t.Fatal(err)
 			}
 			st, _, err := store.Load(ctx)
@@ -505,7 +505,7 @@ func TestDedupeIsRevalidatedAgainstAReviewerChange(t *testing.T) {
 	}
 
 	// Now the override lands after the decision was made from svc.cfg.
-	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	st, _, err = store.Load(ctx)
@@ -562,7 +562,7 @@ func TestDedupeIsRevalidatedInsideItsWrite(t *testing.T) {
 	}
 	round := *st.Round(repo, pr)
 	hooked.hook = func() {
-		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}, nil); err != nil {
 			t.Error(err)
 		}
 	}
@@ -591,7 +591,7 @@ func TestReviewersRejectAnIncompleteRepository(t *testing.T) {
 		if _, err := svc.Reviewers(ctx, repo); err == nil {
 			t.Errorf("Reviewers(%q) = nil error, want the malformed target refused", repo)
 		}
-		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, nil); err == nil {
+		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, nil, nil); err == nil {
 			t.Errorf("SetReviewers(%q) = nil error, want the malformed target refused", repo)
 		}
 		if _, err := svc.ClearReviewers(ctx, repo); err == nil {
@@ -619,7 +619,7 @@ func TestAReopenedPRPicksUpRequirementsChangedWhileItWasClosed(t *testing.T) {
 	}
 
 	// Both PRs are closed while the required set changes: no round is requeued.
-	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	st, _, err := store.Load(ctx)
@@ -697,7 +697,7 @@ func TestChangingRequirementsLeavesClosedPRsAlone(t *testing.T) {
 	seedRound(t, store, cfg, repo, open, "aaaaaaaa1", PhaseCompleted, time.Now().UTC(), 11)
 	seedRound(t, store, cfg, repo, merged, "bbbbbbbb2", PhaseCompleted, time.Now().UTC(), 12)
 
-	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	st, _, err := store.Load(ctx)
@@ -818,7 +818,7 @@ func TestCompletionIsRevalidatedInsideItsWrite(t *testing.T) {
 	}
 	stale := svc.cfgFor(st, repo)
 	hooked.hook = func() {
-		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}, nil); err != nil {
 			t.Error(err)
 		}
 	}
@@ -855,7 +855,7 @@ func TestFeedbackCompletionIsRevalidatedInsideItsWrite(t *testing.T) {
 	}
 	stale := svc.cfgFor(st, repo)
 	hooked.hook = func() {
-		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}, nil); err != nil {
 			t.Error(err)
 		}
 	}
@@ -894,7 +894,7 @@ func TestSelfHealTriggerIsRevalidatedInsideItsClaim(t *testing.T) {
 	obs := engine.Observation{Head: head, Open: true}
 	hooked.hook = func() {
 		// The operator drops the co-reviewer, keeping only the primary.
-		if _, err := svc.SetReviewers(ctx, repo, []string{}, []string{cfg.Bot}); err != nil {
+		if _, err := svc.SetReviewers(ctx, repo, []string{}, []string{cfg.Bot}, nil); err != nil {
 			t.Error(err)
 		}
 	}
@@ -911,5 +911,69 @@ func TestSelfHealTriggerIsRevalidatedInsideItsClaim(t *testing.T) {
 	}
 	if c := st.Round(repo, pr).Co(dialect.CodexBotLogin); c.ClaimedAt != nil || c.CommandID != 0 {
 		t.Errorf("codex bookkeeping = %+v, want no claim for a removed reviewer", c)
+	}
+}
+
+// TestTurningThePrimaryOff pins the switch a private repository on a free plan
+// needs: the metered reviewer stops running there, stops gating convergence,
+// and cannot be turned off when nobody else would be left to answer.
+func TestTurningThePrimaryOff(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = codexCoBots(nil)
+	store := NewMemoryStore(cfg)
+	gh := newFakeGitHub()
+	svc := NewService(cfg, gh, store, nil)
+	repo := "o/private"
+	off, on := false, true
+
+	// Nobody else is required yet, so turning the primary off would leave a
+	// round gating on nobody — refused at edit time, not discovered later.
+	if _, err := svc.SetReviewers(ctx, repo, nil, nil, &off); err == nil {
+		t.Fatal("turning off the only required reviewer must be refused")
+	}
+
+	// With a co-reviewer required, the switch takes.
+	view, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex", cfg.Bot}, &off)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.PrimaryOff {
+		t.Error("view must say the primary is off, or the empty Reviewers list reads as a fleet without one")
+	}
+	for _, r := range view.Reviewers {
+		if sameBot(r.Login, cfg.Bot) {
+			t.Fatalf("reviewers = %+v, want the primary absent", view.Reviewers)
+		}
+	}
+
+	// The fleet default required set names the primary. A repository that never
+	// rewrote that list must still converge, so a reviewer that does not run
+	// here cannot gate here.
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ov, _ := st.RepoOverride(repo)
+	got := cfg.ForRepo(ov)
+	for _, bot := range got.RequiredBots {
+		if sameBot(bot, cfg.Bot) {
+			t.Errorf("RequiredBots = %v, want the primary dropped once it stopped running here", got.RequiredBots)
+		}
+	}
+	if _, ok := got.Primary(); ok {
+		t.Error("Primary() must find nothing to fire on a repository that turned it off")
+	}
+
+	// And it is reversible without dropping the rest of the override.
+	view, err = svc.SetReviewers(ctx, repo, nil, nil, &on)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.PrimaryOff {
+		t.Error("primary must be back on")
+	}
+	if len(view.Reviewers) == 0 {
+		t.Fatal("reviewers must list the primary again")
 	}
 }

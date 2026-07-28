@@ -20,7 +20,9 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
   static `KnownCoReviewers()` list — Codex, Cursor Bugbot, Macroscope — each
   carrying its login, config name, check-run app slug, trigger command, and its
   wording hooks (`ClassifyComment`, `ClassifyCheck`, `ResolvedInSHA`,
-  `FindingDedupeKey`, …). The only place a bot's literal wording may appear.
+  `FindingDedupeKey`, `Price`, …). The only place a bot's literal wording may
+  appear. `pricing.go` holds the vendors' published prices and the per-bot cost
+  estimators behind `PricesCheckedAt` — money is bot knowledge like any other.
 - `internal/gh/` — GitHub REST/GraphQL transport, bot-agnostic. Owns the "GitHub
   REST quota" concept under the name **Throttle** (`ThrottleWait`/`IsThrottled`).
   The only package (besides dialect) allowed to say "rate limit".
@@ -31,7 +33,11 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
   Owns persistent filesystem and process I/O for checkouts; `crq` supplies only
   configured roots and a current-token resolver.
 - `internal/state/` — persisted schema v4: one `Round` per PR, one global
-  `FireSlot`, the CodeRabbit `AccountQuota`, an `Archive` ring. Round transition
+  `FireSlot`, the CodeRabbit `AccountQuota`, an `Archive` ring, and the
+  per-repository records (`Repos` reviewer overrides incl. `PrimaryOff`,
+  `RepoAutofix`, `Enrolled`). `WriterCaps` is a monotonic integer bumped
+  whenever one of those records starts changing decisions, so a fleet running
+  two binary versions can name the hosts that will ignore a new one. Round transition
   methods, durable tombstones for tidied trigger comments, the CAS store, and
   dashboard rendering. `Round.CoBots` holds per-
   co-reviewer trigger bookkeeping; Codex's entry is **dual-written** to the

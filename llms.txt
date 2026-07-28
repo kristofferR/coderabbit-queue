@@ -281,17 +281,63 @@ again — older than the head commit, or than a later force-push (a command crq'
 spent regardless, and an unreadable head keeps everything),
 and never the bots' own comments. Deletions GitHub refuses are reported in `.failed[]`.
 
+Estimate what a round costs before firing it:
+
+```bash
+crq cost REPO PR
+```
+
+`.low`/`.high` bound it in US dollars; `.exact` is true only when every reviewer's figure is a real
+number; `.unpriced[]` names reviewers crq has no pricing for, so the total is a floor;
+`.reviewers[].basis` is the sentence explaining each figure. Only two reviewers can cost anything —
+Macroscope bills per KB of diff with a 10 KB minimum (so under ~85 changed lines the $0.50 floor IS
+the price and the estimate is exact), and CodeRabbit bills per reviewed file only once the plan
+allowance is spent AND usage-based reviews are enabled. Codex and Cursor Bugbot are covered by their
+own subscriptions. The diff basis is the whole head, so this is exact on a PR's first Macroscope
+review and an upper bound after that. `.prices_checked_at` is when the published figures were last
+verified against the vendors.
+
+Choose which projects crq reviews at all:
+
+```bash
+crq repos                                   # every repository, and where each answer came from
+crq repos REPO                              # one repository
+crq repos add REPO                          # review it (recorded in shared state)
+crq repos remove REPO --reason "<why>"      # stop; --reason is required
+crq repos default REPO                      # back to whatever this host's env says
+```
+
+`.source` is `state` (a record decided it), `env` (this host's `CRQ_REPOS`), `excluded`
+(`CRQ_EXCLUDE`, or the gate repo), `scope` (no allow-list, so all of `CRQ_SCOPE`) or `off`.
+`CRQ_EXCLUDE` wins over everything — it is a per-host kill switch. Otherwise a record wins in BOTH
+directions, and `.env_conflict` reports a record that turns off a repository a host's `CRQ_REPOS`
+still lists. `.lagging_hosts` names hosts whose binary predates enrollment records and still decides
+from its own env alone.
+
 Choose which bots review one project:
 
 ```bash
 crq reviewers REPO                                    # effective reviewers + budgets
 crq reviewers set REPO --bots codex --required codex  # Codex is the only required co-reviewer
+crq reviewers set REPO --no-primary                   # CodeRabbit does not review this project
+crq reviewers set REPO --primary                      # ...and back on
 crq reviewers clear REPO                              # fleet default again
 ```
 
-The primary is fleet-wide: an override chooses the CO-reviewers, so CodeRabbit is still triggered
-and still spends account quota even when it is left out of `--required`. Leaving it out means the
-round does not WAIT for it, not that it is never asked.
+WHICH bot is primary is fleet-wide (its markers are compiled into the classifiers), but whether it
+runs on a project is not. `--no-primary` means crq never posts its review command there, never
+spends the account quota or the fire slot on it, and never waits for its review — the co-reviewers
+resolve those rounds alone. This is the switch for a private repo on a free plan, where the metered
+reviewer produces nothing.
+
+`--no-primary` also drops the primary from the effective required set, since a reviewer that does
+not run cannot gate. It is refused when nobody else is required, because a round gating on nobody
+converges before any bot answers. `lagging_primary_off` in the output names hosts running a binary
+that predates the switch: they read the field, write it back untouched, and would still fire the
+primary there.
+
+Leaving the primary out of `--required` alone is a weaker thing: it is still asked, and still spends
+quota; the round just does not WAIT for it.
 
 `budget: account` means the reviewer is serialized against the shared CodeRabbit allowance;
 `budget: none` means it runs immediately. Stored in the shared state ref, so the daemon and agents

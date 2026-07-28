@@ -1,0 +1,126 @@
+package crq
+
+import (
+	"context"
+	"testing"
+)
+
+// TestEnrollmentPrecedence pins the order the whole feature rests on. Getting it
+// wrong is not a cosmetic bug: too permissive and crq reviews a repository
+// somebody deliberately kept it out of, too strict and the dashboard's Off
+// button silently does nothing.
+func TestEnrollmentPrecedence(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/allowed": true, "o/fought-over": true}
+	cfg.ExcludeRepos = map[string]bool{"o/killed": true}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	// A repository named by neither list, on a host that HAS an allow-list, is
+	// off — the allow-list is the whole statement of what this host looks at.
+	if v, _ := svc.Enrollment(ctx, "o/unknown"); v.Enabled || v.Source != "off" {
+		t.Errorf("unknown repo = %+v, want off", v)
+	}
+	if v, _ := svc.Enrollment(ctx, "o/allowed"); !v.Enabled || v.Source != "env" {
+		t.Errorf("allowed repo = %+v, want enabled by env", v)
+	}
+	if v, _ := svc.Enrollment(ctx, "o/killed"); v.Enabled || v.Source != "excluded" {
+		t.Errorf("excluded repo = %+v, want excluded", v)
+	}
+	if v, _ := svc.Enrollment(ctx, cfg.GateRepo); v.Enabled {
+		t.Errorf("gate repo = %+v, want excluded: it holds crq's own state", v)
+	}
+
+	// CRQ_EXCLUDE is a per-host kill switch and shared state does not override
+	// it, so the write is refused rather than recorded and ignored.
+	if _, err := svc.SetEnrollment(ctx, "o/killed", true, ""); err == nil {
+		t.Error("enrolling an env-excluded repo must be refused, not silently recorded")
+	}
+
+	// Turning one off is the direction that needs a reason, because it makes a
+	// repository disappear from every queue.
+	if _, err := svc.SetEnrollment(ctx, "o/fought-over", false, ""); err == nil {
+		t.Error("removing without a reason must be refused")
+	}
+
+	// A record beats env in BOTH directions. An Off that only tells you which
+	// file to edit on another machine is not a switch.
+	view, err := svc.SetEnrollment(ctx, "o/fought-over", false, "archived")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Enabled || view.Source != "state" || !view.EnvConflict {
+		t.Errorf("view = %+v, want off by record with the env disagreement reported", view)
+	}
+
+	// And it enrolls a repository env never mentioned — which is not a
+	// conflict, it is the feature working.
+	view, err = svc.SetEnrollment(ctx, "o/added", true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.Enabled || view.EnvConflict {
+		t.Errorf("view = %+v, want enabled with no conflict reported", view)
+	}
+
+	st, _, err := svc.store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := svc.scanTargets(st)
+	want := map[string]bool{"o/allowed": true, "o/added": true}
+	if len(targets) != len(want) {
+		t.Fatalf("scan targets = %v, want exactly %v", targets, want)
+	}
+	for _, repo := range targets {
+		if !want[repo] {
+			t.Errorf("scan targets = %v, want %v — a repository turned off must not be searched", targets, want)
+		}
+	}
+
+	// default hands it back to env.
+	if view, err = svc.ClearEnrollment(ctx, "o/fought-over"); err != nil {
+		t.Fatal(err)
+	}
+	if !view.Enabled || view.Source != "env" {
+		t.Errorf("view = %+v, want the env answer back", view)
+	}
+}
+
+// A host with no allow-list searches its whole CRQ_SCOPE. Records must not
+// narrow that to themselves, or enrolling one repository would silently stop
+// every other one from being scanned.
+func TestEnrollmentDoesNotNarrowAScopeWideHost(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.Scope = []string{"o"}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	if v, _ := svc.Enrollment(ctx, "o/anything"); !v.Enabled || v.Source != "scope" {
+		t.Errorf("view = %+v, want enabled by scope", v)
+	}
+	if _, err := svc.SetEnrollment(ctx, "o/one", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := svc.store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if targets := svc.scanTargets(st); len(targets) != 0 {
+		t.Errorf("scan targets = %v, want none so the pass still searches the whole scope", targets)
+	}
+	// The off direction still works there: the per-PR gate reads the record.
+	if _, err := svc.SetEnrollment(ctx, "o/noisy", false, "too busy"); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err = svc.store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if svc.reviewsRepo(st, "o/noisy") {
+		t.Error("a repository turned off must not be reviewed, scope-wide host or not")
+	}
+	if !svc.reviewsRepo(st, "o/other") {
+		t.Error("turning one repository off must not affect the rest of the scope")
+	}
+}

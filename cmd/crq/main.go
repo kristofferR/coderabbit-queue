@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/kristofferR/coderabbit-queue/internal/crq"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
+	"github.com/kristofferR/coderabbit-queue/internal/serve"
 )
 
 type stderrLogger struct{}
@@ -276,6 +278,75 @@ func run(ctx context.Context, args []string) int {
 		}
 		printJSON(result)
 		return 0
+	case "cost":
+		repo, pr, ok := repoPR(args[1:])
+		if !ok {
+			fatal(errors.New("usage: crq cost <repo> <pr>"))
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		est, cerr := service.Cost(ctx, repo, pr)
+		if cerr != nil {
+			fatal(cerr)
+			return 1
+		}
+		printJSON(est)
+		return 0
+	case "repos":
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		sub := ""
+		if len(args) > 1 {
+			sub = args[1]
+		}
+		switch sub {
+		case "", "list":
+			views, verr := service.Enrollments(ctx)
+			if verr != nil {
+				fatal(verr)
+				return 1
+			}
+			printJSON(views)
+			return 0
+		case "add", "remove", "default":
+			rest, reason, ok := parseAutofixReason(args[2:])
+			if !ok || len(rest) != 1 {
+				fatal(errors.New(`usage: crq repos add|remove|default <repo> [--reason "<why>"]`))
+				return 1
+			}
+			var view crq.EnrollmentView
+			var verr error
+			if sub == "default" {
+				view, verr = service.ClearEnrollment(ctx, rest[0])
+			} else {
+				view, verr = service.SetEnrollment(ctx, rest[0], sub == "add", reason)
+			}
+			if verr != nil {
+				fatal(verr)
+				return 1
+			}
+			printJSON(view)
+			return 0
+		default:
+			// A bare repository name is a read, not a typo: `crq repos owner/name`
+			// is the obvious way to ask about one.
+			if strings.Contains(sub, "/") {
+				view, verr := service.Enrollment(ctx, sub)
+				if verr != nil {
+					fatal(verr)
+					return 1
+				}
+				printJSON(view)
+				return 0
+			}
+			fatal(fmt.Errorf("unknown repos subcommand %q (try: crq repos, crq repos add|remove|default <repo>)", sub))
+			return 1
+		}
 	case "autofix":
 		switch sub := autofixSubcommand(args[1:]); sub {
 		case "?":
@@ -485,6 +556,106 @@ func run(ctx context.Context, args []string) int {
 		}
 		printJSON(result)
 		return 0
+	case "serve":
+		fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		addr := fs.String("addr", "127.0.0.1:7777", "address to listen on")
+		readOnly := fs.Bool("read-only", false, "refuse every write from the dashboard")
+		poll := fs.Duration("poll", 5*time.Second, "how often to re-read the state ref")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		// One resolver for both: the fleet list is just the resolver applied to a
+		// repository with no override, so the two can never drift.
+		resolve := func(ov crq.RepoReviewers) []serve.BotName {
+			rc := cfg.ForRepo(ov)
+			out := []serve.BotName{}
+			if primary, ok := rc.Primary(); ok {
+				out = append(out, serve.BotName{
+					Login: primary.Login, Name: primary.Name, Primary: true, Required: primary.Required,
+				})
+			}
+			for _, co := range rc.FreeRunning() {
+				out = append(out, serve.BotName{Login: co.Login, Name: co.Name, Required: co.Required})
+			}
+			return out
+		}
+		bots := resolve(crq.RepoReviewers{})
+		// The enrollment rule lives in the service; serve only renders it.
+		enrollFor := func(st crq.State, repo string) serve.Enrollment {
+			v := service.EnrollmentIn(st, repo)
+			return serve.Enrollment{
+				Source: v.Source, Enabled: v.Enabled, EnvConflict: v.EnvConflict,
+				Reason: v.Reason, By: v.By, UpdatedAt: parseStamp(v.UpdatedAt),
+			}
+		}
+		reviewers := []serve.ReviewerCfg{}
+		if primary, ok := cfg.Primary(); ok {
+			reviewers = append(reviewers, serve.ReviewerCfg{
+				Login: primary.Login, Name: primary.Name, Primary: true,
+				Required: primary.Required, Metered: primary.Metered(),
+				Command: primary.Command, Trigger: string(primary.Trigger),
+				Grace: serve.Dur(primary.SelfHealGrace),
+			})
+		}
+		for _, co := range cfg.FreeRunning() {
+			reviewers = append(reviewers, serve.ReviewerCfg{
+				Login: co.Login, Name: co.Name, Required: co.Required, Metered: co.Metered(),
+				Command: co.Command, Trigger: string(co.Trigger), Grace: serve.Dur(co.SelfHealGrace),
+			})
+		}
+		host, _ := os.Hostname()
+		srv := serve.New(store, serve.Options{
+			Addr:        *addr,
+			MinInterval: cfg.MinInterval,
+			Inflight:    cfg.InflightTimeout,
+			WeeklyLimit: cfg.WeeklyReviewLimit,
+			Bots:        bots,
+			Resolve:     resolve,
+			EnrollFor:   enrollFor,
+			Discoverer:  repoDiscoverer{service},
+			Poll:        *poll,
+			Assets:      serve.Assets(),
+			Log:         stderrLogger{},
+			Host:        host,
+			Token:       ghapi.LookupToken(ctx),
+			Observer:    prObserver{service},
+			Coster:      prCoster{service},
+			Actor:       prActor{service},
+			ReadOnly:    *readOnly,
+			Fleet: serve.FleetConfig{
+				GateRepo:       cfg.GateRepo,
+				StateRef:       cfg.StateRef,
+				DashboardIssue: cfg.DashboardIssue,
+				CalibrationPR:  cfg.CalibrationPR,
+				Scope:          cfg.Scope,
+				AllowRepos:     keysOf(cfg.AllowRepos),
+				ExcludeRepos:   keysOf(cfg.ExcludeRepos),
+				SkipAuthors:    keysOf(cfg.SkipAuthors),
+				SkipMarker:     cfg.SkipMarker,
+
+				MinInterval:     serve.Dur(cfg.MinInterval),
+				InflightTimeout: serve.Dur(cfg.InflightTimeout),
+				WatchInterval:   serve.Dur(cfg.WatchInterval),
+
+				Reviewers: reviewers,
+
+				AutofixCommand:     cfg.DispatchCommand,
+				AutofixMaxAttempts: cfg.DispatchMaxAttempts,
+				AutofixConcurrency: cfg.DispatchConcurrency,
+				AutofixForks:       cfg.DispatchForks,
+				WorkspaceRoot:      cfg.WorkspaceRoot,
+			},
+		})
+		if err := srv.Run(ctx); err != nil {
+			fatal(err)
+			return 1
+		}
+		return 0
 	case "autoreview", "auto":
 		fs := flag.NewFlagSet("autoreview", flag.ContinueOnError)
 		fs.SetOutput(os.Stderr)
@@ -595,6 +766,7 @@ QUEUE WORKFLOWS
   crq wait [<repo> <pr>]           block until there IS something to do, then say what
   crq loop <repo> <pr>             queue one PR review round, then emit JSON feedback
   crq autoreview                   keep open PRs reviewed through the same queue
+  crq serve                        the live web dashboard (read-only for now)
   crq status [--line]              show the queue, in-flight review, and quota state
 
 DRIVING A PR REVIEW
@@ -644,6 +816,7 @@ USAGE
   crq threads <repo> <pr>          list every unresolved review thread, outdated ones included
   crq dismiss <repo> <pr> <finding-id> [...] --reason "<why>"
                                    account for a finding GitHub gives you no thread to close
+  crq serve [--addr 127.0.0.1:7777] [--poll 5s]
   crq autoreview [--once] [--no-incremental]
                                    keep open PRs reviewed, rate-coordinated
   crq preflight [--type all|committed|uncommitted] [--base <branch>]
@@ -798,6 +971,62 @@ replies contesting the decline, crq re-surfaces that reply as its own finding.
 Pass --keep-open to leave it unresolved anyway (an on-the-record disagreement you
 intend to keep working). Thread IDs come from .findings[].thread_id.
 `)
+	case "cost":
+		fmt.Print(`crq cost <repo> <pr>
+
+What one more review round on this pull request would cost, before firing it.
+
+Everything is an ESTIMATE and the output says which parts are not:
+
+  .low / .high     the range, in US dollars
+  .exact           true only when every reviewer's figure is a real number
+  .unpriced        reviewers crq has no pricing for, so the total is a floor
+  .reviewers[]     per bot, each keeping its own .basis — the sentence that
+                   explains the figure, because a number without its reasoning
+                   cannot be checked
+  .prices_checked_at  when the published prices behind this were last verified
+
+Only two reviewers can cost anything. Macroscope bills per kilobyte of diff with
+a 10 KB minimum, so under roughly 85 changed lines the $0.50 floor IS the price
+and the estimate is exact; above that it is a range, because bytes-per-changed-
+line varies about 3x with the code. CodeRabbit costs nothing inside the plan
+allowance, and past it bills per REVIEWED file — an upper bound here, since path
+filters cut that down. Codex and Cursor Bugbot are covered by their own
+subscriptions.
+
+The diff basis is the whole head. Macroscope bills incrementally after its first
+review of a pull request, so this is exact on the first round and an upper bound
+on later ones.
+`)
+	case "repos":
+		fmt.Print(`crq repos                              (every repository crq knows about)
+crq repos <repo>                       (one repository, and why)
+crq repos add <repo>
+crq repos remove <repo> --reason "<why>"
+crq repos default <repo>               (back to whatever this host's env says)
+
+Which projects crq reviews at all, recorded in the shared state ref so every
+host agrees — and so the decision can be made from the dashboard instead of by
+editing an env file on whichever machine happens to run the daemon.
+
+.source says where the answer came from, which matters more than the answer:
+
+  state     a record here decided it — add/remove/default write these
+  env       this host's CRQ_REPOS lists it, with no record either way
+  excluded  this host's CRQ_EXCLUDE names it, or it is the gate repository
+  scope     no allow-list at all, so everything in CRQ_SCOPE is reviewed
+  off       no record, no env mention, and an allow-list that omits it
+
+CRQ_EXCLUDE wins over everything: it is a per-host kill switch, and the machine
+that has one usually has a reason the fleet does not know. Otherwise a record
+wins in BOTH directions — an Off switch that only tells you which file to go and
+edit on another machine is not a switch. When a record turns off a repository a
+host's CRQ_REPOS lists, .env_conflict says so rather than letting the file and
+the fleet disagree in silence.
+
+Removing needs --reason. The repository disappears from every queue, and "why did
+this stop being reviewed" is a question the fleet should be able to answer itself.
+`)
 	case "autofix":
 		fmt.Print(`crq autofix install [--agent <path>] [--dry-run] [<repo>...]
 crq autofix                            (which repositories crq may fix)
@@ -921,7 +1150,7 @@ Set CRQ_TIDY=1 to run it automatically as rounds progress under crq autoreview.
 `)
 	case "reviewers":
 		fmt.Print(`crq reviewers <repo>
-crq reviewers set <repo> [--bots <login,...>] [--required <login,...>]
+crq reviewers set <repo> [--bots <login,...>] [--required <login,...>] [--primary|--no-primary]
 crq reviewers clear <repo>
 
 Which bots review one project, and what each of them costs.
@@ -933,10 +1162,11 @@ its budget: "account" is serialized against the shared CodeRabbit allowance,
 a round WAITS for a reviewer is --required, whatever the reviewer costs.
 
   set     --bots chooses the co-reviewers; --required chooses which reviewers
-          gate convergence. Either flag alone updates only its own half. An
-          empty --bots means none here, which is a different answer from not
-          setting it at all; an empty --required is refused, because a round
-          that gates on nobody converges before any reviewer runs.
+          gate convergence; --no-primary / --primary turns the metered primary
+          off or on here. Each flag alone updates only its own half. An empty
+          --bots means none here, which is a different answer from not setting
+          it at all; an empty --required is refused, because a round that gates
+          on nobody converges before any reviewer runs.
   clear   drops the override so the repository follows the fleet again.
 
 The configuration lives in the shared state ref, not in a file the repository
@@ -944,9 +1174,18 @@ carries: the daemon has no checkout of the repos it reviews, and a daemon and an
 agent reading different configurations while writing one state ref is a class of
 bug worth not having.
 
-The primary reviewer is fleet-wide. Its markers and command are compiled into the
-classifiers when crq starts, so a per-repo primary would mean per-repo
-classifiers — a much larger change than choosing who else runs.
+WHICH bot is primary is fleet-wide: its markers and command are compiled into
+the classifiers when crq starts, so a per-repo primary would mean per-repo
+classifiers. Whether it RUNS here is a different question. --no-primary means
+crq never posts its review command on this repository, never spends the account
+quota or the fire slot on it, and never waits for its review — the co-reviewers
+resolve those rounds alone. That is the switch for a private repository on a
+free plan, where the metered reviewer produces nothing worth queueing for.
+
+It also drops the primary from the effective required set, because a reviewer
+that does not run cannot gate, and is refused when nobody else is required.
+Leaving the primary out of --required alone is the weaker thing: it is still
+asked and still spends quota, the round just does not WAIT for it.
 `)
 	case "threads":
 		fmt.Print(`crq threads <repo> <pr>
@@ -1207,9 +1446,17 @@ func runReviewers(ctx context.Context, service *crq.Service, args []string) int 
 	}
 	var repo string
 	var bots, required *string
+	var primary *bool
+	setPrimary := func(on bool) { primary = &on }
 	for i := 0; i < len(rest); i++ {
 		arg := rest[i]
 		switch {
+		// The primary is the one reviewer that costs the shared account, so
+		// turning it off for a project is a budget decision, not a taste one.
+		case arg == "--no-primary":
+			setPrimary(false)
+		case arg == "--primary":
+			setPrimary(true)
 		case arg == "--bots", arg == "--required":
 			if i+1 >= len(rest) {
 				fatal(fmt.Errorf("%s needs a value", arg))
@@ -1249,23 +1496,23 @@ func runReviewers(ctx context.Context, service *crq.Service, args []string) int 
 	case "clear":
 		// Ignoring a mutation flag here would turn a malformed automation call
 		// like `reviewers clear repo --bots codex` into a silent wipe.
-		if bots != nil || required != nil {
-			fatal(errors.New("clear takes no --bots/--required (it drops the whole override)"))
+		if bots != nil || required != nil || primary != nil {
+			fatal(errors.New("clear takes no --bots/--required/--primary (it drops the whole override)"))
 			return 1
 		}
 		view, err = service.ClearReviewers(ctx, repo)
 	case "set":
-		if bots == nil && required == nil {
-			fatal(errors.New("set needs --bots or --required (crq reviewers clear <repo> drops the override)"))
+		if bots == nil && required == nil && primary == nil {
+			fatal(errors.New("set needs --bots, --required or --primary/--no-primary (crq reviewers clear <repo> drops the override)"))
 			return 1
 		}
-		view, err = service.SetReviewers(ctx, repo, splitList(bots), splitList(required))
+		view, err = service.SetReviewers(ctx, repo, splitList(bots), splitList(required), primary)
 	default:
 		// `crq reviewers owner/repo --bots codex` is a set command missing its
 		// verb. Showing the configuration and exiting 0 tells automation the
 		// mutation worked when nothing changed.
-		if bots != nil || required != nil {
-			fatal(errors.New("did you mean `crq reviewers set`? --bots/--required only apply to set"))
+		if bots != nil || required != nil || primary != nil {
+			fatal(errors.New("did you mean `crq reviewers set`? --bots/--required/--primary only apply to set"))
 			return 1
 		}
 		view, err = service.Reviewers(ctx, repo)
@@ -1845,4 +2092,189 @@ func parseAutofixReason(args []string) (rest []string, reason string, ok bool) {
 		}
 	}
 	return rest, reason, true
+}
+
+// keysOf flattens a config set into the sorted list the dashboard displays.
+func keysOf(set map[string]bool) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// prObserver adapts the orchestrator's feedback path to the dashboard's
+// read-only view. The mapping lives here rather than in serve so that package
+// stays independent of the frozen CLI report shape.
+type prObserver struct{ svc *crq.Service }
+
+func (o prObserver) Observe(ctx context.Context, repo string, pr int) (serve.Observation, error) {
+	report, err := o.svc.Feedback(ctx, repo, pr)
+	if err != nil {
+		return serve.Observation{}, err
+	}
+	return serve.Observation{
+		Head:       report.Head,
+		Converged:  report.Converged,
+		Status:     report.Status,
+		Reason:     report.Reason,
+		ReviewedBy: report.ReviewedBy,
+		Findings:   report.Findings,
+		Dismissed:  report.Dismissed,
+		CheckedAt:  report.CheckedAt,
+	}, nil
+}
+
+// prActor mirrors the CLI verbs the dashboard exposes. Each one calls the same
+// Service method the command line does, so the two cannot drift apart.
+type prActor struct{ svc *crq.Service }
+
+func (a prActor) Hold(ctx context.Context, repo string, pr int, reason string) error {
+	_, err := a.svc.Hold(ctx, repo, pr, reason)
+	return err
+}
+
+func (a prActor) Unhold(ctx context.Context, repo string, pr int) error {
+	_, err := a.svc.Unhold(ctx, repo, pr)
+	return err
+}
+
+func (a prActor) Cancel(ctx context.Context, repo string, pr int) error {
+	return a.svc.Cancel(ctx, repo, pr)
+}
+
+func (a prActor) SetAutofix(ctx context.Context, repo string, enabled bool, reason string) error {
+	_, err := a.svc.SetAutofixEnabled(ctx, repo, enabled, reason)
+	return err
+}
+
+func (a prActor) ClearAutofix(ctx context.Context, repo string) error {
+	_, err := a.svc.ClearAutofixEnabled(ctx, repo)
+	return err
+}
+
+func (a prActor) SetReviewers(ctx context.Context, repo string, coBots, required []string, primary *bool) ([]string, error) {
+	view, err := a.svc.SetReviewers(ctx, repo, coBots, required, primary)
+	if err != nil {
+		return nil, err
+	}
+	// A host that honours overrides but not the primary switch would still fire
+	// the metered reviewer here, which is the whole thing being turned off.
+	return unionHosts(view.Lagging, view.LaggingPrimaryOff), nil
+}
+
+// unionHosts merges two lagging-host lists without repeating a host that lacks
+// both capabilities.
+func unionHosts(a, b []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(a)+len(b))
+	for _, list := range [][]string{a, b} {
+		for _, h := range list {
+			if seen[h] {
+				continue
+			}
+			seen[h] = true
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+func (a prActor) SetEnrollment(ctx context.Context, repo string, enabled bool, reason string) ([]string, error) {
+	view, err := a.svc.SetEnrollment(ctx, repo, enabled, reason)
+	if err != nil {
+		return nil, err
+	}
+	return view.Lagging, nil
+}
+
+func (a prActor) ClearEnrollment(ctx context.Context, repo string) error {
+	_, err := a.svc.ClearEnrollment(ctx, repo)
+	return err
+}
+
+func (a prActor) ClearReviewers(ctx context.Context, repo string) error {
+	_, err := a.svc.ClearReviewers(ctx, repo)
+	return err
+}
+
+func (a prActor) ResolveThreads(ctx context.Context, threadIDs []string) error {
+	_, err := a.svc.ResolveThreads(ctx, threadIDs)
+	return err
+}
+
+func (a prActor) DeclineThreads(ctx context.Context, threadIDs []string, reason string, resolve bool) error {
+	_, err := a.svc.DeclineThreads(ctx, threadIDs, reason, resolve)
+	return err
+}
+
+func (a prActor) DismissFindings(ctx context.Context, repo string, pr int, ids []string, reason string) error {
+	_, err := a.svc.Dismiss(ctx, repo, pr, ids, reason)
+	return err
+}
+
+// repoDiscoverer lists the repositories in CRQ_SCOPE for the dashboard's
+// repository picker.
+type repoDiscoverer struct{ svc *crq.Service }
+
+func (d repoDiscoverer) Discover(ctx context.Context) ([]serve.Candidate, error) {
+	repos, err := d.svc.ScopeRepos(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]serve.Candidate, 0, len(repos))
+	for _, r := range repos {
+		c := serve.Candidate{
+			Repo: r.FullName, Private: r.Private, Archived: r.Archived,
+			Fork: r.Fork, Issues: r.OpenIssues, Language: r.Language,
+		}
+		if !r.PushedAt.IsZero() {
+			at := r.PushedAt
+			c.PushedAt = &at
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// parseStamp turns the service's RFC3339 timestamps back into a time for the
+// JSON the dashboard renders. An unparseable one is reported as absent rather
+// than as the zero time, which would render as the year 1.
+func parseStamp(s string) *time.Time {
+	if s == "" {
+		return nil
+	}
+	at, err := time.Parse("2006-01-02T15:04:05Z", s)
+	if err != nil {
+		return nil
+	}
+	return &at
+}
+
+// prCoster prices one more round for the dashboard's PR page.
+type prCoster struct{ svc *crq.Service }
+
+func (c prCoster) Cost(ctx context.Context, repo string, pr int) (serve.Cost, error) {
+	est, err := c.svc.Cost(ctx, repo, pr)
+	if err != nil {
+		return serve.Cost{}, err
+	}
+	out := serve.Cost{
+		Low: est.Low, High: est.High, Exact: est.Exact, Unpriced: est.Unpriced,
+		Summary: est.Summary, PricesCheckedAt: est.PricesCheckedAt,
+		Diff: serve.CostDiff{
+			Additions: est.Diff.Additions, Deletions: est.Diff.Deletions,
+			ChangedFiles: est.Diff.ChangedFiles,
+		},
+	}
+	for _, r := range est.Reviewers {
+		out.Reviewers = append(out.Reviewers, serve.CostReviewer{
+			Bot: r.Bot, Low: r.Low, High: r.High, Exact: r.Exact, Unknown: r.Unknown, Basis: r.Basis,
+		})
+	}
+	return out, nil
 }

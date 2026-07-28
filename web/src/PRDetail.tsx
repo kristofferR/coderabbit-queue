@@ -1,0 +1,472 @@
+import { useEffect, useState } from "react";
+import type { Cost as CostView, Finding, PRView } from "./api";
+import { BotIcon, BotMarks, Card, CommitLink, Empty, Pill, PRLink, RepoIcon } from "./ui";
+import { ago, clock, countdown, elapsed, useNow } from "./time";
+import { act } from "./actions";
+import { Confirm } from "./Confirm";
+
+const SEV_ORDER = ["critical", "major", "potential", "minor", "unknown"];
+const SEV_TONE: Record<string, "bad" | "warn" | "mut"> = {
+  critical: "bad",
+  major: "warn",
+  potential: "warn",
+  minor: "mut",
+  unknown: "mut",
+};
+
+export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
+  const now = useNow();
+  const [view, setView] = useState<PRView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [action, setAction] = useState<{ finding: Finding; kind: "resolve" | "decline" | "dismiss" } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [actErr, setActErr] = useState<string | null>(null);
+
+  const runAction = async (reason: string) => {
+    if (!action) return;
+    setBusy(true);
+    setActErr(null);
+    try {
+      const f = action.finding;
+      if (action.kind === "resolve") {
+        await act("resolve", { repo, pr, thread_ids: [f.thread_id!] });
+      } else if (action.kind === "decline") {
+        await act("decline", { repo, pr, thread_ids: [f.thread_id!], reason });
+      } else {
+        await act("dismiss", { repo, pr, finding_ids: [f.id], reason });
+      }
+      setAction(null);
+      load(true); // the finding list is GitHub's answer, so re-observe
+    } catch (e) {
+      setActErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const load = (refresh = false) => {
+    setRefreshing(refresh);
+    fetch(`/api/pr/${repo}/${pr}${refresh ? "?refresh=1" : ""}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((v: PRView) => {
+        setView(v);
+        setError(null);
+      })
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setRefreshing(false));
+  };
+
+  // The state layer is cheap, but the observation behind it costs several
+  // GitHub calls — so this loads once on open and only re-fetches on request.
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repo, pr]);
+
+  if (error) {
+    return (
+      <main className="mx-auto max-w-[1180px] px-6 py-16 text-mut">
+        Could not load {repo}#{pr}: {error}
+      </main>
+    );
+  }
+  if (!view) {
+    return (
+      <main className="mx-auto max-w-[1180px] px-6 py-16 text-mut">Reading state…</main>
+    );
+  }
+
+  const findings = view.observed?.findings ?? [];
+  const grouped = SEV_ORDER.map((sev) => ({
+    sev,
+    items: findings.filter((f) => (f.severity || "unknown") === sev),
+  })).filter((g) => g.items.length > 0);
+
+  return (
+    <main className="mx-auto max-w-[1180px] px-6 pt-4.5 pb-16">
+      <div className="mb-2 text-[12.5px] text-faint">
+        <a href="#/" className="text-acc hover:underline">
+          Overview
+        </a>{" "}
+        / {repo} / #{pr}
+      </div>
+
+      <div className="mb-3.5 rounded-[10px] border border-edge bg-card px-5 py-3.5 shadow-card">
+        <div className="flex flex-wrap items-center gap-3">
+          <RepoIcon repo={repo} size={24} />
+          <h1 className="text-[18px] font-[650] tracking-tight">
+            <PRLink repo={repo} pr={pr} />
+          </h1>
+          {view.round ? (
+            <Pill tone={view.round.phase === "reviewing" ? "ok" : "acc"}>{view.round.phase}</Pill>
+          ) : (
+            <Pill tone="mut">no active round</Pill>
+          )}
+          {view.round?.fixing && <Pill tone="ok">fixing</Pill>}
+          {view.hold && <Pill tone="bad">held</Pill>}
+          {view.observed && (
+            <Pill tone={view.observed.converged ? "ok" : "warn"}>
+              {view.observed.converged ? "converged" : `${findings.length} open`}
+            </Pill>
+          )}
+          <button
+            type="button"
+            onClick={() => load(true)}
+            disabled={refreshing}
+            className="ml-auto rounded-lg border border-edge px-3 py-1.5 text-[13px] font-semibold text-mut disabled:opacity-45"
+          >
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </button>
+        </div>
+        {view.round && (
+          <div className="mt-2 flex flex-wrap gap-4 text-[12.5px] text-mut">
+            <span>
+              head <CommitLink repo={repo} sha={view.round.head} />
+            </span>
+            <span>enqueued {clock(view.round.enqueued_at)}</span>
+            {view.round.fired_at && (
+              <span>
+                fired {clock(view.round.fired_at)} · attempt {view.round.attempts || 1}
+              </span>
+            )}
+            {view.round.host && <span className="font-mono">{view.round.host}</span>}
+          </div>
+        )}
+        {view.round?.next && <div className="mt-1.5 text-[13px] text-mut">{view.round.next}</div>}
+      </div>
+
+      {view.hold && (
+        <div className="mb-3.5 rounded-[10px] border border-bad-edge border-l-4 border-l-bad bg-bad-bg px-4 py-2.5 text-[13.5px]">
+          <b>Held</b> by {view.hold.by} {ago(view.hold.at, now)}
+          {view.hold.reason && <span className="ml-2 text-mut">“{view.hold.reason}”</span>}
+          <span className="ml-2 text-faint">— crq will not review it until this is lifted.</span>
+        </div>
+      )}
+
+      {action && (
+        <Confirm
+          title={
+            action.kind === "resolve"
+              ? "Resolve this thread?"
+              : action.kind === "decline"
+                ? "Decline this finding?"
+                : "Dismiss this finding?"
+          }
+          body={
+            action.kind === "resolve" ? (
+              <>
+                Marks the review thread resolved on GitHub, where it can be reopened. Use this when the
+                finding has actually been handled.
+              </>
+            ) : action.kind === "decline" ? (
+              <>
+                Posts your reasoning as a reply on the thread and resolves it. crq reads the bot's answer
+                back, so a withdrawal or a stand-by-it becomes part of the record.
+              </>
+            ) : (
+              <>
+                For findings GitHub gives no way to close. It is recorded against{" "}
+                <b>this head only</b> — a new head may report it again.
+              </>
+            )
+          }
+          confirmLabel={action.kind === "resolve" ? "Resolve" : action.kind === "decline" ? "Decline" : "Dismiss"}
+          needsReason={action.kind !== "resolve"}
+          reasonLabel={action.kind === "decline" ? "Why you disagree (posted to the PR)" : "Why (kept in state)"}
+          busy={busy}
+          error={actErr}
+          onConfirm={runAction}
+          onCancel={() => {
+            setAction(null);
+            setActErr(null);
+          }}
+        />
+      )}
+
+      <div className="grid grid-cols-[minmax(0,1fr)_360px] items-start gap-4 max-[1150px]:grid-cols-[minmax(0,1fr)]">
+        <div>
+          <div className="mb-3.5 flex flex-wrap items-center gap-2.5 rounded-lg border border-acc-edge bg-acc-bg px-3.5 py-2 text-[12.5px] text-mut">
+            {view.observed ? (
+              <>
+                <b className="text-acc">Observed {ago(view.observed.checked_at, now)}</b>
+                <span>
+                  at <CommitLink repo={repo} sha={view.observed.head} /> · reviewed by{" "}
+                  {Object.entries(view.observed.reviewed_by ?? {})
+                    .filter(([, v]) => v)
+                    .map(([k]) => k)
+                    .join(", ") || "nobody yet"}
+                </span>
+              </>
+            ) : (
+              <span>
+                {view.observe_error
+                  ? `Could not reach GitHub — ${view.observe_error}`
+                  : "Reading findings from GitHub…"}
+              </span>
+            )}
+          </div>
+
+          <Card
+            title="Findings"
+            count={
+              view.observed
+                ? `${findings.length} open${view.observed.dismissed ? ` · ${view.observed.dismissed} dismissed` : ""}`
+                : "—"
+            }
+          >
+            {!view.observed ? (
+              <Empty>Findings need a GitHub read; the round above came from state.</Empty>
+            ) : findings.length === 0 ? (
+              <div className="px-[18px] py-6 text-center">
+                <div className="text-[15px] font-semibold">No open findings</div>
+                <p className="mt-1 text-[13px] text-mut">
+                  {view.observed.converged
+                    ? "Every required reviewer finished and nothing is blocking."
+                    : "Nothing actionable is outstanding at this head."}
+                </p>
+              </div>
+            ) : (
+              <div className="px-[18px] pb-3">
+                {grouped.map((g) => (
+                  <div key={g.sev}>
+                    <div className="pt-2.5 pb-1 text-[11px] font-semibold tracking-[0.05em] text-faint uppercase">
+                      {g.sev} · {g.items.length}
+                    </div>
+                    {g.items.map((f) => (
+                      <FindingRow key={f.id} f={f} onAct={(a) => setAction({ finding: f, kind: a })} />
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+        </div>
+
+        <aside>
+          {view.round?.fixing && (
+            <Card title="Fix session" count="live">
+              <div className="px-[18px] pb-3.5 text-[13px]">
+                <Pill tone="ok">Running · {elapsed(view.round.fixing.since, now)}</Pill>
+                <div className="mt-1.5 text-mut">
+                  {view.round.fixing.host} · attempt {view.round.fixing.attempt}
+                  {view.round.fixing.heartbeat && ` · heartbeat ${clock(view.round.fixing.heartbeat)}`}
+                </div>
+              </div>
+            </Card>
+          )}
+
+          {view.round && (
+            <Card title="Round" count={view.round.head}>
+              <div className="px-[18px] pb-3 text-[13px]">
+                <KV k="Phase" v={view.round.phase} />
+                <KV k="Enqueued" v={clock(view.round.enqueued_at)} />
+                {view.round.fired_at && <KV k="Fired" v={clock(view.round.fired_at)} />}
+                {view.round.deadline && (
+                  <KV k="Deadline" v={`${countdown(view.round.deadline, now)} · ${clock(view.round.deadline)}`} />
+                )}
+                {view.round.retry_at && <KV k="Retries after" v={clock(view.round.retry_at)} />}
+                {view.round.co_only && <KV k="Scope" v="co-reviewers only — spends no quota" />}
+                {view.round.note && <KV k="Note" v={`“${view.round.note}”`} />}
+              </div>
+              <div className="border-t border-[#EEF0F3] px-[18px] py-2.5">
+                <div className="mb-1.5 text-[11px] font-medium tracking-[0.06em] text-faint uppercase">
+                  Reviewers
+                </div>
+                <BotMarks bots={view.round.bots} />
+              </div>
+            </Card>
+          )}
+
+          {(view.cost || view.cost_error) && <CostCard cost={view.cost} error={view.cost_error} />}
+
+          {(view.round?.dismissed?.length ?? 0) > 0 && (
+            <Card title="Dismissed" count={view.round!.dismissed!.length}>
+              <div className="px-[18px] pb-3 text-[12.5px] text-mut">
+                {view.round!.dismissed!.map((d) => (
+                  <div key={d.id} className="border-b border-[#EEF0F3] py-1.5 last:border-none">
+                    “{d.reason}”
+                    <div className="font-mono text-[11px] text-faint">{d.id.slice(0, 12)}</div>
+                  </div>
+                ))}
+                <p className="pt-2 text-faint">Dismissals apply to this head only.</p>
+              </div>
+            </Card>
+          )}
+
+          <Card title="Round history" count={`${view.history.length} head(s)`}>
+            <div className="px-[18px] pb-3">
+              {view.history.length === 0 && <Empty>No round has run for this PR.</Empty>}
+              {view.history.map((h, i) => (
+                <div key={`${h.head}-${i}`} className="border-b border-[#EEF0F3] py-2 text-[13px] last:border-none">
+                  <div className="flex items-center gap-2">
+                    <CommitLink repo={repo} sha={h.head} />
+                    {h.current && <Pill tone="acc">current</Pill>}
+                  </div>
+                  <div className="text-[12px] text-faint">
+                    {h.outcome}
+                    {h.note && ` — ${h.note}`}
+                    {h.at && ` · ${clock(h.at)}`}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
+        </aside>
+      </div>
+    </main>
+  );
+}
+
+const DISMISSIBLE = new Set(["review_body", "review_prompt", "review_skipped", "issue_comment"]);
+
+function FindingRow({
+  f,
+  onAct,
+}: {
+  f: Finding;
+  onAct: (kind: "resolve" | "decline" | "dismiss") => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const sev = f.severity || "unknown";
+  const threaded = Boolean(f.thread_id);
+  // Only threadless findings can be dismissed — a threaded one is closed by
+  // resolving or declining it, which is visible on the pull request.
+  const dismissible = !threaded && DISMISSIBLE.has(f.source ?? "");
+  return (
+    <div className="mb-2 overflow-hidden rounded-lg border border-edge">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex w-full items-baseline gap-2.5 px-3.5 py-2.5 text-left hover:bg-[#F7F8FA]"
+      >
+        <span className="flex-1">
+          <span className="text-[13.5px] font-[550]">{f.title || "(untitled finding)"}</span>
+          <span className="mt-0.5 block font-mono text-[12px] text-faint">
+            {f.bot}
+            {f.path ? ` · ${f.path}${f.line ? `:${f.line}` : ""}` : ""}
+            {f.thread_id ? " · thread open" : ""}
+          </span>
+        </span>
+        <Pill tone={SEV_TONE[sev] ?? "mut"}>{sev}</Pill>
+      </button>
+      {open && (
+        <div className="border-t border-[#EEF0F3] px-4 py-2.5 text-[13px] text-mut">
+          <p className="whitespace-pre-wrap">{f.body || "No detail was captured for this finding."}</p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {threaded && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => onAct("resolve")}
+                  className="rounded-lg border border-edge px-3 py-1 text-[12.5px] font-semibold text-mut hover:border-edge2"
+                >
+                  Resolve thread
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onAct("decline")}
+                  className="rounded-lg border border-edge px-3 py-1 text-[12.5px] font-semibold text-mut hover:border-edge2"
+                >
+                  Decline…
+                </button>
+              </>
+            )}
+            {dismissible && (
+              <button
+                type="button"
+                onClick={() => onAct("dismiss")}
+                className="rounded-lg border border-edge px-3 py-1 text-[12.5px] font-semibold text-mut hover:border-edge2"
+              >
+                Dismiss…
+              </button>
+            )}
+            {!threaded && !dismissible && (
+              <span className="text-[12px] text-faint">
+                No thread to resolve, and this source cannot be dismissed — it clears when the finding
+                stops being reported.
+              </span>
+            )}
+            {f.url && (
+              <a href={f.url} target="_blank" rel="noreferrer" className="ml-auto text-[12.5px] text-acc hover:underline">
+                View on GitHub ↗
+              </a>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function KV({ k, v }: { k: string; v: string }) {
+  return (
+    <div className="flex justify-between gap-3 border-b border-[#EEF0F3] py-1.5 last:border-none">
+      <span className="text-mut">{k}</span>
+      <span className="text-right font-medium">{v}</span>
+    </div>
+  );
+}
+
+/**
+ * What the next round would cost.
+ *
+ * Every figure here is an estimate and the card says so — including which
+ * reviewers crq could not price at all, because a total that quietly omits one
+ * reads as complete. The per-reviewer basis is shown rather than tucked into a
+ * tooltip: a number whose reasoning you cannot see is a number you cannot check.
+ */
+function CostCard({ cost, error }: { cost?: CostView; error?: string }) {
+  if (!cost) {
+    return (
+      <Card title="Estimated cost">
+        <div className="px-[18px] pb-3.5 pt-1 text-[12.5px] text-faint">
+          Could not work out a price — {error}
+        </div>
+      </Card>
+    );
+  }
+  const money = (n: number) => `$${n.toFixed(2)}`;
+  return (
+    <Card title="Estimated cost" count={cost.summary}>
+      <div className="px-[18px] pb-3 pt-1">
+        <p className="text-[12.5px] text-faint">
+          {cost.diff.additions + cost.diff.deletions} changed lines across{" "}
+          {cost.diff.changed_files} file(s), for one more round at this head.
+        </p>
+        <table className="mt-2 w-full border-collapse">
+          <tbody>
+            {cost.reviewers.map((r) => (
+              <tr key={r.bot} className="border-b border-[#EEF0F3] last:border-none">
+                <td className="py-1.5 pr-2 align-top">
+                  <BotIcon login={r.bot} name={r.bot} size={18} />
+                </td>
+                <td className="py-1.5 pr-2 align-top text-[12.5px] text-mut">{r.basis}</td>
+                <td className="py-1.5 text-right align-top font-mono text-[12.5px] whitespace-nowrap">
+                  {r.unknown ? (
+                    <span className="text-warn">unknown</span>
+                  ) : r.high === 0 ? (
+                    <span className="text-faint">included</span>
+                  ) : r.low === r.high ? (
+                    money(r.high)
+                  ) : (
+                    `${money(r.low)}–${money(r.high)}`
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {(cost.unpriced?.length ?? 0) > 0 && (
+          <p className="mt-2 rounded-lg border border-warn-edge bg-warn-bg px-2.5 py-1.5 text-[12px] text-warn">
+            The total is a floor: {cost.unpriced!.join(", ")} could not be priced.
+          </p>
+        )}
+        <p className="mt-2 text-[11.5px] text-faint">
+          Estimate. Published prices last checked {cost.prices_checked_at}; Macroscope bills
+          incrementally after its first review of a PR, so later rounds cost less than this.
+        </p>
+      </div>
+    </Card>
+  );
+}

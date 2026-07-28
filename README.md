@@ -409,8 +409,15 @@ crq hold                                                    # list held PRs
 
 crq tidy <repo> <pr>      # delete crq's own spent review-trigger comments (--dry-run previews)
 
+crq cost <repo> <pr>      # what one more review round there would cost, before firing it
+                          # (CRQ_WEEKLY_LIMIT sets the fair-use threshold the dashboard forecasts)
+
+crq repos                 # which projects crq reviews, and where each answer comes from
+crq repos add <repo> | crq repos remove <repo> --reason "<why>" | crq repos default <repo>
+
 crq reviewers <repo>      # which bots review this project, and what each costs
 crq reviewers set <repo> [--bots <a,b>] [--required <a,b>] # choose them (either flag alone)
+crq reviewers set <repo> --no-primary | --primary           # CodeRabbit off/on for this project
 crq reviewers clear <repo>                                 # back to the fleet default
 
 crq dismiss <repo> <pr> <finding-id> [...] --reason "<why>"  # account for a finding with no thread

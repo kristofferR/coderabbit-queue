@@ -54,6 +54,10 @@ type Config struct {
 	// Bot / RequiredBots / FeedbackBots / CoBots above are DERIVED from it and
 	// kept only so existing consumers keep compiling; new code should read this.
 	Reviewers []Reviewer
+	// PrimaryOff is set by ForRepo when a repository turned the metered primary
+	// off. It is never a fleet setting: CRQ_BOT always names one, and "the fleet
+	// has no primary" is expressed by requiring nobody, not by this.
+	PrimaryOff bool
 	// WatchInterval paces `crq watch`; DispatchCommand is the fix session it
 	// runs with --dispatch, argv-style; DispatchMaxAttempts bounds dispatches per
 	// head so a fix that keeps not working stops.
@@ -102,6 +106,11 @@ type Config struct {
 	RateLimitFallback time.Duration
 	AutoReviewPoll    time.Duration
 	AutoReviewMaxScan int
+	// WeeklyReviewLimit is the vendor's weekly fair-use threshold, past which
+	// reviews are throttled to roughly one an hour. Configurable because it is
+	// plan-dependent (60 on Pro, 90 on Pro+) and no API reports it; 0 disables
+	// the forecast without disabling the count.
+	WeeklyReviewLimit int
 	LeaderTTL         time.Duration
 	FiredMax          int
 	// Tidy removes crq's own spent review-trigger comments as rounds progress.
@@ -216,35 +225,39 @@ func LoadConfig() (Config, error) {
 		coLogins = append(coLogins, cb.Login)
 	}
 	cfg := Config{
-		GateRepo:            env["CRQ_REPO"],
-		DashboardIssue:      intEnv(env, "CRQ_ISSUE", 0),
-		CalibrationPR:       intEnv(env, "CRQ_CAL_PR", 0),
-		Scope:               listEnv(env, "CRQ_SCOPE", ownerOf(env["CRQ_REPO"])),
-		AllowRepos:          repoSet(env["CRQ_REPOS"]),
-		ExcludeRepos:        repoSet(env["CRQ_EXCLUDE"]),
-		SkipAuthors:         authorSet(stringEnvAllowEmpty(env, "CRQ_AUTOREVIEW_SKIP_AUTHORS", "dependabot[bot]")),
-		SkipMarker:          stringEnvAllowEmpty(env, "CRQ_AUTOREVIEW_SKIP_MARKER", "<!-- crq:skip-autoreview -->"),
-		StateRef:            stringEnv(env, "CRQ_STATE_REF", "crq-state-v3"),
-		Bot:                 bot,
-		RequiredBots:        requiredBots,
-		CoBots:              coBots,
-		FeedbackBots:        listEnv(env, "CRQ_FEEDBACK_BOTS", strings.Join(unionBots(requiredBots, coLogins), ",")),
-		ReviewCommand:       stringEnv(env, "CRQ_REVIEW_CMD", "@coderabbitai review"),
-		RateLimitCommand:    stringEnv(env, "CRQ_RATELIMIT_CMD", dialect.DefaultRateLimitCommand),
-		RateLimitMarker:     stringEnv(env, "CRQ_RL_MARKER", dialect.DefaultRateLimitMarker),
-		CalibrationMarker:   stringEnv(env, "CRQ_CAL_REPLY_MARKER", "auto-generated reply by CodeRabbit"),
-		ReviewDoneMarker:    stringEnv(env, "CRQ_REVIEW_DONE_MARKER", "summarize by coderabbit.ai"),
-		CompletionMarker:    stringEnvAllowEmpty(env, "CRQ_COMPLETION_MARKER", "Review finished"),
-		Host:                stringEnv(env, "CRQ_HOST", host),
-		Timezone:            env["CRQ_TZ"],
-		MinInterval:         durationEnv(env, "CRQ_MIN_INTERVAL", 90*time.Second),
-		InflightTimeout:     durationEnv(env, "CRQ_INFLIGHT_TIMEOUT", 15*time.Minute),
-		PollInterval:        durationEnv(env, "CRQ_POLL", 15*time.Second),
-		WaitTimeout:         durationEnv(env, "CRQ_WAIT_TIMEOUT", 0),
-		CalibrationTTL:      durationEnv(env, "CRQ_CALIBRATE_TTL", 2*time.Minute),
-		RateLimitFallback:   durationEnv(env, "CRQ_RL_FALLBACK", 15*time.Minute),
-		AutoReviewPoll:      durationEnv(env, "CRQ_AUTOREVIEW_POLL", time.Minute),
-		AutoReviewMaxScan:   intEnv(env, "CRQ_AUTOREVIEW_MAX_SCAN", 400),
+		GateRepo:          env["CRQ_REPO"],
+		DashboardIssue:    intEnv(env, "CRQ_ISSUE", 0),
+		CalibrationPR:     intEnv(env, "CRQ_CAL_PR", 0),
+		Scope:             listEnv(env, "CRQ_SCOPE", ownerOf(env["CRQ_REPO"])),
+		AllowRepos:        repoSet(env["CRQ_REPOS"]),
+		ExcludeRepos:      repoSet(env["CRQ_EXCLUDE"]),
+		SkipAuthors:       authorSet(stringEnvAllowEmpty(env, "CRQ_AUTOREVIEW_SKIP_AUTHORS", "dependabot[bot]")),
+		SkipMarker:        stringEnvAllowEmpty(env, "CRQ_AUTOREVIEW_SKIP_MARKER", "<!-- crq:skip-autoreview -->"),
+		StateRef:          stringEnv(env, "CRQ_STATE_REF", "crq-state-v3"),
+		Bot:               bot,
+		RequiredBots:      requiredBots,
+		CoBots:            coBots,
+		FeedbackBots:      listEnv(env, "CRQ_FEEDBACK_BOTS", strings.Join(unionBots(requiredBots, coLogins), ",")),
+		ReviewCommand:     stringEnv(env, "CRQ_REVIEW_CMD", "@coderabbitai review"),
+		RateLimitCommand:  stringEnv(env, "CRQ_RATELIMIT_CMD", dialect.DefaultRateLimitCommand),
+		RateLimitMarker:   stringEnv(env, "CRQ_RL_MARKER", dialect.DefaultRateLimitMarker),
+		CalibrationMarker: stringEnv(env, "CRQ_CAL_REPLY_MARKER", "auto-generated reply by CodeRabbit"),
+		ReviewDoneMarker:  stringEnv(env, "CRQ_REVIEW_DONE_MARKER", "summarize by coderabbit.ai"),
+		CompletionMarker:  stringEnvAllowEmpty(env, "CRQ_COMPLETION_MARKER", "Review finished"),
+		Host:              stringEnv(env, "CRQ_HOST", host),
+		Timezone:          env["CRQ_TZ"],
+		MinInterval:       durationEnv(env, "CRQ_MIN_INTERVAL", 90*time.Second),
+		InflightTimeout:   durationEnv(env, "CRQ_INFLIGHT_TIMEOUT", 15*time.Minute),
+		PollInterval:      durationEnv(env, "CRQ_POLL", 15*time.Second),
+		WaitTimeout:       durationEnv(env, "CRQ_WAIT_TIMEOUT", 0),
+		CalibrationTTL:    durationEnv(env, "CRQ_CALIBRATE_TTL", 2*time.Minute),
+		RateLimitFallback: durationEnv(env, "CRQ_RL_FALLBACK", 15*time.Minute),
+		AutoReviewPoll:    durationEnv(env, "CRQ_AUTOREVIEW_POLL", time.Minute),
+		AutoReviewMaxScan: intEnv(env, "CRQ_AUTOREVIEW_MAX_SCAN", 400),
+		// The vendor's weekly fair-use threshold, past which reviews are
+		// throttled to roughly one an hour. Configurable because it is
+		// plan-dependent (60 on Pro, 90 on Pro+) and there is no API to ask.
+		WeeklyReviewLimit:   intEnv(env, "CRQ_WEEKLY_LIMIT", 60),
 		LeaderTTL:           durationEnv(env, "CRQ_LEADER_TTL", 3*time.Minute),
 		FiredMax:            intEnv(env, "CRQ_FIRED_MAX", 500),
 		WatchInterval:       durationEnv(env, "CRQ_WATCH_INTERVAL", 2*time.Minute),
@@ -267,7 +280,7 @@ func LoadConfig() (Config, error) {
 	// Built here, after the command is resolved, because the primary's trigger is
 	// part of describing it.
 	cfg.KnownCoBots = parseAllCoBots(env)
-	cfg.Reviewers = buildReviewers(cfg.Bot, cfg.ReviewCommand, requiredBots, coBots)
+	cfg.Reviewers = buildReviewers(cfg.Bot, cfg.ReviewCommand, requiredBots, coBots, false)
 	// The legacy lists are now VIEWS of cfg.Reviewers rather than parallel
 	// parses, so they cannot answer differently from it. An explicit
 	// CRQ_FEEDBACK_BOTS still wins: it is the one list an operator may widen

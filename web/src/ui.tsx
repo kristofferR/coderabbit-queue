@@ -1,0 +1,216 @@
+import { useState, type ReactNode } from "react";
+import type { Bot } from "./api";
+
+/** Status pill: always a dot *and* a word, never colour alone. */
+export function Pill({
+  tone = "mut",
+  children,
+}: {
+  tone?: "ok" | "warn" | "bad" | "mut" | "acc";
+  children: ReactNode;
+}) {
+  const tones = {
+    ok: "text-ok bg-ok-bg border-ok-edge",
+    warn: "text-warn bg-warn-bg border-warn-edge",
+    bad: "text-bad bg-bad-bg border-bad-edge",
+    mut: "text-mut bg-[#EEF0F3] border-edge",
+    acc: "text-acc bg-acc-bg border-acc-edge",
+  }[tone];
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-px text-xs font-medium ${tones}`}
+    >
+      <span className="size-[7px] shrink-0 rounded-full bg-current" />
+      {children}
+    </span>
+  );
+}
+
+export function Card({
+  title,
+  count,
+  end,
+  children,
+}: {
+  title: string;
+  count?: ReactNode;
+  end?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section className="mb-3.5 rounded-[10px] border border-edge bg-card shadow-card">
+      <header className="flex flex-wrap items-baseline gap-2.5 px-[18px] pt-3">
+        <h2 className="text-[14.5px] font-[650]">{title}</h2>
+        {count !== undefined && <span className="text-[12.5px] text-faint">{count}</span>}
+        {end && <span className="ml-auto text-[12.5px] text-faint">{end}</span>}
+      </header>
+      {children}
+    </section>
+  );
+}
+
+export function Empty({ children }: { children: ReactNode }) {
+  return <p className="px-[18px] py-4 text-[13px] text-faint">{children}</p>;
+}
+
+/**
+ * A repository's icon: the favicon out of the repo itself, falling back to a
+ * letter tile. The server fetches and caches it — the browser must not hold a
+ * GitHub token, and private repos would 404 without one.
+ */
+export function RepoIcon({ repo, size = 16 }: { repo: string; size?: number }) {
+  const [failed, setFailed] = useState(false);
+  const name = repo.split("/").pop() ?? repo;
+  const style = { width: size, height: size, borderRadius: size > 20 ? 7 : 4 };
+  if (failed) {
+    return (
+      <span
+        title={repo}
+        style={{ ...style, fontSize: Math.max(9, size * 0.5) }}
+        className="inline-flex shrink-0 items-center justify-center border border-edge bg-[#7A8496] align-[-3px] font-bold text-white"
+      >
+        {name.slice(0, 1).toUpperCase()}
+      </span>
+    );
+  }
+  return (
+    <img
+      src={`/api/icon/repo/${repo}`}
+      alt=""
+      title={repo}
+      style={style}
+      onError={() => setFailed(true)}
+      className="shrink-0 border border-edge bg-white object-cover align-[-3px]"
+    />
+  );
+}
+
+/** A reviewer's GitHub avatar, with the same server-side fetch and fallback. */
+export function BotIcon({ login, name, size = 20 }: { login: string; name: string; size?: number }) {
+  const [failed, setFailed] = useState(false);
+  const style = { width: size, height: size, borderRadius: size > 24 ? 10 : 5 };
+  if (failed) {
+    return (
+      <span
+        title={name}
+        style={{ ...style, fontSize: Math.max(9, size * 0.42) }}
+        className="inline-flex shrink-0 items-center justify-center border border-edge bg-bg font-mono font-semibold text-mut"
+      >
+        {name.slice(0, 2).toUpperCase()}
+      </span>
+    );
+  }
+  return (
+    <img
+      src={`/api/icon/bot/${encodeURIComponent(login)}`}
+      alt=""
+      title={name}
+      style={style}
+      onError={() => setFailed(true)}
+      className="shrink-0 border border-edge bg-white object-cover align-[-3px]"
+    />
+  );
+}
+
+/**
+ * Links a repo#pr to its detail page, with a small ↗ for GitHub itself. The
+ * name goes to crq's own view because that is where the round lives; the arrow
+ * is for when you actually want the pull request.
+ */
+export function PRLink({ repo, pr, className = "" }: { repo: string; pr: number; className?: string }) {
+  const name = repo.split("/").pop() ?? repo;
+  return (
+    <span className="inline-flex items-baseline gap-1">
+      <a href={`#/pr/${repo}/${pr}`} className={`text-acc hover:underline ${className}`}>
+        {name}#{pr}
+      </a>
+      <a
+        href={`https://github.com/${repo}/pull/${pr}`}
+        target="_blank"
+        rel="noreferrer"
+        title="Open the pull request on GitHub"
+        className="text-faint hover:text-acc"
+      >
+        ↗
+      </a>
+    </span>
+  );
+}
+
+/**
+ * Links a head to its commit on GitHub. crq stores 9-char short SHAs, which
+ * GitHub resolves fine — no need to carry the full one just to build a URL.
+ */
+export function CommitLink({
+  repo,
+  sha,
+  className = "",
+}: {
+  repo: string;
+  sha?: string;
+  className?: string;
+}) {
+  if (!sha) return <span className="text-faint">—</span>;
+  return (
+    <a
+      href={`https://github.com/${repo}/commit/${sha}`}
+      target="_blank"
+      rel="noreferrer"
+      title={`commit ${sha}`}
+      className={`font-mono text-acc hover:underline ${className}`}
+    >
+      {sha}
+    </a>
+  );
+}
+
+/**
+ * Reviewer marks: commanded, claim posted but not yet recorded, or not enabled.
+ * The bot's identity travels as data, so this never names a bot itself.
+ */
+export function BotMarks({ bots }: { bots: Bot[] }) {
+  return (
+    <span className="inline-flex items-center gap-2">
+      {bots.map((b) => {
+        const glyph = b.mark === "commanded" ? "✓" : b.mark === "claimed" ? "⏳" : "—";
+        const badge =
+          b.mark === "commanded" ? "bg-ok" : b.mark === "claimed" ? "bg-warn-fg" : "bg-faint";
+        return (
+          <span
+            key={b.login}
+            title={`${b.name}${b.required ? " (required)" : ""} — ${
+              b.mark === "commanded"
+                ? "trigger commanded"
+                : b.mark === "claimed"
+                  ? "claim posted, not yet recorded"
+                  : "runs here — not asked for this head yet"
+            }`}
+            className={`relative inline-block ${b.mark === "pending" ? "opacity-45" : ""}`}
+          >
+            <BotIcon login={b.login} name={b.name} size={22} />
+            <i
+              className={`absolute -right-1 -bottom-1 flex size-[13px] items-center justify-center rounded-full border-[1.5px] border-card text-[8px] leading-none text-white not-italic ${badge}`}
+            >
+              {glyph}
+            </i>
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
+
+export function Th({ children, className = "" }: { children?: ReactNode; className?: string }) {
+  return (
+    <th
+      className={`border-b border-edge px-[18px] py-1.5 text-left text-[11px] font-medium tracking-[0.06em] text-faint uppercase ${className}`}
+    >
+      {children}
+    </th>
+  );
+}
+
+export function Td({ children, className = "" }: { children?: ReactNode; className?: string }) {
+  return <td className={`border-b border-[#EEF0F3] px-[18px] py-2.5 align-top ${className}`}>{children}</td>;
+}

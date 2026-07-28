@@ -14,17 +14,18 @@ import (
 // the package qualifier, and without colliding with the many `state`/`st`
 // variable names in this package.
 type (
-	State         = crqstate.State
-	Round         = crqstate.Round
-	Phase         = crqstate.Phase
-	FireSlot      = crqstate.FireSlot
-	AccountQuota  = crqstate.AccountQuota
-	LeaderLease   = crqstate.LeaderLease
-	PostedCommand = crqstate.PostedCommand
-	RepoReviewers = crqstate.RepoReviewers
-	Revision      = crqstate.Revision
-	StateStore    = crqstate.StateStore
-	StoreConfig   = crqstate.StoreConfig
+	State          = crqstate.State
+	Round          = crqstate.Round
+	Phase          = crqstate.Phase
+	FireSlot       = crqstate.FireSlot
+	AccountQuota   = crqstate.AccountQuota
+	LeaderLease    = crqstate.LeaderLease
+	PostedCommand  = crqstate.PostedCommand
+	RepoReviewers  = crqstate.RepoReviewers
+	RepoEnrollment = crqstate.RepoEnrollment
+	Revision       = crqstate.Revision
+	StateStore     = crqstate.StateStore
+	StoreConfig    = crqstate.StoreConfig
 
 	LeaderCapabilityLease = crqstate.LeaderCapabilityLease
 
@@ -48,6 +49,11 @@ const (
 	AutofixUnhealthyAfter = crqstate.AutofixUnhealthyAfter
 	// CapsRepoOverrides is the binary capability per-repo reviewer overrides need.
 	CapsRepoOverrides = crqstate.CapsRepoOverrides
+	// CapsPrimaryOff is the capability a host needs to honour a repository that
+	// turned the metered primary off.
+	CapsPrimaryOff = crqstate.CapsPrimaryOff
+	// CapsEnrollment is the capability a host needs to honour enrollment records.
+	CapsEnrollment = crqstate.CapsEnrollment
 )
 
 var (
@@ -131,6 +137,7 @@ func (c Config) policy() engine.Policy {
 	p := engine.Policy{
 		Bot:                c.Bot,
 		RequiredBots:       c.RequiredBots,
+		PrimaryOff:         c.PrimaryOff,
 		MinInterval:        c.MinInterval,
 		InflightTimeout:    c.InflightTimeout,
 		RateLimitFallback:  c.RateLimitFallback,

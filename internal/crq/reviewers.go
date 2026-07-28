@@ -92,7 +92,7 @@ func (c Config) reviewerLogins(want func(Reviewer) bool) []string {
 //     once metered, once free-running;
 //   - the primary's trigger lives in ReviewCommand, and an empty Command means
 //     "crq cannot ask this reviewer", which is false for it.
-func buildReviewers(primary, primaryCommand string, required []string, coBots []CoBotConfig) []Reviewer {
+func buildReviewers(primary, primaryCommand string, required []string, coBots []CoBotConfig, primaryOff bool) []Reviewer {
 	requiredSet := map[string]bool{}
 	for _, login := range required {
 		if login = strings.TrimSpace(login); login != "" {
@@ -102,7 +102,10 @@ func buildReviewers(primary, primaryCommand string, required []string, coBots []
 	seen := map[string]bool{}
 	out := make([]Reviewer, 0, len(coBots)+len(required)+1)
 
-	if primary != "" {
+	// A repository that turned the primary off has no metered reviewer at all:
+	// leaving the entry in place with Required false would still let Primary()
+	// find something to fire.
+	if primary != "" && !primaryOff {
 		key := dialect.NormalizeBotName(primary)
 		seen[key] = true
 		out = append(out, Reviewer{
@@ -183,15 +186,24 @@ func (c Config) evidenceBots() map[string]struct{} {
 // per-repo primary would mean per-repo classifiers — a much larger change than
 // "which co-reviewers run here", which is what the request actually is.
 func (c Config) ForRepo(ov RepoReviewers) Config {
-	if !ov.SetCoBots && !ov.SetRequired {
+	if !ov.SetCoBots && !ov.SetRequired && !ov.PrimaryOff {
 		return c
 	}
 	out := c
+	out.PrimaryOff = ov.PrimaryOff
 
 	// The effective required set, whichever half the override named.
 	required := c.RequiredBots
 	if ov.SetRequired {
 		required = ov.Required
+	}
+	// A reviewer that does not run here cannot gate here. The fleet default
+	// required set names the primary, so a repository that turns it off without
+	// also rewriting that list would otherwise wait for ever on a bot crq never
+	// asks. Dropping it is not a silent override of the operator's choice: it is
+	// the same choice, read consistently.
+	if ov.PrimaryOff {
+		required = withoutBot(required, c.Bot)
 	}
 
 	// The effective co-reviewer set. Required implies enabled — the rule the
@@ -270,7 +282,7 @@ func (c Config) ForRepo(ov RepoReviewers) Config {
 
 	// Rebuild the derived views from the overridden lists, exactly as
 	// LoadConfig does, so no view can answer differently from another.
-	out.Reviewers = buildReviewers(out.Bot, out.ReviewCommand, out.RequiredBots, out.CoBots)
+	out.Reviewers = buildReviewers(out.Bot, out.ReviewCommand, out.RequiredBots, out.CoBots, out.PrimaryOff)
 	out.RequiredBots = out.reviewerLogins(func(r Reviewer) bool { return r.Required })
 	if !c.FeedbackBotsExplicit {
 		out.FeedbackBots = out.reviewerLogins(func(r Reviewer) bool { return r.Required || !r.Metered() })
@@ -366,4 +378,19 @@ func (c Config) knownCoBot(login string) (CoBotConfig, bool) {
 		return defaultCoBot(co, false), true
 	}
 	return CoBotConfig{}, false
+}
+
+// withoutBot drops login from a reviewer list, comparing the way every other
+// reviewer path does.
+func withoutBot(list []string, login string) []string {
+	if login == "" {
+		return list
+	}
+	out := make([]string, 0, len(list))
+	for _, l := range list {
+		if !sameBot(l, login) {
+			out = append(out, l)
+		}
+	}
+	return out
 }

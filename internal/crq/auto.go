@@ -221,23 +221,23 @@ func (s *Service) renewLeader(ctx context.Context, owner, token string) (State, 
 }
 
 func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, token string) error {
-	targets := s.cfg.Scope
-	byRepo := false
-	if len(s.cfg.AllowRepos) > 0 {
-		targets = make([]string, 0, len(s.cfg.AllowRepos))
-		for repo := range s.cfg.AllowRepos {
-			targets = append(targets, repo)
-		}
-		byRepo = true
-	}
 	// Load the queue snapshot once per pass and reuse it across candidates: a
 	// git-backed Load is GetRef+GetCommit+GetTree+GetBlob, so reloading it per PR
 	// would burn the shared REST quota on a large scan. The heartbeat refreshes it,
 	// and enqueueBatch re-checks Contains under CAS, so a slightly stale snapshot
 	// during collection is safe.
+	//
+	// It is also what says which repositories are enrolled, which is why it is
+	// read BEFORE the targets are chosen: a repository enrolled from the
+	// dashboard has to be searched on the very next pass, not after a restart.
 	state, _, err := s.store.Load(ctx)
 	if err != nil {
 		return err
+	}
+	targets := s.cfg.Scope
+	byRepo := false
+	if enrolled := s.scanTargets(state); len(enrolled) > 0 {
+		targets, byRepo = enrolled, true
 	}
 	var candidates []queueCandidate
 	lastBeat := time.Now()
@@ -253,10 +253,10 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 				return true, nil
 			}
 			repo := NormalizeRepo(pr.Repo)
-			if repo == NormalizeRepo(s.cfg.GateRepo) || s.cfg.ExcludeRepos[repo] {
-				return false, nil
-			}
-			if len(s.cfg.AllowRepos) > 0 && !s.cfg.AllowRepos[repo] {
+			// One question, one answer: env allow/exclude, the gate repository
+			// and any enrollment record all resolve in enrollmentOf, so a scope
+			// search cannot enqueue what a by-repo search would have skipped.
+			if !s.reviewsRepo(state, repo) {
 				return false, nil
 			}
 			if s.cfg.SkipAuthors[dialect.NormalizeBotName(strings.ToLower(pr.Author))] {

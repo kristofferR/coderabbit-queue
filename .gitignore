@@ -1,4 +1,12 @@
-dist/
+# The dashboard's built SPA is the ONE dist that is committed: internal/serve
+# embeds it with go:embed, so a clean checkout cannot compile without it. Every
+# other dist is build output.
+/dist/
+web/dist/
+# Explicit, because a global gitignore's blanket "dist/" also matches this one
+# and git will not descend into an excluded directory to re-include its files.
+!internal/serve/dist/
+web/node_modules/
 *.log
 .DS_Store
 

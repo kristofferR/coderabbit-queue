@@ -218,10 +218,16 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	// Watching is unaffected: a repository with autofix off is still observed
 	// and still reviewed, so its feedback arrives for a person to act on.
 	autofixOff := map[string]bool{}
+	// Enrollment is read from the same snapshot: a repository turned off from
+	// the dashboard must stop being watched on the next pass, not on restart.
+	notEnrolled := map[string]bool{}
 	if st, _, err := s.store.Load(ctx); err == nil {
 		for _, repo := range repos {
 			if !st.AutofixEnabled(repo) {
 				autofixOff[NormalizeRepo(repo)] = true
+			}
+			if !s.reviewsRepo(st, repo) {
+				notEnrolled[NormalizeRepo(repo)] = true
 			}
 		}
 	}
@@ -239,6 +245,11 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		// opt-out silently covered half of what crq does — reviews stopped and the
 		// watcher carried on, which is not a setting anyone can reason about.
 		if s.cfg.ExcludeRepos[NormalizeRepo(repo)] {
+			continue
+		}
+		// "crq does not go here" has to mean that to every path, including the
+		// one that spends an agent on a fix session.
+		if notEnrolled[NormalizeRepo(repo)] {
 			continue
 		}
 		pulls, err := s.gh.ListPulls(ctx, repo, openPullQuery())

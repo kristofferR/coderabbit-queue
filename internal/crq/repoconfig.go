@@ -23,10 +23,18 @@ type ReviewerView struct {
 	// per-repo overrides — an older binary loads the field, writes it back
 	// untouched, and keeps deciding from its own fleet-wide configuration. The
 	// override is real; those hosts will not honour it until they are upgraded.
-	Lagging   []string         `json:"lagging_hosts,omitempty"`
-	UpdatedAt string           `json:"updated_at,omitempty"`
-	By        string           `json:"by,omitempty"`
-	Reviewers []ReviewerDetail `json:"reviewers"`
+	Lagging []string `json:"lagging_hosts,omitempty"`
+	// PrimaryOff says the metered primary does not review this repository —
+	// which is why it is absent from Reviewers below. Without it the list reads
+	// as a fleet that never had one.
+	PrimaryOff bool   `json:"primary_off,omitempty"`
+	Primary    string `json:"primary,omitempty"`
+	// LaggingPrimaryOff names hosts that understand per-repo overrides but not
+	// this switch, and would still fire the primary here.
+	LaggingPrimaryOff []string         `json:"lagging_primary_off,omitempty"`
+	UpdatedAt         string           `json:"updated_at,omitempty"`
+	By                string           `json:"by,omitempty"`
+	Reviewers         []ReviewerDetail `json:"reviewers"`
 }
 
 // ReviewerDetail is one reviewer as it will actually be used.
@@ -53,10 +61,14 @@ func (s *Service) Reviewers(ctx context.Context, repo string) (ReviewerView, err
 		return ReviewerView{}, err
 	}
 	cfg := s.cfgFor(st, repo)
-	view := ReviewerView{Repo: repo, Reviewers: []ReviewerDetail{}}
+	view := ReviewerView{Repo: repo, Reviewers: []ReviewerDetail{}, Primary: s.cfg.Bot}
 	view.Lagging = st.LaggingWriters(CapsRepoOverrides, s.clock().UTC())
 	if ov, ok := st.RepoOverride(repo); ok {
 		view.Overridden = true
+		view.PrimaryOff = ov.PrimaryOff
+		if ov.PrimaryOff {
+			view.LaggingPrimaryOff = st.LaggingWriters(CapsPrimaryOff, s.clock().UTC())
+		}
 		view.By = ov.By
 		if ov.UpdatedAt != nil {
 			view.UpdatedAt = ov.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z")
@@ -77,15 +89,18 @@ func (s *Service) Reviewers(ctx context.Context, repo string) (ReviewerView, err
 // convergence. A nil list means "leave that half alone"; an empty non-nil list
 // means "none here", which is a different thing and has to survive as one.
 //
-// The primary is not settable. Its markers and command are injected into the
-// dialect classifiers when the Service is built, so a per-repo primary would
-// mean per-repo classifiers.
-func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, required []string) (ReviewerView, error) {
+// primary is nil to leave the primary switch alone, or points at whether the
+// primary runs here at all. WHICH bot is primary is still not settable: its
+// markers and command are injected into the dialect classifiers when the
+// Service is built, so a per-repo primary would mean per-repo classifiers.
+// Turning it off is a different question, and one a private repository on a
+// free plan has to be able to answer.
+func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, required []string, primary *bool) (ReviewerView, error) {
 	repo = NormalizeRepo(repo)
 	if err := checkRepoShape(repo); err != nil {
 		return ReviewerView{}, err
 	}
-	if coBots == nil && required == nil {
+	if coBots == nil && required == nil && primary == nil {
 		// Neither half was named, so there is nothing to set. Writing anyway would
 		// stamp a fresh UpdatedAt, and that timestamp IS the override's identity:
 		// applyFire revalidates against it, so a no-op call would discard every
@@ -171,11 +186,23 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 		if required != nil {
 			ov.Required, ov.SetRequired = setRequired, true
 		}
+		if primary != nil {
+			ov.PrimaryOff = !*primary
+		}
 		if ov.SetCoBots == beforeOverride.SetCoBots &&
 			ov.SetRequired == beforeOverride.SetRequired &&
+			ov.PrimaryOff == beforeOverride.PrimaryOff &&
 			sameLogins(ov.CoBots, beforeOverride.CoBots) &&
 			sameLogins(ov.Required, beforeOverride.Required) {
 			return ErrNoChange
+		}
+		// Checked against the RESOLVED configuration rather than the lists as
+		// typed, because the two disagree in exactly the case that matters: the
+		// fleet default requires the primary, so turning it off here empties the
+		// gate without anyone naming an empty list. A round gating on nobody
+		// converges before any reviewer runs, so refuse it at edit time.
+		if len(s.cfg.ForRepo(ov).RequiredBots) == 0 {
+			return fmt.Errorf("that would leave %s with no required reviewer, so every round would converge before any bot answers — require a co-reviewer first", repo)
 		}
 		ov.UpdatedAt, ov.By = &now, s.cfg.Host
 		before := s.cfg.ForRepo(mustOverride(st, repo))

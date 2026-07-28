@@ -124,6 +124,10 @@ type CoReviewer struct {
 	// FindingDedupeKey extracts a bot-stable finding identity (Bugbot BUG_ID)
 	// so the same bug re-reported in a new thread dedupes to one finding.
 	FindingDedupeKey func(body string) (string, bool)
+	// Price estimates what one review of this diff costs. Nil means the bot
+	// charges nothing per review — it is covered by a subscription — which is
+	// true of every co-reviewer here except Macroscope.
+	Price func(d DiffStat) CostEstimate
 }
 
 // Is reports whether login names this co-reviewer, tolerating the "[bot]"
@@ -206,6 +210,8 @@ func KnownCoReviewers() []CoReviewer {
 			ClassifyComment: ClassifyMacroscopeComment,
 			ClassifyCheck:   ClassifyMacroscopeCheck,
 			ResolvedInSHA:   MacroscopeResolvedInSHA,
+			// The one co-reviewer that bills per review rather than per seat.
+			Price: EstimateMacroscope,
 		},
 	}
 }

@@ -1149,3 +1149,49 @@ func TestReopenedRoundDedupesOnlyOnCompletionEvidence(t *testing.T) {
 		})
 	}
 }
+
+// TestPrimaryOffNeverFiresAndNeverWaitsOnTheQuota pins the repository-level
+// primary switch. A private repo on a free plan gets nothing from the metered
+// reviewer, so crq must neither spend the account on it nor let that account's
+// state — or another PR's fire slot — delay the co-reviewers that DO run there.
+func TestPrimaryOffNeverFiresAndNeverWaitsOnTheQuota(t *testing.T) {
+	now := t0.Add(10 * time.Minute)
+	head := "abcdef123"
+	queued := state.Round{Repo: "owner/private", PR: 7, Head: head, Phase: state.PhaseQueued, Seq: 1}
+	obs := Observation{Head: head, Open: true}
+
+	off := withCodex(policy, "@codex review")
+	off.PrimaryOff = true
+	off.RequiredBots = []string{dialect.CodexBotLogin} // ForRepo drops the primary
+
+	blocked := now.Add(time.Hour)
+	for _, g := range []Global{
+		{SlotFree: true},
+		{SlotFree: false},                        // another PR holds the slot
+		{SlotFree: true, BlockedUntil: &blocked}, // account quota blocked
+		{SlotFree: true, LastFired: &now},        // inside the pacing window
+	} {
+		d := DecideFire(g, queued, obs, now, off)
+		if d.Verdict != FireCoOnly {
+			t.Fatalf("primary off must resolve on the co-reviewers alone whatever the account is doing, got %+v (global %+v)", d, g)
+		}
+		if len(d.PostCo) != 1 || d.PostCo[0] != dialect.CodexBotLogin {
+			t.Fatalf("primary off must still command the co-reviewers, got %+v", d.PostCo)
+		}
+	}
+
+	// With the primary on, the same round is an ordinary metered fire — the
+	// switch is what changed the decision, not the observation.
+	on := off
+	on.PrimaryOff = false
+	on.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
+	if d := DecideFire(Global{SlotFree: true}, queued, obs, now, on); d.Verdict != FirePost {
+		t.Fatalf("primary on must still fire, got %+v", d)
+	}
+
+	// And the reason is reportable, so an agent is never left reasoning about
+	// quota for a reviewer that does not run here.
+	if why := PrimaryUnavailableReason(obs, off, head); why == "" {
+		t.Fatal("primary off must name itself as the reason no review is coming")
+	}
+}

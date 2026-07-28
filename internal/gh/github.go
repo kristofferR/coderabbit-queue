@@ -804,6 +804,12 @@ type Pull struct {
 		} `json:"repo"`
 	} `json:"head"`
 	Merged bool `json:"merged"`
+	// Additions/Deletions/ChangedFiles are only populated by the single-pull
+	// endpoint, not by list or search results. They cost nothing extra there,
+	// and they are what a cost estimate is computed from.
+	Additions    int `json:"additions"`
+	Deletions    int `json:"deletions"`
+	ChangedFiles int `json:"changed_files"`
 }
 
 type RepoInfo struct {
@@ -1201,4 +1207,56 @@ func refPath(ref string) string {
 		parts[i] = url.PathEscape(parts[i])
 	}
 	return strings.Join(parts, "/")
+}
+
+// Repo is one repository as the dashboard's repository picker needs it: enough
+// to recognize and to judge whether it is worth enrolling, and nothing more.
+type Repo struct {
+	FullName string `json:"full_name"`
+	Private  bool   `json:"private"`
+	Archived bool   `json:"archived"`
+	Fork     bool   `json:"fork"`
+	// OpenIssues is GitHub's open_issues_count, which counts issues AND pull
+	// requests together. There is no per-repo open-PR count without a search per
+	// repository, so this is reported as what it is rather than relabelled.
+	OpenIssues int       `json:"open_issues_count"`
+	PushedAt   time.Time `json:"pushed_at"`
+	Language   string    `json:"language"`
+}
+
+// ListOwnerRepos lists the repositories an owner has, following pagination up
+// to max. It resolves user-vs-organization the same way the PR search does, and
+// through the same cache — the two ask the identical question about a login.
+//
+// Archived repositories are kept rather than filtered: the caller decides, and a
+// picker that silently omits a repository somebody is looking for is worse than
+// one that shows it greyed out.
+func (g *GitHub) ListOwnerRepos(ctx context.Context, owner string, max int) ([]Repo, error) {
+	qualifier, err := g.searchOwnerQualifier(ctx, owner)
+	if err != nil {
+		return nil, err
+	}
+	base := "/users/" + owner + "/repos"
+	if qualifier == "org:" {
+		base = "/orgs/" + owner + "/repos"
+	}
+	if max <= 0 {
+		max = 200
+	}
+	out := make([]Repo, 0, max)
+	for page := 1; len(out) < max && page <= 10; page++ {
+		var batch []Repo
+		path := fmt.Sprintf("%s?per_page=100&page=%d&sort=pushed", base, page)
+		if err := g.request(ctx, http.MethodGet, path, nil, &batch); err != nil {
+			return nil, err
+		}
+		out = append(out, batch...)
+		if len(batch) < 100 {
+			break
+		}
+	}
+	if len(out) > max {
+		out = out[:max]
+	}
+	return out, nil
 }
