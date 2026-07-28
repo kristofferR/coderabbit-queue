@@ -137,12 +137,12 @@ type Config struct {
 // ~/.config/crq/env. Empty when neither can be resolved.
 //
 // Exported because a service unit has to be pointed at the SAME file the install
-// read. A drain that loads a different configuration is one that watches nothing
+// read. An autofix service that loads a different configuration is one that watches nothing
 // while reporting itself started.
 //
 // Absolute, always: a relative CRQ_CONFIG resolves against the invoking shell's
 // directory, and the service starts somewhere else entirely — so the install
-// would read the file, write that relative string into the unit, and the drain
+// would read the file, write that relative string into the unit, and the service
 // would load no configuration at all.
 func ConfigPath() string {
 	if path := strings.TrimSpace(os.Getenv("CRQ_CONFIG")); path != "" {

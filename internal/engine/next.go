@@ -96,7 +96,7 @@ func (in NextInput) minDelay() time.Duration {
 // NextAction reduces the whole review protocol to one instruction.
 //
 // The order encodes the rules agents get wrong when left to their own devices:
-// findings are drained before anything else, the head is held while any
+// findings are cleared before anything else, the head is held while any
 // required reviewer is still pending, and a CodeRabbit rate-limit degrade
 // releases the head instead of stalling on it (the queued review fires on the
 // new head by itself). Convergence is last, so "done" can only mean every

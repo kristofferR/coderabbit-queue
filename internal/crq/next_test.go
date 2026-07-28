@@ -158,11 +158,11 @@ func TestNextPreservesUnacknowledgedSlotBeforeReturningPush(t *testing.T) {
 }
 
 // `next` advances the queue as a side effect, and that step owns the review
-// fire — so the two halves of drain-first are both properties of ONE decision:
-// undrained feedback for the current head must not buy another review of that
+// fire — so the two halves of fix-first are both properties of ONE decision:
+// uncleared feedback for the current head must not buy another review of that
 // same head, and feedback carried from an older commit must not stop the new
 // head from being reviewed at all.
-func TestNextDrainsCurrentHeadWithoutDeadlockingTheNextOne(t *testing.T) {
+func TestNextClearsCurrentHeadWithoutDeadlockingTheNextOne(t *testing.T) {
 	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
 	f := newReplayFixture(t, base)
 	repo, pr := "owner/repo", 504
@@ -176,7 +176,7 @@ func TestNextDrainsCurrentHeadWithoutDeadlockingTheNextOne(t *testing.T) {
 		t.Fatalf("the first call must fire exactly one review, got %d", got)
 	}
 
-	// Feedback lands ON this head. Until the caller drains it, another review of
+	// Feedback lands ON this head. Until the caller clears it, another review of
 	// the same head would spend account quota to be told the same thing.
 	f.clk.advance(2 * time.Minute)
 	f.botReview(repo, pr, 900, head, f.clk.now())
@@ -184,7 +184,7 @@ func TestNextDrainsCurrentHeadWithoutDeadlockingTheNextOne(t *testing.T) {
 		"_⚠️ Potential issue_\n\nThis dereferences a nil round.")
 	f.wantAction(f.next(repo, pr), engine.ActionFix)
 	if got := f.reviewsPosted(repo, pr); got != 1 {
-		t.Fatalf("undrained feedback for this head must not buy another review, posted %d", got)
+		t.Fatalf("uncleared feedback for this head must not buy another review, posted %d", got)
 	}
 
 	// The caller pushes a fix. The old finding belongs to the previous commit,
@@ -234,7 +234,7 @@ func TestNextNeverSchedulesAHotLoop(t *testing.T) {
 	}
 }
 
-func TestNextReportsAdministrativeHoldAfterDrainFirst(t *testing.T) {
+func TestNextReportsAdministrativeHoldAfterFixFirst(t *testing.T) {
 	base := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
 	f := newReplayFixture(t, base)
 	repo, pr := "owner/repo", 505
@@ -262,7 +262,7 @@ func TestNextReportsAdministrativeHoldAfterDrainFirst(t *testing.T) {
 	}
 
 	// Current-head findings still come first: the hold must not hide work that
-	// can be drained without moving the head.
+	// can be cleared without moving the head.
 	f.botReviewComment(repo, pr, 901, head, "internal/state/state.go", 42,
 		"_⚠️ Potential issue_\n\nThis dereferences a nil round.")
 	f.wantAction(f.next(repo, pr), engine.ActionFix)
@@ -403,7 +403,7 @@ func TestNextResolvesSummaryOnlyWithoutTheQueue(t *testing.T) {
 }
 
 // A finding with no review thread cannot be resolved or declined — GitHub offers
-// nothing to act on — so drain-first blocks every future round on it. The
+// nothing to act on — so fix-first blocks every future round on it. The
 // observed end state was a PR reporting "no review was ever requested" for its
 // current head, four rounds running. `crq dismiss` is the only way out, and this
 // pins both halves: that the deadlock is real, and that dismissing ends it.

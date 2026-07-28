@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// DrainSetting is one repository's drain answer, as the CLI reports it.
-type DrainSetting struct {
+// AutofixSetting is one repository's autofix answer, as the CLI reports it.
+type AutofixSetting struct {
 	Repo      string     `json:"repo"`
 	Enabled   bool       `json:"enabled"`
 	Default   bool       `json:"default"`
@@ -18,37 +18,37 @@ type DrainSetting struct {
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
 }
 
-// SetDrainEnabled records whether crq may run fix sessions for repo.
+// SetAutofixEnabled records whether crq may run fix sessions for repo.
 //
 // Recorded rather than defaulted, so "on" after an "off" is a real answer and
-// not just the absence of one — the dashboard and `crq drain` can then show that
+// not just the absence of one — the dashboard and `crq autofix` can then show that
 // somebody made the call, and when.
-func (s *Service) SetDrainEnabled(ctx context.Context, repo string, enabled bool, reason string) (DrainSetting, error) {
+func (s *Service) SetAutofixEnabled(ctx context.Context, repo string, enabled bool, reason string) (AutofixSetting, error) {
 	repo = NormalizeRepo(repo)
 	if !validRepoSlug(repo) {
-		return DrainSetting{}, fmt.Errorf("repo must be owner/name")
+		return AutofixSetting{}, fmt.Errorf("repo must be owner/name")
 	}
 	now := s.clock().UTC()
-	sw := RepoDrainSwitch{Enabled: enabled, UpdatedAt: &now, By: s.cfg.Host, Reason: reason}
+	sw := RepoAutofixSwitch{Enabled: enabled, UpdatedAt: &now, By: s.cfg.Host, Reason: reason}
 	if _, err := s.store.Update(ctx, func(st *State) error {
-		st.SetDrainSwitch(repo, sw)
+		st.SetAutofixSwitch(repo, sw)
 		return nil
 	}); err != nil {
-		return DrainSetting{}, err
+		return AutofixSetting{}, err
 	}
-	return DrainSetting{Repo: repo, Enabled: enabled, Reason: reason, By: sw.By, UpdatedAt: sw.UpdatedAt}, nil
+	return AutofixSetting{Repo: repo, Enabled: enabled, Reason: reason, By: sw.By, UpdatedAt: sw.UpdatedAt}, nil
 }
 
-// ClearDrainEnabled returns repo to the default (drained), reporting whether a
+// ClearAutofixEnabled returns repo to the default (autofix on), reporting whether a
 // setting was there.
-func (s *Service) ClearDrainEnabled(ctx context.Context, repo string) (bool, error) {
+func (s *Service) ClearAutofixEnabled(ctx context.Context, repo string) (bool, error) {
 	repo = NormalizeRepo(repo)
 	if !validRepoSlug(repo) {
 		return false, fmt.Errorf("repo must be owner/name")
 	}
 	cleared := false
 	if _, err := s.store.Update(ctx, func(st *State) error {
-		cleared = st.ClearDrainSwitch(repo)
+		cleared = st.ClearAutofixSwitch(repo)
 		if !cleared {
 			return ErrNoChange
 		}
@@ -59,23 +59,23 @@ func (s *Service) ClearDrainEnabled(ctx context.Context, repo string) (bool, err
 	return cleared, nil
 }
 
-// DrainSettings reports the drain answer for every repository in scope, so the
+// AutofixSettings reports the autofix answer for every repository in scope, so the
 // listing shows what WILL happen rather than only what was written down.
-func (s *Service) DrainSettings(ctx context.Context) ([]DrainSetting, error) {
+func (s *Service) AutofixSettings(ctx context.Context) ([]AutofixSetting, error) {
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
 		return nil, err
 	}
 	seen := map[string]bool{}
-	var out []DrainSetting
+	var out []AutofixSetting
 	add := func(repo string) {
 		key := NormalizeRepo(repo)
 		if key == "" || seen[key] {
 			return
 		}
 		seen[key] = true
-		setting := DrainSetting{Repo: key, Enabled: st.DrainEnabled(key), Default: true}
-		if sw, ok := st.DrainSwitch(key); ok {
+		setting := AutofixSetting{Repo: key, Enabled: st.AutofixEnabled(key), Default: true}
+		if sw, ok := st.AutofixSwitch(key); ok {
 			setting.Default = false
 			setting.Reason, setting.By, setting.UpdatedAt = sw.Reason, sw.By, sw.UpdatedAt
 		}
@@ -92,7 +92,7 @@ func (s *Service) DrainSettings(ctx context.Context) ([]DrainSetting, error) {
 	}
 	// A repository ruled on but no longer watched still shows: an "off" nobody
 	// can see is how a repository quietly stops being fixed.
-	for _, repo := range st.DrainSwitches() {
+	for _, repo := range st.AutofixSwitches() {
 		add(repo)
 	}
 	return out, nil
@@ -103,7 +103,7 @@ func (s *Service) DrainSettings(ctx context.Context) ([]DrainSetting, error) {
 // the hazard is a setting recorded under a name nothing will ever match.
 func validRepoSlug(repo string) bool {
 	owner, name, ok := strings.Cut(repo, "/")
-	return ok && validNameSegment(owner) && validNameSegment(name)
+	return ok && validOwnerLogin(owner) && validNameSegment(name)
 }
 
 // maxOwnerLogin is GitHub's hard length limit for a user or organisation login.

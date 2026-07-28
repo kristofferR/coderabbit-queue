@@ -254,6 +254,21 @@ func hostName(writer string) string {
 	return name
 }
 
+// hostCell renders the host column, including the case where there is no host
+// to name.
+//
+// ByHost is written by Reserve, so a round that has never taken the fire slot
+// has none — which is every row of the queue table until a round is retried.
+// Formatting that as code produced an empty pair of backticks in the rendered
+// issue, which reads as a bug in crq rather than as "no host has had this yet".
+func hostCell(writer string) string {
+	name := hostName(writer)
+	if strings.TrimSpace(name) == "" {
+		return dash("")
+	}
+	return "`" + name + "`"
+}
+
 // RenderDashboard renders the human-facing dashboard for the current state:
 // rounds by phase instead of v2's queue/fired/awaiting maps.
 func RenderDashboard(st State, cfg StoreConfig) string {
@@ -317,13 +332,13 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	} else {
 		fmt.Fprintf(&b, "| **CodeRabbit quota** | ✅ not currently blocked |\n")
 	}
-	if cfg.CoReviewers != "" {
-		fmt.Fprintf(&b, "| **Co-reviewers** | %s |\n", cfg.CoReviewers)
+	if cfg.CoReviewers != "" || hasCoReviewerOverrides(st) {
+		fmt.Fprintf(&b, "| **Co-reviewers** | %s |\n", coReviewerCell(st, cfg.CoReviewers))
 	}
 	fmt.Fprintf(&b, "| **Last review fired** | %s |\n", fmtStamp(st.LastFired, loc))
-	if st.Drain.Unhealthy() {
+	if st.Autofix.Unhealthy() {
 		fmt.Fprintf(&b, "\n> 🚨 fix sessions are not starting on %s — %d attempts in a row: %s\n",
-			dash(st.Drain.Host), st.Drain.ConsecutiveFailures, st.Drain.LastError)
+			dash(st.Autofix.Host), st.Autofix.ConsecutiveFailures, st.Autofix.LastError)
 	}
 	if st.Warn != "" {
 		fmt.Fprintf(&b, "\n> ⚠️ %s\n", st.Warn)
@@ -335,9 +350,9 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	} else {
 		fmt.Fprintf(&b, "| PR | commit | phase | fired | deadline | triggers | host |\n|---|---|---|---|---|---|---|\n")
 		for _, r := range inFlight {
-			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %s | %s | `%s` |\n",
+			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %s | %s | %s |\n",
 				r.Repo, r.PR, r.Repo, r.PR, r.Head, r.Phase,
-				fmtStamp(firedTimeOf(r), loc), fmtStamp(r.WaitDeadline, loc), dash(coBotMarks(r)), hostName(r.ByHost))
+				fmtStamp(firedTimeOf(r), loc), fmtStamp(r.WaitDeadline, loc), dash(coBotMarks(r)), hostCell(r.ByHost))
 		}
 	}
 
@@ -372,9 +387,9 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 			if i == 0 && e.ReadyAt.IsZero() && e.Why == "" {
 				position = strconv.Itoa(1)
 			}
-			fmt.Fprintf(&b, "| %s | [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %d | %s | `%s` |\n",
+			fmt.Fprintf(&b, "| %s | [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s | %d | %s | %s |\n",
 				position, e.Repo, e.PR, e.Repo, e.PR, e.Head, ready, dash(e.Why),
-				e.Attempts, fmtStamp(&e.EnqueuedAt, loc), hostName(e.ByHost))
+				e.Attempts, fmtStamp(&e.EnqueuedAt, loc), hostCell(e.ByHost))
 		}
 	}
 
@@ -397,8 +412,8 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	} else {
 		fmt.Fprintf(&b, "| PR | commit | requested | host |\n|---|---|---|---|\n")
 		for _, r := range requested {
-			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | `%s` |\n",
-				r.Repo, r.PR, r.Repo, r.PR, r.Head, fmtStamp(r.FiredAt, loc), hostName(r.ByHost))
+			fmt.Fprintf(&b, "| [%s#%d](https://github.com/%s/pull/%d) | `%s` | %s | %s |\n",
+				r.Repo, r.PR, r.Repo, r.PR, r.Head, fmtStamp(r.FiredAt, loc), hostCell(r.ByHost))
 		}
 	}
 
@@ -458,4 +473,52 @@ func cell(v string) string {
 	v = strings.ReplaceAll(v, "\n", " ")
 	v = strings.ReplaceAll(v, "\r", " ")
 	return strings.ReplaceAll(v, "|", "\\|")
+}
+
+// coReviewerCell renders the co-reviewer row, which is a FLEET DEFAULT rather
+// than the answer for any particular repository.
+//
+// Reviewers became per-repository, so a bare list here claims more than it
+// knows: a reader of the issue sees "codex, bugbot, macroscope" and has no way
+// to tell that one repository has been set to something else. The default is
+// still worth showing — it governs everything nobody has ruled on — so it is
+// labelled, and the repositories that differ are named beside it.
+func coReviewerCell(st State, fleet string) string {
+	overrides := make([]string, 0, len(st.Repos))
+	for repo, settings := range st.Repos {
+		if !settings.SetCoBots {
+			continue
+		}
+		overrides = append(overrides, repo)
+	}
+	if len(overrides) == 0 {
+		return dash(fleet) + " _(fleet default)_"
+	}
+	sort.Strings(overrides)
+	// Named, not just counted: "3 repositories differ" sends the reader to the
+	// CLI to find out which, and the answer is already here.
+	const show = 3
+	listed := overrides
+	suffix := ""
+	if len(listed) > show {
+		listed, suffix = listed[:show], fmt.Sprintf(" +%d more", len(overrides)-show)
+	}
+	return fmt.Sprintf("%s _(fleet default; %s override%s)_", dash(fleet),
+		strings.Join(listed, ", ")+suffix, plural(len(overrides)))
+}
+
+func hasCoReviewerOverrides(st State) bool {
+	for _, settings := range st.Repos {
+		if settings.SetCoBots {
+			return true
+		}
+	}
+	return false
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }

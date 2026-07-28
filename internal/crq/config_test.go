@@ -538,7 +538,7 @@ func TestLoadConfigParsesDispatchForksAsABoolean(t *testing.T) {
 // The install writes the config path into a service unit, and the service starts
 // in a directory of the service manager's choosing. A relative CRQ_CONFIG that
 // resolved for the installing shell would then name nothing at all, and the
-// drain would load no configuration while the install reported success.
+// service would load no configuration while the install reported success.
 func TestConfigPathIsAbsolute(t *testing.T) {
 	t.Setenv("CRQ_CONFIG", filepath.Join("relative", "env"))
 	got := ConfigPath()

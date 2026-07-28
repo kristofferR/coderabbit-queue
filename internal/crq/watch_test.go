@@ -112,7 +112,7 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 
 // Dispatching is the default, so a machine with no fix agent configured must
 // still be able to watch: refusing to start would make the default setting
-// break the plain command. It observes instead — and says so, because a drain
+// break the plain command. It observes instead — and says so, because an autofix watcher
 // that quietly does nothing is the failure this whole area is about.
 func TestWatchObservesWhenNoFixCommandIsConfigured(t *testing.T) {
 	cfg := firingConfig()
@@ -261,8 +261,8 @@ func TestDispatchHonoursDryRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Drain != nil {
-		t.Errorf("a dry run wrote dispatch health: %+v", st.Drain)
+	if st.Autofix != nil {
+		t.Errorf("a dry run wrote dispatch health: %+v", st.Autofix)
 	}
 }
 
@@ -679,8 +679,8 @@ func TestDispatchHealthRecordsProcessStartBeforeItsExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Drain == nil || st.Drain.LastSuccessAt == nil || st.Drain.ConsecutiveFailures != 0 {
-		t.Errorf("a process that started but exited nonzero was recorded as a start failure: %+v", st.Drain)
+	if st.Autofix == nil || st.Autofix.LastSuccessAt == nil || st.Autofix.ConsecutiveFailures != 0 {
+		t.Errorf("a process that started but exited nonzero was recorded as a start failure: %+v", st.Autofix)
 	}
 }
 
@@ -701,14 +701,14 @@ func TestDispatchHealthSyncsEveryVisibleAlertChange(t *testing.T) {
 	svc := NewService(cfg, newFakeGitHub(), store, &recordingLogger{})
 	ctx := context.Background()
 
-	for i := 1; i <= DrainUnhealthyAfter+1; i++ {
+	for i := 1; i <= AutofixUnhealthyAfter+1; i++ {
 		svc.noteDispatchHealth(ctx, false, fmt.Sprintf("failure %d", i))
 	}
 	if got := len(store.syncs); got != 2 {
 		t.Fatalf("dashboard syncs = %d, want threshold and later unhealthy update", got)
 	}
-	last := store.syncs[len(store.syncs)-1].Drain
-	if last == nil || last.ConsecutiveFailures != DrainUnhealthyAfter+1 || last.LastError != "failure 4" {
+	last := store.syncs[len(store.syncs)-1].Autofix
+	if last == nil || last.ConsecutiveFailures != AutofixUnhealthyAfter+1 || last.LastError != "failure 4" {
 		t.Fatalf("last synced health = %+v", last)
 	}
 
@@ -719,7 +719,7 @@ func TestDispatchHealthSyncsEveryVisibleAlertChange(t *testing.T) {
 }
 
 // Findings on a head crq never queued — a review somebody triggered by hand, or
-// feedback that predates the drain — used to be undispatchable forever, because
+// feedback that predates the autofix watcher — used to be undispatchable forever, because
 // `Next` returns fix before enqueueing and the claim had nowhere to live.
 func TestClaimDispatchAdoptsAHeadTheQueueNeverSaw(t *testing.T) {
 	cfg := firingConfig()
@@ -731,7 +731,7 @@ func TestClaimDispatchAdoptsAHeadTheQueueNeverSaw(t *testing.T) {
 	}
 
 	if ok, why, _ := svc.claimDispatch(context.Background(), report, "tok", 3); !ok {
-		t.Fatalf("claim refused: %s — these findings can never be drained", why)
+		t.Fatalf("claim refused: %s — these findings can never be cleared", why)
 	}
 	st, _, err := store.Load(context.Background())
 	if err != nil {
@@ -779,7 +779,7 @@ func TestClaimDispatchDoesNotMarkACarriedHeadReviewed(t *testing.T) {
 	}
 }
 
-func TestClaimDispatchRechecksRepositoryDrainSwitch(t *testing.T) {
+func TestClaimDispatchRechecksRepositoryAutofixSwitch(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	store := NewMemoryStore(cfg)
@@ -788,16 +788,16 @@ func TestClaimDispatchRechecksRepositoryDrainSwitch(t *testing.T) {
 		Repo: "owner/thing", PR: 12, Head: "aaaaaaaa1", Action: "fix",
 		Findings: []dialect.Finding{{ID: "f1", Commit: "aaaaaaaa1"}},
 	}
-	if _, err := svc.SetDrainEnabled(ctx, report.Repo, false, "operator stop"); err != nil {
+	if _, err := svc.SetAutofixEnabled(ctx, report.Repo, false, "operator stop"); err != nil {
 		t.Fatal(err)
 	}
 
 	ok, why, byDesign := svc.claimDispatch(ctx, report, "tok", 3)
 	if ok {
-		t.Fatal("claim bypassed a repository drain switch that was turned off after the pass snapshot")
+		t.Fatal("claim bypassed a repository autofix switch that was turned off after the pass snapshot")
 	}
 	if !byDesign {
-		t.Errorf("drain refusal %q counted as a dispatcher failure", why)
+		t.Errorf("autofix refusal %q counted as a dispatcher failure", why)
 	}
 	st, _, err := store.Load(ctx)
 	if err != nil {
@@ -853,7 +853,7 @@ func TestClaimDispatchSupersedesAStaleRound(t *testing.T) {
 
 	ok, why, _ := svc.claimDispatch(context.Background(), report, "tok", 3)
 	if !ok {
-		t.Fatalf("claim refused: %s — the new head's findings can never be drained", why)
+		t.Fatalf("claim refused: %s — the new head's findings can never be cleared", why)
 	}
 	st, _, err := store.Load(context.Background())
 	if err != nil {
@@ -918,7 +918,7 @@ func TestClaimDispatchSeesAClaimItsOwnPushArchived(t *testing.T) {
 }
 
 // The attempt bound is crq obeying its own configuration, not fix sessions
-// failing to start. Counted as drain health, a correctly bounded head raised the
+// failing to start. Counted as autofix health, a correctly bounded head raised the
 // "fix sessions are not starting" alert after three passes — and every pass
 // after that, forever.
 func TestExhaustedAttemptsAreNotADispatcherFailure(t *testing.T) {

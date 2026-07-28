@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -20,13 +21,13 @@ import (
 // Setup people get wrong is setup that silently does nothing, which is the exact
 // failure this whole feature exists to prevent. A dry run has to describe the
 // real thing, and it must not touch anything.
-func TestInstallDrainPlansWithoutWriting(t *testing.T) {
+func TestInstallAutofixPlansWithoutWriting(t *testing.T) {
 	cfg := firingConfig()
 	cfg.AllowRepos = map[string]bool{"owner/name": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
 	agent := fakeAgent(t, "claude")
-	plan, err := svc.InstallDrain(context.Background(), agent, nil, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), agent, nil, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,13 +57,86 @@ func TestInstallDrainPlansWithoutWriting(t *testing.T) {
 	}
 }
 
-func TestInstallDrainHonoursConfiguredDryRun(t *testing.T) {
+// The plan is what --dry-run shows and what the unit records, so the fleet it
+// names has to be the same fleet twice. Taken straight off the map it was not:
+// a re-install rewrote the unit with the repositories in a new order, and a
+// dry run described a different service than the install that followed it.
+func TestAutofixPlanOrdersTheFleetTheSameWayEveryTime(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/zulu": true, "owner/alpha": true, "owner/mike": true}
+	agent := fakeAgent(t, "claude")
+
+	want := []string{"owner/alpha", "owner/mike", "owner/zulu"}
+	for i := range 8 {
+		plan, err := AutofixPlan(cfg, agent, nil, nil, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(plan.Repos, want) {
+			t.Fatalf("plan %d repos = %v, want %v", i, plan.Repos, want)
+		}
+	}
+}
+
+// The rename breaks the state and the CLI, but a break in naming stops nothing
+// that is already running: a host that ran the pre-rename installer keeps an
+// enabled crq-drain unit, and installing autofix beside it left two watchers
+// scanning the same fleet and racing each other's dispatch claims.
+func TestAutofixPlanRetiresThePreRenameWatcher(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/name": true}
+	agent := fakeAgent(t, "claude")
+
+	// A host that never ran the old installer must not be told to retire it.
+	clean, err := AutofixPlan(cfg, agent, nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clean.Retire != "" {
+		t.Errorf("retire = %q on a host with no legacy unit", clean.Retire)
+	}
+	for _, c := range clean.Commands {
+		if strings.Contains(c, "crq-drain") {
+			t.Errorf("commands = %v, want nothing about a watcher that was never installed", clean.Commands)
+		}
+	}
+
+	legacy := filepath.Join(home, ".config", "systemd", "user", "crq-drain.service")
+	if runtime.GOOS == "darwin" {
+		legacy = filepath.Join(home, "Library", "LaunchAgents", "no.kristofferr.crq-drain.plist")
+	}
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte("legacy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := AutofixPlan(cfg, agent, nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Retire != legacy {
+		t.Errorf("retire = %q, want the legacy unit %q", plan.Retire, legacy)
+	}
+	if len(plan.Commands) == 0 || !strings.Contains(plan.Commands[0], "crq-drain") {
+		t.Fatalf("commands = %v, want the legacy watcher stopped before the new one starts", plan.Commands)
+	}
+	// applyAutofix pairs the two by index and refuses to run a mismatch.
+	if got, want := len(autofixCommandArgs(plan)), len(plan.Commands); got != want {
+		t.Errorf("argv count = %d, want %d — the plan and what it runs must be the same list", got, want)
+	}
+}
+
+func TestInstallAutofixHonoursConfiguredDryRun(t *testing.T) {
 	cfg := firingConfig()
 	cfg.DryRun = true
 	cfg.AllowRepos = map[string]bool{"owner/repo": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	plan, err := svc.InstallDrain(context.Background(), fakeAgent(t, "claude"), nil, nil, false)
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +145,7 @@ func TestInstallDrainHonoursConfiguredDryRun(t *testing.T) {
 	}
 }
 
-func TestInstallDrainUsesFleetRepositories(t *testing.T) {
+func TestInstallAutofixUsesFleetRepositories(t *testing.T) {
 	cfg := firingConfig()
 	cfg.AllowRepos = nil
 	store := NewMemoryStore(cfg)
@@ -83,19 +157,19 @@ func TestInstallDrainUsesFleetRepositories(t *testing.T) {
 	}
 	svc := NewService(cfg, newFakeGitHub(), store, nil)
 
-	plan, err := svc.InstallDrain(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(plan.Repos) != 1 || plan.Repos[0] != "owner/fleet-repo" {
-		t.Fatalf("drain repos = %v, want the fleet repository", plan.Repos)
+		t.Fatalf("autofix repos = %v, want the fleet repository", plan.Repos)
 	}
 	if plan.PolicySource != "fleet" {
 		t.Fatalf("policy source = %q, want fleet", plan.PolicySource)
 	}
 }
 
-func TestDrainUnitKeepsHostFallbacksUnderFleetPolicy(t *testing.T) {
+func TestAutofixUnitKeepsHostFallbacksUnderFleetPolicy(t *testing.T) {
 	cfg := firingConfig()
 	cfg.AllowRepos = map[string]bool{"owner/host-repo": true}
 	cfg.ExcludeRepos = map[string]bool{"owner/host-excluded": true}
@@ -109,14 +183,14 @@ func TestDrainUnitKeepsHostFallbacksUnderFleetPolicy(t *testing.T) {
 	}
 	svc := NewService(cfg, newFakeGitHub(), store, nil)
 
-	plan, err := svc.InstallDrain(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(plan.Repos) != 1 || plan.Repos[0] != "owner/fleet-repo" {
 		t.Fatalf("preview repos = %v, want current fleet policy", plan.Repos)
 	}
-	env := drainEnvFor(svc.drainFallbackConfig(nil), plan)
+	env := autofixEnvFor(svc.autofixFallbackConfig(nil), plan)
 	if got := env["CRQ_REPOS"]; got != "owner/host-repo" {
 		t.Fatalf("unit CRQ_REPOS = %q, want host fallback", got)
 	}
@@ -125,24 +199,24 @@ func TestDrainUnitKeepsHostFallbacksUnderFleetPolicy(t *testing.T) {
 	}
 }
 
-func TestDrainUnitKeepsExplicitRepositoriesAsHostFallback(t *testing.T) {
+func TestAutofixUnitKeepsExplicitRepositoriesAsHostFallback(t *testing.T) {
 	cfg := firingConfig()
 	cfg.AllowRepos = map[string]bool{"owner/configured": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
-	plan := DrainInstall{Repos: []string{"owner/explicit"}}
+	plan := AutofixInstall{Repos: []string{"owner/explicit"}}
 
-	env := drainEnvFor(svc.drainFallbackConfig(plan.Repos), plan)
+	env := autofixEnvFor(svc.autofixFallbackConfig(plan.Repos), plan)
 	if got := env["CRQ_REPOS"]; got != "owner/explicit" {
 		t.Fatalf("unit CRQ_REPOS = %q, want explicit install repository", got)
 	}
 }
 
-func TestDrainWrapperKeepsExplicitRepositoriesAuthoritative(t *testing.T) {
-	got := drainWrapper("/usr/bin/crq", "'agent' 'prompt'", []string{"owner/explicit", "owner/with space"})
+func TestAutofixWrapperKeepsExplicitRepositoriesAuthoritative(t *testing.T) {
+	got := autofixWrapper("/usr/bin/crq", "'agent' 'prompt'", []string{"owner/explicit", "owner/with space"})
 	if !strings.Contains(got, "watch 'owner/explicit' 'owner/with space' --") {
 		t.Fatalf("wrapper lost explicit repositories:\n%s", got)
 	}
-	if fallback := drainWrapper("/usr/bin/crq", "'agent' 'prompt'", nil); !strings.Contains(fallback, "watch --") {
+	if fallback := autofixWrapper("/usr/bin/crq", "'agent' 'prompt'", nil); !strings.Contains(fallback, "watch --") {
 		t.Fatalf("wrapper without explicit repositories does not use runtime fleet policy:\n%s", fallback)
 	}
 }
@@ -151,12 +225,12 @@ func TestDrainWrapperKeepsExplicitRepositoriesAuthoritative(t *testing.T) {
 // error — --dry-run is what somebody runs to inspect the setup before finishing
 // it. The plan says which policy it could see, so it cannot be mistaken for the
 // fleet's; a real install has no such fallback.
-func TestInstallDrainPreviewsFromTheHostWhenFleetStateIsUnreadable(t *testing.T) {
+func TestInstallAutofixPreviewsFromTheHostWhenFleetStateIsUnreadable(t *testing.T) {
 	cfg := firingConfig()
 	cfg.AllowRepos = map[string]bool{"owner/host-repo": true}
 	svc := NewService(cfg, newFakeGitHub(), unreadableStore{NewMemoryStore(cfg)}, nil)
 
-	plan, err := svc.InstallDrain(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +240,7 @@ func TestInstallDrainPreviewsFromTheHostWhenFleetStateIsUnreadable(t *testing.T)
 	if len(plan.Repos) != 1 || plan.Repos[0] != "owner/host-repo" {
 		t.Fatalf("preview repos = %v, want this host's own", plan.Repos)
 	}
-	if _, err := svc.InstallDrain(context.Background(), fakeAgent(t, "claude"), nil, nil, false); err == nil {
+	if _, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, false); err == nil {
 		t.Fatal("an install wrote a unit from policy it could not check against the fleet's")
 	}
 }
@@ -180,13 +254,13 @@ func (unreadableStore) Load(context.Context) (State, Revision, error) {
 }
 
 // A missing agent must fail loudly at install time. Discovering it at the first
-// dispatch means a drain that looks installed and fixes nothing.
-func TestInstallDrainRefusesWithoutAnAgent(t *testing.T) {
+// dispatch means an autofix watcher that looks installed and fixes nothing.
+func TestInstallAutofixRefusesWithoutAnAgent(t *testing.T) {
 	cfg := firingConfig()
 	cfg.AllowRepos = map[string]bool{"owner/name": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	_, err := svc.InstallDrain(context.Background(), "definitely-not-a-real-binary", nil, nil, true)
+	_, err := svc.InstallAutofix(context.Background(), "definitely-not-a-real-binary", nil, nil, true)
 	if err == nil {
 		t.Skip("a binary by that name exists on this machine")
 	}
@@ -210,12 +284,12 @@ func TestEmbeddedPromptCarriesTheRulesThatCostUs(t *testing.T) {
 	}
 }
 
-func TestWriteDrainFileRestoresDeclaredMode(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "crq-drain")
+func TestWriteAutofixFileRestoresDeclaredMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "crq-autofix")
 	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeDrainFile(path, "new", 0o755); err != nil {
+	if err := writeAutofixFile(path, "new", 0o755); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(path)
@@ -227,12 +301,12 @@ func TestWriteDrainFileRestoresDeclaredMode(t *testing.T) {
 	}
 }
 
-func TestDrainStartArgumentsPreservePathsWithSpaces(t *testing.T) {
-	plan := DrainInstall{
+func TestAutofixStartArgumentsPreservePathsWithSpaces(t *testing.T) {
+	plan := AutofixInstall{
 		Platform: "darwin",
-		Unit:     "/Users/Example User/Library/LaunchAgents/crq-drain.plist",
+		Unit:     "/Users/Example User/Library/LaunchAgents/crq-autofix.plist",
 	}
-	got := drainCommandArgs(plan)[1]
+	got := autofixCommandArgs(plan)[1]
 	if len(got) != 4 || got[3] != plan.Unit {
 		t.Fatalf("bootstrap argv = %q, want unit path %q as one argument", got, plan.Unit)
 	}
@@ -242,7 +316,7 @@ func TestDrainStartArgumentsPreservePathsWithSpaces(t *testing.T) {
 // configuration file. A unit that names neither the file nor the settings that
 // reached the install from the shell alone starts a watcher that loads a
 // different queue — or none — while the install reports Started.
-func TestDrainUnitCarriesTheConfigurationTheInstallRead(t *testing.T) {
+func TestAutofixUnitCarriesTheConfigurationTheInstallRead(t *testing.T) {
 	config := filepath.Join(t.TempDir(), "env")
 	t.Setenv("CRQ_CONFIG", config)
 
@@ -253,11 +327,11 @@ func TestDrainUnitCarriesTheConfigurationTheInstallRead(t *testing.T) {
 	cfg.CalibrationPR = 1
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	plan, err := svc.InstallDrain(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	unit := svc.drainUnit(plan)
+	unit := svc.autofixUnit(plan)
 	// The state ref included: without it the service falls back to the default
 	// and reads a queue nobody else is using, which looks exactly like an idle
 	// fleet.
@@ -270,7 +344,7 @@ func TestDrainUnitCarriesTheConfigurationTheInstallRead(t *testing.T) {
 		"CRQ_STATE_REF=" + cfg.StateRef,
 	} {
 		if !strings.Contains(unit, want) {
-			t.Errorf("the unit does not carry %q; the drain would not find it:\n%s", want, unit)
+			t.Errorf("the unit does not carry %q; the autofix watcher would not find it:\n%s", want, unit)
 		}
 	}
 	// A secret in a file every local user can read is not the way to hand the
@@ -279,12 +353,12 @@ func TestDrainUnitCarriesTheConfigurationTheInstallRead(t *testing.T) {
 		t.Errorf("the unit carries a token:\n%s", unit)
 	}
 	// Rewriting it for the same configuration must produce the same file.
-	if again := svc.drainUnit(plan); again != unit {
+	if again := svc.autofixUnit(plan); again != unit {
 		t.Error("two renderings of one configuration differ; every re-install would rewrite the unit")
 	}
 }
 
-func TestDrainUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
+func TestAutofixUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 	cfg := firingConfig()
 	cfg.DispatchForks = true
 	cfg.SkipMarker = "<!-- custom-skip -->"
@@ -307,9 +381,9 @@ func TestDrainUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 		Required: true, SelfHealGrace: 4 * time.Minute,
 	}}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
-	plan := DrainInstall{Platform: "linux", Wrapper: "/tmp/crq drain", LogDir: "/tmp/crq logs"}
+	plan := AutofixInstall{Platform: "linux", Wrapper: "/tmp/crq autofix", LogDir: "/tmp/crq logs"}
 
-	unit := svc.drainUnit(plan)
+	unit := svc.autofixUnit(plan)
 	for _, want := range []string{
 		`CRQ_BOT=custom-reviewer[bot]`,
 		`CRQ_REQUIRED_BOTS=custom-reviewer[bot],cursor[bot]`,
@@ -339,7 +413,7 @@ func TestDrainUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 // unit makes the service read it as an operator's choice, and the registry
 // default for a bot the fleet later REQUIRES can then never be recomputed — so a
 // required Codex would be waited for and never commanded.
-func TestDrainEnvInstallsAnImplicitTriggerAsUnset(t *testing.T) {
+func TestAutofixEnvInstallsAnImplicitTriggerAsUnset(t *testing.T) {
 	cfg := firingConfig()
 	cfg.CoBots = []CoBotConfig{{
 		Name: "codex", Login: dialect.CodexBotLogin, Command: "@codex review",
@@ -347,7 +421,7 @@ func TestDrainEnvInstallsAnImplicitTriggerAsUnset(t *testing.T) {
 	}}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	env := svc.drainEnv(DrainInstall{})
+	env := svc.autofixEnv(AutofixInstall{})
 	trigger, ok := env["CRQ_COBOT_CODEX_TRIGGER"]
 	if !ok || trigger != "" {
 		t.Fatalf("CRQ_COBOT_CODEX_TRIGGER = %q, present=%t; want an explicit empty value", trigger, ok)
@@ -367,13 +441,13 @@ func TestDrainEnvInstallsAnImplicitTriggerAsUnset(t *testing.T) {
 // implicit trigger: written out as a value, the service reads it back as the
 // operator's own list and stops recomputing it, so a co-reviewer the fleet
 // enables later never has its findings surfaced.
-func TestDrainEnvInstallsDerivedFeedbackBotsAsUnset(t *testing.T) {
+func TestAutofixEnvInstallsDerivedFeedbackBotsAsUnset(t *testing.T) {
 	cfg := firingConfig()
 	cfg.FeedbackBots = []string{cfg.Bot, dialect.CodexBotLogin}
 	cfg.FeedbackBotsExplicit = false
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	env := svc.drainEnv(DrainInstall{})
+	env := svc.autofixEnv(AutofixInstall{})
 	bots, ok := env["CRQ_FEEDBACK_BOTS"]
 	if !ok || bots != "" {
 		t.Fatalf("CRQ_FEEDBACK_BOTS = %q, present=%t; want an explicit empty value", bots, ok)
@@ -384,7 +458,7 @@ func TestDrainEnvInstallsDerivedFeedbackBotsAsUnset(t *testing.T) {
 // They are what a repository override — or a fleet `cobots` change that names
 // the bot without naming its keys — picks the bot up with, and the installing
 // shell's own preview uses them.
-func TestDrainEnvCarriesDisabledCoBotFallbacks(t *testing.T) {
+func TestAutofixEnvCarriesDisabledCoBotFallbacks(t *testing.T) {
 	cfg := firingConfig()
 	cfg.CoBots = nil
 	cfg.KnownCoBots = []CoBotConfig{{
@@ -394,7 +468,7 @@ func TestDrainEnvCarriesDisabledCoBotFallbacks(t *testing.T) {
 	}}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	env := svc.drainEnv(DrainInstall{})
+	env := svc.autofixEnv(AutofixInstall{})
 	if got := env["CRQ_COBOTS"]; got != "" {
 		t.Fatalf("CRQ_COBOTS = %q, want the enabled set to stay empty", got)
 	}
@@ -418,29 +492,29 @@ func mustCoReviewer(t *testing.T, name string) dialect.CoReviewer {
 	return co
 }
 
-func TestDrainEnvCarriesAnIntentionallyEmptySkipMarker(t *testing.T) {
+func TestAutofixEnvCarriesAnIntentionallyEmptySkipMarker(t *testing.T) {
 	cfg := firingConfig()
 	cfg.SkipMarker = ""
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	env := svc.drainEnv(DrainInstall{})
+	env := svc.autofixEnv(AutofixInstall{})
 	marker, ok := env["CRQ_AUTOREVIEW_SKIP_MARKER"]
 	if !ok || marker != "" {
 		t.Fatalf("skip marker = %q, present=%t; want an explicit empty value", marker, ok)
 	}
 }
 
-func TestDrainEnvCarriesConfiguredWorkspace(t *testing.T) {
+func TestAutofixEnvCarriesConfiguredWorkspace(t *testing.T) {
 	cfg := firingConfig()
 	cfg.WorkspaceRoot = "/mnt/large disk/crq"
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	if got := svc.drainEnv(DrainInstall{})["CRQ_WORKSPACE"]; got != cfg.WorkspaceRoot {
+	if got := svc.autofixEnv(AutofixInstall{})["CRQ_WORKSPACE"]; got != cfg.WorkspaceRoot {
 		t.Fatalf("CRQ_WORKSPACE = %q, want %q", got, cfg.WorkspaceRoot)
 	}
 }
 
-func TestInstallDrainMakesRelativeWorkspaceAbsolute(t *testing.T) {
+func TestInstallAutofixMakesRelativeWorkspaceAbsolute(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
 
@@ -449,12 +523,12 @@ func TestInstallDrainMakesRelativeWorkspaceAbsolute(t *testing.T) {
 	cfg.WorkspaceRoot = "relative workspace"
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	plan, err := svc.InstallDrain(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := filepath.Join(root, cfg.WorkspaceRoot)
-	if got := svc.drainEnv(plan)["CRQ_WORKSPACE"]; got != want {
+	if got := svc.autofixEnv(plan)["CRQ_WORKSPACE"]; got != want {
 		t.Fatalf("CRQ_WORKSPACE = %q, want absolute install-time path %q", got, want)
 	}
 }
@@ -463,13 +537,13 @@ func TestLaunchdUnitEscapesXMLValues(t *testing.T) {
 	cfg := firingConfig()
 	cfg.ReviewCommand = "@bot review <this> & report"
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
-	plan := DrainInstall{
+	plan := AutofixInstall{
 		Platform: "darwin",
-		Wrapper:  "/tmp/a&b/crq-drain",
+		Wrapper:  "/tmp/a&b/crq-autofix",
 		LogDir:   "/tmp/a<b/logs",
 	}
 
-	unit := svc.drainUnit(plan)
+	unit := svc.autofixUnit(plan)
 	var document struct{}
 	if err := xml.Unmarshal([]byte(unit), &document); err != nil {
 		t.Fatalf("launchd unit is not valid XML: %v\n%s", err, unit)
@@ -484,7 +558,7 @@ func TestLaunchdUnitEscapesXMLValues(t *testing.T) {
 	}
 }
 
-func TestInstallDrainMakesRelativeAgentAbsolute(t *testing.T) {
+func TestInstallAutofixMakesRelativeAgentAbsolute(t *testing.T) {
 	root := t.TempDir()
 	bin := filepath.Join(root, "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
@@ -499,7 +573,7 @@ func TestInstallDrainMakesRelativeAgentAbsolute(t *testing.T) {
 	cfg := firingConfig()
 	cfg.AllowRepos = map[string]bool{"owner/name": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
-	plan, err := svc.InstallDrain(context.Background(), "./bin/wrapper", []string{"--run"}, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), "./bin/wrapper", []string{"--run"}, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -513,9 +587,9 @@ func TestSystemdEnvironmentAssignmentsQuoteWhitespace(t *testing.T) {
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "config with spaces", "env"))
 	t.Setenv("PATH", "/usr/bin:/opt/tools with spaces/bin")
-	plan := DrainInstall{Platform: "linux", Wrapper: "/tmp/crq-drain", LogDir: "/tmp/crq"}
+	plan := AutofixInstall{Platform: "linux", Wrapper: "/tmp/crq-autofix", LogDir: "/tmp/crq"}
 
-	unit := svc.drainUnit(plan)
+	unit := svc.autofixUnit(plan)
 	for _, key := range []string{"CRQ_CONFIG", "PATH", "CRQ_REVIEW_CMD"} {
 		if !strings.Contains(unit, `Environment="`+key+`=`) {
 			t.Errorf("%s assignment is not quoted:\n%s", key, unit)
@@ -524,7 +598,7 @@ func TestSystemdEnvironmentAssignmentsQuoteWhitespace(t *testing.T) {
 	if strings.Contains(unit, "Environment=CRQ_CONFIG=") {
 		t.Errorf("CRQ_CONFIG was emitted as an unquoted systemd assignment:\n%s", unit)
 	}
-	if !strings.Contains(unit, `ExecStart="/tmp/crq-drain"`) {
+	if !strings.Contains(unit, `ExecStart="/tmp/crq-autofix"`) {
 		t.Errorf("ExecStart executable is not quoted:\n%s", unit)
 	}
 }
@@ -539,13 +613,13 @@ func TestSystemdExecWordQuotesWhitespaceAndExpansion(t *testing.T) {
 
 func TestLaunchdMissingJobIsBenignOnlyForBootout(t *testing.T) {
 	output := []byte("Boot-out failed: 3: No such process")
-	if !launchdJobAbsent("launchctl bootout gui/501/no.kristofferr.crq-drain", output) {
+	if !launchdJobAbsent("launchctl bootout gui/501/no.kristofferr.crq-autofix", output) {
 		t.Error("first-install bootout should accept an absent launchd job")
 	}
-	if launchdJobAbsent("launchctl bootstrap gui/501 /tmp/drain.plist", output) {
+	if launchdJobAbsent("launchctl bootstrap gui/501 /tmp/autofix.plist", output) {
 		t.Error("a bootstrap failure must never be ignored")
 	}
-	if launchdJobAbsent("launchctl bootout gui/501/no.kristofferr.crq-drain", []byte("permission denied")) {
+	if launchdJobAbsent("launchctl bootout gui/501/no.kristofferr.crq-autofix", []byte("permission denied")) {
 		t.Error("a genuine bootout failure must not be ignored")
 	}
 }
@@ -553,19 +627,19 @@ func TestLaunchdMissingJobIsBenignOnlyForBootout(t *testing.T) {
 // systemd refuses to start a unit whose StandardOutput path cannot be opened
 // (209/STDOUT), so a log directory that does not exist is a service that never
 // runs — the silent nothing this command exists to prevent.
-func TestInstallDrainNamesALogDirectory(t *testing.T) {
+func TestInstallAutofixNamesALogDirectory(t *testing.T) {
 	cfg := firingConfig()
 	cfg.AllowRepos = map[string]bool{"owner/name": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	plan, err := svc.InstallDrain(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if plan.LogDir == "" {
 		t.Fatal("no log directory planned; the unit would reference a path nothing creates")
 	}
-	unit := svc.drainUnit(plan)
+	unit := svc.autofixUnit(plan)
 	if !strings.Contains(unit, plan.LogDir) {
 		t.Errorf("the unit does not write into the directory the install creates:\n%s", unit)
 	}
@@ -644,7 +718,7 @@ func fakeAgent(t *testing.T, name string) string {
 // "enable --now" does nothing to a unit that is already running, so a reinstall
 // with a different agent kept the old one going — an install that reports
 // success and changes nothing.
-func TestInstallDrainRestartsAnAlreadyRunningService(t *testing.T) {
+func TestInstallAutofixRestartsAnAlreadyRunningService(t *testing.T) {
 	if runtime.GOOS == "darwin" {
 		t.Skip("launchd bootout/bootstrap already replaces a running agent")
 	}
@@ -652,7 +726,7 @@ func TestInstallDrainRestartsAnAlreadyRunningService(t *testing.T) {
 	cfg.AllowRepos = map[string]bool{"owner/name": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	plan, err := svc.InstallDrain(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}

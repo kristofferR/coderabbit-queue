@@ -105,7 +105,7 @@ type Round struct {
 	// Dismissed maps the ID of a finding an agent explicitly accounted for to the
 	// reason given. GitHub offers no way to close these: a review-body finding, a
 	// review-skipped notice and an outside-diff remark all lack a review thread,
-	// so `crq resolve` and `crq decline` have nothing to act on and drain-first
+	// so `crq resolve` and `crq decline` have nothing to act on and fix-first
 	// can never be satisfied — the round repeats `fix` forever and no new review is ever
 	// requested for the head.
 	//
@@ -432,21 +432,21 @@ type State struct {
 	// for the dashboard and debugging. Bounded by ArchiveMax.
 	Archive []Round `json:"archive,omitempty"`
 
-	// Drain records the watcher's dispatch health. It is separate from Warn
+	// Autofix records the watcher's dispatch health. It is separate from Warn
 	// because Warn is cleared by the next successful fire — a dispatcher that
 	// has been failing for hours would be wiped by unrelated progress, which is
 	// exactly how the failure stayed invisible.
-	Drain *DrainHealth `json:"drain,omitempty"`
-	// Drains keeps each host's failure streak independent. Drain above is the
+	Autofix *AutofixHealth `json:"autofix,omitempty"`
+	// AutofixByHost keeps each host's failure streak independent. Autofix above is the
 	// fleet summary dual-written for older binaries during rolling upgrades.
-	Drains map[string]DrainHealth `json:"drains,omitempty"`
+	AutofixByHost map[string]AutofixHealth `json:"autofix_by_host,omitempty"`
 	// Dispatches holds live PR-level claims outside the bounded round archive.
 	// A session may still be resolving threads after its push superseded the
 	// claimed round, and archive eviction must not admit a second session.
 	Dispatches map[string]DispatchClaim `json:"dispatches,omitempty"`
-	// RepoDrain answers "may crq fix pull requests here?" per repository. Absent
-	// means the default, which is yes — see DrainEnabled.
-	RepoDrain map[string]RepoDrainSwitch `json:"repo_drain,omitempty"`
+	// RepoAutofix answers "may crq fix pull requests here?" per repository. Absent
+	// means the default, which is yes — see AutofixEnabled.
+	RepoAutofix map[string]RepoAutofixSwitch `json:"repo_autofix,omitempty"`
 	// TidiedCommands are durable tombstones for trigger comments Tidy removed.
 	// Unlike Archive, they are not bounded: GitHub can deliver a delayed reply
 	// for as long as the PR conversation exists, and command/reply FIFO pairing
@@ -1241,27 +1241,27 @@ func (r *Round) ReleaseDispatch(token string) bool {
 	return true
 }
 
-// DrainUnhealthyAfter is how many consecutive dispatch attempts may fail to
+// AutofixUnhealthyAfter is how many consecutive dispatch attempts may fail to
 // start a session before crq says so out loud. One failure is a transient; three
 // in a row is a dispatcher that is not working.
 //
 // Attempts, not passes: sessions outlive the pass that started them, so their
 // outcomes arrive one at a time and any success resets the count.
-const DrainUnhealthyAfter = 3
+const AutofixUnhealthyAfter = 3
 
-// DrainHealthTTL is how long a host that reports no dispatch outcome remains
+// AutofixHealthTTL is how long a host that reports no dispatch outcome remains
 // part of the fleet health summary. A retired or renamed host cannot report its
 // own recovery, so retaining it forever would make one historical failure the
 // permanent fleet verdict.
-const DrainHealthTTL = 24 * time.Hour
+const AutofixHealthTTL = 24 * time.Hour
 
-// DrainHealth is the watcher's dispatch record: whether fix sessions are
+// AutofixHealth is the watcher's dispatch record: whether fix sessions are
 // actually starting.
 //
 // A dispatch failure used to be a line in a log nobody read, so a wedged git
 // mirror stopped every session for hours while the queue looked busy. Counting
 // it here puts it on the dashboard and in the status line instead.
-type DrainHealth struct {
+type AutofixHealth struct {
 	Host                string     `json:"host,omitempty"`
 	ConsecutiveFailures int        `json:"consecutive_failures,omitempty"`
 	LastError           string     `json:"last_error,omitempty"`
@@ -1271,47 +1271,47 @@ type DrainHealth struct {
 
 // Unhealthy reports whether dispatch has failed enough times in a row to be
 // worth someone's attention.
-func (d *DrainHealth) Unhealthy() bool {
-	return d != nil && d.ConsecutiveFailures >= DrainUnhealthyAfter
+func (d *AutofixHealth) Unhealthy() bool {
+	return d != nil && d.ConsecutiveFailures >= AutofixUnhealthyAfter
 }
 
 // NoteDispatch records one dispatch attempt's outcome: whether a session
 // started, and the reason if it did not.
 func (s *State) NoteDispatch(host string, started bool, reason string, now time.Time) {
-	if s.Drains == nil {
-		s.Drains = map[string]DrainHealth{}
-		if s.Drain != nil && s.Drain.Host != "" {
-			s.Drains[s.Drain.Host] = *s.Drain
+	if s.AutofixByHost == nil {
+		s.AutofixByHost = map[string]AutofixHealth{}
+		if s.Autofix != nil && s.Autofix.Host != "" {
+			s.AutofixByHost[s.Autofix.Host] = *s.Autofix
 		}
 	}
 	at := now.UTC()
-	drain := s.Drains[host]
-	drain.Host = host
+	health := s.AutofixByHost[host]
+	health.Host = host
 	if started {
-		drain.ConsecutiveFailures = 0
-		drain.LastError = ""
-		drain.LastSuccessAt = &at
+		health.ConsecutiveFailures = 0
+		health.LastError = ""
+		health.LastSuccessAt = &at
 	} else {
-		drain.ConsecutiveFailures++
-		drain.LastError = reason
-		drain.LastFailureAt = &at
+		health.ConsecutiveFailures++
+		health.LastError = reason
+		health.LastFailureAt = &at
 	}
-	s.Drains[host] = drain
-	s.summarizeDrains(now)
+	s.AutofixByHost[host] = health
+	s.summarizeAutofix(now)
 }
 
-func (s *State) summarizeDrains(now time.Time) {
-	var summary *DrainHealth
-	for host, drain := range s.Drains {
-		latest := drain.LastFailureAt
-		if timeAfter(drain.LastSuccessAt, latest) {
-			latest = drain.LastSuccessAt
+func (s *State) summarizeAutofix(now time.Time) {
+	var summary *AutofixHealth
+	for host, health := range s.AutofixByHost {
+		latest := health.LastFailureAt
+		if timeAfter(health.LastSuccessAt, latest) {
+			latest = health.LastSuccessAt
 		}
-		if latest != nil && !latest.Add(DrainHealthTTL).After(now.UTC()) {
-			delete(s.Drains, host)
+		if latest != nil && !latest.Add(AutofixHealthTTL).After(now.UTC()) {
+			delete(s.AutofixByHost, host)
 			continue
 		}
-		candidate := drain
+		candidate := health
 		if summary == nil ||
 			candidate.ConsecutiveFailures > summary.ConsecutiveFailures ||
 			(candidate.ConsecutiveFailures == summary.ConsecutiveFailures &&
@@ -1321,7 +1321,7 @@ func (s *State) summarizeDrains(now time.Time) {
 			summary = &candidate
 		}
 	}
-	s.Drain = summary
+	s.Autofix = summary
 }
 
 func timeAfter(a, b *time.Time) bool {
@@ -1677,16 +1677,16 @@ func (s *State) Normalize(now time.Time) {
 	if s.Version == 0 {
 		s.Version = SchemaVersion
 	}
-	if s.Drain != nil && s.Drain.Host != "" {
-		if s.Drains == nil {
-			s.Drains = map[string]DrainHealth{}
+	if s.Autofix != nil && s.Autofix.Host != "" {
+		if s.AutofixByHost == nil {
+			s.AutofixByHost = map[string]AutofixHealth{}
 		}
-		if _, ok := s.Drains[s.Drain.Host]; !ok {
-			s.Drains[s.Drain.Host] = *s.Drain
+		if _, ok := s.AutofixByHost[s.Autofix.Host]; !ok {
+			s.AutofixByHost[s.Autofix.Host] = *s.Autofix
 		}
 	}
-	if s.Drains != nil {
-		s.summarizeDrains(now)
+	if s.AutofixByHost != nil {
+		s.summarizeAutofix(now)
 	}
 	// Fold both hold representations before repairing the slot. The top-level
 	// mirror may be the only copy left after a pre-FireSlot-tolerance binary

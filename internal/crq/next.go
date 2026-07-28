@@ -49,7 +49,7 @@ type NextReport struct {
 // non-blocking call.
 //
 // It replaces the agent-side protocol that `crq loop` documented but could not
-// enforce: drain findings before starting a round, hold the head while a
+// enforce: clear findings before starting a round, hold the head while a
 // required reviewer is pending, pick a sensible delay. Each of those is now a
 // value in the returned report rather than a judgement call at the call site.
 //
@@ -65,7 +65,7 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 	// Observe BEFORE publishing anything. Enqueue makes this head fire-eligible
 	// in shared state, and an autoreview daemon pumping concurrently can claim
 	// and fire it in the gap — CAS protects each individual write, not this
-	// sequence. Deciding first means the drain-first rule is enforced before the
+	// sequence. Deciding first means the fix-first rule is enforced before the
 	// round is exposed at all, rather than only in this process's own pump.
 	report, action, feedback, err := s.nextFromState(ctx, repo, pr)
 	if err != nil {
@@ -82,7 +82,7 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 		}
 	}
 
-	// Undrained feedback for THIS head: publish nothing. Another review of the
+	// Uncleared feedback for THIS head: publish nothing. Another review of the
 	// same head would spend account quota to be told what the caller is already
 	// holding.
 	//
@@ -111,14 +111,14 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 		return report, nil
 	}
 
-	// Nothing left to drain, so record the round for this head (idempotent;
+	// Nothing left to clear, so record the round for this head (idempotent;
 	// supersedes on a new head) and advance the queue one step.
 	enqueued, err := s.Enqueue(ctx, repo, pr)
 	if err != nil {
 		return report, err
 	}
 	if enqueued.Held {
-		// Findings were drained above before Enqueue was allowed to write.
+		// Findings were cleared above before Enqueue was allowed to write.
 		// Once that work is clear, a hold is actionable administrative state,
 		// not an ordinary reviewer wait: there is no recheck time that can make
 		// progress without somebody releasing it.

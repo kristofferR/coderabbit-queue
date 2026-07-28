@@ -103,7 +103,7 @@ report with a frozen exit code (0 converged/skipped, 10 findings, 2 timeout). It
 for humans and one-shot scripts.
 
 An agent driving a PR should use `crq next` instead. `crq loop` requires the caller to interpret exit
-codes, enforce the drain-first and hold-the-head rules by hand, and keep a long-lived process alive
+codes, enforce the fix-first and hold-the-head rules by hand, and keep a long-lived process alive
 across turns — the three things that go wrong. Use `crq next` plus `crq wait` instead.
 
 Rate-limit degrade (default on, `CRQ_RL_CODEX_DEGRADE=0` disables): when CodeRabbit is rate-limited
@@ -204,7 +204,7 @@ round gating on nobody converges before anything runs); use `clear` to drop the 
 
 If the output lists `lagging_hosts`, those hosts are driving the queue with a binary that predates
 per-repo overrides — they will keep using the fleet default until upgraded.
-## Unattended Drain
+## Unattended Autofix
 
 `crq watch` starts a fix session for every PR whose action is `fix` — that is the default — in a worktree crq
 checked out at that head. Sessions run concurrently and off the decision loop, with **no cap by default** — fixing findings
@@ -212,7 +212,7 @@ spends no account quota, so it does not belong in a queue. `CRQ_DISPATCH_CONCURR
 machine cannot take the load. The decisions stay serial, which is what keeps the metered review in
 one queue.
 
-One command sets it up — `crq drain install` writes the prompt, a wrapper and this platform's
+One command sets it up — `crq autofix install` writes the prompt, a wrapper and this platform's
 service (systemd user unit, or a launchd agent on macOS), makes it survive a logout, and starts it;
 `--dry-run` prints the paths and the exact invocation first. `--agent claude|codex` picks the fix
 agent, and `--agent-args` carries its model and reasoning settings — crq knows how to call each
@@ -288,8 +288,8 @@ per-repo overrides — they will keep using the fleet default until upgraded.
 ## Findings With No Thread
 
 Review-body findings, review-skipped notices, outside-diff remarks and issue-comment findings have
-no `thread_id`. `crq resolve` and `crq decline` both act on a thread, so neither can touch them — and a
-finding that can never drain blocks every future round on that PR.
+no `thread_id`, so `crq resolve` and `crq decline` cannot act on them. Once judged, dismiss one for
+the current head so it no longer blocks the round:
 
 ```bash
 crq dismiss "$REPO" "$PR" "$FINDING_ID" --reason "why this is being set aside"
@@ -311,20 +311,20 @@ does have a thread; retry once crq can read threads again rather than working ar
 the notice is a SKIPPED review, narrowing the PR addresses the cause; dismissing only records that
 you chose to proceed at this head.
 
-## Turning the Drain Off Somewhere
+## Turning Autofix Off Somewhere
 
 Fixing is what watching is for, so it is on for every repository in scope. Where you do not want crq
 writing code — a release branch, a repository you are hand-tuning:
 
 ```bash
-crq drain off "$REPO" --reason "hand-tuning the release branch"
-crq drain on "$REPO"          # or: crq drain default "$REPO"
-crq drain                     # what is on, and where an answer was recorded
+crq autofix off "$REPO" --reason "hand-tuning the release branch"
+crq autofix on "$REPO"          # or: crq autofix default "$REPO"
+crq autofix                     # what is on, and where an answer was recorded
 ```
 
 Off stops FIXING, not watching. The pull request is still observed and still reviewed, so its
 feedback keeps arriving for a person to act on. The setting lives in the state ref, so it applies to
-every host running a drain.
+every host running autofix.
 
 ## Fleet Auto-Review
 

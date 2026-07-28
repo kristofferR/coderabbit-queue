@@ -32,10 +32,10 @@ func StatusLine(st State, cfg StoreConfig) string {
 	heldPrimary := false
 	stranded := firstStranded(st, inFlight)
 	switch {
-	case st.Drain.Unhealthy():
+	case st.Autofix.Unhealthy():
 		// Above everything else: a queue that looks busy while no session can
 		// start is the state that hid a wedged dispatcher for hours.
-		parts = append(parts, fmt.Sprintf("🚨 dispatch failing (%d)", st.Drain.ConsecutiveFailures))
+		parts = append(parts, fmt.Sprintf("🚨 dispatch failing (%d)", st.Autofix.ConsecutiveFailures))
 	case stranded != nil:
 		parts = append(parts, fmt.Sprintf("⚠ #%d stranded", stranded.PR))
 	case !ready && st.Account.BlockedUntil != nil && st.Account.BlockedUntil.After(now):

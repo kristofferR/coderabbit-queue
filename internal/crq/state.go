@@ -28,8 +28,8 @@ type (
 
 	LeaderCapabilityLease = crqstate.LeaderCapabilityLease
 
-	// RepoDrainSwitch is one repository's answer to whether crq may fix it.
-	RepoDrainSwitch = crqstate.RepoDrainSwitch
+	// RepoAutofixSwitch is one repository's answer to whether crq may fix it.
+	RepoAutofixSwitch = crqstate.RepoAutofixSwitch
 
 	// RepoReviewers is the per-repository reviewer override (see Config.ForRepo).
 )
@@ -46,8 +46,8 @@ const (
 
 	// DispatchTTL is how long a watcher's fix claim survives without a heartbeat.
 	DispatchTTL = crqstate.DispatchTTL
-	// DrainUnhealthyAfter is how many passes may fail to dispatch before crq says so.
-	DrainUnhealthyAfter = crqstate.DrainUnhealthyAfter
+	// AutofixUnhealthyAfter is how many passes may fail to dispatch before crq says so.
+	AutofixUnhealthyAfter = crqstate.AutofixUnhealthyAfter
 	// CapsRepoOverrides is the binary capability per-repo reviewer overrides need.
 	CapsRepoOverrides = crqstate.CapsRepoOverrides
 	// CapsFleetPolicy is the binary capability state-backed fleet policy needs.

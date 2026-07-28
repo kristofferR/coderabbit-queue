@@ -243,12 +243,12 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	var candidates []candidate
 	gate := NormalizeRepo(cfg.GateRepo)
 	// Which repositories may be FIXED is per repository, read once for the pass.
-	// Watching is unaffected: a repository with draining off is still observed
+	// Watching is unaffected: a repository with autofix off is still observed
 	// and still reviewed, so its feedback arrives for a person to act on.
-	drainOff := map[string]bool{}
+	autofixOff := map[string]bool{}
 	for _, repo := range repos {
-		if !state.DrainEnabled(repo) {
-			drainOff[NormalizeRepo(repo)] = true
+		if !state.AutofixEnabled(repo) {
+			autofixOff[NormalizeRepo(repo)] = true
 		}
 	}
 	for _, repo := range repos {
@@ -286,8 +286,19 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			}
 			continue
 		}
+		open := make(map[int]bool, len(pulls))
 		for _, pull := range pulls {
 			candidates = append(candidates, candidate{repo, pull})
+			open[pull.Number] = true
+		}
+		// This list is the authoritative set of open pull requests for the
+		// repository, and it has already been paid for. Any round still waiting
+		// for one that is not in it belongs to a closed or merged PR, so retire
+		// them all here rather than leaving them to a sweep that inspects one
+		// candidate per pass — a merged PR sat in the rendered queue for an
+		// afternoon that way, behind rounds the sweep reached first.
+		if err := s.retireClosedRounds(ctx, repo, open); err != nil && s.log != nil {
+			s.log.Printf("watch: %s: retiring closed rounds: %v", repo, err)
 		}
 	}
 	if len(candidates) > 0 {
@@ -382,8 +393,8 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				Findings: len(report.Findings), At: s.clock().UTC(),
 			}
 			var result <-chan dispatchResult
-			if opts.dispatching() && report.Action == string(engine.ActionFix) && drainOff[NormalizeRepo(repo)] {
-				event.Skipped = "draining is off for this repository (crq drain on " + NormalizeRepo(repo) + ")"
+			if opts.dispatching() && report.Action == string(engine.ActionFix) && autofixOff[NormalizeRepo(repo)] {
+				event.Skipped = "autofix is off for this repository (crq autofix on " + NormalizeRepo(repo) + ")"
 			} else if opts.dispatching() && report.Action == string(engine.ActionFix) && !s.mayDispatch(repo, pull) {
 				event.Skipped = "the head branch is a fork; set CRQ_DISPATCH_FORKS=1 to fix contributor pull requests"
 			} else if opts.dispatching() && report.Action == string(engine.ActionFix) {
@@ -487,23 +498,23 @@ func (s *Service) mayDispatch(repo string, pull ghapi.Pull) bool {
 func (s *Service) noteDispatchHealth(ctx context.Context, started bool, reason string) {
 	var flipped, unhealthy bool
 	state, err := s.store.Update(ctx, func(st *State) error {
-		was := st.Drain.Unhealthy()
+		was := st.Autofix.Unhealthy()
 		st.NoteDispatch(s.cfg.Host, started, reason, s.clock())
-		unhealthy = st.Drain.Unhealthy()
+		unhealthy = st.Autofix.Unhealthy()
 		flipped = unhealthy != was
 		return nil
 	})
 	if err != nil {
 		return
 	}
-	// The dashboard is where this alert is meant to be read, and a drain that has
+	// The dashboard is where this alert is meant to be read, and an autofix service that has
 	// stopped working may produce no other write for hours. Every unhealthy
 	// attempt changes the rendered count, host, or error; recovery removes it.
 	if unhealthy || flipped {
 		s.sync(ctx, state)
 	}
 	if flipped && unhealthy && s.log != nil {
-		s.log.Printf("ALERT: no fix session has started in %d dispatch attempts — %s", DrainUnhealthyAfter, reason)
+		s.log.Printf("ALERT: no fix session has started in %d dispatch attempts — %s", AutofixUnhealthyAfter, reason)
 	}
 }
 
@@ -628,7 +639,7 @@ func (s *Service) dispatchWithStart(
 	token string,
 	started chan<- dispatchResult,
 ) (ok bool, reason string) {
-	// Health means "can this drain START a session", not whether the agent later
+	// Health means "can this watcher START a session", not whether the agent later
 	// succeeds at the work it was given. Record pre-start failures on return;
 	// cmd.Start records recovery immediately, while a healthy long-running
 	// session is still running.
@@ -720,11 +731,25 @@ func (s *Service) dispatchWithStart(
 	}
 	s.noteDispatchHealth(context.WithoutCancel(ctx), true, "")
 	runErr := cmd.Wait()
-	s.releaseDispatch(context.WithoutCancel(ctx), report, token, true)
+	// A session the WATCHER stopped did not use up the head's attempt budget.
+	//
+	// That budget exists to stop a fix which keeps not working from looping for
+	// ever, and a session killed because the daemon went down never got to
+	// fail — it is the operator's restart, not the fix's quality. Counting it
+	// spent two of this head's three attempts on redeploys alone, and a third
+	// would have left the pull request unfixable at that commit while `crq next`
+	// went on asking for a fix.
+	attempted := ctx.Err() == nil
+	s.releaseDispatch(context.WithoutCancel(ctx), report, token, attempted)
 	if lost() {
 		return false, "another watcher took this round; the session was stopped"
 	}
 	if runErr != nil {
+		if !attempted {
+			// Say which kind of ending this was: "failed" reads as the fix being
+			// wrong, and the reader's next move is different when crq stopped it.
+			return false, fmt.Sprintf("fix session stopped with the watcher, and keeps its attempt (log: %s)", logPath)
+		}
 		// Keep the worktree AND name the log: a failed session is the one whose
 		// state somebody needs to look at.
 		return false, fmt.Sprintf("fix session failed: %v (log: %s)", runErr, logPath)
@@ -813,7 +838,7 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 		// The pass-level snapshot is only an optimization. The switch is an
 		// operator safety gate, so enforce it in the same CAS that grants the
 		// claim; a concurrent off or a failed earlier Load must fail closed.
-		if !st.DrainEnabled(report.Repo) {
+		if !st.AutofixEnabled(report.Repo) {
 			reason, byDesign = "fix sessions are disabled for this repository", true
 			return ErrNoChange
 		}
@@ -845,7 +870,7 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 		}
 		if round == nil || round.Head != report.Head {
 			// Findings on a head the queue is not tracking: a review somebody
-			// triggered by hand, feedback that predates the drain, or a head that
+			// triggered by hand, feedback that predates autofix, or a head that
 			// moved on while the previous round still stood. `Next` returns `fix`
 			// before Enqueue in that case — deliberately, so no second review is
 			// bought for a head whose findings are already in hand — so nothing
@@ -1180,4 +1205,40 @@ func sessionLogTimestamp(name string) string {
 		return name[at+1:]
 	}
 	return ""
+}
+
+// retireClosedRounds abandons every waiting round of repo whose pull request is
+// not in the open set the pass just listed.
+//
+// It costs nothing extra: the list is the one watchPass already fetched, and it
+// is the same evidence a per-round `pullHead` would gather one PR at a time.
+// Rounds that are fired or reviewing are left alone — those are answered by
+// Progress, which has the round's own observation to reason from.
+func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[int]bool) error {
+	key := NormalizeRepo(repo)
+	var stale []Round
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return err
+	}
+	for _, r := range st.Rounds {
+		if NormalizeRepo(r.Repo) != key || open[r.PR] {
+			continue
+		}
+		if r.Phase == PhaseQueued || r.Phase == PhaseAwaitingRetry {
+			stale = append(stale, r)
+		}
+	}
+	// Ordered, so a pass that is interrupted has done a prefix of the work
+	// rather than an arbitrary subset.
+	sort.Slice(stale, func(i, j int) bool { return stale[i].PR < stale[j].PR })
+	for _, r := range stale {
+		if _, err := s.abandonRound(ctx, r, "pr closed", "skipped"); err != nil {
+			return err
+		}
+		if s.log != nil {
+			s.log.Printf("watch: %s#%d left the queue: pr closed", r.Repo, r.PR)
+		}
+	}
+	return nil
 }

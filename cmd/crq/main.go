@@ -84,13 +84,13 @@ func run(ctx context.Context, args []string) int {
 		// A dry run is documented as a PREVIEW, so it has to work for somebody
 		// who has not authenticated yet — otherwise the one command for looking
 		// at the plan is itself another thing to set up first. An authenticated
-		// one takes the normal path below, where InstallDrain builds it from the
+		// one takes the normal path below, where InstallAutofix builds it from the
 		// same fleet state as the real install (and falls back to this host's
 		// own plan if that state cannot be read). Every other command needs the
 		// token this just failed to find.
-		if args[0] == "drain" {
-			if opts, perr := parseDrainArgs(args[1:]); perr == nil && opts.dryRun {
-				plan, ierr := hostOnlyDrainPlan(cfg, opts)
+		if args[0] == "autofix" {
+			if opts, perr := parseAutofixArgs(args[1:]); perr == nil && opts.dryRun {
+				plan, ierr := hostOnlyAutofixPlan(cfg, opts)
 				if ierr != nil {
 					fatal(ierr)
 					return 1
@@ -281,17 +281,17 @@ func run(ctx context.Context, args []string) int {
 		}
 		printJSON(result)
 		return 0
-	case "drain":
-		switch sub := drainSubcommand(args[1:]); sub {
+	case "autofix":
+		switch sub := autofixSubcommand(args[1:]); sub {
 		case "?":
-			fatal(fmt.Errorf("unknown drain subcommand %q (try: crq drain, crq drain on|off|default <repo>, crq drain install)", args[1]))
+			fatal(fmt.Errorf("unknown autofix subcommand %q (try: crq autofix, crq autofix on|off|default <repo>, crq autofix install)", args[1]))
 			return 1
 		case "", "list":
 			if err := cfg.RequireState(); err != nil {
 				fatal(err)
 				return 1
 			}
-			settings, derr := service.DrainSettings(ctx)
+			settings, derr := service.AutofixSettings(ctx)
 			if derr != nil {
 				fatal(derr)
 				return 1
@@ -299,9 +299,9 @@ func run(ctx context.Context, args []string) int {
 			printJSON(settings)
 			return 0
 		case "on", "off", "default":
-			rest, reason, ok := parseDrainReason(args[2:])
+			rest, reason, ok := parseAutofixReason(args[2:])
 			if !ok || len(rest) != 1 {
-				fatal(errors.New(`usage: crq drain on|off|default <repo> [--reason "<why>"]`))
+				fatal(errors.New(`usage: crq autofix on|off|default <repo> [--reason "<why>"]`))
 				return 1
 			}
 			if err := cfg.RequireState(); err != nil {
@@ -309,7 +309,7 @@ func run(ctx context.Context, args []string) int {
 				return 1
 			}
 			if sub == "default" {
-				cleared, cerr := service.ClearDrainEnabled(ctx, rest[0])
+				cleared, cerr := service.ClearAutofixEnabled(ctx, rest[0])
 				if cerr != nil {
 					fatal(cerr)
 					return 1
@@ -317,7 +317,7 @@ func run(ctx context.Context, args []string) int {
 				printJSON(map[string]any{"repo": crq.NormalizeRepo(rest[0]), "cleared": cleared, "enabled": true, "default": true})
 				return 0
 			}
-			setting, serr := service.SetDrainEnabled(ctx, rest[0], sub == "on", reason)
+			setting, serr := service.SetAutofixEnabled(ctx, rest[0], sub == "on", reason)
 			if serr != nil {
 				fatal(serr)
 				return 1
@@ -325,19 +325,19 @@ func run(ctx context.Context, args []string) int {
 			printJSON(setting)
 			return 0
 		}
-		opts, perr := parseDrainArgs(args[1:])
+		opts, perr := parseAutofixArgs(args[1:])
 		if perr != nil {
 			fatal(perr)
 			return 1
 		}
 		if err := cfg.RequireState(); err != nil {
 			// Without CRQ_REPO there is no state ref to read, so a preview here
-			// is the host-only one InstallDrain would otherwise produce.
+			// is the host-only one InstallAutofix would otherwise produce.
 			if !opts.dryRun {
 				fatal(err)
 				return 1
 			}
-			plan, ierr := hostOnlyDrainPlan(cfg, opts)
+			plan, ierr := hostOnlyAutofixPlan(cfg, opts)
 			if ierr != nil {
 				fatal(ierr)
 				return 1
@@ -345,7 +345,7 @@ func run(ctx context.Context, args []string) int {
 			printJSON(plan)
 			return 0
 		}
-		plan, ierr := service.InstallDrain(ctx, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, opts.dryRun)
+		plan, ierr := service.InstallAutofix(ctx, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, opts.dryRun)
 		if ierr != nil {
 			fatal(ierr)
 			return 1
@@ -704,9 +704,10 @@ USAGE
   crq decline <thread-id> [...] --reason "<why>" [--keep-open]
                                    reply on a thread to record why a finding is declined
                                    (resolves it; --keep-open leaves it open)
-  crq drain install [--agent <path>] [--dry-run] [<repo>...]
-  crq drain [on|off|default <repo>]  which repositories crq may fix (on by default)
-                                   install and start the unattended review drain
+  crq autofix install [--agent <path>] [--agent-args <args>] [--dry-run] [<repo>...]
+                                   install and start unattended autofix
+  crq autofix [on|off|default <repo>]
+                                   which repositories crq may fix (on by default)
   crq watch [--no-dispatch] [--once] [<repo>...] [-- <fix command>]
                                    drive open PRs through crq next; --dispatch starts a
                                    session to fix the ones that need it
@@ -811,7 +812,7 @@ more of the shared budget — run the daemon.
 
 Review round primitive for humans and agents. crq coordinates the review trigger,
 waits for real feedback on the current PR head, and emits one JSON report to stdout.
-It returns unresolved findings before queueing a new round, so agents must drain
+It returns unresolved findings before queueing a new round, so agents must clear
 current feedback before waiting for another review.
 
 Exit codes:
@@ -906,17 +907,17 @@ The primary reviewer is fleet-wide. Its markers and command are compiled into th
 classifiers when crq starts, so a per-repo primary would mean per-repo
 classifiers — a much larger change than choosing who else runs.
 `)
-	case "drain":
-		fmt.Print(`crq drain install [--agent <path>] [--dry-run] [<repo>...]
-crq drain                            (which repositories crq may fix)
-crq drain off <repo> [--reason "<why>"]
-crq drain on <repo>
-crq drain default <repo>             (back to the fleet default, which is on)
+	case "autofix":
+		fmt.Print(`crq autofix install [--agent <path>] [--agent-args <args>] [--dry-run] [<repo>...]
+crq autofix                            (which repositories crq may fix)
+crq autofix off <repo> [--reason "<why>"]
+crq autofix on <repo>
+crq autofix default <repo>             (back to the fleet default, which is on)
 
-Install and start the unattended review drain: crq watches every open PR and
+Install and start unattended autofix: crq watches every open PR and
 starts a fix session for the ones that need one.
 
-Draining is ON for every repository in scope. That is the point of watching: a
+Autofix is ON for every repository in scope. That is the point of watching: a
 pull request nobody fixes is a queue that reports work and does none. Turn it off
 where you do not want crq writing code — a release branch, a repository you are
 hand-tuning — and watching continues there regardless, so reviews still arrive
@@ -929,7 +930,9 @@ platform needs to survive a logout, and starts it. --dry-run prints the paths an
 commands without touching anything.
 
 The agent defaults to "claude" on PATH; --agent takes another path to it, or a
-wrapper around it. The installed service runs the agent with Claude Code's own
+wrapper around it. --agent-args passes a shell-style argument string to that
+agent, for example a model or reasoning-effort override. The installed service
+runs the agent with Claude Code's own
 flags (-p, --permission-mode, --output-format), so an agent with a different CLI
 needs its own wrapper script and "crq watch -- <cmd>...", which runs
 whatever argv you give it. --agent must name something runnable; a name that
@@ -950,7 +953,7 @@ line per PR per pass, and start a fix session for each PR whose action is "fix".
 
 Fixing is the default — watching a pull request nobody fixes is a queue that
 reports work and does none. Three things turn it off: --no-dispatch for one run,
-"crq drain off <repo>" for one repository, and having no fix command configured
+"crq autofix off <repo>" for one repository, and having no fix command configured
 at all, which observes and says so rather than refusing to start.
 
 A dispatched session runs in a worktree crq checked out at that head, with:
@@ -1047,10 +1050,10 @@ Read this, decide, then crq resolve (or crq decline) the ones you have answered.
 Record that you have accounted for a finding that has no review thread, so it
 stops blocking the round.
 
-crq resolve and crq decline both act on a thread. A review-body finding, a
-review-skipped notice or an outside-diff remark has none, so neither command can
-touch it — and a finding that can never drain blocks every future round, leaving
-a PR whose current head no review was ever requested for.
+crq resolve and crq decline both act on a thread. Review-body findings,
+review-skipped notices, outside-diff remarks and issue-comment findings have no
+thread, so neither command can act on them. Dismiss one after judging it so it
+does not block the current head's round.
 
 Finding IDs come from .findings[].id. They are content-derived, not GitHub node
 IDs, so the repo and PR are required. A dismissal covers the current head only:
@@ -1915,31 +1918,31 @@ func fleetDivergence(ctx context.Context) []string {
 	return diverged
 }
 
-// drainArgs is `crq drain install`'s parsed command line.
-type drainArgs struct {
+// autofixArgs is `crq autofix install`'s parsed command line.
+type autofixArgs struct {
 	agent     string
 	agentArgs string
 	dryRun    bool
 	repos     []string
 }
 
-// hostOnlyDrainPlan is the preview for a host that cannot reach fleet state at
+// hostOnlyAutofixPlan is the preview for a host that cannot reach fleet state at
 // all: this machine's own answers, labelled so the plan cannot be mistaken for
 // the fleet-backed one an authenticated install would write.
-func hostOnlyDrainPlan(cfg crq.Config, opts drainArgs) (crq.DrainInstall, error) {
-	plan, err := crq.DrainPlan(cfg, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, true)
+func hostOnlyAutofixPlan(cfg crq.Config, opts autofixArgs) (crq.AutofixInstall, error) {
+	plan, err := crq.AutofixPlan(cfg, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, true)
 	if err != nil {
-		return crq.DrainInstall{}, err
+		return crq.AutofixInstall{}, err
 	}
 	plan.PolicySource = "host"
-	plan.Warning = crq.HostOnlyDrainWarning
+	plan.Warning = crq.HostOnlyAutofixWarning
 	return plan, nil
 }
 
-// parseDrainArgs is shared by the pre-authentication dry-run path and the
+// parseAutofixArgs is shared by the pre-authentication dry-run path and the
 // install itself, so the two cannot disagree about what was asked for.
-func parseDrainArgs(args []string) (drainArgs, error) {
-	fs := flag.NewFlagSet("drain", flag.ContinueOnError)
+func parseAutofixArgs(args []string) (autofixArgs, error) {
+	fs := flag.NewFlagSet("autofix", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	agent := fs.String("agent", "", "fix agent to run: claude or codex (default: claude on PATH)")
 	agentArgs := fs.String("agent-args", "", "extra flags for the agent, e.g. model and reasoning effort")
@@ -1949,22 +1952,22 @@ func parseDrainArgs(args []string) (drainArgs, error) {
 		sub, rest = rest[0], rest[1:]
 	}
 	if err := fs.Parse(rest); err != nil {
-		return drainArgs{}, err
+		return autofixArgs{}, err
 	}
 	if sub != "install" {
-		return drainArgs{}, errors.New("usage: crq drain install [--agent <path>] [--dry-run] [<repo>...]")
+		return autofixArgs{}, errors.New("usage: crq autofix install [--agent <path>] [--agent-args <args>] [--dry-run] [<repo>...]")
 	}
-	return drainArgs{agent: *agent, agentArgs: *agentArgs, dryRun: *dryRun, repos: fs.Args()}, nil
+	return autofixArgs{agent: *agent, agentArgs: *agentArgs, dryRun: *dryRun, repos: fs.Args()}, nil
 }
 
-// drainSubcommand names what `crq drain ...` was asked to do. An empty string
+// autofixSubcommand names what `crq autofix ...` was asked to do. An empty string
 // means the bare command, which lists; "?" means something this command does not
 // have.
 //
-// A typo must not list. `crq drain of owner/name` reading as the bare listing
-// would report the repository as drained and leave it drained — an answer to a
+// A typo must not list. `crq autofix of owner/name` reading as the bare listing
+// would report the repository as fixable and leave it fixable — an answer to a
 // question nobody asked, in place of the instruction that was meant.
-func drainSubcommand(args []string) string {
+func autofixSubcommand(args []string) string {
 	if len(args) == 0 {
 		return ""
 	}
@@ -1975,10 +1978,10 @@ func drainSubcommand(args []string) string {
 	return "?"
 }
 
-// parseDrainReason splits `<repo>` from an optional --reason value. An
+// parseAutofixReason splits `<repo>` from an optional --reason value. An
 // unrecognized flag is an error rather than a positional: a typo like --resaon
 // must fail loudly, not silently become the repository name.
-func parseDrainReason(args []string) (rest []string, reason string, ok bool) {
+func parseAutofixReason(args []string) (rest []string, reason string, ok bool) {
 	for i := 0; i < len(args); i++ {
 		switch arg := args[i]; {
 		case arg == "--reason":

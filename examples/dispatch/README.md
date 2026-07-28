@@ -1,13 +1,13 @@
-# Unattended review drain
+# Unattended autofix
 
 `crq watch --dispatch` turns "this PR needs fixing" into a session that fixes it.
 
 ```bash
-crq drain install                 # prompt + wrapper + service, started
-crq drain install --dry-run       # print what it would write first
+crq autofix install                 # prompt + wrapper + service, started
+crq autofix install --dry-run       # print what it would write first
 
 # a different agent, and its own model/effort settings
-crq drain install --agent codex --agent-args '-c model_reasoning_effort=high'
+crq autofix install --agent codex --agent-args '-c model_reasoning_effort=high'
 ```
 
 crq knows how to CALL claude and codex, and nothing about which model either
@@ -18,6 +18,10 @@ That writes the fix prompt, a wrapper, and a systemd user unit (or a launchd
 agent on macOS), enables lingering so it survives a logout, and starts it. There
 are no files in this directory to copy: the prompt crq installs is embedded in
 the binary, so it cannot drift from the one documented here.
+
+On a host that ran the pre-rename `crq drain install`, it also stops and
+disables the leftover `crq-drain` service — two watchers scanning the same
+fleet would race each other's dispatch claims.
 
 ## Two rules the prompt earned the hard way
 
@@ -45,6 +49,6 @@ somebody else actively holds stops a session now.
 
 - `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log` — each session's own
   output, the last five per PR. A failed session also keeps its worktree.
-- `~/.local/state/crq/drain.err` — one line per dispatch, naming the session log.
+- `~/.local/state/crq/autofix.err` — one line per dispatch, naming the session log.
 - The dashboard issue and `crq status --line` — three passes in a row that start
   nothing and both say `dispatch failing`, rather than leaving it to be noticed.
