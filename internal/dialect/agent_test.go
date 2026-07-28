@@ -27,4 +27,14 @@ source := ` + "`\"type\":\"overloaded_error\"`" + `
 	if ordinary := ClassifyAgentFailure(repositoryOutput, reset); ordinary.Unavailable {
 		t.Fatal("repository-controlled text was treated as a provider outage")
 	}
+	repositoryJSON := []byte(
+		`{"type":"assistant","message":{"content":[{"type":"tool_result","content":{"error":"rate_limit","resetsAt":4102444800}}]}}`,
+	)
+	if ordinary := ClassifyAgentFailure(repositoryJSON, reset); ordinary.Unavailable {
+		t.Fatal("repository-controlled JSON was treated as a provider outage")
+	}
+	apiError := []byte(`{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)
+	if outage := ClassifyAgentFailure(apiError, reset); !outage.Unavailable {
+		t.Fatal("the provider's top-level error envelope was not classified")
+	}
 }

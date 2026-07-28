@@ -91,7 +91,10 @@ type discoverCache struct {
 	flight  chan struct{}
 }
 
-const discoverTTL = 10 * time.Minute
+const (
+	discoverTTL     = 10 * time.Minute
+	discoverTimeout = 60 * time.Second
+)
 
 func (c *discoverCache) get(ctx context.Context, d Discoverer, now time.Time, force bool) (Listing, error) {
 	c.mu.Lock()
@@ -117,13 +120,30 @@ func (c *discoverCache) get(ctx context.Context, d Discoverer, now time.Time, fo
 	flight := c.flight
 	c.mu.Unlock()
 
+	go c.fill(d, now, flight)
+	select {
+	case <-ctx.Done():
+		return Listing{}, ctx.Err()
+	case <-flight:
+		c.mu.Lock()
+		listing, err := c.listing, c.err
+		c.mu.Unlock()
+		return listing, err
+	}
+}
+
+func (c *discoverCache) fill(d Discoverer, now time.Time, flight chan struct{}) {
+	// The fetch belongs to every caller sharing this flight, not to whichever
+	// browser happened to start it. A closed tab must not cancel discovery for
+	// the other waiters.
+	ctx, cancel := context.WithTimeout(context.Background(), discoverTimeout)
+	defer cancel()
 	listing, err := d.Discover(ctx)
 	c.mu.Lock()
 	c.at, c.listing, c.err = now, listing, err
 	c.flight = nil
 	close(flight)
 	c.mu.Unlock()
-	return listing, err
 }
 
 // handleDiscover answers the repository picker. It never blocks the rest of the
@@ -136,7 +156,7 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), discoverTimeout)
 	defer cancel()
 
 	listing, err := s.discovered.get(ctx, s.opts.Discoverer, s.opts.Now(), r.URL.Query().Get("refresh") == "1")

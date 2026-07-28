@@ -22,21 +22,16 @@ type AgentFailure struct {
 // failures stay ordinary fix failures: refunding a genuine bad fix forever
 // would remove the loop's safety bound.
 func ClassifyAgentFailure(log []byte, now time.Time) AgentFailure {
-	text := strings.ToLower(string(log))
-	var decoded []any
-	for _, line := range strings.Split(string(log), "\n") {
-		var value any
-		if json.Unmarshal([]byte(line), &value) == nil {
-			decoded = append(decoded, value)
-		}
-	}
 	found := false
-	for _, value := range decoded {
-		if hasStringMember(value, "error", "rate_limit") ||
-			hasStringMember(value, "type", "rate_limit_error") ||
-			hasStringMember(value, "type", "overloaded_error") {
-			found = true
-			break
+	var resetAt int64
+	for _, line := range strings.Split(string(log), "\n") {
+		var event agentEvent
+		if json.Unmarshal([]byte(line), &event) != nil || !event.providerUnavailable() {
+			continue
+		}
+		found = true
+		if unix, ok := event.resetUnix(); ok {
+			resetAt = unix
 		}
 	}
 	if !found {
@@ -44,23 +39,8 @@ func ClassifyAgentFailure(log []byte, now time.Time) AgentFailure {
 	}
 
 	retryAt := now.UTC().Add(15 * time.Minute)
-	// Claude's stream-json error includes an epoch-seconds resetsAt member.
-	// Decode each line when possible, then use a narrow textual fallback for a
-	// partially-written final line.
-	for _, value := range decoded {
-		if unix, ok := findUnixMember(value, "resetsAt"); ok {
-			retryAt = time.Unix(unix, 0).UTC()
-		}
-	}
-	if i := strings.Index(text, `"resetsat":`); i >= 0 {
-		value := strings.TrimLeft(text[i+len(`"resetsat":`):], " \t")
-		end := 0
-		for end < len(value) && value[end] >= '0' && value[end] <= '9' {
-			end++
-		}
-		if unix, err := strconv.ParseInt(value[:end], 10, 64); end > 0 && err == nil {
-			retryAt = time.Unix(unix, 0).UTC()
-		}
+	if resetAt != 0 {
+		retryAt = time.Unix(resetAt, 0).UTC()
 	}
 	if !retryAt.After(now) {
 		retryAt = now.UTC().Add(5 * time.Minute)
@@ -77,52 +57,44 @@ func ClassifyAgentFailure(log []byte, now time.Time) AgentFailure {
 	}
 }
 
-func hasStringMember(value any, key, want string) bool {
-	switch value := value.(type) {
-	case map[string]any:
-		for k, child := range value {
-			if strings.EqualFold(k, key) {
-				if text, ok := child.(string); ok && strings.EqualFold(text, want) {
-					return true
-				}
-			}
-			if hasStringMember(child, key, want) {
-				return true
-			}
-		}
-	case []any:
-		for _, child := range value {
-			if hasStringMember(child, key, want) {
-				return true
-			}
-		}
-	}
-	return false
+// agentEvent is deliberately only the outer protocol envelope. Repository
+// output is embedded inside assistant/user events and may itself contain
+// outage-shaped JSON; recursively scanning it would let a test refund a failed
+// fix and bypass the per-head attempt bound.
+type agentEvent struct {
+	Type     string          `json:"type"`
+	Error    json.RawMessage `json:"error"`
+	ResetsAt json.RawMessage `json:"resetsAt"`
 }
 
-func findUnixMember(value any, key string) (int64, bool) {
-	switch value := value.(type) {
-	case map[string]any:
-		for k, child := range value {
-			if strings.EqualFold(k, key) {
-				switch n := child.(type) {
-				case float64:
-					return int64(n), true
-				case string:
-					unix, err := strconv.ParseInt(n, 10, 64)
-					return unix, err == nil
-				}
-			}
-			if unix, ok := findUnixMember(child, key); ok {
-				return unix, true
-			}
-		}
-	case []any:
-		for _, child := range value {
-			if unix, ok := findUnixMember(child, key); ok {
-				return unix, true
-			}
-		}
+func (e agentEvent) providerUnavailable() bool {
+	if e.Type != "result" && e.Type != "error" {
+		return false
+	}
+	var direct string
+	if json.Unmarshal(e.Error, &direct) == nil {
+		return strings.EqualFold(direct, "rate_limit")
+	}
+	var nested struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(e.Error, &nested) != nil {
+		return false
+	}
+	return strings.EqualFold(nested.Type, "rate_limit_error") ||
+		strings.EqualFold(nested.Type, "overloaded_error")
+}
+
+func (e agentEvent) resetUnix() (int64, bool) {
+	var number json.Number
+	if json.Unmarshal(e.ResetsAt, &number) == nil {
+		unix, err := strconv.ParseInt(string(number), 10, 64)
+		return unix, err == nil
+	}
+	var text string
+	if json.Unmarshal(e.ResetsAt, &text) == nil {
+		unix, err := strconv.ParseInt(text, 10, 64)
+		return unix, err == nil
 	}
 	return 0, false
 }

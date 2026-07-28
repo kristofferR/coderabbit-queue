@@ -136,7 +136,7 @@ func TestProviderOutageUsesFallbackWithoutSpendingAnAttempt(t *testing.T) {
 	body := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$CRQ_FIX_MODEL\" >> " + record + "\n" +
 		"if test \"$CRQ_FIX_MODEL\" = opus; then\n" +
-		"  printf '%s\\n' '{\"error\":\"rate_limit\",\"resetsAt\":4102444800}'\n" +
+		"  printf '%s\\n' '{\"type\":\"result\",\"error\":\"rate_limit\",\"resetsAt\":4102444800}'\n" +
 		"  exit 1\n" +
 		"fi\n"
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
@@ -684,6 +684,16 @@ func TestWatchPassVisitsPrioritizedPRBeforeFairnessRotation(t *testing.T) {
 	}
 	if len(order) == 0 || order[0] != 4 {
 		t.Fatalf("visit order = %v, want prioritized PR 4 first", order)
+	}
+}
+
+func TestPrioritizeDryRunDoesNotReportAMutation(t *testing.T) {
+	cfg := firingConfig()
+	cfg.DryRun = true
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	err := svc.Prioritize(context.Background(), "o/r", 4)
+	if err == nil || !strings.Contains(err.Error(), "dry run") {
+		t.Fatalf("dry-run prioritize error = %v, want an explicit non-success outcome", err)
 	}
 }
 

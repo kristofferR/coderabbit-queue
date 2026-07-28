@@ -78,10 +78,13 @@ func (s *Service) ReportHost(ctx context.Context, roles ...string) {
 
 func cachedToolReports(ctx context.Context, now time.Time) []ToolReport {
 	toolProbeCache.Lock()
-	defer toolProbeCache.Unlock()
 	if len(toolProbeCache.tools) > 0 && toolProbeCache.at.After(now.Add(-HostReportTTL/2)) {
-		return append([]ToolReport(nil), toolProbeCache.tools...)
+		tools := append([]ToolReport(nil), toolProbeCache.tools...)
+		toolProbeCache.Unlock()
+		return tools
 	}
+	toolProbeCache.Unlock()
+
 	tools := make([]ToolReport, 0, len(probedTools))
 	for _, name := range probedTools {
 		t := ToolReport{Name: name}
@@ -90,6 +93,15 @@ func cachedToolReports(ctx context.Context, now time.Time) []ToolReport {
 			t.Version = toolVersion(ctx, path)
 		}
 		tools = append(tools, t)
+	}
+
+	toolProbeCache.Lock()
+	defer toolProbeCache.Unlock()
+	// Another caller may have refreshed the cache while this one was probing.
+	// Keep the first complete result rather than making a slower probe extend
+	// the cache lifetime again.
+	if len(toolProbeCache.tools) > 0 && toolProbeCache.at.After(now.Add(-HostReportTTL/2)) {
+		return append([]ToolReport(nil), toolProbeCache.tools...)
 	}
 	toolProbeCache.at = now
 	toolProbeCache.tools = append(toolProbeCache.tools[:0], tools...)

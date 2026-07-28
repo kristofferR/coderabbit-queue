@@ -170,7 +170,6 @@ func (ic *Icons) avatarURL(ctx context.Context, login string) string {
 	if err != nil {
 		return ""
 	}
-	ic.auth(req)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := ic.do(req)
 	if err != nil {
@@ -203,7 +202,6 @@ func (ic *Icons) fetch(ctx context.Context, rawURL string) ([]byte, string, bool
 	if err != nil {
 		return nil, "", false
 	}
-	ic.auth(req)
 	resp, err := ic.do(req)
 	if err != nil {
 		return nil, "", false
@@ -260,16 +258,17 @@ func (ic *Icons) currentToken(ctx context.Context) string {
 
 func (ic *Icons) do(req *http.Request) (*http.Response, error) {
 	ic.auth(req)
+	usedToken := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
 	resp, err := ic.client.Do(req)
 	if err != nil || resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden ||
-		ic.lookupToken == nil || req.Header.Get("Authorization") == "" {
+		ic.lookupToken == nil {
 		return resp, err
 	}
-	resp.Body.Close()
 	token := ic.lookupToken(req.Context())
-	if token == "" {
+	if token == "" || token == usedToken {
 		return resp, nil
 	}
+	resp.Body.Close()
 	ic.mu.Lock()
 	ic.token = token
 	ic.mu.Unlock()

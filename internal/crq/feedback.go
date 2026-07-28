@@ -350,10 +350,10 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 			}
 			report.Findings = append(report.Findings, dialect.Finding{
 				Bot:       comment.User.Login,
-				Severity:  dialect.SeverityOf(comment.Body),
+				Severity:  dialect.SeverityFor(comment.User.Login, comment.Body),
 				Path:      comment.Path,
 				Line:      firstPositive(comment.Line, comment.OriginalLine),
-				Title:     dialect.TitleOf(comment.Body),
+				Title:     dialect.ReviewTitleFor(comment.User.Login, comment.Body),
 				Body:      strings.TrimSpace(comment.Body),
 				CommentID: comment.ID,
 				ReviewID:  comment.PullRequestReviewID,
@@ -460,7 +460,7 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 		report.Findings = append(report.Findings, dialect.Finding{
 			Bot:       comment.User.Login,
 			Severity:  dialect.SeverityFor(comment.User.Login, comment.Body),
-			Title:     dialect.TitleOf(comment.Body),
+			Title:     dialect.ReviewTitleFor(comment.User.Login, comment.Body),
 			Body:      strings.TrimSpace(comment.Body),
 			CommentID: comment.ID,
 			URL:       comment.URL,

@@ -185,7 +185,7 @@ func (s *Service) Unhold(ctx context.Context, repo string, pr int) (HoldResult, 
 func (s *Service) Prioritize(ctx context.Context, repo string, pr int) error {
 	repo = NormalizeRepo(repo)
 	if s.cfg.DryRun {
-		return nil
+		return fmt.Errorf("dry run: would move %s#%d to the top of the queue", repo, pr)
 	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		if !st.MoveToFront(repo, pr) {

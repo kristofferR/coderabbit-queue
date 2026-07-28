@@ -26,7 +26,12 @@ var markup = regexp.MustCompile(`!\[[^\]]*\]\([^)]*\)` +
 // and displaces the part that differs. It matches the SHAPE rather than any
 // pipe, because a title may contain one: "Support A | B configuration" must not
 // become "B configuration".
-var rubric = regexp.MustCompile(`^[^|]*\b(Correctness|Maintainability|Security|Performance|Reliability|Quality)\b[^|]*\|[^|]*\|[^|]*\|?\s*`)
+const codeRabbitCategoryPattern = `Correctness|Maintainability|Security|Performance|Reliability|Quality|Data Integrity`
+
+var (
+	rubric             = regexp.MustCompile(`^[^|]*\b(` + codeRabbitCategoryPattern + `)\b[^|]*\|[^|]*\|[^|]*\|?\s*`)
+	codeRabbitCategory = regexp.MustCompile(`(?i)\b(` + codeRabbitCategoryPattern + `)\b`)
+)
 
 // severityWord is the vocabulary Bugbot and Macroscope lead with.
 const severityWord = `potential issue|critical|high|medium|low|major|minor|blocker|trivial|info`
@@ -91,7 +96,7 @@ func codeRabbitLabels(body string) ReviewLabels {
 		scale := labelText(parts[1])
 		effort := labelText(parts[2])
 		severity := severityFromLabel(scale)
-		if !codeRabbitCategory(category) || severity == "" {
+		if !isCodeRabbitCategory(category) || severity == "" {
 			continue
 		}
 		return ReviewLabels{Category: category, Severity: severity, Scale: scale, Effort: effort}
@@ -99,17 +104,8 @@ func codeRabbitLabels(body string) ReviewLabels {
 	return ReviewLabels{}
 }
 
-func codeRabbitCategory(category string) bool {
-	lower := strings.ToLower(category)
-	for _, marker := range []string{
-		"correctness", "maintainability", "security", "performance",
-		"reliability", "quality", "data integrity",
-	} {
-		if strings.Contains(lower, marker) {
-			return true
-		}
-	}
-	return false
+func isCodeRabbitCategory(category string) bool {
+	return codeRabbitCategory.MatchString(category)
 }
 
 func codexLabels(body string) ReviewLabels {

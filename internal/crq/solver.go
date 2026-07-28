@@ -56,7 +56,7 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 
 	view := SolverView{
 		Repo: repo, Overridden: has && !own.Empty(),
-		Models: append([]string(nil), cfg.FixModels...),
+		Models: append([]string{}, cfg.FixModels...),
 		Model:  cfg.FixModel, Effort: cfg.FixEffort, Prompt: cfg.FixPrompt,
 		MaxAttempts: cfg.DispatchMaxAttempts, Forks: cfg.DispatchForks,
 		SkipAuthors: sortedKeys(cfg.SkipAuthors),

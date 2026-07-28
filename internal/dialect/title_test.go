@@ -113,6 +113,15 @@ The startup token can expire.`
 	}
 }
 
+func TestCodeRabbitDataIntegrityRubricIsNotATitle(t *testing.T) {
+	body := `_🗄️ Data Integrity & Integration_ | _🟡 Minor_ | _⚡ Quick win_
+
+**Keep an empty model list as an array.**`
+	if got := ReviewTitleFor("coderabbitai[bot]", body); got != "Keep an empty model list as an array." {
+		t.Fatalf("ReviewTitleFor = %q", got)
+	}
+}
+
 func TestReviewLabelsKeepEachBotsNativeScale(t *testing.T) {
 	codex := ReviewLabelsFor("chatgpt-codex-connector[bot]",
 		`**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow)</sub></sub> Preserve fallback ordering**`)

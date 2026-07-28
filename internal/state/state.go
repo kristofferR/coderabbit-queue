@@ -1069,13 +1069,13 @@ func (s *State) MoveToFront(repo string, pr int) bool {
 	if r == nil {
 		return false
 	}
-	min := int64(0)
+	minSeq := int64(0)
 	for _, other := range s.Rounds {
-		if other.Seq < min {
-			min = other.Seq
+		if other.Seq < minSeq {
+			minSeq = other.Seq
 		}
 	}
-	r.Seq = min - 1
+	r.Seq = minSeq - 1
 	s.PutRound(*r)
 	return true
 }

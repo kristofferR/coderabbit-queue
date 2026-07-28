@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 
 /**
  * A single-step confirmation. Consequences come from live state and are stated
@@ -30,6 +30,7 @@ export function Confirm({
   onCancel: () => void;
 }) {
   const [reason, setReason] = useState("");
+  const reasonHintId = useId();
   const blocked = needsReason && reason.trim() === "";
   const panel = useRef<HTMLDivElement>(null);
   const reasonInput = useRef<HTMLInputElement>(null);
@@ -97,13 +98,13 @@ export function Confirm({
               ref={reasonInput}
               required
               aria-invalid={blocked}
-              aria-describedby="confirm-reason-hint"
+              aria-describedby={reasonHintId}
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               placeholder="why — this is what every screen will show"
               className="mt-1 w-full rounded-lg border border-edge bg-[#FBFBFC] px-2.5 py-1.5 text-[13px]"
             />
-            <span id="confirm-reason-hint" className="mt-1 block text-[11.5px] text-faint">
+            <span id={reasonHintId} className="mt-1 block text-[11.5px] text-faint">
               A reason is required and will be shown with this decision.
             </span>
           </label>

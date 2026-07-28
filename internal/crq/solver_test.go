@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -28,6 +29,13 @@ func TestSolverLayering(t *testing.T) {
 	}
 	if view.Agent != "/usr/bin/claude" {
 		t.Errorf("agent = %q, want the fleet's — it is baked into the session script", view.Agent)
+	}
+	raw, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"models":[]`) {
+		t.Fatalf("empty model ranking must be a JSON array: %s", raw)
 	}
 
 	// A fleet default reaches every repository.
