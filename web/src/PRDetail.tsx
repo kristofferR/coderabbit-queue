@@ -685,13 +685,39 @@ export function findingContent(f: Finding): FindingContent {
     );
     description = stripRenderedTitle(description, f.title);
   } else if (bot === "chatgpt-codex-connector") {
-    // The title line contains both the shields.io P badge and the actual title.
-    // The native P value is already a chip, and the title is already above.
+    // Inline comments begin with the badge. Review-body findings add a generic
+    // "Codex Review" heading and a raw blob URL first. Neither belongs in the
+    // explanation; preserve useful source/instruction links in one collapsed
+    // References panel instead.
+    description = description.replace(/^\s*#{1,6}\s*(?:💡\s*)?Codex Review\s*/im, "");
+    const references: string[] = [];
     description = description.replace(
-      /^\s*\*\*<sub><sub>!\[[^\]]*]\([^)]*\)<\/sub><\/sub>\s*[^*\n]*\*\*\s*/i,
+      /^\s*(https:\/\/github\.com\/\S+\/blob\/\S+)\s*$/gim,
+      (_match, url: string) => {
+        references.push(`[Source location](${url})`);
+        return "";
+      },
+    );
+    description = description.replace(
+      /^\s*(AGENTS\.md reference:\s*\[[^\n]+]\([^)]+\))\s*$/gim,
+      (_match, reference: string) => {
+        references.push(reference);
+        return "";
+      },
+    );
+    description = description.replace(
+      /^\s*\*\*<sub><sub>!\[[^\]]*]\([^)]*\)<\/sub><\/sub>\s*[^*\n]*\*\*\s*/im,
       "",
     );
+    description = stripRenderedTitle(description, f.title);
     description = description.replace(/^\s*Useful\?\s*React with[\s\S]*$/im, "");
+    const usefulSections = sections.filter(
+      (section) => !/About Codex in GitHub/i.test(section.title),
+    );
+    sections.splice(0, sections.length, ...usefulSections);
+    if (references.length > 0) {
+      sections.push({ title: "References", body: references.join("\n\n") });
+    }
   } else if (bot === "cursor") {
     description = description.replace(/^\s*\*\*(?:Critical|High|Medium|Low)\s+Severity\*\*\s*/im, "");
     description = stripRenderedTitle(description, f.title);
