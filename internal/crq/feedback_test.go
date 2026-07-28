@@ -971,6 +971,9 @@ func TestThreadFindingsSurfacesUnresolvedAcrossCommits(t *testing.T) {
 	if got[0].ThreadID != "PRRT_x" || got[0].Line != 42 {
 		t.Fatalf("finding mismatch: %#v", got[0])
 	}
+	if got[0].Title != "Potential issue still unfixed." {
+		t.Fatalf("finding title = %q, want reviewer markup removed", got[0].Title)
+	}
 
 	// Resolved and outdated threads are skipped regardless of commit.
 	if got := threadFindings(mk(true, false, "0000oldcommit"), bots); len(got) != 0 {

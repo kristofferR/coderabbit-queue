@@ -362,11 +362,13 @@ func BuildConfig(env map[string]string) (Config, error) {
 	explicitFeedback := strings.TrimSpace(env["CRQ_FEEDBACK_BOTS"]) != ""
 	cfg.FeedbackBotsExplicit = explicitFeedback
 	if !explicitFeedback {
-		// Everyone except a primary the operator deliberately left out of
-		// CRQ_REQUIRED_BOTS. That omission is how you say "do not wait for
-		// CodeRabbit here", and surfacing its findings anyway would put the round
-		// back to work over a reviewer nobody asked for.
-		cfg.FeedbackBots = cfg.reviewerLogins(func(r Reviewer) bool { return r.Required || !r.Metered() })
+		// Requiredness decides convergence, not visibility. An optional reviewer
+		// still ran and its unresolved findings are still work; hiding them made
+		// the dashboard claim two open threads on a PR where GitHub had seventy.
+		// PrimaryOff and co-reviewer selection remove reviewers from this list
+		// structurally, while an explicit CRQ_FEEDBACK_BOTS remains the escape
+		// hatch for fleets that intentionally want a narrower feed.
+		cfg.FeedbackBots = cfg.reviewerLogins(func(Reviewer) bool { return true })
 	}
 	if len(cfg.FixModels) > 0 {
 		cfg.FixModel = cfg.FixModels[0]

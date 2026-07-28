@@ -48,6 +48,11 @@ func TestThreadTitleReadsAsText(t *testing.T) {
 			"**Preserve `__init__` ordering**\n\nDetail.",
 			"Preserve __init__ ordering",
 		},
+		{
+			"code span before punctuation",
+			"**Handle no-op changes in `SetFleetSolver`.**\n\nDetail.",
+			"Handle no-op changes in SetFleetSolver.",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := ThreadTitle(true, tc.body); got != tc.want {
@@ -69,6 +74,59 @@ func TestThreadTitleReadsAsText(t *testing.T) {
 	}
 	if strings.Contains(wide, "\uFFFD") {
 		t.Errorf("truncation split a character: %q", wide)
+	}
+}
+
+func TestReviewLabelsComeFromTheRubricNotTheExplanation(t *testing.T) {
+	body := `_🎯 Functional Correctness_ | _🟡 Minor_ | _⚡ Quick win_
+
+**Preserve the setting.**
+
+This touches a major code path, but the finding itself is minor.`
+	labels := ReviewLabelsFor("coderabbitai[bot]", body)
+	if labels.Category != "Functional Correctness" || labels.Severity != "minor" ||
+		labels.Scale != "Minor" || labels.Effort != "Quick win" {
+		t.Fatalf("labels = %+v", labels)
+	}
+	if got := SeverityFor("coderabbitai[bot]", body); got != "minor" {
+		t.Fatalf("SeverityFor = %q, want rubric severity minor", got)
+	}
+}
+
+func TestCodeRabbitTitleIgnoresAnalysisBeforeFinding(t *testing.T) {
+	body := `_🔒 Security & Privacy_ | _🟠 Major_ | _⚡ Quick win_
+
+<details>
+<summary>🧩 Analysis chain</summary>
+
+` + "```shell" + `
+# How is the token resolved, and is it re-read anywhere else?
+rg LookupToken
+` + "```" + `
+</details>
+
+**Refresh the GitHub token before using cached icon misses.**
+
+The startup token can expire.`
+	if got := ReviewTitleFor("coderabbitai[bot]", body); got != "Refresh the GitHub token before using cached icon misses." {
+		t.Fatalf("ReviewTitleFor = %q", got)
+	}
+}
+
+func TestReviewLabelsKeepEachBotsNativeScale(t *testing.T) {
+	codex := ReviewLabelsFor("chatgpt-codex-connector[bot]",
+		`**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow)</sub></sub> Preserve fallback ordering**`)
+	if codex.Scale != "P2" || codex.Severity != "potential" || codex.Category != "" {
+		t.Fatalf("codex labels = %+v", codex)
+	}
+	if got := SeverityFor("chatgpt-codex-connector[bot]",
+		`![P2 Badge](https://img.shields.io/badge/P2-yellow) this mentions a major path`); got != "potential" {
+		t.Fatalf("Codex SeverityFor = %q, want P2/potential", got)
+	}
+
+	bugbot := ReviewLabelsFor("cursor[bot]", "**High Severity**\n\nA nil map write.")
+	if bugbot.Scale != "High" || bugbot.Severity != "major" {
+		t.Fatalf("bugbot labels = %+v", bugbot)
 	}
 }
 

@@ -286,7 +286,7 @@ func (c Config) ForRepo(ov RepoReviewers) Config {
 	out.Reviewers = buildReviewers(out.Bot, out.ReviewCommand, out.RequiredBots, out.CoBots, out.PrimaryOff)
 	out.RequiredBots = out.reviewerLogins(func(r Reviewer) bool { return r.Required })
 	if !c.FeedbackBotsExplicit {
-		out.FeedbackBots = out.reviewerLogins(func(r Reviewer) bool { return r.Required || !r.Metered() })
+		out.FeedbackBots = out.reviewerLogins(func(Reviewer) bool { return true })
 	}
 	return out
 }

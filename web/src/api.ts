@@ -321,6 +321,9 @@ export type Finding = {
   id: string;
   bot: string;
   severity: string;
+  scale?: string;
+  category?: string;
+  effort?: string;
   path?: string;
   line?: number;
   title: string;

@@ -78,6 +78,26 @@ func TestDispatchClaim(t *testing.T) {
 	}
 }
 
+func TestNormalizePrunesExpiredDispatchIndex(t *testing.T) {
+	now := time.Now().UTC()
+	st := New()
+	st.RememberDispatch("o/r", 1, DispatchClaim{
+		Host: "dead", Token: "old", At: now.Add(-time.Hour), Heartbeat: now.Add(-time.Hour), Attempts: 3,
+	})
+	st.RememberDispatch("o/r", 2, DispatchClaim{
+		Host: "live", Token: "new", At: now.Add(-time.Minute), Heartbeat: now.Add(-time.Minute), Attempts: 1,
+	})
+
+	st.Normalize(now)
+
+	if _, ok := st.Dispatches[Key("o/r", 1)]; ok {
+		t.Fatal("expired cross-archive dispatch index survived normalization")
+	}
+	if _, ok := st.Dispatches[Key("o/r", 2)]; !ok {
+		t.Fatal("live dispatch index was pruned")
+	}
+}
+
 func TestDispatchModelFallbackRefundsProviderOutages(t *testing.T) {
 	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
 	reset := now.Add(time.Hour)

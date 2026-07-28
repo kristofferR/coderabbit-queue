@@ -3,6 +3,7 @@ package dialect
 import (
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // markup matches the wrappers a bot puts AROUND its title: badge images, the
@@ -28,7 +29,7 @@ var markup = regexp.MustCompile(`!\[[^\]]*\]\([^)]*\)` +
 var rubric = regexp.MustCompile(`^[^|]*\b(Correctness|Maintainability|Security|Performance|Reliability|Quality)\b[^|]*\|[^|]*\|[^|]*\|?\s*`)
 
 // severityWord is the vocabulary Bugbot and Macroscope lead with.
-const severityWord = `critical|high|medium|low|major|minor|blocker|trivial|info`
+const severityWord = `potential issue|critical|high|medium|low|major|minor|blocker|trivial|info`
 
 // severityOnly matches a title that is nothing but a severity label — "High
 // Severity", "Critical" — which carries nothing a severity field does not.
@@ -37,6 +38,141 @@ var severityOnly = regexp.MustCompile(`(?i)^\W*(` + severityWord + `)(\s+severit
 // severityPrefix matches a leading severity label, which Macroscope puts in
 // front of the path on its first line.
 var severityPrefix = regexp.MustCompile(`(?i)^\W*(` + severityWord + `)(\s+severity)?\b[\s:—-]*`)
+
+var (
+	codexPriority   = regexp.MustCompile(`(?i)(?:P([0-3])\s+Badge|badge/P([0-3])(?:-|$))`)
+	bugbotScale     = regexp.MustCompile(`(?im)^\s*\*\*(Critical|High|Medium|Low)\s+Severity\*\*`)
+	detailsBlock    = regexp.MustCompile(`(?is)<details(?:\s[^>]*)?>.*?</details>`)
+	macroscopeScale = regexp.MustCompile(
+		`(?im)^\s*\W*\*\*(Critical|High|Medium|Low)\*\*`,
+	)
+)
+
+// ReviewLabels are the independent labels in a reviewer's rubric header.
+// Requiredness and actionability live elsewhere; these are presentation facts
+// the reviewer explicitly wrote, such as "Functional Correctness | Minor |
+// Quick win".
+type ReviewLabels struct {
+	Category string
+	Severity string
+	Scale    string
+	Effort   string
+}
+
+// ReviewLabelsFor reads the labels in one reviewer's own dialect. Do not merge
+// these formats: CodeRabbit's "Minor" and Codex's "P2" mean similar urgency but
+// are different scales the UI should preserve.
+func ReviewLabelsFor(bot, body string) ReviewLabels {
+	switch NormalizeBotName(bot) {
+	case "coderabbitai":
+		return codeRabbitLabels(body)
+	case "chatgpt-codex-connector":
+		return codexLabels(body)
+	case "cursor":
+		return singleScaleLabels(body, bugbotScale)
+	case "macroscopeapp":
+		return singleScaleLabels(body, macroscopeScale)
+	default:
+		return ReviewLabels{}
+	}
+}
+
+// codeRabbitLabels reads the three-part rubric without letting words deep in
+// the explanation override it. CodeRabbit routinely writes "Minor" in the
+// header and later mentions a "major" code path; scanning the whole body made
+// every such finding render as Major.
+func codeRabbitLabels(body string) ReviewLabels {
+	for _, line := range strings.Split(body, "\n") {
+		parts := strings.Split(line, "|")
+		if len(parts) != 3 {
+			continue
+		}
+		category := labelText(parts[0])
+		scale := labelText(parts[1])
+		effort := labelText(parts[2])
+		severity := severityFromLabel(scale)
+		if !codeRabbitCategory(category) || severity == "" {
+			continue
+		}
+		return ReviewLabels{Category: category, Severity: severity, Scale: scale, Effort: effort}
+	}
+	return ReviewLabels{}
+}
+
+func codeRabbitCategory(category string) bool {
+	lower := strings.ToLower(category)
+	for _, marker := range []string{
+		"correctness", "maintainability", "security", "performance",
+		"reliability", "quality", "data integrity",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexLabels(body string) ReviewLabels {
+	match := codexPriority.FindStringSubmatch(body)
+	if match == nil {
+		return ReviewLabels{}
+	}
+	priority := match[1]
+	if priority == "" {
+		priority = match[2]
+	}
+	severity := map[string]string{"0": "critical", "1": "major", "2": "potential", "3": "minor"}[priority]
+	return ReviewLabels{Severity: severity, Scale: "P" + priority}
+}
+
+func singleScaleLabels(body string, pattern *regexp.Regexp) ReviewLabels {
+	match := pattern.FindStringSubmatch(body)
+	if match == nil {
+		return ReviewLabels{}
+	}
+	scale := match[1]
+	return ReviewLabels{Severity: severityFromLabel(scale), Scale: scale}
+}
+
+func labelText(label string) string {
+	label = strings.Trim(strings.TrimSpace(label), "_*` ")
+	runes := []rune(label)
+	for len(runes) > 0 && !unicode.IsLetter(runes[0]) && !unicode.IsNumber(runes[0]) {
+		runes = runes[1:]
+	}
+	return strings.TrimSpace(string(runes))
+}
+
+func severityFromLabel(label string) string {
+	lower := strings.ToLower(label)
+	switch {
+	case strings.Contains(lower, "critical"), strings.Contains(lower, "blocker"):
+		return "critical"
+	case strings.Contains(lower, "major"), strings.Contains(lower, "high"):
+		return "major"
+	case strings.Contains(lower, "potential"), strings.Contains(lower, "medium"):
+		return "potential"
+	case strings.Contains(lower, "minor"), strings.Contains(lower, "low"), strings.Contains(lower, "trivial"):
+		return "minor"
+	default:
+		return ""
+	}
+}
+
+// ReviewTitleFor reads a title in one reviewer's dialect. In particular,
+// CodeRabbit may put an Analysis chain before the actual finding; shell
+// comments and bold labels inside that collapsed block are implementation
+// detail, never title candidates.
+func ReviewTitleFor(bot, body string) string {
+	switch NormalizeBotName(bot) {
+	case "coderabbitai":
+		return ThreadTitle(true, detailsBlock.ReplaceAllString(body, ""))
+	case "chatgpt-codex-connector", "cursor", "macroscopeapp":
+		return ThreadTitle(true, body)
+	default:
+		return ThreadTitle(true, body)
+	}
+}
 
 // ThreadTitle reduces a review comment to one readable line, per bot.
 //
@@ -156,6 +292,11 @@ func cleanTitle(title string) string {
 	// renders it as a replacement character.
 	title = strings.ToValidUTF8(title, "")
 	title = strings.Join(strings.Fields(markup.ReplaceAllString(title, " ")), " ")
+	// A title is already rendered separately from its Markdown body. Backticks
+	// that survive beside punctuation show up literally (and an unmatched one
+	// can consume the rest of the line in a Markdown renderer), so retain the
+	// identifier but not its source-format delimiter.
+	title = strings.ReplaceAll(title, "`", "")
 	if trimmed := strings.TrimSpace(rubric.ReplaceAllString(title, "")); trimmed != "" {
 		title = trimmed
 	}

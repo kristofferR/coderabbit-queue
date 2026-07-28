@@ -28,6 +28,15 @@ func SeverityOf(text string) string {
 	}
 }
 
+// SeverityFor prefers the reviewer's structured scale, then falls back to the
+// generic vocabulary for formats without one.
+func SeverityFor(bot, text string) string {
+	if labels := ReviewLabelsFor(bot, text); labels.Severity != "" {
+		return labels.Severity
+	}
+	return SeverityOf(text)
+}
+
 // FloorSeverity raises sev to at least floor by rank ("unknown" ranks lowest),
 // so callers never compare severity literals themselves.
 func FloorSeverity(sev, floor string) string {

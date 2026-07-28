@@ -447,7 +447,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		}
 		report.Findings = append(report.Findings, dialect.Finding{
 			Bot:       comment.User.Login,
-			Severity:  dialect.SeverityOf(comment.Body),
+			Severity:  dialect.SeverityFor(comment.User.Login, comment.Body),
 			Title:     dialect.TitleOf(comment.Body),
 			Body:      strings.TrimSpace(comment.Body),
 			CommentID: comment.ID,
@@ -1343,10 +1343,10 @@ func threadFindings(thread reviewThread, bots map[string]struct{}) []dialect.Fin
 		}
 		out = append(out, dialect.Finding{
 			Bot:       comment.Author.Login,
-			Severity:  dialect.SeverityOf(comment.Body),
+			Severity:  dialect.SeverityFor(comment.Author.Login, comment.Body),
 			Path:      firstNonEmpty(thread.Path, comment.Path),
 			Line:      firstPositive(thread.Line, comment.Line, comment.OriginalLine),
-			Title:     dialect.TitleOf(comment.Body),
+			Title:     dialect.ReviewTitleFor(comment.Author.Login, comment.Body),
 			Body:      strings.TrimSpace(comment.Body),
 			ThreadID:  thread.ID,
 			CommentID: comment.DatabaseID,
@@ -1390,6 +1390,19 @@ func dedupeFindings(in []dialect.Finding, suppressPromptAt, settledStableIDs map
 	for _, finding := range in {
 		finding.Body = strings.TrimSpace(finding.Body)
 		finding.Title = strings.TrimSpace(finding.Title)
+		labels := dialect.ReviewLabelsFor(finding.Bot, finding.Body)
+		if labels.Category != "" {
+			finding.Category = labels.Category
+		}
+		if labels.Severity != "" {
+			finding.Severity = labels.Severity
+		}
+		if labels.Scale != "" {
+			finding.Scale = labels.Scale
+		}
+		if labels.Effort != "" {
+			finding.Effort = labels.Effort
+		}
 		if !dialect.IsActionableFinding(finding) {
 			continue
 		}

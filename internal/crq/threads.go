@@ -57,7 +57,11 @@ func (s *Service) OpenThreads(ctx context.Context, repo string, pr int) ([]OpenT
 			} else {
 				open.Author = first.Author.Login
 			}
-			open.Title = dialect.ThreadTitle(isBot, first.Body)
+			if isBot {
+				open.Title = dialect.ReviewTitleFor(first.Author.Login, first.Body)
+			} else {
+				open.Title = dialect.ThreadTitle(false, first.Body)
+			}
 			open.URL = first.URL
 			if open.Path == "" {
 				open.Path = first.Path

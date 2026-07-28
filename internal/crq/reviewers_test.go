@@ -198,22 +198,20 @@ func TestDerivationLosesNothing(t *testing.T) {
 		}
 	})
 
-	t.Run("an omitted primary contributes no findings", func(t *testing.T) {
-		// Leaving the primary out of CRQ_REQUIRED_BOTS is how an operator says
-		// "do not wait for CodeRabbit here". Deriving feedback from every reviewer
-		// put it back, so its findings would return code 10 and start a new round
-		// over a reviewer nobody asked for.
+	t.Run("an optional primary still contributes findings", func(t *testing.T) {
+		// Leaving the primary out of CRQ_REQUIRED_BOTS says not to wait for it.
+		// It does not make findings from a review that DID run disappear.
 		cfg := isolatedConfig(t, map[string]string{
 			"CRQ_REQUIRED_BOTS": "chatgpt-codex-connector[bot]",
 		})
+		found := false
 		for _, login := range cfg.FeedbackBots {
 			if login == cfg.Bot {
-				t.Errorf("FeedbackBots = %v, want the omitted primary excluded", cfg.FeedbackBots)
+				found = true
 			}
 		}
-		// The co-reviewers it did ask for are still there.
-		if len(cfg.FeedbackBots) == 0 {
-			t.Error("FeedbackBots is empty; the required co-reviewer must still report")
+		if !found {
+			t.Errorf("FeedbackBots = %v, want the optional primary surfaced", cfg.FeedbackBots)
 		}
 	})
 

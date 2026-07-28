@@ -1988,6 +1988,16 @@ func (s *State) Normalize(now time.Time) {
 	if s.AutofixByHost != nil {
 		s.summarizeAutofix(now)
 	}
+	// Dispatches is the cross-archive ownership index, not attempt history.
+	// Once a claim's heartbeat expires scheduling already treats it as free, so
+	// retaining it can only grow state and let an older dashboard render a dead
+	// session forever. The round (current or archived) retains the attempt
+	// counters used by a replacement claim.
+	for key, claim := range s.Dispatches {
+		if !claim.Live(now) {
+			delete(s.Dispatches, key)
+		}
+	}
 	// Fold both hold representations before repairing the slot. The top-level
 	// mirror may be the only copy left after a pre-FireSlot-tolerance binary
 	// normalized and rewrote an orphaned hold.
