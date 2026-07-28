@@ -64,6 +64,8 @@ func IsReviewFindingWithdrawn(text string) bool {
 	}
 	t := NormalizeReviewText(text)
 	return strings.Contains(t, "should be withdrawn") ||
+		strings.Contains(t, "finding remains withdrawn") ||
+		strings.Contains(t, "finding is withdrawn") ||
 		strings.Contains(t, "withdrawing this") ||
 		strings.Contains(t, "withdrawing the finding") ||
 		strings.Contains(t, "withdrawing my") ||
