@@ -673,6 +673,8 @@ func (s *Service) dispatchWithStart(
 		fmt.Sprintf("CRQ_DISPATCH_PR=%d", report.PR),
 		"CRQ_DISPATCH_HEAD="+report.Head,
 		"CRQ_DISPATCH_FINDINGS="+findingsPath,
+		// The agent and prompt come from the unit's environment and are already
+		// in os.Environ(); only the per-repository half is added here.
 		"CRQ_FIX_MODEL="+solver.FixModel,
 		"CRQ_FIX_EFFORT="+solver.FixEffort,
 		"CRQ_FIX_PROMPT="+solver.FixPrompt,

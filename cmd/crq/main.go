@@ -295,6 +295,14 @@ func run(ctx context.Context, args []string) int {
 		}
 		printJSON(est)
 		return 0
+	case "fix-session":
+		// What `crq watch --dispatch` runs per pull request. It execs the agent,
+		// so this call does not return on success.
+		if err := crq.FixSession(ctx, cfg); err != nil {
+			fatal(err)
+			return 1
+		}
+		return 0
 	case "solver":
 		if err := cfg.RequireState(); err != nil {
 			fatal(err)
@@ -1066,6 +1074,24 @@ subscriptions.
 The diff basis is the whole head. Macroscope bills incrementally after its first
 review of a pull request, so this is exact on the first round and an upper bound
 on later ones.
+`)
+	case "fix-session":
+		fmt.Print(`crq fix-session
+
+One fix session, run by the watcher for one pull request. You do not call this;
+'crq autofix install' points the watcher at it.
+
+It exists so crq is one binary. The install used to write two bash scripts — a
+wrapper that started the watcher and a session script that assembled the
+agent's command line — so three things had to agree about the configuration and
+two of them were generated text on disk that no test ever ran. A setting added
+to crq reached a fleet only after every host reinstalled, and nothing said which
+hosts had not.
+
+It reads the dispatcher's environment: the agent and prompt file from the unit,
+the model, effort and extra instruction from the repository's solver settings.
+An unset model or effort adds no flag at all rather than an empty one, which
+every agent rejects differently and none ignores.
 `)
 	case "solver":
 		fmt.Print(`crq solver <repo>

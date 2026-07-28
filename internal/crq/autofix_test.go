@@ -38,7 +38,7 @@ func TestInstallAutofixPlansWithoutWriting(t *testing.T) {
 	if len(plan.Repos) != 1 || plan.Repos[0] != "owner/name" {
 		t.Errorf("repos = %v, want the configured fleet", plan.Repos)
 	}
-	for _, path := range []string{plan.Prompt, plan.Wrapper, plan.Unit, plan.LogDir} {
+	for _, path := range []string{plan.Prompt, plan.Binary, plan.Unit, plan.LogDir} {
 		if path == "" {
 			t.Fatalf("plan = %+v, want every path named so --dry-run is reviewable", plan)
 		}
@@ -267,7 +267,7 @@ func TestAutofixUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 		Trigger: engine.TriggerAlways, Required: true, SelfHealGrace: 4 * time.Minute,
 	}}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
-	plan := AutofixInstall{Platform: "linux", Wrapper: "/tmp/crq autofix", LogDir: "/tmp/crq logs"}
+	plan := AutofixInstall{Platform: "linux", Binary: "/tmp/crq autofix", LogDir: "/tmp/crq logs"}
 
 	unit := svc.autofixUnit(plan)
 	for _, want := range []string{
@@ -342,7 +342,7 @@ func TestLaunchdUnitEscapesXMLValues(t *testing.T) {
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 	plan := AutofixInstall{
 		Platform: "darwin",
-		Wrapper:  "/tmp/a&b/crq-autofix",
+		Binary:   "/tmp/a&b/crq",
 		LogDir:   "/tmp/a<b/logs",
 	}
 
@@ -351,7 +351,7 @@ func TestLaunchdUnitEscapesXMLValues(t *testing.T) {
 	if err := xml.Unmarshal([]byte(unit), &document); err != nil {
 		t.Fatalf("launchd unit is not valid XML: %v\n%s", err, unit)
 	}
-	for _, raw := range []string{plan.Wrapper, plan.LogDir, cfg.ReviewCommand} {
+	for _, raw := range []string{plan.Binary, plan.LogDir, cfg.ReviewCommand} {
 		if strings.Contains(unit, raw) {
 			t.Errorf("launchd unit contains unescaped value %q:\n%s", raw, unit)
 		}
@@ -390,7 +390,7 @@ func TestSystemdEnvironmentAssignmentsQuoteWhitespace(t *testing.T) {
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "config with spaces", "env"))
 	t.Setenv("PATH", "/usr/bin:/opt/tools with spaces/bin")
-	plan := AutofixInstall{Platform: "linux", Wrapper: "/tmp/crq-autofix", LogDir: "/tmp/crq"}
+	plan := AutofixInstall{Platform: "linux", Binary: "/tmp/crq", LogDir: "/tmp/crq"}
 
 	unit := svc.autofixUnit(plan)
 	for _, key := range []string{"CRQ_CONFIG", "PATH", "CRQ_REVIEW_CMD"} {
@@ -401,8 +401,10 @@ func TestSystemdEnvironmentAssignmentsQuoteWhitespace(t *testing.T) {
 	if strings.Contains(unit, "Environment=CRQ_CONFIG=") {
 		t.Errorf("CRQ_CONFIG was emitted as an unquoted systemd assignment:\n%s", unit)
 	}
-	if !strings.Contains(unit, `ExecStart="/tmp/crq-autofix"`) {
-		t.Errorf("ExecStart executable is not quoted:\n%s", unit)
+	// One binary, twice: it starts the watcher and it runs each fix session.
+	// Every word quoted, since a path with a space in it is a path.
+	if !strings.Contains(unit, `ExecStart="/tmp/crq" "watch" "--" "/tmp/crq" "fix-session"`) {
+		t.Errorf("ExecStart is not the crq binary, quoted, twice:\n%s", unit)
 	}
 }
 
@@ -452,46 +454,67 @@ func TestInstallAutofixNamesALogDirectory(t *testing.T) {
 // they should use — that belongs in the agent's own config or in --agent-args.
 // Getting this wrong is invisible until a session starts and dies on a flag the
 // binary does not have.
-func TestAgentInvocationPerAgent(t *testing.T) {
-	prompt := "/tmp/p.txt"
+func TestFixSessionArgvPerAgent(t *testing.T) {
+	prompt := "do the thing"
 
-	claude, err := agentInvocation("/usr/bin/claude", prompt, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"-p ", "bypassPermissions", "stream-json", prompt} {
-		if !strings.Contains(claude, want) {
-			t.Errorf("claude invocation %q missing %q", claude, want)
+	claude := fixSessionArgv("/usr/bin/claude", prompt, nil, "", "")
+	joined := strings.Join(claude, " ")
+	for _, want := range []string{"-p", "bypassPermissions", "stream-json", prompt} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("claude argv %q missing %q", joined, want)
 		}
 	}
 
-	codex, err := agentInvocation("/usr/bin/codex", prompt, []string{"-c", "model_reasoning_effort=high"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "model_reasoning_effort=high", prompt} {
-		if !strings.Contains(codex, want) {
-			t.Errorf("codex invocation %q missing %q", codex, want)
+	codex := fixSessionArgv("/usr/bin/codex", prompt, []string{"--foo"}, "", "")
+	joined = strings.Join(codex, " ")
+	for _, want := range []string{"exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--foo", prompt} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("codex argv %q missing %q", joined, want)
 		}
 	}
-	// Codex takes the prompt as a positional; claude's -p is not its flag.
-	if strings.Contains(codex, "--permission-mode") || strings.Contains(codex, "-p ") {
-		t.Errorf("codex invocation carries claude's flags: %q", codex)
+	// Codex takes the prompt as a positional, and last; claude's flags are not
+	// its flags.
+	if codex[len(codex)-1] != prompt {
+		t.Errorf("codex argv must end with the prompt, got %q", codex[len(codex)-1])
+	}
+	if strings.Contains(joined, "--permission-mode") {
+		t.Errorf("codex argv carries claude's flags: %q", joined)
 	}
 
-	// No model anywhere: a queue does not choose the model.
-	for _, inv := range []string{claude, codex} {
-		if strings.Contains(inv, "--model") || strings.Contains(inv, "-m ") {
-			t.Errorf("invocation hardcodes a model: %q", inv)
+	// No model or effort unless the repository asked for one. An empty value
+	// must add no flag at all: every agent rejects an empty one differently and
+	// none ignores it, so the session would die on its first argument and the
+	// fix would silently never happen.
+	for _, argv := range [][]string{claude, codex} {
+		if slices.Contains(argv, "--model") || slices.Contains(argv, "--effort") {
+			t.Errorf("argv invents a model or effort: %v", argv)
+		}
+		for _, a := range argv {
+			if a == "" {
+				t.Errorf("argv carries an empty word: %v", argv)
+			}
 		}
 	}
 
-	// An unknown executable may be a self-contained prompt-taking wrapper.
-	if got, err := agentInvocation("/usr/bin/mystery", prompt, nil); err != nil || !strings.Contains(got, prompt) {
-		t.Errorf("a self-contained wrapper should be honoured, got %q err=%v", got, err)
+	// And they are applied in each agent's own spelling when asked for.
+	claude = fixSessionArgv("/usr/bin/claude", prompt, nil, "opus", "high")
+	if !slices.Contains(claude, "--model") || !slices.Contains(claude, "opus") ||
+		!slices.Contains(claude, "--effort") || !slices.Contains(claude, "high") {
+		t.Errorf("claude argv missing the requested model/effort: %v", claude)
 	}
-	if got, err := agentInvocation("/usr/bin/mystery", prompt, []string{"--run"}); err != nil || !strings.Contains(got, "--run") {
-		t.Errorf("an unknown agent with explicit args should be honoured, got %q err=%v", got, err)
+	codex = fixSessionArgv("/usr/bin/codex", prompt, nil, "gpt-5", "high")
+	if !slices.Contains(codex, `model_reasoning_effort="high"`) {
+		t.Errorf("codex argv missing its own effort spelling: %v", codex)
+	}
+
+	// An unknown executable is a self-contained prompt-taking wrapper: no flags
+	// are invented for it.
+	mystery := fixSessionArgv("/usr/bin/mystery", prompt, []string{"--run"}, "opus", "high")
+	if mystery[len(mystery)-1] != prompt || !slices.Contains(mystery, "--run") {
+		t.Errorf("unknown agent argv = %v, want its own args and the prompt last", mystery)
+	}
+	if slices.Contains(mystery, "--model") {
+		t.Errorf("flags were invented for an unknown agent: %v", mystery)
 	}
 }
 

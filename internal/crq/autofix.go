@@ -27,20 +27,22 @@ var fixPrompt string
 type AutofixInstall struct {
 	Platform string `json:"platform"`
 	Prompt   string `json:"prompt"`
-	// Wrapper starts the watcher; Session is the one fix session it runs per
-	// pull request, and the only one that sees the repository's settings.
-	Wrapper   string `json:"wrapper"`
-	Session   string `json:"session"`
+	// Binary is the crq the unit runs. There is no wrapper script and no
+	// session script: the unit runs `crq watch -- crq fix-session`, so one
+	// binary starts the watcher and one binary runs each session. Two generated
+	// bash files used to sit in between, which meant three things had to agree
+	// about the configuration and two of them were text on disk no test ever
+	// ran — a setting reached a fleet only after every host reinstalled, and
+	// nothing said which had not.
+	Binary    string `json:"binary"`
 	Unit      string `json:"unit"`
 	LogDir    string `json:"log_dir"`
 	Workspace string `json:"workspace,omitempty"`
 	Agent     string `json:"agent"`
-	// Invocation is the exact command the wrapper runs, so --dry-run shows what
-	// the fix session will actually be — including the model, which is the
-	// agent's business and not crq's to hardcode.
+	// Invocation is the exact command the unit runs, so --dry-run shows it.
 	Invocation string `json:"invocation,omitempty"`
-	// AgentArgs are the operator's extra arguments, carried so the session
-	// script can be regenerated from the plan alone.
+	// AgentArgs are the operator's extra arguments, passed to the session
+	// through the unit's environment.
 	AgentArgs []string `json:"agent_args,omitempty"`
 	Repos     []string `json:"repos"`
 	Commands  []string `json:"commands"`
@@ -117,8 +119,6 @@ func AutofixPlan(cfg Config, agent string, agentArgs []string, repos []string, d
 		Platform:  runtime.GOOS,
 		LogDir:    logDir,
 		Prompt:    filepath.Join(home, ".local", "share", "crq", "fix-prompt.txt"),
-		Wrapper:   filepath.Join(home, ".local", "bin", "crq-autofix"),
-		Session:   filepath.Join(home, ".local", "bin", "crq-fix-session"),
 		Agent:     agent,
 		AgentArgs: agentArgs,
 		Repos:     repos,
@@ -163,22 +163,29 @@ func AutofixPlan(cfg Config, agent string, agentArgs []string, repos []string, d
 			plan.Commands = append([]string{"systemctl --user disable --now crq-drain"}, plan.Commands...)
 		}
 	}
-	invocation, err := agentInvocation(agent, plan.Prompt, agentArgs)
+	self, err := os.Executable()
 	if err != nil {
-		return plan, err
+		return plan, fmt.Errorf("resolving the crq binary: %w", err)
 	}
-	plan.Invocation = invocation
-
+	if resolved, rerr := filepath.EvalSymlinks(self); rerr == nil {
+		self = resolved
+	}
+	plan.Binary = self
+	// What the unit runs, shown by --dry-run: one binary starting the watcher,
+	// and the same binary running each session.
+	plan.Invocation = strings.Join(autofixArgv(plan), " ")
 	return plan, nil
+}
+
+// autofixArgv is the unit's command line: the watcher, told to dispatch each
+// fix session by running crq again.
+func autofixArgv(plan AutofixInstall) []string {
+	return []string{plan.Binary, "watch", "--", plan.Binary, "fix-session"}
 }
 
 // applyAutofix writes the plan to disk and starts the service.
 func (s *Service) applyAutofix(ctx context.Context, plan AutofixInstall) (AutofixInstall, error) {
 	logDir := plan.LogDir
-	self, err := os.Executable()
-	if err != nil {
-		return plan, err
-	}
 	if err := autofixCanAuthenticate(ctx); err != nil {
 		return plan, err
 	}
@@ -186,47 +193,12 @@ func (s *Service) applyAutofix(ctx context.Context, plan AutofixInstall) (Autofi
 		return plan, err
 	}
 
-	// Two scripts, not one. The wrapper starts the watcher; the SESSION script
-	// is what the watcher runs per pull request, and it is separate precisely so
-	// the per-repository settings can reach it — argv is fixed when the watcher
-	// starts, the session's environment is built per dispatch. Reading the
-	// prompt here rather than in the wrapper also means editing the prompt takes
-	// effect on the next session instead of the next restart.
-	session := fmt.Sprintf(`#!/usr/bin/env bash
-# Installed by "crq autofix install". One fix session.
-#
-# crq sets these per pull request, from the repository's solver settings:
-#   CRQ_FIX_MODEL   the model to use, empty for the agent's own default
-#   CRQ_FIX_EFFORT  reasoning effort, empty for the agent's own default
-#   CRQ_FIX_PROMPT  extra standing instruction for this repository
-set -uo pipefail
-
-prompt="$(cat %s)"
-if [ -n "${CRQ_FIX_PROMPT:-}" ]; then
-  prompt="$prompt
-
-Additional instructions for this repository:
-$CRQ_FIX_PROMPT"
-fi
-
-%s
-`, shellQuote(plan.Prompt), sessionInvocation(plan.Agent, plan.AgentArgs))
-
-	wrapper := fmt.Sprintf(`#!/usr/bin/env bash
-# Installed by "crq autofix install". Runs autofix: crq decides, and a
-# fix session is started for each PR that needs one.
-set -uo pipefail
-exec %s watch -- %s
-`, shellQuote(self), shellQuote(plan.Session))
-
 	for _, f := range []struct {
 		path string
 		body string
 		mode os.FileMode
 	}{
 		{plan.Prompt, fixPrompt, 0o644},
-		{plan.Session, session, 0o755},
-		{plan.Wrapper, wrapper, 0o755},
 		{plan.Unit, s.autofixUnit(plan), 0o644},
 	} {
 		if err := os.MkdirAll(filepath.Dir(f.path), 0o755); err != nil {
@@ -388,7 +360,7 @@ func autofixPath(plan AutofixInstall) string {
 		seen[dir] = true
 		dirs = append(dirs, dir)
 	}
-	paths := []string{plan.Wrapper, plan.Agent}
+	paths := []string{plan.Binary, plan.Agent}
 	if self, err := os.Executable(); err == nil {
 		paths = append(paths, self) // the session runs `crq resolve` itself
 	}
@@ -425,20 +397,24 @@ func (s *Service) autofixEnv(plan AutofixInstall) map[string]string {
 		"CRQ_DISPATCH_CONCURRENCY":   fmt.Sprint(s.cfg.DispatchConcurrency),
 		"CRQ_DISPATCH_FORKS":         strconv.FormatBool(s.cfg.DispatchForks),
 		"CRQ_AUTOREVIEW_SKIP_MARKER": s.cfg.SkipMarker,
-		"CRQ_BOT":                    s.cfg.Bot,
-		"CRQ_REQUIRED_BOTS":          strings.Join(s.cfg.RequiredBots, ","),
-		"CRQ_FEEDBACK_BOTS":          strings.Join(s.cfg.FeedbackBots, ","),
-		"CRQ_REVIEW_CMD":             s.cfg.ReviewCommand,
-		"CRQ_RATELIMIT_CMD":          s.cfg.RateLimitCommand,
-		"CRQ_RL_MARKER":              s.cfg.RateLimitMarker,
-		"CRQ_CAL_REPLY_MARKER":       s.cfg.CalibrationMarker,
-		"CRQ_REVIEW_DONE_MARKER":     s.cfg.ReviewDoneMarker,
-		"CRQ_COMPLETION_MARKER":      s.cfg.CompletionMarker,
-		"CRQ_MIN_INTERVAL":           s.cfg.MinInterval.String(),
-		"CRQ_INFLIGHT_TIMEOUT":       s.cfg.InflightTimeout.String(),
-		"CRQ_POLL":                   s.cfg.PollInterval.String(),
-		"CRQ_FEEDBACK_WAIT_TIMEOUT":  s.cfg.FeedbackWaitTimeout.String(),
-		"CRQ_SETTLE":                 s.cfg.SettleWindow.String(),
+		// The session reads these; there is no script holding them any more.
+		"CRQ_FIX_AGENT":             plan.Agent,
+		"CRQ_FIX_ARGS":              strings.Join(plan.AgentArgs, " "),
+		"CRQ_FIX_PROMPT_FILE":       plan.Prompt,
+		"CRQ_BOT":                   s.cfg.Bot,
+		"CRQ_REQUIRED_BOTS":         strings.Join(s.cfg.RequiredBots, ","),
+		"CRQ_FEEDBACK_BOTS":         strings.Join(s.cfg.FeedbackBots, ","),
+		"CRQ_REVIEW_CMD":            s.cfg.ReviewCommand,
+		"CRQ_RATELIMIT_CMD":         s.cfg.RateLimitCommand,
+		"CRQ_RL_MARKER":             s.cfg.RateLimitMarker,
+		"CRQ_CAL_REPLY_MARKER":      s.cfg.CalibrationMarker,
+		"CRQ_REVIEW_DONE_MARKER":    s.cfg.ReviewDoneMarker,
+		"CRQ_COMPLETION_MARKER":     s.cfg.CompletionMarker,
+		"CRQ_MIN_INTERVAL":          s.cfg.MinInterval.String(),
+		"CRQ_INFLIGHT_TIMEOUT":      s.cfg.InflightTimeout.String(),
+		"CRQ_POLL":                  s.cfg.PollInterval.String(),
+		"CRQ_FEEDBACK_WAIT_TIMEOUT": s.cfg.FeedbackWaitTimeout.String(),
+		"CRQ_SETTLE":                s.cfg.SettleWindow.String(),
 		// The quota timings belong here for the same reason as every other
 		// setting: the service does not inherit the shell that installed it. A
 		// deliberately longer fallback set only in that shell was folded into
@@ -519,7 +495,7 @@ func (s *Service) autofixUnit(plan AutofixInstall) string {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 	<key>Label</key><string>no.kristofferr.crq-autofix</string>
-	<key>ProgramArguments</key><array><string>%s</string></array>
+	<key>ProgramArguments</key><array>%s</array>
 	<key>EnvironmentVariables</key><dict>
 %s	</dict>
 	<key>RunAtLoad</key><true/>
@@ -527,7 +503,7 @@ func (s *Service) autofixUnit(plan AutofixInstall) string {
 	<key>StandardOutPath</key><string>%s/autofix.log</string>
 	<key>StandardErrorPath</key><string>%s/autofix.err</string>
 </dict></plist>
-`, html.EscapeString(plan.Wrapper), entries.String(),
+`, plistArgv(autofixArgv(plan)), entries.String(),
 			html.EscapeString(logDir), html.EscapeString(logDir))
 	}
 	var lines strings.Builder
@@ -554,7 +530,7 @@ StandardError=append:%s/autofix.err
 
 [Install]
 WantedBy=default.target
-`, lines.String(), systemdExecWord(plan.Wrapper), logDir, logDir)
+`, lines.String(), systemdExecLine(autofixArgv(plan)), logDir, logDir)
 }
 
 // systemdExecWord makes one literal word for an ExecStart command line.
@@ -651,4 +627,22 @@ exec %s exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox "$
 		// gets no flags invented for it, but the environment still reaches it.
 		return fmt.Sprintf(`exec %s %s "$prompt"`, shellQuote(agent), args)
 	}
+}
+
+// plistArgv renders a command line as launchd's ProgramArguments entries.
+func plistArgv(argv []string) string {
+	var b strings.Builder
+	for _, a := range argv {
+		fmt.Fprintf(&b, "<string>%s</string>", html.EscapeString(a))
+	}
+	return b.String()
+}
+
+// systemdExecLine renders a command line for ExecStart, one literal word each.
+func systemdExecLine(argv []string) string {
+	words := make([]string, 0, len(argv))
+	for _, a := range argv {
+		words = append(words, systemdExecWord(a))
+	}
+	return strings.Join(words, " ")
 }
