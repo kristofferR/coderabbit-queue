@@ -125,18 +125,19 @@ type RepoRow struct {
 
 // RepoSolver mirrors crq.SolverView on the wire.
 type RepoSolver struct {
-	Overridden  bool              `json:"overridden"`
-	Agent       string            `json:"agent,omitempty"`
-	Models      []string          `json:"models"`
-	Model       string            `json:"model,omitempty"`
-	Effort      string            `json:"effort,omitempty"`
-	Prompt      string            `json:"prompt,omitempty"`
-	MaxAttempts int               `json:"max_attempts"`
-	Forks       bool              `json:"forks"`
-	SkipAuthors []string          `json:"skip_authors"`
-	Sources     map[string]string `json:"sources"`
-	By          string            `json:"by,omitempty"`
-	Lagging     []string          `json:"lagging_hosts,omitempty"`
+	Overridden   bool              `json:"overridden"`
+	Agent        string            `json:"agent,omitempty"`
+	Models       []string          `json:"models"`
+	ModelChoices []string          `json:"model_choices"`
+	Model        string            `json:"model,omitempty"`
+	Effort       string            `json:"effort,omitempty"`
+	Prompt       string            `json:"prompt,omitempty"`
+	MaxAttempts  int               `json:"max_attempts"`
+	Forks        bool              `json:"forks"`
+	SkipAuthors  []string          `json:"skip_authors"`
+	Sources      map[string]string `json:"sources"`
+	By           string            `json:"by,omitempty"`
+	Lagging      []string          `json:"lagging_hosts,omitempty"`
 	// AgentOn says, per host, whether the configured fix agent is reachable
 	// there. Capability, not policy: a repository can be set to a model no
 	// host can run, and the settings alone would never say so.
@@ -636,6 +637,16 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Tim
 		out = append(out, card)
 	}
 	seenCard := map[string]bool{}
+	primaryKey := ""
+	for _, b := range fleetBots {
+		if b.Primary {
+			primaryKey = dialect.NormalizeBotName(b.Login)
+			break
+		}
+	}
+	if primaryKey == "" {
+		primaryKey = dialect.NormalizeBotName(cfg.primaryLogin())
+	}
 	// Start with the effective fleet set, including its current primary. The
 	// startup config is metadata and fallback only; it must not keep the retired
 	// primary marked primary after shared settings replace it.
@@ -655,7 +666,8 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Tim
 			continue
 		}
 		seenCard[key] = true
-		add(r.Login, r.Name, false, false, &r)
+		primary := key == primaryKey
+		add(r.Login, r.Name, primary, primary && r.Metered, &r)
 	}
 	for _, co := range dialect.KnownCoReviewers() {
 		if seenCard[dialect.NormalizeBotName(co.Login)] {

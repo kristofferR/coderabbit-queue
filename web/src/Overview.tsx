@@ -62,6 +62,12 @@ export function OverviewPage({
   const [settingsFor, setSettingsFor] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [prioritizing, setPrioritizing] = useState<string | null>(null);
+  const [prioritizeError, setPrioritizeError] = useState<string | null>(null);
+  const openConfirm = (next: Pending) => {
+    setError(null);
+    setPending(next);
+  };
 
   const run = async (reason: string) => {
     if (!pending) return;
@@ -78,15 +84,17 @@ export function OverviewPage({
     }
   };
   const prioritize = async (repo: string, pr: number) => {
-    setBusy(true);
-    setError(null);
+    const key = `${repo.toLowerCase()}#${pr}`;
+    if (prioritizing) return;
+    setPrioritizing(key);
+    setPrioritizeError(null);
     try {
       const { snapshot } = await act("prioritize", { repo, pr });
       onSnapshot?.(snapshot);
     } catch (e) {
-      setError((e as Error).message);
+      setPrioritizeError((e as Error).message);
     } finally {
-      setBusy(false);
+      setPrioritizing(null);
     }
   };
   // Filtering is client-side on purpose: the whole snapshot is already here,
@@ -136,9 +144,9 @@ export function OverviewPage({
           )}
         </div>
       ))}
-      {error && !pending && (
+      {prioritizeError && (
         <div className="mb-3.5 rounded-[10px] border border-bad-edge bg-bad-bg px-4 py-2.5 text-[13.5px] text-bad">
-          {error}
+          {prioritizeError}
         </div>
       )}
 
@@ -226,9 +234,9 @@ export function OverviewPage({
                   <Td>
                     <RowActions
                       onSettings={() => setSettingsFor(r.repo)}
-                      onHold={() => setPending({ kind: "hold", repo: r.repo, pr: r.pr })}
+                      onHold={() => openConfirm({ kind: "hold", repo: r.repo, pr: r.pr })}
                       onCancel={() =>
-                        setPending({
+                        openConfirm({
                           kind: "cancel",
                           repo: r.repo,
                           pr: r.pr,
@@ -294,10 +302,11 @@ export function OverviewPage({
                   <Td>
                     <RowActions
                       onPrioritize={() => prioritize(q.repo, q.pr)}
+                      prioritizing={prioritizing === `${q.repo.toLowerCase()}#${q.pr}`}
                       onSettings={() => setSettingsFor(q.repo)}
-                      onHold={() => setPending({ kind: "hold", repo: q.repo, pr: q.pr })}
+                      onHold={() => openConfirm({ kind: "hold", repo: q.repo, pr: q.pr })}
                       onCancel={() =>
-                        setPending({ kind: "cancel", repo: q.repo, pr: q.pr, phase: "queued", slot: false })
+                        openConfirm({ kind: "cancel", repo: q.repo, pr: q.pr, phase: "queued", slot: false })
                       }
                     />
                   </Td>
@@ -342,7 +351,7 @@ export function OverviewPage({
                   <Td>
                     <button
                       type="button"
-                      onClick={() => setPending({ kind: "unhold", repo: h.repo, pr: h.pr })}
+                      onClick={() => openConfirm({ kind: "unhold", repo: h.repo, pr: h.pr })}
                       className="text-[12.5px] text-acc hover:underline"
                     >
                       Unhold
@@ -560,22 +569,25 @@ function RowActions({
   onHold,
   onCancel,
   onSettings,
+  prioritizing,
 }: {
   onPrioritize?: () => void;
   onHold: () => void;
   onCancel: () => void;
   onSettings?: () => void;
+  prioritizing?: boolean;
 }) {
   return (
     <span className="flex justify-end gap-2.5 whitespace-nowrap opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
       {onPrioritize && (
         <button
           type="button"
+          disabled={prioritizing}
           onClick={onPrioritize}
           title="move to top of review and autofix queues"
-          className="text-[12.5px] text-acc hover:underline"
+          className="text-[12.5px] text-acc hover:underline disabled:opacity-45"
         >
-          ↑ Top
+          {prioritizing ? "Moving…" : "↑ Top"}
         </button>
       )}
       {onSettings && (

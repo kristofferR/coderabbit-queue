@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -20,13 +21,14 @@ type SolverView struct {
 	// and effort below are being handed to.
 	Agent string `json:"agent,omitempty"`
 
-	Models      []string `json:"models"`
-	Model       string   `json:"model,omitempty"`
-	Effort      string   `json:"effort,omitempty"`
-	Prompt      string   `json:"prompt,omitempty"`
-	MaxAttempts int      `json:"max_attempts"`
-	Forks       bool     `json:"forks"`
-	SkipAuthors []string `json:"skip_authors"`
+	Models       []string `json:"models"`
+	ModelChoices []string `json:"model_choices"`
+	Model        string   `json:"model,omitempty"`
+	Effort       string   `json:"effort,omitempty"`
+	Prompt       string   `json:"prompt,omitempty"`
+	MaxAttempts  int      `json:"max_attempts"`
+	Forks        bool     `json:"forks"`
+	SkipAuthors  []string `json:"skip_authors"`
 
 	// Sources says, per setting, whether the value came from this repository's
 	// record, the fleet default, or this host's env.
@@ -94,6 +96,7 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 	if view.Agent == "" {
 		view.Agent = st.FixAgent()
 	}
+	view.ModelChoices = modelChoicesFor(view.Agent, view.Models)
 	if has && own.UpdatedAt != nil {
 		view.By = own.By
 		view.UpdatedAt = own.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z")
@@ -111,6 +114,32 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 		view.Lagging = st.LaggingRoleWriters(CapsSolver, s.clock().UTC(), "autofix")
 	}
 	return view
+}
+
+// modelChoicesFor keeps agent-specific model vocabulary on the server. The
+// browser receives both the supported choices and any already-recorded custom
+// value, so a newer/older model is never made uneditable by a binary upgrade.
+func modelChoicesFor(agent string, selected []string) []string {
+	name := strings.ToLower(filepath.Base(agent))
+	var known []string
+	switch name {
+	case "claude":
+		known = []string{"opus", "sonnet", "haiku", "fable"}
+	case "codex":
+		known = []string{"gpt-5.6-sol", "gpt-5.6-terra", "codex-auto-review"}
+	default:
+		known = []string{"gpt-5.6-sol", "gpt-5.6-terra", "codex-auto-review", "opus", "sonnet", "haiku", "fable"}
+	}
+	out := make([]string, 0, len(selected)+len(known))
+	seen := map[string]bool{}
+	for _, model := range append(append([]string{}, selected...), known...) {
+		model = strings.TrimSpace(model)
+		if model != "" && !seen[model] {
+			seen[model] = true
+			out = append(out, model)
+		}
+	}
+	return out
 }
 
 // SolverChange is a proposed edit. Absent fields are left alone, so a form

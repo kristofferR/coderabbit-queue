@@ -349,6 +349,22 @@ func TestBotCardsUseTheEffectiveFleetPrimary(t *testing.T) {
 	}
 }
 
+func TestBotCardsRetainConfiguredPrimaryWhenEffectiveSetIsUnavailable(t *testing.T) {
+	cfg := FleetConfig{Reviewers: []ReviewerCfg{{
+		Login: "coderabbitai[bot]", Name: "coderabbit", Primary: true, Metered: true,
+	}}}
+	cards := botCards(state.State{}, cfg, nil, time.Now())
+	for _, card := range cards {
+		if card.Login == "coderabbitai[bot]" {
+			if !card.Primary || !card.Metered {
+				t.Fatalf("configured fallback primary = %+v", card)
+			}
+			return
+		}
+	}
+	t.Fatal("no card for the configured primary")
+}
+
 func TestBotCardsUseEffectiveReviewerMetadata(t *testing.T) {
 	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
 	cfg := FleetConfig{Reviewers: []ReviewerCfg{{

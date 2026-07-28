@@ -271,6 +271,7 @@ export type RepoSolver = {
   overridden: boolean;
   agent?: string;
   models: string[];
+  model_choices?: string[];
   model?: string;
   effort?: string;
   prompt?: string;

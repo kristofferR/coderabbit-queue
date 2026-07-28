@@ -111,7 +111,7 @@ export function SolverEditor({
       clear
         ? { clear: true }
         : {
-            ...(changed.models ? { models } : {}),
+            ...(changed.models ? { models: models.filter(Boolean) } : {}),
             ...(changed.effort ? { effort } : {}),
             ...(changed.prompt ? { prompt } : {}),
             ...(changed.attempts ? { max_attempts: Number(attempts) || 0 } : {}),
@@ -128,7 +128,9 @@ export function SolverEditor({
     );
 
   const src = (key: string) => solver.sources?.[key] ?? "env";
-  const modelChoices = choicesFor(solver.agent, models);
+  const modelChoices = ["", ...models.filter(Boolean), ...(solver.model_choices ?? [])].filter(
+    (model, index, all) => all.indexOf(model) === index,
+  );
   const setRankedModel = (index: number, model: string) =>
     setModels((current) => current.map((value, i) => (i === index ? model : value)));
   const moveModel = (index: number, direction: -1 | 1) =>
@@ -212,7 +214,7 @@ export function SolverEditor({
             <Row label="Models" source={src("models")}>
               <div className="space-y-1.5">
                 {models.map((model, index) => (
-                  <div key={`${index}-${model}`} className="flex items-center gap-1.5">
+                  <div key={index} className="flex items-center gap-1.5">
                     <span className="w-4 text-right font-mono text-[11px] text-faint">{index + 1}</span>
                     <select
                       value={model}
@@ -385,19 +387,6 @@ export function SolverEditor({
       </div>
     </Card>
     </>
-  );
-}
-
-function choicesFor(agent: string | undefined, selected: string[]): string[] {
-  const name = agent?.split("/").pop()?.toLowerCase();
-  const known =
-    name === "claude"
-      ? ["opus", "sonnet", "haiku", "fable"]
-      : name === "codex"
-        ? ["gpt-5.6-sol", "gpt-5.6-terra", "codex-auto-review"]
-        : ["gpt-5.6-sol", "gpt-5.6-terra", "codex-auto-review", "opus", "sonnet", "haiku", "fable"];
-  return ["", ...selected.filter(Boolean), ...known].filter(
-    (model, index, all) => all.indexOf(model) === index,
   );
 }
 

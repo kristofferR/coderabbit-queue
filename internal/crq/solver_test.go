@@ -37,6 +37,9 @@ func TestSolverLayering(t *testing.T) {
 	if !strings.Contains(string(raw), `"models":[]`) {
 		t.Fatalf("empty model ranking must be a JSON array: %s", raw)
 	}
+	if got := strings.Join(view.ModelChoices, ","); got != "opus,sonnet,haiku,fable" {
+		t.Errorf("model choices = %q, want the server-owned Claude vocabulary", got)
+	}
 
 	// A fleet default reaches every repository.
 	if _, err := svc.SetFleetSolver(ctx, SolverChange{Effort: strptr("medium")}); err != nil {

@@ -548,7 +548,7 @@ function FindingRow({
   const [open, setOpen] = useState(false);
   const sev = f.severity || "unknown";
   const threaded = Boolean(f.thread_id);
-  const content = findingContent(f);
+  const content = open ? findingContent(f) : null;
   // Only threadless findings can be dismissed — a threaded one is closed by
   // resolving or declining it, which is visible on the pull request.
   const dismissible = !threaded && DISMISSIBLE.has(f.source ?? "");
@@ -585,7 +585,7 @@ function FindingRow({
           </span>
         </span>
       </button>
-      {open && (
+      {content && (
         <div className="border-t border-[#EEF0F3] bg-[#FBFCFD] px-4 py-3 text-[13px] text-mut">
           <div className="rounded-lg border border-edge bg-white px-4 py-2.5 text-[13.5px] text-ink">
             <ReviewMarkdown body={content.description || "No detail was captured for this finding."} />

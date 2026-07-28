@@ -587,7 +587,7 @@ func (s *Service) AdoptEnv(ctx context.Context, dryRun bool) ([]AdoptedSetting, 
 				}
 			case "CRQ_REQUIRED_BOTS":
 				if !fd.SetRequired {
-					if logins, err := resolveRequiredLogins(splitCommas(value), s.cfg.Bot); err == nil {
+					if logins, err := resolveRequiredLogins(splitCommas(value), s.cfg.WithFleet(fd).Bot); err == nil {
 						fd.Required, fd.SetRequired, changed = logins, true, true
 						applied[key] = true
 					}

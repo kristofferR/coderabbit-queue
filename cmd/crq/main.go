@@ -647,7 +647,8 @@ func run(ctx context.Context, args []string) int {
 		solverFor := func(st crq.State, repo string) serve.RepoSolver {
 			v := service.SolverIn(st, repo)
 			out := serve.RepoSolver{
-				Overridden: v.Overridden, Agent: v.Agent, Models: v.Models, Model: v.Model, Effort: v.Effort,
+				Overridden: v.Overridden, Agent: v.Agent, Models: v.Models, ModelChoices: v.ModelChoices,
+				Model: v.Model, Effort: v.Effort,
 				Prompt: v.Prompt, MaxAttempts: v.MaxAttempts, Forks: v.Forks,
 				SkipAuthors: v.SkipAuthors, Sources: v.Sources, By: v.By,
 				Lagging: hostsOfWriters(v.Lagging),

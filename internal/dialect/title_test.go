@@ -93,6 +93,17 @@ This touches a major code path, but the finding itself is minor.`
 	}
 }
 
+func TestDataIntegrityRubricDoesNotBecomeTheFindingTitle(t *testing.T) {
+	body := `_🗄️ Data Integrity & Integration_ | _🟠 Major_ | _⚡ Quick win_
+
+**Keep archived dispatch state intact.**
+
+The rubric belongs in chips, not in the finding title.`
+	if got := ReviewTitleFor("coderabbitai[bot]", body); got != "Keep archived dispatch state intact." {
+		t.Fatalf("ReviewTitleFor = %q", got)
+	}
+}
+
 func TestCodeRabbitTitleIgnoresAnalysisBeforeFinding(t *testing.T) {
 	body := `_🔒 Security & Privacy_ | _🟠 Major_ | _⚡ Quick win_
 

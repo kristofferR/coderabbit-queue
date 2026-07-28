@@ -554,6 +554,40 @@ func TestAdoptEnvReportsWhatStateActuallyTook(t *testing.T) {
 	}
 }
 
+func TestAdoptEnvResolvesRequiredBotsAgainstTheFleetPrimary(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":          "owner/gate",
+		"CRQ_HOST":          "testhost",
+		"CRQ_COBOTS":        "",
+		"CRQ_REQUIRED_BOTS": "replacement-reviewer[bot]",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		fd := st.Fleet
+		fd.Env = map[string]string{"CRQ_BOT": "replacement-reviewer[bot]"}
+		st.SetFleetDefaults(fd, "other-host", time.Now())
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if _, err := svc.AdoptEnv(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(st.Fleet.Required, ","); got != "replacement-reviewer[bot]" {
+		t.Fatalf("required = %q, want the fleet-effective primary", got)
+	}
+}
+
 func findAdopted(list []AdoptedSetting, key string) (AdoptedSetting, bool) {
 	for _, a := range list {
 		if a.Key == key {

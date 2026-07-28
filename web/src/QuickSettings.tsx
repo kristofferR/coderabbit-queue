@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { BotCard, RepoRow, Snapshot } from "./api";
 import { act } from "./actions";
 import { BotIcon, Pill, Toggle } from "./ui";
@@ -36,14 +36,47 @@ export function QuickSettings({
   // can still name hosts too old to read the record, and closing on it reports a
   // fleet-wide decision that part of the fleet will go on ignoring.
   const [warning, setWarning] = useState<string | null>(null);
+  const panel = useRef<HTMLDivElement>(null);
+  const returnTo = useRef<Element | null>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
+    returnTo.current = document.activeElement;
+    const focusable = () =>
+      Array.from(
+        panel.current?.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), [href], select, textarea, [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      );
+    focusable()[0]?.focus();
+
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const items = focusable();
+      if (items.length === 0) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && (active === first || !panel.current?.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      (returnTo.current as HTMLElement | null)?.focus?.();
+    };
+  }, []);
 
   const runsRev = setKey(repo.reviewers);
   const requiredRev = setKey(repo.required);
@@ -84,6 +117,7 @@ export function QuickSettings({
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-[rgb(27_36_48/0.24)]">
       <div
+        ref={panel}
         role="dialog"
         aria-modal="true"
         aria-label={`Reviewers for ${repo.repo}`}
