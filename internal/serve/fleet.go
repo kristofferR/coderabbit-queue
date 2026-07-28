@@ -124,12 +124,48 @@ type RepoSolver struct {
 	Sources     map[string]string `json:"sources"`
 	By          string            `json:"by,omitempty"`
 	Lagging     []string          `json:"lagging_hosts,omitempty"`
+	// AgentOn says, per host, whether the configured fix agent is reachable
+	// there. Capability, not policy: a repository can be set to a model no
+	// host can run, and the settings alone would never say so.
+	AgentOn []HostHas `json:"agent_on,omitempty"`
+}
+
+// HostHas is one host's answer to "can you run this".
+type HostHas struct {
+	Host string `json:"host"`
+	// Has is nil when that host has never reported, which is not the same as
+	// "no" — and saying no would blame a machine for crq's own blind spot.
+	Has   *bool  `json:"has,omitempty"`
+	Path  string `json:"path,omitempty"`
+	Stale bool   `json:"stale,omitempty"`
 }
 
 // SolverFor resolves one repository's fix-session settings. Supplied by the
 // command layer for the same reason the reviewer resolver is: the layering
 // belongs to internal/crq, and two answers to it would be one too many.
 type SolverFor func(st state.State, repo string) RepoSolver
+
+// HostTools is one machine's self-report.
+type HostTools struct {
+	Host    string     `json:"host"`
+	Version string     `json:"version,omitempty"`
+	Caps    int        `json:"caps,omitempty"`
+	Roles   []string   `json:"roles,omitempty"`
+	Tools   []ToolSeen `json:"tools"`
+	At      *time.Time `json:"at,omitempty"`
+	// Stale says the host has not reported recently, so everything above is
+	// what it LAST said rather than what is true now.
+	Stale bool `json:"stale,omitempty"`
+	// Behind marks a host running an older crq than the newest reporting one —
+	// the single most common cause of "that setting did nothing".
+	Behind bool `json:"behind,omitempty"`
+}
+
+type ToolSeen struct {
+	Name    string `json:"name"`
+	Path    string `json:"path,omitempty"`
+	Version string `json:"version,omitempty"`
+}
 
 // BotCard is one reviewer on the Bots page. "Last seen" is deliberately what
 // crq itself recorded — a trigger it posted or a claim it observed — rather
@@ -178,6 +214,15 @@ type SetupView struct {
 	Checks []Check    `json:"checks"`
 	Tools  []Tool     `json:"tools"`
 	Hosts  []HostInfo `json:"hosts"`
+	// Fleet is every host's own report of what it can reach — the answer to
+	// "is claude installed" that is actually useful, since it differs per host
+	// and, on any one host, between the shell and the service.
+	Fleet []HostTools `json:"fleet,omitempty"`
+	// Ready/Attention/Optional summarise the checks, so the page opens with a
+	// verdict instead of a list to count.
+	Ready     int `json:"ready"`
+	Attention int `json:"attention"`
+	Optional  int `json:"optional"`
 	// ToolsHost names the machine the tool list describes. crq stores no tool
 	// inventory for other hosts, so claiming a fleet-wide view would be a lie.
 	ToolsHost string `json:"tools_host"`
@@ -548,6 +593,7 @@ func (c FleetConfig) primaryLogin() string {
 
 func setupView(st state.State, cfg FleetConfig, ov Overview, tools []Tool, toolsHost string) SetupView {
 	v := SetupView{Tools: tools, ToolsHost: toolsHost, Checks: []Check{}, Hosts: []HostInfo{}}
+	v.Fleet = hostTools(st, ov.Now)
 
 	add := func(key, label, status, detail string) {
 		v.Checks = append(v.Checks, Check{Key: key, Label: label, Status: status, Detail: detail})
@@ -629,6 +675,24 @@ func setupView(st state.State, cfg FleetConfig, ov Overview, tools []Tool, tools
 		v.Hosts = append(v.Hosts, *h)
 	}
 	sort.Slice(v.Hosts, func(i, j int) bool { return v.Hosts[i].Name < v.Hosts[j].Name })
+	for _, c := range v.Checks {
+		switch c.Status {
+		case "ok":
+			v.Ready++
+		case "bad", "warn":
+			v.Attention++
+		}
+	}
+	for _, t := range v.Tools {
+		switch {
+		case t.Found:
+			v.Ready++
+		case t.Required:
+			v.Attention++
+		default:
+			v.Optional++
+		}
+	}
 	return v
 }
 
@@ -729,4 +793,41 @@ func botStatus(enabled bool, lastSeen, lastAsked *time.Time, now time.Time, logW
 	default:
 		return "quiet"
 	}
+}
+
+// hostTools turns every host's self-report into the matrix the setup page
+// shows: one row per host, one column per tool.
+//
+// A stale report is kept and marked rather than dropped. "atlas last said it
+// had claude, two days ago" is a more useful thing to read than an empty row,
+// and a host that has stopped reporting is itself the finding.
+func hostTools(st state.State, now time.Time) []HostTools {
+	reports := st.HostReportList()
+	if len(reports) == 0 {
+		return nil
+	}
+	newest := ""
+	for _, r := range reports {
+		if r.Version > newest {
+			newest = r.Version
+		}
+	}
+	out := make([]HostTools, 0, len(reports))
+	for _, r := range reports {
+		at := r.At
+		row := HostTools{
+			Host: hostOf(r.Host), Version: r.Version, Caps: r.Caps, Roles: r.Roles,
+			At: &at, Stale: now.Sub(r.At) > state.HostReportTTL,
+			// Compared as strings, which is enough for the only question being
+			// asked: is this host running something OTHER than the newest crq
+			// in the fleet. A wrong answer here costs a warning, not a decision.
+			Behind: r.Version != "" && newest != "" && r.Version != newest,
+			Tools:  []ToolSeen{},
+		}
+		for _, t := range r.Tools {
+			row.Tools = append(row.Tools, ToolSeen{Name: t.Name, Path: t.Path, Version: t.Version})
+		}
+		out = append(out, row)
+	}
+	return out
 }

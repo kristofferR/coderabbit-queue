@@ -98,6 +98,9 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 		on := true
 		opts.Dispatch = &on
 	}
+	// The watcher's PATH is the one a fix session inherits, so its report is the
+	// one that answers "can this host actually run the agent".
+	s.ReportHost(ctx, "autofix")
 	if *opts.Dispatch && len(opts.Command) == 0 {
 		opts.Command = s.cfg.DispatchCommand
 	}
@@ -214,6 +217,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	}
 	var candidates []candidate
 	gate := NormalizeRepo(s.cfg.GateRepo)
+	s.ReportHost(ctx, "autofix")
 	// Which repositories may be FIXED is per repository, read once for the pass.
 	// Watching is unaffected: a repository with autofix off is still observed
 	// and still reviewed, so its feedback arrives for a person to act on.

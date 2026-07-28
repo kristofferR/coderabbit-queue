@@ -26,6 +26,8 @@ type (
 	FleetDefaults  = crqstate.FleetDefaults
 	SolverSettings = crqstate.SolverSettings
 	CoBotRound     = crqstate.CoBotRound
+	HostReport     = crqstate.HostReport
+	ToolReport     = crqstate.ToolReport
 	Revision       = crqstate.Revision
 	StateStore     = crqstate.StateStore
 	StoreConfig    = crqstate.StoreConfig
@@ -61,6 +63,11 @@ const (
 	CapsFleetDefaults = crqstate.CapsFleetDefaults
 	// CapsSolver is the capability a host needs to honour solver settings.
 	CapsSolver = crqstate.CapsSolver
+	// WriterCaps is what THIS binary understands, recorded in each host's
+	// self-report so a fleet can see why a host ignores a setting.
+	WriterCaps = crqstate.WriterCaps
+	// HostReportTTL is how long a host's self-report counts as current.
+	HostReportTTL = crqstate.HostReportTTL
 )
 
 var (

@@ -1,4 +1,4 @@
-import type { BotCard, HeldRow, RepoRow, SetupView, SettingsView, Snapshot } from "./api";
+import type { BotCard, HeldRow, HostTools, RepoRow, SetupView, SettingsView, Snapshot } from "./api";
 import { useEffect, useState } from "react";
 import { act } from "./actions";
 import { Confirm } from "./Confirm";
@@ -769,8 +769,17 @@ export function SetupPage({ setup }: { setup: SetupView }) {
         <h2 className="text-[15px] font-[650]">
           {problems === 0 ? "Everything crq checks is in place" : `${problems} thing(s) need attention`}
         </h2>
-        <span className="ml-auto text-[12.5px] text-faint">checked continuously · rev-driven</span>
+        <span className="flex flex-wrap items-center gap-2 text-[12.5px]">
+          <Pill tone="ok">{setup.ready} ready</Pill>
+          {setup.attention > 0 && <Pill tone="warn">{setup.attention} need attention</Pill>}
+          {setup.optional > 0 && <Pill tone="mut">{setup.optional} optional missing</Pill>}
+        </span>
+        <span className="ml-auto text-[12.5px] text-faint">
+          {setup.fleet?.length ?? 0} host(s) reporting · updates as they do
+        </span>
       </div>
+
+      {(setup.fleet?.length ?? 0) > 0 && <FleetTools fleet={setup.fleet!} now={now} />}
 
       <Card title="Checks" count={setup.checks.length}>
         <div className="px-[18px] pb-3">
@@ -847,6 +856,82 @@ export function SetupPage({ setup }: { setup: SetupView }) {
         </div>
       </Card>
     </main>
+  );
+}
+
+/**
+ * What each host can actually reach.
+ *
+ * The single most useful table in the product, because every question about a
+ * fleet turns into a per-host question and crq could previously only answer for
+ * whichever machine you happened to be asking from. The failure it exists to
+ * show is the quiet one: a tool installed for your shell and invisible to the
+ * service, which looks fine everywhere except in the fix session that needs it.
+ *
+ * A host reports its OWN PATH, and a daemon reports the service's — so a tick
+ * here means the thing that runs fix sessions can find it, not that you can.
+ */
+function FleetTools({ fleet, now }: { fleet: HostTools[]; now: number }) {
+  const names = [...new Set(fleet.flatMap((h) => h.tools.map((t) => t.name)))];
+  return (
+    <Card title="Tools, per host" count={`${fleet.length} host(s)`}>
+      <div className="overflow-x-auto px-[18px] pb-3">
+        <table className="w-full border-collapse text-[12.5px]">
+          <thead>
+            <tr>
+              <Th>Host</Th>
+              {names.map((n) => (
+                <Th key={n} className="text-center">
+                  {n}
+                </Th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {fleet.map((h) => (
+              <tr key={h.host} className="border-t border-[#EEF0F3]">
+                <Td>
+                  <div className="font-[550]">{h.host}</div>
+                  <div className="text-[11.5px] text-faint">
+                    {h.version && (
+                      <span className={h.behind ? "text-warn" : ""}>
+                        crq {h.version}
+                        {h.behind ? " · behind" : ""}
+                      </span>
+                    )}
+                    {(h.roles?.length ?? 0) > 0 && ` · ${h.roles!.join(", ")}`}
+                    {h.stale && h.at && <span className="text-warn"> · last heard {ago(h.at, now)}</span>}
+                  </div>
+                </Td>
+                {names.map((n) => {
+                  const t = h.tools.find((x) => x.name === n);
+                  return (
+                    <Td key={n} className="text-center">
+                      {t?.path ? (
+                        <span title={`${t.path}${t.version ? ` · ${t.version}` : ""}`} className="text-ok">
+                          ✓
+                        </span>
+                      ) : (
+                        <span className="text-faint" title="not on the PATH this host's service runs with">
+                          —
+                        </span>
+                      )}
+                    </Td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="pt-2 text-[11.5px] text-faint">
+          Each host probes the PATH its own crq process runs with. A daemon reports the SERVICE's
+          PATH, which is the one that decides whether a fix session can start — a tool installed for
+          your shell and missing here is exactly the failure that looks fine until it is needed. Fix
+          it by adding the directory to the unit: <code>systemctl --user edit crq-autofix</code>, then{" "}
+          <code>Environment=PATH=…</code>, then reinstall with <code>crq autofix install</code>.
+        </p>
+      </div>
+    </Card>
   );
 }
 

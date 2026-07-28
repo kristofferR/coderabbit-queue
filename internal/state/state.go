@@ -475,6 +475,9 @@ type State struct {
 	// Fleet is what every repository inherits, recorded once for the whole fleet
 	// rather than in each host's env file. See fleet.go.
 	Fleet FleetDefaults `json:"fleet,omitempty"`
+	// HostReports is what each machine says about itself: its crq version and
+	// the tools it can reach. See hosts.go.
+	HostReports map[string]HostReport `json:"host_reports,omitempty"`
 	// RepoSolver is how a fix session runs, per repository. See solver.go.
 	RepoSolver map[string]SolverSettings `json:"repo_solver,omitempty"`
 	// Enrolled answers "does crq review this project at all?" per repository,

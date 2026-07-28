@@ -204,7 +204,28 @@ export type HostInfo = {
   last_error?: string;
   caps?: number;
 };
-export type SetupView = { checks: Check[]; tools: Tool[]; hosts: HostInfo[]; tools_host: string };
+export type HostTools = {
+  host: string;
+  version?: string;
+  caps?: number;
+  roles?: string[];
+  tools: { name: string; path?: string; version?: string }[];
+  at?: string;
+  stale?: boolean;
+  behind?: boolean;
+};
+
+export type SetupView = {
+  checks: Check[];
+  tools: Tool[];
+  hosts: HostInfo[];
+  tools_host: string;
+  /** Every host's own report of what it can reach — the per-host answer. */
+  fleet?: HostTools[];
+  ready: number;
+  attention: number;
+  optional: number;
+};
 
 export type ReviewerCfg = {
   login: string;
@@ -252,6 +273,7 @@ export type RepoSolver = {
   sources: Record<string, string>;
   by?: string;
   lagging_hosts?: string[];
+  agent_on?: { host: string; has?: boolean; path?: string; stale?: boolean }[];
 };
 
 export type FleetSettings = {

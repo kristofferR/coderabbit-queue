@@ -630,12 +630,37 @@ func run(ctx context.Context, args []string) int {
 		// repository's own record — all of which live in the service.
 		solverFor := func(st crq.State, repo string) serve.RepoSolver {
 			v := service.SolverIn(st, repo)
-			return serve.RepoSolver{
+			out := serve.RepoSolver{
 				Overridden: v.Overridden, Agent: v.Agent, Model: v.Model, Effort: v.Effort,
 				Prompt: v.Prompt, MaxAttempts: v.MaxAttempts, Forks: v.Forks,
 				SkipAuthors: v.SkipAuthors, Sources: v.Sources, By: v.By,
 				Lagging: hostsOfWriters(v.Lagging),
 			}
+			// Which hosts can actually run the agent — capability, beside the
+			// policy, so a repository is never quietly set to something no
+			// machine can do.
+			agent := v.Agent
+			if i := strings.LastIndex(agent, "/"); i >= 0 {
+				agent = agent[i+1:]
+			}
+			if agent == "" {
+				agent = "claude"
+			}
+			for _, r := range st.HostReportList() {
+				has := serve.HostHas{Host: r.Host}
+				if i := strings.Index(has.Host, "host="); i >= 0 {
+					has.Host = strings.SplitN(has.Host[i+len("host="):], " ", 2)[0]
+				}
+				for _, t := range r.Tools {
+					if t.Name != agent {
+						continue
+					}
+					found := t.Path != ""
+					has.Has, has.Path = &found, t.Path
+				}
+				out.AgentOn = append(out.AgentOn, has)
+			}
+			return out
 		}
 		// The enrollment rule lives in the service; serve only renders it.
 		enrollFor := func(st crq.State, repo string) serve.Enrollment {

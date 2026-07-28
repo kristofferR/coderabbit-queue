@@ -24,6 +24,10 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 	// from. Spelling it out here again would let the two drift apart.
 	owner := s.cfg.WriterID()
 	token := randomToken()
+	// Report what this machine can reach before doing anything else, and again
+	// as it goes: a fleet's tool inventory is only useful if it is a fleet's,
+	// and a daemon is the only thing that knows the PATH its service runs with.
+	s.ReportHost(ctx, "autoreview")
 	for {
 		held, err := s.acquireLeader(ctx, owner, token)
 		if err != nil {
@@ -221,6 +225,9 @@ func (s *Service) renewLeader(ctx context.Context, owner, token string) (State, 
 }
 
 func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, token string) error {
+	// Refreshed each pass. ReportHost writes nothing when nothing changed and
+	// the record is still fresh, so this is a probe, not a write.
+	s.ReportHost(ctx, "autoreview")
 	// Load the queue snapshot once per pass and reuse it across candidates: a
 	// git-backed Load is GetRef+GetCommit+GetTree+GetBlob, so reloading it per PR
 	// would burn the shared REST quota on a large scan. The heartbeat refreshes it,
