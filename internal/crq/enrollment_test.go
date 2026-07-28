@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -147,6 +148,56 @@ func TestEnrollmentDoesNotNarrowAScopeWideHost(t *testing.T) {
 	}
 	if !svc.reviewsRepo(st, "o/other") {
 		t.Error("turning one repository off must not affect the rest of the scope")
+	}
+}
+
+// The record round-trips members a newer binary added, but only if the toggle
+// EDITS it. Building a replacement from scratch — which is what every save did —
+// erased them on the next CAS, so an older binary flipping a switch silently
+// unset whatever setting the newer one had recorded beside it.
+func TestTogglingEnrollmentKeepsANewerBinarysMembers(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	// Seeded as a newer binary would have left it.
+	if _, err := store.Update(ctx, func(st *State) error {
+		var foreign State
+		if err := json.Unmarshal([]byte(`{"v":4,"rev":1,"next_seq":1,"account":{"scope":"o"},
+		  "enrolled":{"o/repo":{"enabled":true,"future_enroll_flag":{"until":"2030-01-01"}}}}`), &foreign); err != nil {
+			return err
+		}
+		st.Enrolled = foreign.Enrolled
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.SetEnrollment(ctx, "o/repo", false, "paused for the quarter"); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := st.Enrollment("o/repo")
+	if !ok || rec.Enabled || rec.Reason != "paused for the quarter" {
+		t.Fatalf("record = %+v, want the switch actually thrown", rec)
+	}
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	enrolled, _ := back["enrolled"].(map[string]any)
+	own, _ := enrolled["o/repo"].(map[string]any)
+	carried, _ := own["future_enroll_flag"].(map[string]any)
+	if carried == nil || carried["until"] != "2030-01-01" {
+		t.Errorf("toggling the switch erased a member this binary does not know: %#v", own)
 	}
 }
 

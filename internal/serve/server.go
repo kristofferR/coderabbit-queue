@@ -88,6 +88,12 @@ type Options struct {
 	// refuse — useful when pointing a dashboard at someone else's fleet.
 	Actor    Actor
 	ReadOnly bool
+	// AllowedHosts are extra names actions may be addressed to, beyond loopback,
+	// IP literals, the bound address and this machine's own name. A reverse
+	// proxy or a DNS alias is the case for it: the check exists to stop a name
+	// an ATTACKER controls from being rebound at this port, and crq cannot tell
+	// one of those from an alias somebody set up on purpose.
+	AllowedHosts []string
 }
 
 // Pacing is the fire-pacing configuration the overview renders, resolved
@@ -307,9 +313,15 @@ func (s *Server) markStale(err error) {
 	s.mu.Lock()
 	s.loadErr = err
 	if !s.loaded {
-		// Nothing has ever loaded: the handlers already refuse outright, and
-		// there is no snapshot to mark.
+		// Nothing has ever loaded, so there is no snapshot to mark — but the
+		// stream is open and healthy, and a browser that only ever consumes it
+		// would sit on "Reading the state ref…" for as long as the credential or
+		// the ref stays broken. The error is the only thing there is to say, so
+		// it is said on its own frame: a page with no snapshot can render it, and
+		// a client that does not know the event ignores it.
+		subs := s.subscribers()
 		s.mu.Unlock()
+		broadcastFrame(unavailableFrame(err), subs)
 		return
 	}
 	if s.last.Stale == nil {
@@ -321,12 +333,18 @@ func (s *Server) markStale(err error) {
 		s.last.Stale.Error = err.Error()
 	}
 	snap := s.last
+	subs := s.subscribers()
+	s.mu.Unlock()
+	broadcast(snap, subs)
+}
+
+// subscribers copies the current subscriber set. The caller must hold s.mu.
+func (s *Server) subscribers() []chan []byte {
 	subs := make([]chan []byte, 0, len(s.subs))
 	for ch := range s.subs {
 		subs = append(subs, ch)
 	}
-	s.mu.Unlock()
-	broadcast(snap, subs)
+	return subs
 }
 
 func broadcast(snap Snapshot, subs []chan []byte) {
@@ -334,9 +352,35 @@ func broadcast(snap Snapshot, subs []chan []byte) {
 	if err != nil {
 		return
 	}
+	broadcastFrame(dataFrame(payload), subs)
+}
+
+// Subscribers carry whole SSE frames rather than bare payloads, so a message
+// that is not a snapshot can be sent down the same stream without the client
+// having to tell them apart by inspecting one.
+func dataFrame(payload []byte) []byte {
+	return fmt.Appendf(nil, "data: %s\n\n", payload)
+}
+
+// unavailableFrame reports that there is no state to send yet, and why. Named
+// rather than sent as data: a client reads it with an explicit listener, so one
+// that predates the event simply never sees it instead of parsing an error as a
+// snapshot.
+func unavailableFrame(err error) []byte {
+	payload, merr := json.Marshal(map[string]string{"error": firstLoadError(err)})
+	if merr != nil {
+		return nil
+	}
+	return fmt.Appendf(nil, "event: unavailable\ndata: %s\n\n", payload)
+}
+
+func broadcastFrame(frame []byte, subs []chan []byte) {
+	if len(frame) == 0 {
+		return
+	}
 	for _, ch := range subs {
 		select {
-		case ch <- payload:
+		case ch <- frame:
 		default: // a browser that cannot keep up gets the next one
 		}
 	}
@@ -423,11 +467,18 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// connecting during a slow first read would otherwise be handed the zero
 	// snapshot and take it for live state. The subscription is already in place,
 	// so that tab gets the real one the moment the load lands.
-	if snap, loaded, _ := s.snapshot(); loaded {
+	//
+	// A first read that has already FAILED is said outright instead. The stream
+	// itself is fine, so nothing else would ever tell this tab why it is empty.
+	switch snap, loaded, loadErr := s.snapshot(); {
+	case loaded:
 		if payload, err := json.Marshal(snap); err == nil {
-			fmt.Fprintf(w, "data: %s\n\n", payload)
+			_, _ = w.Write(dataFrame(payload))
 			flusher.Flush()
 		}
+	case loadErr != nil:
+		_, _ = w.Write(unavailableFrame(loadErr))
+		flusher.Flush()
 	}
 
 	keepalive := time.NewTicker(25 * time.Second)
@@ -436,8 +487,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
-		case payload := <-ch:
-			fmt.Fprintf(w, "data: %s\n\n", payload)
+		case frame := <-ch:
+			_, _ = w.Write(frame)
 			flusher.Flush()
 		case <-keepalive.C:
 			fmt.Fprint(w, ": keepalive\n\n")

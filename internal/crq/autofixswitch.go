@@ -97,6 +97,13 @@ func (s *Service) AutofixSettings(ctx context.Context) ([]AutofixSetting, error)
 	for _, repo := range watched {
 		add(repo)
 	}
+	// A repository enrolled from shared state is watched here whether or not
+	// this host's CRQ_REPOS lists it — watchPass builds its targets from both —
+	// so one with no explicit switch is being fixed under the fleet default
+	// while a listing built from env alone never mentioned it.
+	for _, repo := range st.EnrolledRepos() {
+		add(repo)
+	}
 	// A repository ruled on but no longer watched still shows: an "off" nobody
 	// can see is how a repository quietly stops being fixed.
 	for _, repo := range st.AutofixSwitches() {

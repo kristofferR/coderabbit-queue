@@ -3,7 +3,11 @@ package serve
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -100,6 +104,15 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	// on another site from posting to it behind your back.
 	if r.Header.Get("X-CRQ-Dashboard") != "1" {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "missing dashboard header"})
+		return
+	}
+	// The header is not enough on its own, because a DNS rebind makes the
+	// attacker's page same-origin: a name they control, re-pointed at 127.0.0.1,
+	// reaches this server with any header it likes and no preflight at all. The
+	// one thing that still tells the two apart is the name the request was
+	// addressed to, so this checks that it is a name this dashboard answers to.
+	if err := s.addressedHere(r); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -279,6 +292,77 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	s.refresh(ctx)
 	snap, _, _ := s.snapshot()
 	writeJSON(w, http.StatusOK, snap)
+}
+
+// addressedHere reports whether an action request was addressed to this
+// dashboard, rather than to a name that merely resolves to it.
+//
+// This is the anti-rebinding check, and it is about NAMES. An address bar
+// holding an IP literal cannot be rebound — the browser dials it, and the origin
+// is the address itself — so those pass, as does loopback by its own name. Every
+// other name has to be one this host answers to: the address the server was
+// asked to bind, the machine's own hostname (matched on its first label, so
+// `mac.local` and a tailnet's `mac.tailnet.ts.net` are the same machine), or one
+// named with --allow-host for a proxy or an alias crq cannot know about.
+//
+// An Origin, when the browser sends one, must agree with it: same-origin is the
+// whole claim being made, and a request that contradicts itself is not one.
+func (s *Server) addressedHere(r *http.Request) error {
+	host := hostname(r.Host)
+	if host == "" {
+		return errors.New("refusing an action with no Host: crq serve answers only to its own address")
+	}
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || !strings.EqualFold(hostname(u.Host), host) {
+			return fmt.Errorf("refusing an action sent from %s to %s: the two must be the same dashboard", origin, r.Host)
+		}
+	}
+	if s.answersTo(host) {
+		return nil
+	}
+	return fmt.Errorf("refusing an action addressed to %q: crq serve is unauthenticated, so it acts only on its own address — "+
+		"a name that resolves here is how a page on another site reaches a local dashboard. Start it with --allow-host %s if that name is yours",
+		host, host)
+}
+
+// answersTo reports whether host names this server.
+func (s *Server) answersTo(host string) bool {
+	switch {
+	case net.ParseIP(host) != nil:
+		return true
+	case host == "localhost" || strings.HasSuffix(host, ".localhost"):
+		return true
+	}
+	for _, allowed := range s.opts.AllowedHosts {
+		if strings.EqualFold(hostname(strings.TrimSpace(allowed)), host) {
+			return true
+		}
+	}
+	// The bound address and this machine's name, both reduced to their first
+	// label: a host is reached as `mac`, `mac.local` and `mac.<tailnet>.ts.net`
+	// interchangeably, and all three are the same machine answering.
+	for _, own := range []string{hostname(s.opts.Addr), s.opts.Host} {
+		own = firstLabel(own)
+		if own != "" && own != "0.0.0.0" && own != "::" && own == firstLabel(host) {
+			return true
+		}
+	}
+	return false
+}
+
+// hostname is the lowercased name in an authority, without its port.
+func hostname(authority string) string {
+	authority = strings.TrimSpace(authority)
+	if h, _, err := net.SplitHostPort(authority); err == nil {
+		authority = h
+	}
+	return strings.ToLower(strings.Trim(authority, "[]"))
+}
+
+func firstLabel(host string) string {
+	name, _, _ := strings.Cut(hostname(host), ".")
+	return name
 }
 
 func (s *Server) needPR(req actionRequest, run func() error) error {

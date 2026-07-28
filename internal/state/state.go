@@ -686,6 +686,10 @@ func (s *State) LaggingWriters(caps int, now time.Time) []string {
 // Reports are named by machine and writers by process ("host=blue pid=4711
 // run=1a2b"), so a machine lagging in both registers is listed once, under the
 // writer identity that says which process it is.
+//
+// Capabilities are asked of the ROLE, not of the record: a machine mid-upgrade
+// runs one service on each build, and the record's own value is whichever wrote
+// last. Reading it let a fresh `serve` heartbeat vouch for an old watcher.
 func (s *State) LaggingRoleWriters(caps int, now time.Time, roles ...string) []string {
 	out := s.LaggingWriters(caps, now)
 	named := map[string]bool{}
@@ -693,11 +697,11 @@ func (s *State) LaggingRoleWriters(caps int, now time.Time, roles ...string) []s
 		named[hostName(writer)] = true
 	}
 	for host, report := range s.HostReports {
-		if named[host] || report.Caps >= caps {
+		if named[host] {
 			continue
 		}
 		for _, role := range roles {
-			if report.RolesFresh([]string{role}, now, HostReportTTL) {
+			if report.CapsFor(role) < caps && report.RolesFresh([]string{role}, now, HostReportTTL) {
 				named[host] = true
 				out = append(out, host)
 				break

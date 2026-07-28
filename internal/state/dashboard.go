@@ -62,6 +62,25 @@ func dashboardLoc(st State, cfg StoreConfig) *time.Location {
 	return time.UTC
 }
 
+// dashboardInterval is the pacing the queue is actually kept at: the fleet's
+// recorded floor when there is one, and the rendering process's own
+// configuration otherwise.
+//
+// Same reasoning as dashboardLoc, and the same failure. This issue is written by
+// whichever host happens to save state, so reading its startup environment made
+// ReadyAt, the queue's order and the "next at" headline advertise a fire time
+// Pump — which resolves the setting from the record — does not follow.
+func dashboardInterval(st State, cfg StoreConfig) time.Duration {
+	// The typed field first: it is the refinement the generic env layer is
+	// merged under, which is the precedence the configuration itself applies.
+	for _, text := range []string{st.Fleet.MinInterval, st.Fleet.Env["CRQ_MIN_INTERVAL"]} {
+		if d, err := time.ParseDuration(strings.TrimSpace(text)); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return cfg.MinInterval
+}
+
 func fmtStamp(t *time.Time, loc *time.Location) string {
 	if t == nil {
 		return "—"
@@ -284,7 +303,7 @@ func hostCell(writer string) string {
 func RenderDashboard(st State, cfg StoreConfig) string {
 	loc := dashboardLoc(st, cfg)
 	now := time.Now().UTC()
-	queue := st.Queue(now, cfg.MinInterval)
+	queue := st.Queue(now, dashboardInterval(st, cfg))
 	inFlight := inFlightRounds(st)
 	held := heldRounds(st)
 	slot := st.SlotRound()

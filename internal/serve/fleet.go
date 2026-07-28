@@ -420,6 +420,12 @@ func repoRows(st state.State, cfg FleetConfig, now time.Time, botsFor BotsFor, e
 	for _, repo := range st.EnrolledRepos() {
 		get(repo)
 	}
+	// Solver settings are accepted for any repository, including one recorded
+	// before it had a round or an enrollment. Its row is where that record is
+	// read and cleared, so leaving it out hides an override nothing else shows.
+	for _, repo := range st.SolverRepos() {
+		get(repo)
+	}
 
 	// Resolved, not merged here: an override names co-reviewers by login while
 	// the fleet default names them by short name, and half a repository's

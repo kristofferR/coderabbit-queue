@@ -80,7 +80,12 @@ func (s *Service) enrollmentOf(st State, repo string) EnrollmentView {
 		// repository a host's CRQ_REPOS lists. A record that turns one ON that
 		// env never mentioned is the feature working, not a conflict.
 		view.EnvConflict = inEnv && !rec.Enabled
-		view.Lagging = st.LaggingWriters(CapsEnrollment, s.clock().UTC())
+		// The autofix watcher reads this record too, and it holds neither the
+		// leader lease nor the fire slot — so an old one went on scanning a
+		// repository the off switch had just abandoned while the save reported
+		// no lagging host at all. Autoreview needs no naming here: it scans only
+		// as leader, which is an identity LaggingWriters already covers.
+		view.Lagging = st.LaggingRoleWriters(CapsEnrollment, s.clock().UTC(), "autofix")
 		return view
 	}
 	switch {
@@ -116,9 +121,13 @@ func (s *Service) SetEnrollment(ctx context.Context, repo string, enabled bool, 
 		if cur, ok := st.Enrollment(repo); ok && cur.Enabled == enabled && cur.Reason == reason {
 			return ErrNoChange
 		}
-		st.SetEnrollment(repo, RepoEnrollment{
-			Enabled: enabled, Reason: reason, By: s.cfg.Host, UpdatedAt: &now,
-		})
+		// Edited, not rebuilt. A record carries the members a NEWER binary wrote
+		// inside it, and a fresh value starts with none: constructing one here
+		// made an older binary's toggle erase the newer setting on its next CAS,
+		// which is exactly what the tolerant round trip exists to stop.
+		rec, _ := st.Enrollment(repo)
+		rec.Enabled, rec.Reason, rec.By, rec.UpdatedAt = enabled, reason, s.cfg.Host, &now
+		st.SetEnrollment(repo, rec)
 		if !enabled {
 			s.abandonPendingRounds(st, repo)
 		}
@@ -319,20 +328,36 @@ func (s *Service) EnrollmentIn(st State, repo string) EnrollmentView {
 	return s.enrollmentOf(st, repo)
 }
 
+// scopeRepoLimit bounds the listing per owner. It is the transport's own
+// ceiling — ten pages of a hundred — so raising it further would need
+// pagination changes there rather than a bigger number here.
+const scopeRepoLimit = 1000
+
 // ScopeRepos lists the repositories in CRQ_SCOPE, for choosing one to enroll.
 // It is the one genuinely expensive read in the dashboard — a multi-page REST
 // walk per owner — so callers are expected to cache it.
-func (s *Service) ScopeRepos(ctx context.Context) ([]ghapi.Repo, error) {
+//
+// The second return names the owners whose listing hit the bound, most recently
+// pushed first being all that survived it. A picker that silently offered a
+// subset was the worse failure: a repository past the bound is perfectly
+// eligible for review, and nothing said why it could not be found — so the
+// truncation is reported, and `crq repos add <owner>/<name>` enrolls one by name
+// without any listing at all.
+func (s *Service) ScopeRepos(ctx context.Context) ([]ghapi.Repo, []string, error) {
 	seen := map[string]bool{}
 	var out []ghapi.Repo
+	var truncated []string
 	for _, owner := range s.cfg.Scope {
 		owner = strings.TrimSpace(owner)
 		if owner == "" {
 			continue
 		}
-		repos, err := s.gh.ListOwnerRepos(ctx, owner, 300)
+		repos, err := s.gh.ListOwnerRepos(ctx, owner, scopeRepoLimit)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+		if len(repos) >= scopeRepoLimit {
+			truncated = append(truncated, owner)
 		}
 		for _, r := range repos {
 			key := NormalizeRepo(r.FullName)
@@ -343,7 +368,7 @@ func (s *Service) ScopeRepos(ctx context.Context) ([]ghapi.Repo, error) {
 			out = append(out, r)
 		}
 	}
-	return out, nil
+	return out, truncated, nil
 }
 
 // EnrollImpact is what enrolling a repository would actually do, before it is

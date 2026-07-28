@@ -581,6 +581,8 @@ func run(ctx context.Context, args []string) int {
 		fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 		fs.SetOutput(os.Stderr)
 		addr := fs.String("addr", "127.0.0.1:7777", "address to listen on")
+		allowHosts := fs.String("allow-host", "",
+			"extra names actions may be addressed to (comma-separated), for a proxy or DNS alias in front of the dashboard")
 		readOnly := fs.Bool("read-only", false, "refuse every write from the dashboard")
 		poll := fs.Duration("poll", 5*time.Second, "how often to re-read the state ref")
 		dryRun := fs.Bool("dry-run", false, "with install: print the plan, write nothing")
@@ -601,7 +603,7 @@ func run(ctx context.Context, args []string) int {
 				fatal(err)
 				return 1
 			}
-			plan, ierr := service.InstallServe(ctx, *addr, *readOnly, *dryRun, *skipAuth)
+			plan, ierr := service.InstallServe(ctx, *addr, splitList(allowHosts), *readOnly, *dryRun, *skipAuth)
 			if ierr != nil {
 				fatal(ierr)
 				return 1
@@ -714,10 +716,11 @@ func run(ctx context.Context, args []string) int {
 			}
 		}()
 		srv := serve.New(store, serve.Options{
-			Addr:        *addr,
-			MinInterval: cfg.MinInterval,
-			Inflight:    cfg.InflightTimeout,
-			WeeklyLimit: cfg.WeeklyReviewLimit,
+			Addr:         *addr,
+			AllowedHosts: splitList(allowHosts),
+			MinInterval:  cfg.MinInterval,
+			Inflight:     cfg.InflightTimeout,
+			WeeklyLimit:  cfg.WeeklyReviewLimit,
 			// The three above are the startup fallback; this resolves them
 			// against the state the dashboard is rendering, so a fleet pacing or
 			// fair-use save reaches the cards on the next revision rather than on
@@ -1121,8 +1124,8 @@ Pass --keep-open to leave it unresolved anyway (an on-the-record disagreement yo
 intend to keep working). Thread IDs come from .findings[].thread_id.
 `)
 	case "serve":
-		fmt.Print(`crq serve [--addr host:port] [--read-only] [--poll <dur>]
-crq serve install [--addr host:port] [--read-only] [--dry-run] [--skip-auth-check]
+		fmt.Print(`crq serve [--addr host:port] [--allow-host names] [--read-only] [--poll <dur>]
+crq serve install [--addr host:port] [--allow-host names] [--read-only] [--dry-run] [--skip-auth-check]
 
 The live web dashboard: the queue, the repositories, the bots and the settings,
 in a page that updates itself. The GitHub issue dashboard is unaffected and
@@ -1138,6 +1141,12 @@ card rather than the page.
   --addr       default 127.0.0.1:7777. Bind 0.0.0.0 to reach it from another
                machine on a private network; there is NO authentication, so do
                not put it on one you do not trust.
+  --allow-host extra names an action may be addressed to, comma-separated.
+               Actions are accepted on an IP literal, on localhost, on the bound
+               address and on this machine's own name — a name that merely
+               RESOLVES here is refused, because that is how a page on another
+               site reaches an unauthenticated local dashboard. Name a reverse
+               proxy or a DNS alias here.
   --read-only  refuse every write, for pointing at a fleet you do not administer.
   install      write a service definition (systemd user unit, or a launchd
                agent) and start it, so the dashboard survives a reboot. It
@@ -2490,10 +2499,10 @@ func (a prActor) DismissFindings(ctx context.Context, repo string, pr int, ids [
 // repository picker.
 type repoDiscoverer struct{ svc *crq.Service }
 
-func (d repoDiscoverer) Discover(ctx context.Context) ([]serve.Candidate, error) {
-	repos, err := d.svc.ScopeRepos(ctx)
+func (d repoDiscoverer) Discover(ctx context.Context) (serve.Listing, error) {
+	repos, truncated, err := d.svc.ScopeRepos(ctx)
 	if err != nil {
-		return nil, err
+		return serve.Listing{}, err
 	}
 	out := make([]serve.Candidate, 0, len(repos))
 	for _, r := range repos {
@@ -2507,7 +2516,7 @@ func (d repoDiscoverer) Discover(ctx context.Context) ([]serve.Candidate, error)
 		}
 		out = append(out, c)
 	}
-	return out, nil
+	return serve.Listing{Repos: out, Truncated: truncated}, nil
 }
 
 // parseStamp turns the service's RFC3339 timestamps back into a time for the

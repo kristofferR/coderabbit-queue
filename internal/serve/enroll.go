@@ -63,34 +63,44 @@ type Previewer interface {
 	PreviewEnroll(ctx context.Context, repo string) (EnrollImpact, error)
 }
 
+// Listing is one scope walk: the repositories it found, and the owners it could
+// not finish. Truncation travels with the rows because a picker that shows a
+// bounded list as if it were the whole of one is how a repository becomes
+// impossible to add without anyone being told why.
+type Listing struct {
+	Repos []Candidate `json:"repos"`
+	// Truncated names the owners whose listing hit the bound.
+	Truncated []string `json:"truncated,omitempty"`
+}
+
 // Discoverer lists the repositories in the configured scope. It is a separate
 // interface from Observer because it is the one call in the dashboard that is
 // expensive enough to cache aggressively and to never make on a page load.
 type Discoverer interface {
-	Discover(ctx context.Context) ([]Candidate, error)
+	Discover(ctx context.Context) (Listing, error)
 }
 
 // discoverCache holds the scope listing. Repositories appear when someone
 // creates one, which is rare, and the picker has a Refresh button — so a long
 // TTL costs a stale row and saves a multi-page REST walk on every open.
 type discoverCache struct {
-	mu   sync.Mutex
-	at   time.Time
-	rows []Candidate
-	err  error
+	mu      sync.Mutex
+	at      time.Time
+	listing Listing
+	err     error
 }
 
 const discoverTTL = 10 * time.Minute
 
-func (c *discoverCache) get(ctx context.Context, d Discoverer, now time.Time, force bool) ([]Candidate, error) {
+func (c *discoverCache) get(ctx context.Context, d Discoverer, now time.Time, force bool) (Listing, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !force && c.at.After(now.Add(-discoverTTL)) && c.err == nil {
-		return c.rows, nil
+		return c.listing, nil
 	}
-	rows, err := d.Discover(ctx)
-	c.at, c.rows, c.err = now, rows, err
-	return rows, err
+	listing, err := d.Discover(ctx)
+	c.at, c.listing, c.err = now, listing, err
+	return listing, err
 }
 
 // handleDiscover answers the repository picker. It never blocks the rest of the
@@ -106,11 +116,12 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
-	rows, err := s.discovered.get(ctx, s.opts.Discoverer, s.opts.Now(), r.URL.Query().Get("refresh") == "1")
+	listing, err := s.discovered.get(ctx, s.opts.Discoverer, s.opts.Now(), r.URL.Query().Get("refresh") == "1")
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
+	rows := listing.Repos
 
 	// Annotate with what crq already knows, from the snapshot the server holds
 	// — the picker's whole job is separating "not added yet" from "added, and
@@ -140,7 +151,7 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 		}
 		return strings.ToLower(a.Repo) < strings.ToLower(b.Repo)
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"repos": out})
+	writeJSON(w, http.StatusOK, map[string]any{"repos": out, "truncated": listing.Truncated})
 }
 
 // handleEnrollPreview answers the add-repo dialog. It is the one click in the

@@ -33,6 +33,13 @@ type HostReport struct {
 	// found there, so the one still running refreshed the stopped one's claim on
 	// every pass and the table showed a dead service running for ever.
 	RoleSeen map[string]time.Time `json:"role_seen,omitempty"`
+	// RoleCaps is what the binary behind each role understands, kept apart for
+	// the same reason RoleSeen is. During an ordinary rolling upgrade one
+	// machine runs one service on the new build and another on the old, and a
+	// single value is whichever of them wrote last: a fresh `serve` heartbeat
+	// advertised the newest capabilities while an old `autofix` watcher went on
+	// ignoring the very setting LaggingRoleWriters was then told it honoured.
+	RoleCaps map[string]int `json:"role_caps,omitempty"`
 	// Tools is what this host can run, resolved across the roles reporting here
 	// — see RoleTools for why that is not simply the last report.
 	Tools []ToolReport `json:"tools,omitempty"`
@@ -103,7 +110,14 @@ const HostReportTTL = 30 * time.Minute
 //
 // Tool probes merge the same way and for the same reason: they describe the
 // PATH of the service that took them, so they are kept per role and resolved
-// into Tools rather than replaced wholesale by whoever wrote last.
+// into Tools rather than replaced wholesale by whoever wrote last. Capabilities
+// join them, because a machine mid-upgrade runs its roles on two builds.
+//
+// The reporter's record is a fresh value every pass, so what a NEWER binary
+// wrote is carried onto it — both the report's own unrecognised members and
+// each probe's. Without that, an older service's heartbeat erased a newer one's
+// additions every time it ran, which is the one thing tolerant.go exists to
+// prevent.
 func (s *State) SetHostReport(r HostReport, now time.Time) {
 	if s.HostReports == nil {
 		s.HostReports = map[string]HostReport{}
@@ -111,12 +125,16 @@ func (s *State) SetHostReport(r HostReport, now time.Time) {
 	now = now.UTC()
 	seen := map[string]time.Time{}
 	tools := map[string][]ToolReport{}
+	caps := map[string]int{}
 	if prev, ok := s.HostReports[r.Host]; ok {
 		for role, at := range prev.RoleSeen {
 			seen[role] = at
 		}
 		for role, probed := range prev.RoleTools {
 			tools[role] = probed
+		}
+		for role, c := range prev.RoleCaps {
+			caps[role] = c
 		}
 		for _, role := range prev.Roles {
 			// A record written before roles were dated (an older binary, or one
@@ -131,12 +149,19 @@ func (s *State) SetHostReport(r HostReport, now time.Time) {
 			if _, probed := tools[role]; !probed && len(prev.Tools) > 0 {
 				tools[role] = prev.Tools
 			}
+			// And for one written before capabilities were: the record's own
+			// value is all it can say for the roles it carries forward.
+			if _, known := caps[role]; !known {
+				caps[role] = prev.Caps
+			}
 		}
+		r.unknown = carryUnknown(r.unknown, prev.unknown)
 	}
 	for _, role := range r.Roles {
 		seen[role] = now
+		caps[role] = r.Caps
 		if len(r.Tools) > 0 {
-			tools[role] = r.Tools
+			tools[role] = mergeTools(tools[role], r.Tools)
 		}
 	}
 	roles := make([]string, 0, len(seen))
@@ -144,6 +169,7 @@ func (s *State) SetHostReport(r HostReport, now time.Time) {
 		if now.Sub(at) > HostReportTTL {
 			delete(seen, role)
 			delete(tools, role)
+			delete(caps, role)
 			continue
 		}
 		roles = append(roles, role)
@@ -159,8 +185,45 @@ func (s *State) SetHostReport(r HostReport, now time.Time) {
 		tools = nil
 	}
 	r.RoleTools = tools
+	if len(caps) == 0 {
+		caps = nil
+	}
+	r.RoleCaps = caps
 	r.At = now
 	s.HostReports[r.Host] = r
+}
+
+// mergeTools carries what a newer binary recorded about a tool onto this
+// reporter's fresh probe of it, matched by name. The probe itself is the
+// reporter's to state — a path that has changed has changed — but the members
+// it has never heard of are not, and rebuilding the slice from scratch dropped
+// them on every pass.
+func mergeTools(prev, next []ToolReport) []ToolReport {
+	if len(prev) == 0 {
+		return next
+	}
+	byName := make(map[string]ToolReport, len(prev))
+	for _, t := range prev {
+		byName[t.Name] = t
+	}
+	out := make([]ToolReport, 0, len(next))
+	for _, t := range next {
+		if old, ok := byName[t.Name]; ok {
+			t.unknown = carryUnknown(t.unknown, old.unknown)
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// CapsFor is what the binary running role understands. It falls back to the
+// record's own value for a role that predates per-role capabilities, which is
+// the same thing that value meant before they existed.
+func (r HostReport) CapsFor(role string) int {
+	if c, ok := r.RoleCaps[role]; ok {
+		return c
+	}
+	return r.Caps
 }
 
 // resolveTools answers "what can this host run" from the per-role probes, one

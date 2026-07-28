@@ -169,15 +169,23 @@ func EstimateCodeRabbit(login string, d DiffStat, a Allowance) CostEstimate {
 // configured primary or any registry co-reviewer; an unrecognised one is
 // Unknown rather than free, because crq cannot know what somebody else's bot
 // charges.
+//
+// The VENDOR decides the basis, not the role. CRQ_BOT may name a registry bot —
+// Macroscope, Codex — and asking about the primary first billed whichever one
+// was configured on CodeRabbit's allowance-then-per-file model: a Macroscope
+// primary was quoted the wrong basis outright, and a Codex primary read as
+// billable or unknown instead of covered by its subscription. The registry is
+// therefore consulted first; CodeRabbit has no entry there, so a CodeRabbit
+// primary still lands on its own estimator.
 func EstimateCost(login, primary string, d DiffStat, a Allowance) CostEstimate {
-	if primary != "" && NormalizeBotName(login) == NormalizeBotName(primary) {
-		return EstimateCodeRabbit(login, d, a)
-	}
 	if co, ok := CoReviewerByName(login); ok {
 		if co.Price != nil {
 			return co.Price(d)
 		}
 		return freeEstimate(co.Login, "covered by its own subscription — it spends no per-review money")
+	}
+	if primary != "" && NormalizeBotName(login) == NormalizeBotName(primary) {
+		return EstimateCodeRabbit(login, d, a)
 	}
 	return CostEstimate{Bot: login, Unknown: true, Basis: "crq has no pricing for this reviewer"}
 }

@@ -19,9 +19,13 @@ export function App() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [live, setLive] = useState<Live>("connecting");
   const [route, setRoute] = useState(() => location.hash || "#/");
+  // Why there is no state at all, when the server can say. A read that fails
+  // before the first one ever succeeds leaves the stream healthy and empty, so
+  // this is the only thing that distinguishes "still loading" from "broken".
+  const [unavailable, setUnavailable] = useState<string | null>(null);
   const now = useNow(5000);
 
-  useEffect(() => subscribe(setSnap, setLive), []);
+  useEffect(() => subscribe(setSnap, setLive, setUnavailable), []);
   useEffect(() => {
     const onHash = () => setRoute(location.hash || "#/");
     addEventListener("hashchange", onHash);
@@ -90,7 +94,7 @@ export function App() {
       {prRoute(route) ? (
         <PRDetailPage repo={prRoute(route)!.repo} pr={prRoute(route)!.pr} rev={snap?.overview.rev} />
       ) : !snap ? (
-        <Loading live={live} />
+        <Loading live={live} error={unavailable} />
       ) : route === "#/repos" ? (
         <ReposPage repos={snap.repos} bots={snap.bots} held={snap.overview.held} onSnapshot={setSnap} />
       ) : route === "#/bots" ? (
@@ -123,7 +127,21 @@ function prRoute(route: string): { repo: string; pr: number } | null {
   return { repo: `${parts[1]}/${parts[2]}`, pr };
 }
 
-function Loading({ live }: { live: Live }) {
+function Loading({ live, error }: { live: Live; error: string | null }) {
+  if (live !== "reconnecting" && error) {
+    // The server is there and answering; it is the state ref it cannot read.
+    // Saying "Reading the state ref…" here waits on something that is not going
+    // to happen, and hides the one sentence that says what to fix.
+    return (
+      <main className="mx-auto max-w-[1400px] px-6 py-16">
+        <div className="rounded-[10px] border border-bad-edge bg-bad-bg px-5 py-4 text-[13px] text-bad">
+          <span className="font-mono">crq serve</span> cannot read the state ref, so there is nothing
+          to show yet. It keeps retrying.
+          <div className="mt-2 font-mono text-[12.5px]">{error}</div>
+        </div>
+      </main>
+    );
+  }
   return (
     <main className="mx-auto max-w-[1400px] px-6 py-16 text-mut">
       {live === "reconnecting"

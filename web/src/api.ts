@@ -432,10 +432,16 @@ export type Live = "connecting" | "live" | "reconnecting";
 /**
  * Subscribes to whole snapshots. The server pushes only when the state ref's
  * revision moves; clocks tick locally, so nothing here polls for time.
+ *
+ * onUnavailable receives the reason there is no state to show at all — a broken
+ * credential or state ref, which leaves the stream perfectly healthy and empty.
+ * Without it a first read that never succeeds is indistinguishable from one
+ * still in progress, and the page waits on it forever.
  */
 export function subscribe(
   onData: (snap: Snapshot) => void,
   onLive: (live: Live) => void,
+  onUnavailable?: (error: string) => void,
 ): () => void {
   let source: EventSource | null = null;
   let closed = false;
@@ -460,6 +466,15 @@ export function subscribe(
         /* a malformed frame is not worth tearing the stream down for */
       }
     };
+    // Its own event, not a snapshot: there is no state behind it to render.
+    source.addEventListener("unavailable", (e) => {
+      try {
+        onLive("live");
+        onUnavailable?.((JSON.parse((e as MessageEvent).data) as { error: string }).error);
+      } catch {
+        /* as above */
+      }
+    });
     source.onerror = () => {
       onLive("reconnecting");
       source?.close();

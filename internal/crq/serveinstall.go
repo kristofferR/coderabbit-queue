@@ -32,7 +32,11 @@ type ServeInstall struct {
 	LogDir   string `json:"log_dir"`
 	Binary   string `json:"binary"`
 	Addr     string `json:"addr"`
-	Config   string `json:"config,omitempty"`
+	// AllowHosts are the extra names the dashboard accepts actions on. Part of
+	// the unit rather than of the config file because it belongs to the address
+	// this instance is served at, which is also where --addr lives.
+	AllowHosts []string `json:"allow_hosts,omitempty"`
+	Config     string   `json:"config,omitempty"`
 	// ReadOnly installs a dashboard that refuses every write, for pointing at a
 	// fleet you do not administer.
 	ReadOnly bool `json:"read_only,omitempty"`
@@ -47,8 +51,8 @@ type ServeInstall struct {
 }
 
 // InstallServe writes the service definition for `crq serve` and starts it.
-func (s *Service) InstallServe(ctx context.Context, addr string, readOnly, dryRun, skipAuth bool) (ServeInstall, error) {
-	return s.installUnit(ctx, "serve", addr, readOnly, dryRun, skipAuth)
+func (s *Service) InstallServe(ctx context.Context, addr string, allowHosts []string, readOnly, dryRun, skipAuth bool) (ServeInstall, error) {
+	return s.installUnit(ctx, "serve", addr, allowHosts, readOnly, dryRun, skipAuth)
 }
 
 // InstallAutoReview writes the service definition for `crq autoreview` and
@@ -59,10 +63,10 @@ func (s *Service) InstallServe(ctx context.Context, addr string, readOnly, dryRu
 // only fires while that machine is awake. A laptop that sleeps is the wrong
 // host for it, and nothing about the queue says so until reviews quietly stop.
 func (s *Service) InstallAutoReview(ctx context.Context, dryRun, skipAuth bool) (ServeInstall, error) {
-	return s.installUnit(ctx, "autoreview", "", false, dryRun, skipAuth)
+	return s.installUnit(ctx, "autoreview", "", nil, false, dryRun, skipAuth)
 }
 
-func (s *Service) installUnit(ctx context.Context, service, addr string, readOnly, dryRun, skipAuth bool) (ServeInstall, error) {
+func (s *Service) installUnit(ctx context.Context, service, addr string, allowHosts []string, readOnly, dryRun, skipAuth bool) (ServeInstall, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ServeInstall{}, fmt.Errorf("resolving home directory: %w", err)
@@ -87,6 +91,7 @@ func (s *Service) installUnit(ctx context.Context, service, addr string, readOnl
 		LogDir:        logDir,
 		Binary:        self,
 		Addr:          addr,
+		AllowHosts:    allowHosts,
 		Config:        ConfigPath(),
 		ReadOnly:      readOnly,
 		SkipAuthCheck: skipAuth,
@@ -185,6 +190,9 @@ func serveArgv(plan ServeInstall) []string {
 		return []string{plan.Binary, plan.Service}
 	}
 	argv := []string{plan.Binary, "serve", "--addr", plan.Addr}
+	if len(plan.AllowHosts) > 0 {
+		argv = append(argv, "--allow-host", strings.Join(plan.AllowHosts, ","))
+	}
 	if plan.ReadOnly {
 		argv = append(argv, "--read-only")
 	}

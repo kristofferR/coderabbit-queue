@@ -704,6 +704,20 @@ func TestGoldenPricing(t *testing.T) {
 			t.Errorf("unknown bot = %+v, want Unknown rather than free", e)
 		}
 
+		// The VENDOR decides the basis, not the role. CRQ_BOT may name a
+		// registry bot, and pricing whichever one is configured on CodeRabbit's
+		// allowance model billed a Macroscope primary on the wrong basis
+		// entirely and hid a Codex primary's subscription behind an allowance
+		// it does not use.
+		big := DiffStat{Additions: 40000, Deletions: 20000, ChangedFiles: 300}
+		spent := Allowance{RemainingKnown: true, UsageBasedKnown: true, UsageBasedEnabled: true}
+		if e := EstimateCost(MacroscopeLogin, MacroscopeLogin, big, spent); e != EstimateMacroscope(big) {
+			t.Errorf("macroscope primary = %+v, want its own per-kilobyte price", e)
+		}
+		if e := EstimateCost(CodexBotLogin, CodexBotLogin, big, spent); !e.Exact || e.High != 0 {
+			t.Errorf("codex primary = %+v, want the subscription it is actually covered by", e)
+		}
+
 		// The primary is free inside the allowance, unknown without a count,
 		// and priced per file only once past it WITH usage-based billing on.
 		d := DiffStat{ChangedFiles: 8}

@@ -152,3 +152,28 @@ func TestLaggingRoleWritersNamesTheAutofixWatcher(t *testing.T) {
 		t.Errorf("lagging = %v, want the machine named once", got)
 	}
 }
+
+// One machine runs its services on two builds for as long as a rolling upgrade
+// takes, and each writes the SAME record. Reading the record's own capabilities
+// let whichever wrote last answer for both: a current `serve` heartbeat vouched
+// for an old `autofix` watcher that ignores the very setting being saved.
+func TestLaggingRoleWritersReadsEachRolesOwnCapabilities(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	st := New()
+	st.SetHostReport(HostReport{Host: "atlas", Caps: CapsSolver - 1, Roles: []string{"autofix"}}, now)
+	// The upgraded dashboard on the same machine, reporting after it.
+	st.SetHostReport(HostReport{Host: "atlas", Caps: CapsSolver, Roles: []string{"serve"}}, now)
+
+	if got := st.LaggingRoleWriters(CapsSolver, now, "autofix"); len(got) != 1 || got[0] != "atlas" {
+		t.Fatalf("lagging = %v, want the machine named for its old watcher", got)
+	}
+	// Nothing is claimed about the role that never reported an old binary.
+	if got := st.LaggingRoleWriters(CapsSolver, now, "serve"); len(got) != 0 {
+		t.Errorf("lagging = %v, want none — the dashboard here is current", got)
+	}
+	// Upgrading the watcher clears it, without the dashboard having to write.
+	st.SetHostReport(HostReport{Host: "atlas", Caps: CapsSolver, Roles: []string{"autofix"}}, now)
+	if got := st.LaggingRoleWriters(CapsSolver, now, "autofix"); len(got) != 0 {
+		t.Errorf("lagging = %v, want none once the watcher itself reports the capability", got)
+	}
+}

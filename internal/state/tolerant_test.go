@@ -514,3 +514,70 @@ func TestUnknownHostReportFieldsSurviveARewrite(t *testing.T) {
 		t.Errorf("a tool member this binary does not know was dropped: %#v", tool)
 	}
 }
+
+// Round-tripping is only half of it. A host's self-report is CONSTRUCTED fresh
+// on every heartbeat, so however carefully the load preserved a newer binary's
+// members, the next report by an older service on the same machine replaced the
+// record with a value carrying none — erasing them on a timer, at both levels of
+// nesting.
+func TestAnOlderHeartbeatKeepsANewerBinarysHostMembers(t *testing.T) {
+	foreign := `{
+	  "v": 4, "rev": 3, "next_seq": 1,
+	  "host_reports": {
+	    "atlas": {
+	      "host": "atlas", "version": "9.9.9", "caps": 99,
+	      "roles": ["autofix"],
+	      "role_seen": {"autofix": "2026-07-26T11:55:00Z"},
+	      "role_tools": {"autofix": [{"name": "claude", "path": "/new/claude", "future_tool_flag": "sandboxed"}]},
+	      "at": "2026-07-26T11:55:00Z",
+	      "future_host_flag": {"gpu": true}
+	    }
+	  },
+	  "account": {"scope": "owner"}
+	}`
+
+	var st State
+	if err := json.Unmarshal([]byte(foreign), &st); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	// The same machine's older service, reporting what IT can see.
+	st.SetHostReport(HostReport{
+		Host: "atlas", Version: "1.0.0", Caps: 1, Roles: []string{"autofix"},
+		Tools: []ToolReport{{Name: "claude", Path: "/old/claude"}},
+	}, now)
+
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	reports, _ := back["host_reports"].(map[string]any)
+	atlas, _ := reports["atlas"].(map[string]any)
+	if atlas == nil {
+		t.Fatalf("the host report vanished:\n%s", out)
+	}
+	// The probe itself is the reporter's to state — a path that changed changed.
+	if atlas["version"] != "1.0.0" {
+		t.Errorf("version = %#v, want the reporting binary's own", atlas["version"])
+	}
+	carried, _ := atlas["future_host_flag"].(map[string]any)
+	if carried == nil || carried["gpu"] != true {
+		t.Errorf("a report member this binary does not know was erased by a heartbeat: %#v", atlas)
+	}
+	roleTools, _ := atlas["role_tools"].(map[string]any)
+	probed, _ := roleTools["autofix"].([]any)
+	if len(probed) != 1 {
+		t.Fatalf("the role's probes vanished: %#v", roleTools)
+	}
+	tool, _ := probed[0].(map[string]any)
+	if tool["path"] != "/old/claude" {
+		t.Errorf("path = %#v, want the fresh probe's answer", tool["path"])
+	}
+	if tool["future_tool_flag"] != "sandboxed" {
+		t.Errorf("a tool member this binary does not know was erased by a re-probe: %#v", tool)
+	}
+}

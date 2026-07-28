@@ -17,7 +17,7 @@ import (
 // rendering of the same reduced state, not new logic.
 func StatusLine(st State, cfg StoreConfig) string {
 	now := time.Now().UTC()
-	queue := st.Queue(now, cfg.MinInterval)
+	queue := st.Queue(now, dashboardInterval(st, cfg))
 	inFlight := inFlightRounds(st)
 	held := heldRounds(st)
 

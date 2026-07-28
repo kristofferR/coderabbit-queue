@@ -58,6 +58,40 @@ func TestAutofixIsOnUnlessARepositorySaysOtherwise(t *testing.T) {
 	}
 }
 
+// The watcher builds its targets from CRQ_REPOS AND the enrollment records, so a
+// repository enrolled from the dashboard is being fixed here under the fleet
+// default. Listing only what env names — and what somebody has ruled on — left
+// that repository out of the one screen that says whether crq may touch it.
+func TestAutofixSettingsListEnrolledRepositories(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/env": true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if _, err := svc.SetEnrollment(ctx, "owner/added", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := svc.AutofixSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := map[string]AutofixSetting{}
+	for _, s := range settings {
+		listed[s.Repo] = s
+	}
+	added, ok := listed["owner/added"]
+	if !ok {
+		t.Fatalf("settings = %+v, want the enrolled repository the watcher will fix", settings)
+	}
+	if !added.Enabled || !added.Default {
+		t.Errorf("owner/added = %+v, want it reported as on by the fleet default", added)
+	}
+	if _, ok := listed["owner/env"]; !ok {
+		t.Errorf("settings = %+v, want this host's own repositories still listed", settings)
+	}
+}
+
 func TestAutofixSwitchRejectsMalformedRepositoryNames(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()

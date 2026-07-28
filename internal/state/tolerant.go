@@ -350,6 +350,28 @@ func captureUnknown(raw []byte, known map[string]bool) (unknownFields, error) {
 	return out, nil
 }
 
+// carryUnknown folds prev's carried members into next's, for a record that is
+// REBUILT rather than edited.
+//
+// Round-tripping is only half the guarantee: a value a writer constructs from
+// scratch — a host's self-report, a repository's enrollment — starts with an
+// empty carrier however carefully the loaded one preserved its members, so the
+// next save erased them. next wins where both carry a member: it is the newer
+// read of the two.
+func carryUnknown(next, prev unknownFields) unknownFields {
+	if len(prev) == 0 {
+		return next
+	}
+	out := make(unknownFields, len(prev)+len(next))
+	for name, value := range prev {
+		out[name] = value
+	}
+	for name, value := range next {
+		out[name] = value
+	}
+	return out
+}
+
 // mergeUnknown marshals value and adds the carried members back.
 //
 // A carried member never shadows a field this binary owns: if a later build

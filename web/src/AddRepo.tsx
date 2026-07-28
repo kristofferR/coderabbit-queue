@@ -29,6 +29,10 @@ export function AddRepo({
 }) {
   const now = useNow(30000);
   const [rows, setRows] = useState<Candidate[] | null>(null);
+  // Owners whose listing hit the per-owner bound. The rows below are then the
+  // most recently pushed of them and not the whole set, and a filter that finds
+  // nothing is not the same as a repository that is not there.
+  const [truncated, setTruncated] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("");
@@ -53,6 +57,7 @@ export function AddRepo({
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
       setRows(body.repos as Candidate[]);
+      setTruncated((body.truncated as string[] | null) ?? []);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -171,6 +176,14 @@ export function AddRepo({
         {warning && (
           <div className="border-b border-warn-edge bg-warn-bg px-5 py-2 text-[12.5px] text-warn">
             {warning}
+          </div>
+        )}
+        {truncated.length > 0 && (
+          <div className="border-b border-warn-edge bg-warn-bg px-5 py-2 text-[12.5px] text-warn">
+            This is not everything {truncated.join(", ")} {truncated.length === 1 ? "has" : "have"} —
+            the listing stops at the 1000 most recently pushed. A repository below that line is still
+            eligible: add it by name with{" "}
+            <span className="font-mono">crq repos add owner/name</span>.
           </div>
         )}
 

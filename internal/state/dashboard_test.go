@@ -98,6 +98,33 @@ func TestRenderDashboardCoolingDownOnly(t *testing.T) {
 	}
 }
 
+// The pacing floor is a fleet setting, and this issue is written by whichever
+// host happens to save state. Rendering it from that process's own startup
+// configuration advertised a "next at" — and a queue order — that Pump, which
+// resolves the setting from the record, was never going to follow.
+func TestRenderDashboardPacesFromTheRecordedInterval(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(queuedRound("owner/repo", 7, 1, now))
+	fired := now.Add(-time.Minute)
+	st.LastFired = &fired
+	st.Fleet.MinInterval = "2h"
+
+	out := RenderDashboard(st, StoreConfig{MinInterval: time.Second})
+	ready := fmtStamp(ptime(fired.Add(2*time.Hour)), time.UTC)
+	if !strings.Contains(out, "next at "+ready) {
+		t.Errorf("header does not pace from the recorded interval (want %s):\n%s", ready, out)
+	}
+	// And the generic layer answers for it when nothing typed does, exactly as
+	// the configuration resolves it.
+	st.Fleet.MinInterval = ""
+	st.Fleet.Env = map[string]string{"CRQ_MIN_INTERVAL": "30m"}
+	out = RenderDashboard(st, StoreConfig{MinInterval: time.Second})
+	ready = fmtStamp(ptime(fired.Add(30*time.Minute)), time.UTC)
+	if !strings.Contains(out, "next at "+ready) {
+		t.Errorf("header ignores the fleet's env layer (want %s):\n%s", ready, out)
+	}
+}
+
 // Guard against over-correcting: a genuinely empty state keeps its empty-state
 // text and its idle title.
 func TestRenderDashboardEmpty(t *testing.T) {
