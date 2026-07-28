@@ -4,6 +4,7 @@ import { subscribe } from "./api";
 import { OverviewPage } from "./Overview";
 import { BotsPage, ReposPage, SettingsPage, SetupPage } from "./Pages";
 import { PRDetailPage } from "./PRDetail";
+import { FirstRun, isFirstRun } from "./FirstRun";
 import { ago, useNow } from "./time";
 
 const NAV = [
@@ -82,6 +83,8 @@ export function App() {
         <SetupPage setup={snap.setup} />
       ) : route === "#/settings" ? (
         <SettingsPage settings={snap.settings} bots={snap.bots} onSnapshot={setSnap} />
+      ) : isFirstRun(snap) ? (
+        <FirstRun snap={snap} />
       ) : (
         <OverviewPage ov={snap.overview} events={snap.events} onSnapshot={setSnap} />
       )}

@@ -484,3 +484,15 @@ export type Candidate = {
     by?: string;
   };
 };
+
+/** What enrolling a repository would enqueue, and cost, before it happens. */
+export type EnrollImpact = {
+  repo: string;
+  open: number;
+  eligible: number;
+  skipped?: Record<string, number>;
+  low: number;
+  high: number;
+  summary: string;
+  prices_checked_at: string;
+};

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Candidate, Snapshot } from "./api";
+import type { Candidate, EnrollImpact, Snapshot } from "./api";
 import { act } from "./actions";
 import { Card, Empty, Pill, RepoIcon } from "./ui";
+import { Confirm } from "./Confirm";
 import { ago, useNow } from "./time";
 
 /**
@@ -32,6 +33,12 @@ export function AddRepo({
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  // The backlog contract: enrolling a repository with a dozen open pull
+  // requests becomes a dozen metered reviews on the next pass. Nothing is
+  // written until this has been shown and confirmed.
+  const [pending, setPending] = useState<{ repo: string; impact?: EnrollImpact; error?: string } | null>(
+    null,
+  );
 
   const load = async (refresh = false) => {
     setLoading(true);
@@ -73,12 +80,27 @@ export function AddRepo({
 
   if (!open) return null;
 
+  const preview = async (repo: string) => {
+    setPending({ repo });
+    try {
+      const res = await fetch(`/api/enroll-preview?repo=${encodeURIComponent(repo)}`);
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+      setPending({ repo, impact: body as EnrollImpact });
+    } catch (e) {
+      // A price we could not work out must not silently become a free-looking
+      // Add: the dialog stays, and says why.
+      setPending({ repo, error: (e as Error).message });
+    }
+  };
+
   const add = async (repo: string) => {
     setBusy(repo);
     setError(null);
     try {
       const res = await act("enroll", { repo, enabled: true });
       onSnapshot?.(res.snapshot);
+      setPending(null);
       // Reflect it locally too: the listing is cached server-side and would
       // otherwise keep offering an Add button for a repository already added.
       setRows(
@@ -178,7 +200,7 @@ export function AddRepo({
                         <button
                           type="button"
                           disabled={busy === r.repo}
-                          onClick={() => void add(r.repo)}
+                          onClick={() => void preview(r.repo)}
                           className="rounded-lg bg-ink px-3 py-1 text-[12.5px] font-semibold text-white disabled:opacity-45"
                         >
                           {busy === r.repo ? "Adding…" : "Add"}
@@ -191,6 +213,38 @@ export function AddRepo({
             </ul>
           )}
         </div>
+
+        {pending && (
+          <Confirm
+            title={`Review ${pending.repo}?`}
+            confirmLabel={busy ? "Adding…" : "Add it"}
+            busy={busy === pending.repo}
+            error={pending.error}
+            body={
+              pending.error ? (
+                <>Could not work out what this would enqueue. Adding anyway is still safe — the daemon
+                will pick up whatever is open — but the cost is unknown from here.</>
+              ) : pending.impact ? (
+                <>
+                  <p>{pending.impact.summary}.</p>
+                  {Object.entries(pending.impact.skipped ?? {}).map(([why, n]) => (
+                    <p key={why} className="mt-1 text-[12.5px] text-faint">
+                      {n} skipped — {why}.
+                    </p>
+                  ))}
+                  <p className="mt-2 text-[12px] text-faint">
+                    Estimate; published prices last checked {pending.impact.prices_checked_at}. Reviews
+                    start on the daemon's next pass, one metered review at a time across the fleet.
+                  </p>
+                </>
+              ) : (
+                <>Working out what this would enqueue, and what it would cost…</>
+              )
+            }
+            onConfirm={() => void add(pending.repo)}
+            onCancel={() => setPending(null)}
+          />
+        )}
 
         <p className="border-t border-edge px-5 py-2.5 text-[12px] text-faint">
           Adding records the decision in shared state, so every host agrees. Its pull requests are

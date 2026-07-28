@@ -696,6 +696,7 @@ func run(ctx context.Context, args []string) int {
 			EnrollFor:   enrollFor,
 			SolverFor:   solverFor,
 			Discoverer:  repoDiscoverer{service},
+			Previewer:   enrollPreviewer{service},
 			Poll:        *poll,
 			Assets:      serve.Assets(),
 			Log:         stderrLogger{},
@@ -2840,4 +2841,18 @@ func (a prActor) EnvSettings(st crq.State) []serve.EnvSetting {
 func (a prActor) SetEnv(ctx context.Context, key, value string, clear bool) error {
 	_, err := a.svc.SetEnv(ctx, key, value, clear)
 	return err
+}
+
+// enrollPreviewer prices an enrollment for the dashboard's add-repo dialog.
+type enrollPreviewer struct{ svc *crq.Service }
+
+func (p enrollPreviewer) PreviewEnroll(ctx context.Context, repo string) (serve.EnrollImpact, error) {
+	i, err := p.svc.PreviewEnroll(ctx, repo)
+	if err != nil {
+		return serve.EnrollImpact{}, err
+	}
+	return serve.EnrollImpact{
+		Repo: i.Repo, Open: i.Open, Eligible: i.Eligible, Skipped: i.Skipped,
+		Low: i.Low, High: i.High, Summary: i.Summary, PricesCheckedAt: i.PricesCheckedAt,
+	}, nil
 }

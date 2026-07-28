@@ -72,6 +72,8 @@ type Options struct {
 	// repository page without a solver card rather than showing env values that
 	// no repository record could change.
 	SolverFor SolverFor
+	// Previewer prices an enrollment before it happens.
+	Previewer Previewer
 	// Observer supplies the per-PR findings. Optional: without it the PR page
 	// still renders its state layer.
 	Observer Observer
@@ -131,6 +133,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/icon/{kind}/{name...}", s.handleIcon)
 	mux.HandleFunc("GET /api/pr/{owner}/{name}/{pr}", s.handlePR)
 	mux.HandleFunc("GET /api/discover", s.handleDiscover)
+	mux.HandleFunc("GET /api/enroll-preview", s.handleEnrollPreview)
 	mux.HandleFunc("POST /api/action/{action}", s.handleAction)
 	mux.Handle("/", s.assets())
 

@@ -44,6 +44,25 @@ type Candidate struct {
 	Enrollment *Enrollment `json:"enrollment,omitempty"`
 }
 
+// EnrollImpact is what enrolling a repository would do, before it is done.
+type EnrollImpact struct {
+	Repo            string         `json:"repo"`
+	Open            int            `json:"open"`
+	Eligible        int            `json:"eligible"`
+	Skipped         map[string]int `json:"skipped,omitempty"`
+	Low             float64        `json:"low"`
+	High            float64        `json:"high"`
+	Summary         string         `json:"summary"`
+	PricesCheckedAt string         `json:"prices_checked_at"`
+}
+
+// Previewer answers what enrolling a repository would cost. Separate from the
+// Actor because it reads GitHub per open pull request: it is what a dialog asks
+// when it opens, not something a list can carry.
+type Previewer interface {
+	PreviewEnroll(ctx context.Context, repo string) (EnrollImpact, error)
+}
+
 // Discoverer lists the repositories in the configured scope. It is a separate
 // interface from Observer because it is the one call in the dashboard that is
 // expensive enough to cache aggressively and to never make on a page load.
@@ -122,4 +141,30 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 		return strings.ToLower(a.Repo) < strings.ToLower(b.Repo)
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"repos": out})
+}
+
+// handleEnrollPreview answers the add-repo dialog. It is the one click in the
+// product that can spend real money — a repository with a dozen open pull
+// requests becomes a dozen metered reviews on the next pass — so the dialog
+// asks before offering it, in the terms the bill arrives in.
+func (s *Server) handleEnrollPreview(w http.ResponseWriter, r *http.Request) {
+	if s.opts.Previewer == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "this dashboard cannot price an enrollment",
+		})
+		return
+	}
+	repo := strings.TrimSpace(r.URL.Query().Get("repo"))
+	if repo == "" || !strings.Contains(repo, "/") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo must be owner/name"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	impact, err := s.opts.Previewer.PreviewEnroll(ctx, repo)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, impact)
 }

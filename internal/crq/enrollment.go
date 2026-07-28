@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
@@ -259,4 +260,110 @@ func (s *Service) ScopeRepos(ctx context.Context) ([]ghapi.Repo, error) {
 		}
 	}
 	return out, nil
+}
+
+// EnrollImpact is what enrolling a repository would actually do, before it is
+// done.
+//
+// This is the one click in the product that can spend real money: a repository
+// with a dozen open pull requests becomes a dozen metered reviews on the next
+// pass. The dialog that offers it should say so in the terms the bill arrives
+// in, not in "7 pull requests".
+type EnrollImpact struct {
+	Repo string `json:"repo"`
+	// Open is every open pull request; Eligible is what would actually be
+	// enqueued once the skip rules are applied. The gap between them is worth
+	// showing: "12 open, 9 eligible" answers the question the raw count raises.
+	Open     int `json:"open"`
+	Eligible int `json:"eligible"`
+	// Skipped explains the gap, per reason.
+	Skipped map[string]int `json:"skipped,omitempty"`
+	// Metered is how many of those would spend the shared review allowance.
+	Metered int `json:"metered"`
+	// Low/High bound the cost of reviewing the backlog, summed over the
+	// eligible pull requests. Estimates, with the same honesty as crq cost.
+	Low             float64 `json:"low"`
+	High            float64 `json:"high"`
+	Summary         string  `json:"summary"`
+	PricesCheckedAt string  `json:"prices_checked_at"`
+}
+
+// PreviewEnroll reports what enrolling repo would do. It costs one pull-request
+// read per open pull request, which is why it is a separate call the dialog
+// makes rather than something every repository row carries.
+func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact, error) {
+	repo = NormalizeRepo(repo)
+	if err := checkRepoShape(repo); err != nil {
+		return EnrollImpact{}, err
+	}
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return EnrollImpact{}, err
+	}
+	cfg := s.cfgFor(st, repo)
+	impact := EnrollImpact{Repo: repo, Skipped: map[string]int{}, PricesCheckedAt: dialect.PricesCheckedAt}
+
+	var eligible []int
+	err = s.gh.EachOpenPR(ctx, repo, true, func(pr ghapi.SearchPR) (bool, error) {
+		if NormalizeRepo(pr.Repo) != repo {
+			return false, nil
+		}
+		impact.Open++
+		switch {
+		case cfg.SkipAuthors[dialect.NormalizeBotName(strings.ToLower(pr.Author))]:
+			impact.Skipped["author is skipped"]++
+		case cfg.SkipsReview(pr.Body):
+			impact.Skipped["carries the skip marker"]++
+		default:
+			eligible = append(eligible, pr.Number)
+		}
+		return false, nil
+	})
+	if err != nil {
+		return impact, err
+	}
+	impact.Eligible = len(eligible)
+
+	// One read per eligible pull request, for the diff each would be reviewed
+	// at. Bounded, because a dialog that takes a minute to open is a dialog
+	// nobody waits for — and an under-count is reported rather than hidden.
+	const maxPriced = 25
+	priced := eligible
+	if len(priced) > maxPriced {
+		priced = priced[:maxPriced]
+	}
+	for _, pr := range priced {
+		cost, cerr := s.Cost(ctx, repo, pr)
+		if cerr != nil {
+			continue
+		}
+		impact.Low += cost.Low
+		impact.High += cost.High
+		for _, r := range cost.Reviewers {
+			if dialect.NormalizeBotName(r.Bot) == dialect.NormalizeBotName(cfg.Bot) {
+				impact.Metered++
+			}
+		}
+	}
+	impact.Summary = enrollSummary(impact, len(priced) < len(eligible))
+	return impact, nil
+}
+
+func enrollSummary(i EnrollImpact, partial bool) string {
+	if i.Eligible == 0 {
+		return fmt.Sprintf("%d open pull request(s), none of which would be enqueued", i.Open)
+	}
+	cost := "no per-review cost"
+	switch {
+	case i.High > 0 && i.Low != i.High:
+		cost = fmt.Sprintf("roughly $%.2f–$%.2f", i.Low, i.High)
+	case i.High > 0:
+		cost = fmt.Sprintf("about $%.2f", i.High)
+	}
+	out := fmt.Sprintf("would enqueue %d of %d open pull request(s) on the next pass — %s",
+		i.Eligible, i.Open, cost)
+	if partial {
+		out += ", priced over the first 25"
+	}
+	return out
 }
