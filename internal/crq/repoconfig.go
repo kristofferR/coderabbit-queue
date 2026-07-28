@@ -535,7 +535,13 @@ func addedReviewers(before, after Config, beforeCo, afterCo []string) bool {
 		}
 	}
 	for _, reviewer := range after.Reviewers {
-		if reviewer.Metered() || reviewer.Trigger == engine.TriggerNever {
+		if reviewer.Metered() {
+			if !containsBot(before.reviewerLogins(func(r Reviewer) bool { return r.Metered() }), reviewer.Login) {
+				return true
+			}
+			continue
+		}
+		if reviewer.Trigger == engine.TriggerNever {
 			continue
 		}
 		for _, old := range before.Reviewers {

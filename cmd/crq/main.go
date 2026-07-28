@@ -3082,6 +3082,7 @@ func (p enrollPreviewer) PreviewEnroll(ctx context.Context, repo string) (serve.
 	}
 	return serve.EnrollImpact{
 		Repo: i.Repo, Open: i.Open, Eligible: i.Eligible, Skipped: i.Skipped,
-		Low: i.Low, High: i.High, Summary: i.Summary, PricesCheckedAt: i.PricesCheckedAt,
+		Metered: i.Metered, Low: i.Low, High: i.High, Unpriced: i.Unpriced, Unexamined: i.Unexamined,
+		Summary: i.Summary, PricesCheckedAt: i.PricesCheckedAt,
 	}, nil
 }

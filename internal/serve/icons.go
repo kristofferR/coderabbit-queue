@@ -313,6 +313,18 @@ func sniff(path string, body []byte) string {
 // handleIcon serves both kinds. A miss is a 404 so the browser falls back to
 // the letter tile without another round trip.
 func (s *Server) handleIcon(w http.ResponseWriter, r *http.Request) {
+	// Unlike the other credential-backed reads, icons are loaded by <img>, so
+	// they cannot carry the dashboard's custom header. Fetch Metadata still
+	// distinguishes the dashboard's same-origin image load from a hostile page
+	// embedding arbitrarily many cache misses.
+	if r.Header.Get("Sec-Fetch-Site") != "same-origin" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "icon requests must come from this dashboard"})
+		return
+	}
+	if err := s.addressedHere(r); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
 	if s.icons == nil {
 		http.NotFound(w, r)
 		return

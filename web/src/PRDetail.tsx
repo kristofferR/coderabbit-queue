@@ -33,6 +33,7 @@ export function PRDetailPage({ repo, pr, rev }: { repo: string; pr: number; rev?
   const [roundErr, setRoundErr] = useState<string | null>(null);
   const [findingQuery, setFindingQuery] = useState("");
   const [findingBot, setFindingBot] = useState("all");
+  const request = useRef<AbortController | null>(null);
 
   const runRound = async (kind: "hold" | "unhold" | "cancel", reason = "") => {
     setActing(true);
@@ -71,21 +72,36 @@ export function PRDetailPage({ repo, pr, rev }: { repo: string; pr: number; rev?
   };
 
   const load = (refresh = false) => {
+    request.current?.abort();
+    const controller = new AbortController();
+    request.current = controller;
     setRefreshing(refresh);
-    return fetch(`/api/pr/${repo}/${pr}${refresh ? "?refresh=1" : ""}`)
+    return fetch(`/api/pr/${repo}/${pr}${refresh ? "?refresh=1" : ""}`, {
+      headers: { "X-CRQ-Dashboard": "1" },
+      signal: controller.signal,
+    })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((v: PRView) => {
+        if (request.current !== controller) return;
         setView(v);
         setError(null);
       })
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setRefreshing(false));
+      .catch((e: Error) => {
+        if (e.name !== "AbortError" && request.current === controller) setError(e.message);
+      })
+      .finally(() => {
+        if (request.current === controller) {
+          request.current = null;
+          setRefreshing(false);
+        }
+      });
   };
 
   // The state layer is cheap, but the observation behind it costs several
   // GitHub calls — so this loads once on open and only re-fetches on request.
   useEffect(() => {
     load();
+    return () => request.current?.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repo, pr]);
 

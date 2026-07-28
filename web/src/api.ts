@@ -526,6 +526,8 @@ export type EnrollImpact = {
   repo: string;
   open: number;
   eligible: number;
+  /** Eligible pull requests that consume the shared review allowance. */
+  metered: number;
   skipped?: Record<string, number>;
   low: number;
   high: number;

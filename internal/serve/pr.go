@@ -351,6 +351,9 @@ func buildPRView(st state.State, repo string, pr int, bots []BotName, inflight t
 // observation is attempted but never allowed to fail the request — a page that
 // shows the round and says "could not reach GitHub" beats a 500.
 func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
+	if !s.allowDashboardRead(w, r) {
+		return
+	}
 	owner, name := r.PathValue("owner"), r.PathValue("name")
 	pr, err := strconv.Atoi(r.PathValue("pr"))
 	if owner == "" || name == "" || err != nil || pr <= 0 {

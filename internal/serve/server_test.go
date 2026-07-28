@@ -25,6 +25,13 @@ func (l *stubLoader) Load(context.Context) (state.State, state.Revision, error) 
 	return l.st, state.Revision{}, l.err
 }
 
+type countingObserver struct{ calls int }
+
+func (o *countingObserver) Observe(context.Context, string, int) (Observation, error) {
+	o.calls++
+	return Observation{}, nil
+}
+
 // Before the first load returns there is no snapshot — and no error either. The
 // zero Snapshot encodes its collections as null, and the client takes a 200 for
 // live state and iterates them straight away, so the dashboard crashed during
@@ -47,6 +54,8 @@ func TestHandlersRefuseUntilTheFirstLoadSucceeds(t *testing.T) {
 	}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/pr/o/r/1", nil)
+	req.Host = "localhost"
+	req.Header.Set("X-CRQ-Dashboard", "1")
 	req.SetPathValue("owner", "o")
 	req.SetPathValue("name", "r")
 	req.SetPathValue("pr", "1")
@@ -226,6 +235,27 @@ func TestQuotaHeavyReadsRequireDashboardOriginProof(t *testing.T) {
 				t.Fatalf("allowed = %v, want %v (status %d)", got, tc.want, rec.Code)
 			}
 		})
+	}
+}
+
+func TestPRReadRequiresDashboardOriginProofBeforeObserving(t *testing.T) {
+	observer := &countingObserver{}
+	srv := New(&stubLoader{}, Options{Addr: "127.0.0.1:7777", Observer: observer})
+	srv.loaded = true
+	srv.lastState = state.New()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost:7777/api/pr/o/r/1?refresh=1", nil)
+	req.SetPathValue("owner", "o")
+	req.SetPathValue("name", "r")
+	req.SetPathValue("pr", "1")
+	srv.handlePR(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("unauthorized PR read = %d, want 403", rec.Code)
+	}
+	if observer.calls != 0 {
+		t.Fatalf("observer calls = %d, want none before authorization", observer.calls)
 	}
 }
 

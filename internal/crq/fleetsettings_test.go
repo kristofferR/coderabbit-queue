@@ -369,6 +369,54 @@ func TestSetEnvTriggerPolicyReopensCompletedRounds(t *testing.T) {
 	}
 }
 
+func TestSetEnvRecomputesFleetFollowersInsideCAS(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost", "CRQ_REPOS": "o/r",
+		"CRQ_COBOTS": "", "CRQ_MIN_INTERVAL": "0s",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, pr, head := "o/r", 6, "cccccccc3"
+	store := NewMemoryStore(cfg)
+	now := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetRepoOverride(repo, RepoReviewers{
+			CoBots: []string{}, SetCoBots: true,
+			Required: []string{cfg.Bot}, SetRequired: true,
+			UpdatedAt: &now,
+		})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, now, 13)
+
+	hooked := &hookedStore{StateStore: store}
+	hooked.hook = func() {
+		if _, err := store.Update(ctx, func(st *State) error {
+			st.ClearRepoOverride(repo)
+			return nil
+		}); err != nil {
+			t.Error(err)
+		}
+	}
+	svc := NewService(cfg, newFakeGitHub(), hooked, nil)
+	if _, err := svc.SetEnv(ctx, "CRQ_BOT", "chatgpt-codex-connector[bot]", false); err != nil {
+		t.Fatal(err)
+	}
+
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(repo, pr)
+	if round == nil || round.Phase != PhaseCompleted || !round.ReviewersChanged {
+		t.Fatalf("round = %#v, want a conservative reopen marker after the repository began following the fleet", round)
+	}
+}
+
 func strptr(s string) *string { return &s }
 func intptr(n int) *int       { return &n }
 func boolptr(b bool) *bool    { return &b }

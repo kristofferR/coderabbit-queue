@@ -50,8 +50,11 @@ type EnrollImpact struct {
 	Open            int            `json:"open"`
 	Eligible        int            `json:"eligible"`
 	Skipped         map[string]int `json:"skipped,omitempty"`
+	Metered         int            `json:"metered"`
 	Low             float64        `json:"low"`
 	High            float64        `json:"high"`
+	Unpriced        int            `json:"unpriced,omitempty"`
+	Unexamined      int            `json:"unexamined,omitempty"`
 	Summary         string         `json:"summary"`
 	PricesCheckedAt string         `json:"prices_checked_at"`
 }

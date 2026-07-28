@@ -1003,3 +1003,27 @@ func TestTurningThePrimaryOff(t *testing.T) {
 		t.Fatal("reviewers must list the primary again")
 	}
 }
+
+func TestTurningThePrimaryBackOnReopensCompletedRounds(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = codexCoBots(nil)
+	store := NewMemoryStore(cfg)
+	gh := newFakeGitHub()
+	repo, pr, head := "o/private", 7, "aaaaaaaa1"
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	svc := NewService(cfg, gh, store, nil)
+	off, on := false, true
+
+	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}, &off); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 11)
+
+	if _, err := svc.SetReviewers(ctx, repo, nil, nil, &on); err != nil {
+		t.Fatal(err)
+	}
+	if got := roundPhase(t, store, repo, pr); got != PhaseQueued {
+		t.Fatalf("phase = %s, want the completed round reopened for the newly enabled primary", got)
+	}
+}

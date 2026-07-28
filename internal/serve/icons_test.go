@@ -4,8 +4,10 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -134,5 +136,31 @@ func TestMalformedIconNamesAreRejectedBeforeFetching(t *testing.T) {
 	}
 	if got := icons.Bot(t.Context(), "bot/../../token"); got != nil {
 		t.Fatalf("Bot returned %#v for delimiter input", got)
+	}
+}
+
+func TestIconRequestsRequireSameOriginFetchMetadata(t *testing.T) {
+	icons := NewIcons("", nil)
+	icons.put("bot:codex", &icon{
+		body: []byte("\x89PNG\r\n\x1a\n"), contentType: "image/png",
+		expires: time.Now().Add(time.Hour),
+	})
+	srv := &Server{opts: Options{Addr: "127.0.0.1:7777"}, icons: icons}
+
+	request := func(fetchSite string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost:7777/api/icon/bot/codex", nil)
+		req.Header.Set("Sec-Fetch-Site", fetchSite)
+		req.SetPathValue("kind", "bot")
+		req.SetPathValue("name", "codex")
+		srv.handleIcon(rec, req)
+		return rec
+	}
+
+	if rec := request("cross-site"); rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-site icon = %d, want 403", rec.Code)
+	}
+	if rec := request("same-origin"); rec.Code != http.StatusOK {
+		t.Fatalf("same-origin icon = %d: %s", rec.Code, rec.Body.String())
 	}
 }

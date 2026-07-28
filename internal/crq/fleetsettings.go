@@ -784,7 +784,12 @@ func (s *Service) SetEnv(ctx context.Context, key, value string, unset bool) (Fl
 			return ErrNoChange
 		}
 		before := map[string]Config{}
-		for repo := range open {
+		// Recompute this set from the state revision the write will update. A
+		// concurrent override clear can make a repository start following the
+		// fleet after the open-PR prefetch above. It has no prefetched open set,
+		// so reopenForChangedReviewers conservatively marks its completed rounds
+		// for reopening when that PR is next observed alive.
+		for _, repo := range s.reposFollowingFleet(*st) {
 			before[repo] = s.cfgFor(*st, repo)
 		}
 		st.SetFleetDefaults(fleetEnvSet(st.Fleet, key, value, unset), s.cfg.Host, now)

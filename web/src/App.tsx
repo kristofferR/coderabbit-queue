@@ -107,7 +107,7 @@ export function App() {
       {!snap ? (
         <Loading live={live} error={unavailable} />
       ) : pr ? (
-        <PRDetailPage repo={pr.repo} pr={pr.pr} rev={snap.overview.rev} />
+        <PRDetailPage key={`${pr.repo}#${pr.pr}`} repo={pr.repo} pr={pr.pr} rev={snap.overview.rev} />
       ) : route === "#/repos" || route === "#/repos/add" ? (
         <ReposPage
           repos={snap.repos}
