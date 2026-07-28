@@ -462,19 +462,24 @@ export function BotsPage({
   const now = useNow(5000);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const primaryName = bots.find((b) => b.primary)?.name ?? "";
 
   // Turning one off writes the fleet's whole co-reviewer list, because that is
   // what the setting IS — "these bots run" rather than a flag per bot. The
   // primary is absent from it: it is not a co-reviewer, and turning it off is a
   // per-repository decision (a private repo on a free plan) rather than a fleet
   // one.
-  const setEnabled = async (name: string, on: boolean) => {
+  const save = async (name: string, runs: boolean, required: boolean) => {
     setBusy(name);
     setError(null);
     try {
       const co = bots.filter((b) => !b.primary && b.enabled).map((b) => b.name);
-      const next = on ? [...new Set([...co, name])] : co.filter((n) => n !== name);
-      const res = await act("fleet", { fleet: { cobots: next } });
+      const req = bots.filter((b) => b.required).map((b) => b.name);
+      const nextRuns = runs ? [...new Set([...co, name])] : co.filter((n) => n !== name);
+      const nextReq = required ? [...new Set([...req, name])] : req.filter((n) => n !== name);
+      const res = await act("fleet", {
+        fleet: { cobots: nextRuns.filter((n) => n !== primaryName), required: nextReq },
+      });
       onSnapshot?.(res.snapshot);
     } catch (e) {
       setError((e as Error).message);
@@ -482,6 +487,12 @@ export function BotsPage({
       setBusy(null);
     }
   };
+
+  // Requiring implies running, and dropping a reviewer drops its requirement —
+  // the same two rules the per-repo Reviewers card applies, because it is the
+  // same pair of questions asked at a different scope.
+  const toggleRuns = (b: BotCard) => save(b.name, !b.enabled, b.enabled ? false : b.required);
+  const toggleRequired = (b: BotCard) => save(b.name, b.required ? b.enabled : true, !b.required);
 
   return (
     <main className="mx-auto max-w-[1120px] px-6 pt-5 pb-16">
@@ -512,31 +523,39 @@ export function BotsPage({
                   {b.metered ? "spends the shared quota" : "free, no crq quota"}
                 </div>
               </div>
-              <span className="ml-auto flex items-center gap-2">
+              <span className="ml-auto">
                 {b.last_seen ? <Pill tone="ok">Seen {ago(b.last_seen, now)}</Pill> : <Pill tone="mut">Not seen yet</Pill>}
-                <Toggle
-                  on={b.enabled}
-                  locked={b.primary || busy === b.name}
-                  title={
-                    b.primary
-                      ? "the primary runs everywhere by default — turn it off for one project on that project's page"
-                      : b.enabled
-                        ? "runs on every repository that has not overridden its reviewers"
-                        : "not run anywhere unless a repository names it"
-                  }
-                  onClick={() => void setEnabled(b.name, !b.enabled)}
-                />
               </span>
             </header>
             <div className="flex-1 px-5 pt-3 text-[13px] text-mut">
               <dl className="grid grid-cols-[110px_1fr] gap-y-1.5">
+                <dt className="text-faint">Runs</dt>
+                <dd className="flex items-center gap-2">
+                  <Toggle
+                    on={b.enabled}
+                    locked={b.primary || busy === b.name}
+                    title={
+                      b.primary
+                        ? "the primary runs everywhere by default — turn it off for one project on that project's page"
+                        : "runs on every repository that has not overridden its reviewers"
+                    }
+                    onClick={() => void toggleRuns(b)}
+                  />
+                  <span className="text-faint">
+                    {b.enabled ? "reviews every repo following the fleet" : "not run anywhere"}
+                  </span>
+                </dd>
                 <dt className="text-faint">Required</dt>
-                <dd>
-                  {!b.enabled
-                    ? "not running here"
-                    : b.required
-                      ? "convergence waits for it"
-                      : "does not gate convergence"}
+                <dd className="flex items-center gap-2">
+                  <Toggle
+                    on={b.required}
+                    locked={busy === b.name}
+                    title="convergence waits for it"
+                    onClick={() => void toggleRequired(b)}
+                  />
+                  <span className="text-faint">
+                    {b.required ? "convergence waits for it" : "does not gate convergence"}
+                  </span>
                 </dd>
                 {b.command && (
                   <>
