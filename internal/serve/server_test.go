@@ -235,6 +235,7 @@ func TestSnapshotStreamsAreRefusedOnANameThatOnlyResolvesHere(t *testing.T) {
 
 	for _, handle := range []func(http.ResponseWriter, *http.Request){
 		srv.handleSnapshot,
+		srv.handleOverview,
 		srv.handleEvents,
 	} {
 		rec := httptest.NewRecorder()

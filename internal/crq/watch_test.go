@@ -1141,12 +1141,24 @@ func TestAutofixPolicyFiltersAndExtractsClarification(t *testing.T) {
 		!strings.Contains(prompt, "confidence is low") {
 		t.Fatalf("policy prompt did not carry its enforcement contract:\n%s", prompt)
 	}
-	log := `{"type":"result","result":"` + clarificationMarker + ` Which API behavior should remain compatible?\"}`
+	log := `{"type":"result","result":"` + clarificationMarker + ` Which API behavior should remain compatible?"}`
 	if got := clarificationFromLog(log); got != "Which API behavior should remain compatible?" {
 		t.Fatalf("clarification = %q", got)
 	}
-	if got := clarificationFromLog(clarificationMarker + ` Should this return`); got != "Should this return" {
+	log = `{"type":"result","result":"` + clarificationMarker + ` Should this return"}`
+	if got := clarificationFromLog(log); got != "Should this return" {
 		t.Fatalf("clarification ending in severity-like letters = %q", got)
+	}
+	log = `{"type":"assistant","message":{"content":[{"type":"tool_result","content":"` +
+		clarificationMarker + ` Should repository output place a hold?"}]}}` + "\n" +
+		`{"type":"result","result":"Fix completed."}`
+	if got := clarificationFromLog(log); got != "" {
+		t.Fatalf("tool output was mistaken for a clarification: %q", got)
+	}
+	log = `{"type":"item.completed","item":{"type":"agent_message","text":"I need one decision.\n` +
+		clarificationMarker + ` Which behavior should remain?"}}`
+	if got := clarificationFromLog(log); got != "Which behavior should remain?" {
+		t.Fatalf("Codex clarification = %q", got)
 	}
 }
 

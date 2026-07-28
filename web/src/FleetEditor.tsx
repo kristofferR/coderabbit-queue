@@ -33,6 +33,7 @@ export function FleetEditor({
   const [autofix, setAutofix] = useState(fleet.autofix_default);
 
   const [impact, setImpact] = useState<{ summary: string; changes: string[]; reopened: number } | null>(null);
+  const [clearing, setClearing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -81,11 +82,12 @@ export function FleetEditor({
   // Ask first. The answer is the confirmation's whole body — there is no
   // generic "are you sure", because the useful question is always "what does
   // this actually do to the 7 repositories following the fleet".
-  const preview = async () => {
+  const preview = async (clear = false) => {
     setBusy(true);
     setError(null);
     try {
-      const res = await act("fleet", { fleet: change(), preview: true });
+      const res = await act("fleet", { fleet: clear ? { clear: true } : change(), preview: true });
+      setClearing(clear);
       setImpact(res.impact);
     } catch (e) {
       setError((e as Error).message);
@@ -101,6 +103,7 @@ export function FleetEditor({
       const res = await act("fleet", { fleet: clear ? { clear: true } : change() });
       onSnapshot?.(res.snapshot);
       setImpact(null);
+      setClearing(false);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -270,7 +273,7 @@ export function FleetEditor({
             <button
               type="button"
               disabled={busy}
-              onClick={() => void save(true)}
+              onClick={() => void preview(true)}
               className="ml-auto text-[12.5px] text-acc hover:underline disabled:opacity-45"
             >
               Drop the record — follow this host's env again
@@ -281,9 +284,15 @@ export function FleetEditor({
 
       {impact && (
         <Confirm
-          title="Save fleet defaults?"
+          title={clearing ? "Drop fleet defaults?" : "Save fleet defaults?"}
           danger={impact.reopened > 0}
-          confirmLabel={impact.reopened > 0 ? `Save and reopen ${impact.reopened}` : "Save"}
+          confirmLabel={
+            impact.reopened > 0
+              ? `${clearing ? "Drop" : "Save"} and reopen ${impact.reopened}`
+              : clearing
+                ? "Drop the record"
+                : "Save"
+          }
           busy={busy}
           error={error}
           body={
@@ -301,8 +310,11 @@ export function FleetEditor({
               )}
             </>
           }
-          onConfirm={() => void save()}
-          onCancel={() => setImpact(null)}
+          onConfirm={() => void save(clearing)}
+          onCancel={() => {
+            setImpact(null);
+            setClearing(false);
+          }}
         />
       )}
     </Card>

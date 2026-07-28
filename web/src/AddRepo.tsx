@@ -247,7 +247,7 @@ export function AddRepo({
           <Confirm
             title={`Review ${pending.repo}?`}
             confirmLabel={busy ? "Adding…" : "Add it"}
-            busy={busy === pending.repo}
+            busy={busy === pending.repo || (!pending.impact && !pending.error)}
             error={pending.error}
             body={
               pending.error ? (

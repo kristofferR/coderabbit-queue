@@ -1,6 +1,7 @@
 package crq
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -940,18 +941,44 @@ func appendAutofixPolicy(prompt string, severities map[string]bool, askMode stri
 }
 
 func clarificationFromLog(body string) string {
-	at := strings.LastIndex(body, clarificationMarker)
-	if at < 0 {
+	var response string
+	scanner := bufio.NewScanner(strings.NewReader(body))
+	scanner.Buffer(make([]byte, 64<<10), 256<<10)
+	for scanner.Scan() {
+		var event struct {
+			Type   string `json:"type"`
+			Result string `json:"result"`
+			Item   struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"item"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &event) != nil {
+			continue
+		}
+		switch {
+		case event.Type == "result":
+			// Claude's stream-json terminal event.
+			response = event.Result
+		case event.Type == "item.completed" && event.Item.Type == "agent_message":
+			// Codex's --json terminal assistant message.
+			response = event.Item.Text
+		}
+	}
+
+	response = strings.TrimSpace(response)
+	if response == "" {
 		return ""
 	}
-	question := body[at+len(clarificationMarker):]
-	if end := strings.IndexByte(question, '\n'); end >= 0 {
-		question = question[:end]
+	line := response
+	if start := strings.LastIndexByte(response, '\n'); start >= 0 {
+		line = response[start+1:]
 	}
-	question = strings.TrimSpace(question)
-	question = strings.ReplaceAll(question, `\n`, " ")
-	question = strings.ReplaceAll(question, `\"`, `"`)
-	question = strings.Trim(question, "\"' }\t\r\n")
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, clarificationMarker) {
+		return ""
+	}
+	question := strings.TrimSpace(strings.TrimPrefix(line, clarificationMarker))
 	if len(question) > 500 {
 		question = question[:500]
 	}
