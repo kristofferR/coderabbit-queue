@@ -651,6 +651,11 @@ func (s *Service) dispatchWithStart(
 	// read but the fact that nothing happened. Every session gets a file, and
 	// the path is logged before it starts so it is findable while it runs.
 	logPath, logFile, err := s.sessionLog(ctx, report)
+	if err == nil {
+		// Record where the output is going and what it is working on, so the
+		// dashboard can say more about a running session than "attempt 2".
+		s.noteSessionDetail(ctx, report, token, logPath, len(report.Findings))
+	}
 	if err != nil {
 		s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
 		_ = co.Remove(context.WithoutCancel(ctx))
@@ -1209,4 +1214,25 @@ func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[
 		}
 	}
 	return nil
+}
+
+// noteSessionDetail records what a running session is working on, for the
+// reader. Best-effort: this is display bookkeeping, and failing a fix session
+// over it would trade something that matters for something that does not.
+func (s *Service) noteSessionDetail(ctx context.Context, report NextReport, token, logPath string, findings int) {
+	_, err := s.store.Update(ctx, func(st *State) error {
+		r := st.Round(report.Repo, report.PR)
+		if r == nil || r.Dispatch == nil || r.Dispatch.Token != token {
+			return ErrNoChange
+		}
+		if r.Dispatch.Log == logPath && r.Dispatch.Findings == findings {
+			return ErrNoChange
+		}
+		r.Dispatch.Log, r.Dispatch.Findings = logPath, findings
+		st.PutRound(*r)
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrNoChange) && s.log != nil {
+		s.log.Printf("warning: recording session detail for %s#%d: %v", report.Repo, report.PR, err)
+	}
 }

@@ -240,6 +240,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 		targets, byRepo = enrolled, true
 	}
 	var candidates []queueCandidate
+	var titles []queueCandidate
 	lastBeat := time.Now()
 	for _, target := range targets {
 		// Per-target scan budget so one large scope can't consume the whole budget
@@ -279,6 +280,13 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 				state = st // reuse the freshly written snapshot for later candidates
 				lastBeat = time.Now()
 			}
+			// A round that already exists at this head is not a candidate, so it
+			// would never reach enqueueBatch and would never learn its title.
+			// The scan already has one; recording it here is what stops every
+			// existing round reading as a bare number for ever.
+			if pr.Title != "" {
+				titles = append(titles, queueCandidate{Repo: repo, PR: pr.Number, Title: pr.Title})
+			}
 			need, head, nerr := s.needsReview(ctx, state, repo, pr.Number, opts.Incremental)
 			if nerr != nil {
 				// A throttle must abort the pass so AutoReview's outer backoff kicks
@@ -293,7 +301,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 				return false, nil
 			}
 			if need {
-				candidates = append(candidates, queueCandidate{Repo: repo, PR: pr.Number, Head: head})
+				candidates = append(candidates, queueCandidate{Repo: repo, PR: pr.Number, Head: head, Title: pr.Title})
 			}
 			return false, nil
 		})
@@ -301,6 +309,9 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			return err
 		}
 	}
+	// Titles first, in one write: they change nothing about scheduling, so a
+	// failure here must not stop the enqueue that does.
+	s.noteTitles(ctx, titles)
 	// One batched write for the whole pass instead of N (#2).
 	return s.enqueueBatch(ctx, candidates)
 }

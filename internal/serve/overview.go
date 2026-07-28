@@ -106,6 +106,7 @@ type Bot struct {
 
 type RoundRow struct {
 	Key      string     `json:"key"`
+	Title    string     `json:"title,omitempty"`
 	Repo     string     `json:"repo"`
 	PR       int        `json:"pr"`
 	Head     string     `json:"head"`
@@ -121,6 +122,7 @@ type RoundRow struct {
 
 type QueueRow struct {
 	Key      string     `json:"key"`
+	Title    string     `json:"title,omitempty"`
 	Repo     string     `json:"repo"`
 	PR       int        `json:"pr"`
 	Head     string     `json:"head"`
@@ -135,6 +137,7 @@ type QueueRow struct {
 
 type HeldRow struct {
 	Key    string    `json:"key"`
+	Title  string    `json:"title,omitempty"`
 	Repo   string    `json:"repo"`
 	PR     int       `json:"pr"`
 	Head   string    `json:"head,omitempty"`
@@ -149,14 +152,19 @@ type AutofixView struct {
 }
 
 type Session struct {
-	Key       string     `json:"key"`
-	Repo      string     `json:"repo"`
-	PR        int        `json:"pr"`
-	Head      string     `json:"head,omitempty"`
-	Host      string     `json:"host,omitempty"`
-	Attempt   int        `json:"attempt,omitempty"`
-	Since     time.Time  `json:"since"`
-	Heartbeat *time.Time `json:"heartbeat,omitempty"`
+	Key     string `json:"key"`
+	Repo    string `json:"repo"`
+	PR      int    `json:"pr"`
+	Head    string `json:"head,omitempty"`
+	Host    string `json:"host,omitempty"`
+	Attempt int    `json:"attempt,omitempty"`
+	// MaxAttempts is the budget this repository allows, so "attempt 2" can be
+	// read as nearly-done or barely-started.
+	MaxAttempts int        `json:"max_attempts,omitempty"`
+	Findings    int        `json:"findings,omitempty"`
+	Log         string     `json:"log,omitempty"`
+	Since       time.Time  `json:"since"`
+	Heartbeat   *time.Time `json:"heartbeat,omitempty"`
 }
 
 // Host health is deliberately three-valued: a host that has reported nothing is
@@ -173,6 +181,7 @@ type Host struct {
 
 type DoneRow struct {
 	Key     string     `json:"key"`
+	Title   string     `json:"title,omitempty"`
 	Repo    string     `json:"repo"`
 	PR      int        `json:"pr"`
 	Head    string     `json:"head"`
@@ -184,7 +193,7 @@ type DoneRow struct {
 // BuildOverview reduces a loaded State. minInterval comes from config because
 // Queue() folds the pacing gate in, and reviewers names the bots so the UI can
 // label marks without knowing any bot's identity itself.
-func BuildOverview(st state.State, now time.Time, minInterval, inflight time.Duration, botsFor BotsFor, weeklyLimit int) Overview {
+func BuildOverview(st state.State, now time.Time, minInterval, inflight time.Duration, botsFor BotsFor, weeklyLimit int, maxAttempts func(repo string) int) Overview {
 	ov := Overview{
 		Now:     now,
 		Rev:     st.Rev,
@@ -219,7 +228,7 @@ func BuildOverview(st state.State, now time.Time, minInterval, inflight time.Dur
 	ov.InFlight = inFlight(st, now, inflight, botsFor)
 	ov.Queue = queueRows(st, now, minInterval)
 	ov.Held = heldRows(st)
-	ov.Autofix = autofixView(st, now)
+	ov.Autofix = autofixView(st, now, maxAttempts)
 	ov.Finished = finishedRows(st)
 	ov.Counts = Counts{len(ov.InFlight), len(ov.Queue), len(ov.Held), len(ov.Autofix.Sessions)}
 	ov.Attention = attention(st, now, ov)
@@ -255,7 +264,7 @@ func inFlight(st state.State, now time.Time, inflight time.Duration, botsFor Bot
 			continue
 		}
 		row := RoundRow{
-			Key: key, Repo: r.Repo, PR: r.PR, Head: r.Head, Phase: string(r.Phase),
+			Key: key, Title: r.Title, Repo: r.Repo, PR: r.PR, Head: r.Head, Phase: string(r.Phase),
 			FiredAt: r.FiredAt, Host: hostOf(r.ByHost), Note: r.Note,
 			Bots: botMarks(r, botsFor(r.Repo)),
 		}
@@ -322,7 +331,8 @@ func queueRows(st state.State, now time.Time, minInterval time.Duration) []Queue
 	for i, e := range entries {
 		row := QueueRow{
 			Key: state.Key(e.Repo, e.PR), Repo: e.Repo, PR: e.PR, Head: e.Head,
-			Why: e.Why, Attempts: e.Attempts, Host: hostOf(e.ByHost), CoOnly: e.CoOnly,
+			Title: titleOf(st, e.Repo, e.PR),
+			Why:   e.Why, Attempts: e.Attempts, Host: hostOf(e.ByHost), CoOnly: e.CoOnly,
 		}
 		// Only a round that is genuinely eligible now gets a number and a time —
 		// anything behind it starts when the front finishes, which is unknowable.
@@ -345,7 +355,7 @@ func heldRows(st state.State) []HeldRow {
 		repo, pr := splitKey(key)
 		row := HeldRow{Key: key, Repo: repo, PR: pr, Reason: h.Reason, By: h.By, At: h.At}
 		if r, ok := st.Rounds[key]; ok {
-			row.Head = r.Head
+			row.Head, row.Title = r.Head, r.Title
 		}
 		out = append(out, row)
 	}
@@ -353,11 +363,15 @@ func heldRows(st state.State) []HeldRow {
 	return out
 }
 
-func autofixView(st state.State, now time.Time) AutofixView {
+func autofixView(st state.State, now time.Time, maxAttempts func(repo string) int) AutofixView {
 	v := AutofixView{Sessions: []Session{}, Hosts: []Host{}}
 	for key, d := range st.Dispatches {
 		repo, pr := splitKey(key)
-		s := Session{Key: key, Repo: repo, PR: pr, Host: hostOf(d.Host), Attempt: d.Attempts, Since: d.At}
+		s := Session{Key: key, Repo: repo, PR: pr, Host: hostOf(d.Host), Attempt: d.Attempts,
+			Findings: d.Findings, Log: d.Log, Since: d.At}
+		if maxAttempts != nil {
+			s.MaxAttempts = maxAttempts(repo)
+		}
 		if r, ok := st.Rounds[key]; ok {
 			s.Head = r.Head
 		}
@@ -390,7 +404,7 @@ func autofixView(st state.State, now time.Time) AutofixView {
 func finishedRows(st state.State) []DoneRow {
 	out := []DoneRow{}
 	add := func(r state.Round) {
-		row := DoneRow{Key: state.Key(r.Repo, r.PR), Repo: r.Repo, PR: r.PR,
+		row := DoneRow{Key: state.Key(r.Repo, r.PR), Title: r.Title, Repo: r.Repo, PR: r.PR,
 			Head: r.Head, Outcome: string(r.Phase), Note: r.Note}
 		if r.FiredAt != nil {
 			row.At = r.FiredAt
@@ -416,4 +430,14 @@ func finishedRows(st state.State) []DoneRow {
 		out = out[:12]
 	}
 	return out
+}
+
+// titleOf is the pull request's title from its round, when one is recorded.
+// Queue entries come from State.Queue, which reduces a round to its scheduling
+// facts; the title lives on the round itself.
+func titleOf(st state.State, repo string, pr int) string {
+	if r, ok := st.Rounds[state.Key(repo, pr)]; ok {
+		return r.Title
+	}
+	return ""
 }

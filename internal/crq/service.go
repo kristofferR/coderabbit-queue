@@ -288,6 +288,10 @@ type queueCandidate struct {
 	Repo string
 	PR   int
 	Head string
+	// Title travels with the candidate because the scan already has it: the
+	// search result carries it, so recording it costs nothing and spares every
+	// later list a request per row.
+	Title string
 }
 
 // enqueueBatch appends several PRs in a single compare-and-swap write plus one
@@ -307,20 +311,39 @@ func (s *Service) enqueueBatch(ctx context.Context, items []queueCandidate) erro
 				continue
 			}
 			if r := st.Round(repo, it.PR); r != nil {
+				// A title arriving for a round that already exists is still
+				// news: it may have been renamed, or recorded before titles
+				// were kept at all.
+				if it.Title != "" && r.Title != it.Title {
+					updated := *r
+					updated.Title = it.Title
+					st.PutRound(updated)
+					r = st.Round(repo, it.PR)
+				}
 				if r.Head == it.Head {
 					if requeueIfReviewersChanged(st, r) {
 						added++
 					}
 					continue
 				}
-				if _, err := st.Supersede(repo, it.PR, it.Head, now); err != nil {
+				superseded, err := st.Supersede(repo, it.PR, it.Head, now)
+				if err != nil {
 					return err
+				}
+				if it.Title != "" {
+					superseded.Title = it.Title
+					st.PutRound(*superseded)
 				}
 				added++
 				continue
 			}
-			if _, err := st.NewRound(repo, it.PR, it.Head, now); err != nil {
+			fresh, err := st.NewRound(repo, it.PR, it.Head, now)
+			if err != nil {
 				return err
+			}
+			if it.Title != "" {
+				fresh.Title = it.Title
+				st.PutRound(*fresh)
 			}
 			added++
 		}
@@ -2558,4 +2581,41 @@ func sameCoAnswers(before, after map[string]CoBotRound) bool {
 func (s *Service) LoadState(ctx context.Context) (State, error) {
 	st, _, err := s.store.Load(ctx)
 	return st, err
+}
+
+// noteTitles records pull-request titles on rounds that already exist.
+//
+// A round is created with the title the scan saw, but a round already at the
+// current head is never a candidate, so it would never be written again and
+// would read as a bare number for ever. This is the one write that fixes that,
+// and it converges: once every round has its title, nothing changes and the
+// CAS reports no change.
+//
+// Best-effort by construction. A title is what a list SAYS, not what the queue
+// decides, so failing a pass over one would trade something that matters for
+// something that does not.
+func (s *Service) noteTitles(ctx context.Context, items []queueCandidate) {
+	if len(items) == 0 {
+		return
+	}
+	_, err := s.store.Update(ctx, func(st *State) error {
+		changed := false
+		for _, it := range items {
+			r := st.Round(NormalizeRepo(it.Repo), it.PR)
+			if r == nil || it.Title == "" || r.Title == it.Title {
+				continue
+			}
+			updated := *r
+			updated.Title = it.Title
+			st.PutRound(updated)
+			changed = true
+		}
+		if !changed {
+			return ErrNoChange
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrNoChange) && s.log != nil {
+		s.log.Printf("warning: recording pull request titles: %v", err)
+	}
 }

@@ -255,3 +255,35 @@ export function Toggle({
     </button>
   );
 }
+
+/**
+ * A pull request's number and what it is about.
+ *
+ * Every list showed "repo#141" and nothing else, so the queue read as a set of
+ * ticket numbers: you had to open each one to find out what it was. The title
+ * is recorded on the round when it is enqueued, which is why showing it costs
+ * no request — and why it can be a commit or two stale after a rename, which is
+ * a fair price for a list that says what it is listing.
+ */
+export function PRTitle({
+  repo,
+  pr,
+  title,
+  className = "",
+}: {
+  repo: string;
+  pr: number;
+  title?: string;
+  className?: string;
+}) {
+  return (
+    <span className={`flex min-w-0 items-baseline gap-2 ${className}`}>
+      <PRLink repo={repo} pr={pr} />
+      {title && (
+        <span className="min-w-0 truncate text-[12.5px] text-mut" title={title}>
+          {title}
+        </span>
+      )}
+    </span>
+  );
+}

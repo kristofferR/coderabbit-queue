@@ -48,6 +48,7 @@ export type Bot = {
 };
 
 export type RoundRow = {
+  title?: string;
   key: string;
   repo: string;
   pr: number;
@@ -63,6 +64,7 @@ export type RoundRow = {
 };
 
 export type QueueRow = {
+  title?: string;
   key: string;
   repo: string;
   pr: number;
@@ -77,6 +79,7 @@ export type QueueRow = {
 };
 
 export type HeldRow = {
+  title?: string;
   key: string;
   repo: string;
   pr: number;
@@ -93,6 +96,9 @@ export type Session = {
   head?: string;
   host?: string;
   attempt?: number;
+  max_attempts?: number;
+  findings?: number;
+  log?: string;
   since: string;
   heartbeat?: string;
 };
@@ -107,6 +113,7 @@ export type Host = {
 };
 
 export type DoneRow = {
+  title?: string;
   key: string;
   repo: string;
   pr: number;
@@ -333,6 +340,7 @@ export type PRView = {
   pr: number;
   round?: RoundView;
   hold?: HeldRow;
+  title?: string;
   observed?: Observation;
   observe_error?: string;
   cost?: Cost;

@@ -69,6 +69,13 @@ type Round struct {
 	// binaries never fired them, so ignoring the map is correct for them.
 	// Mutate only through Co/SetCoCommand/ClaimCo/ClearCoClaim.
 	CoBots map[string]CoBotRound `json:"cobots,omitempty"`
+	// Title is the pull request's own title, recorded when the round is
+	// enqueued. Every queue and in-flight list showed "repo#141" and nothing
+	// about what that pull request was for, and fetching a title per row would
+	// be a request per row — so it is stored once, with the round that needs it.
+	// Stale after a rename, which is a price worth paying for a list that says
+	// what it is listing.
+	Title string `json:"title,omitempty"`
 
 	// CoOnly marks a round that reached its fired/reviewing state WITHOUT crq
 	// requesting a primary review — a co-reviewer-only trigger, or a bounded
@@ -1093,6 +1100,12 @@ type DispatchClaim struct {
 	// stops instead of looping. It survives release; only a new head clears it,
 	// because a new head means the previous attempt achieved something.
 	Attempts int `json:"attempts,omitempty"`
+	// Findings is how many the session set out to fix, and Log is where its
+	// output is going. Both are for the reader: "attempt 2" says nothing about
+	// whether that is nearly the last one, and a session with no visible log is
+	// one you cannot check on.
+	Findings int    `json:"findings,omitempty"`
+	Log      string `json:"log,omitempty"`
 }
 
 // DispatchHeld reports whether a live claim exists.

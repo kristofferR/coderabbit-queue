@@ -22,6 +22,26 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
   const [action, setAction] = useState<{ finding: Finding; kind: "resolve" | "decline" | "dismiss" } | null>(null);
   const [busy, setBusy] = useState(false);
   const [actErr, setActErr] = useState<string | null>(null);
+  // Round-level actions, kept apart from the finding-level ones above: they
+  // act on different things and one being in flight should not disable the
+  // other.
+  const [pending, setPending] = useState<"hold" | "cancel" | null>(null);
+  const [acting, setActing] = useState(false);
+  const [roundErr, setRoundErr] = useState<string | null>(null);
+
+  const runRound = async (kind: "hold" | "unhold" | "cancel", reason = "") => {
+    setActing(true);
+    setRoundErr(null);
+    try {
+      await act(kind, { repo, pr, reason });
+      setPending(null);
+      await load(true);
+    } catch (e) {
+      setRoundErr((e as Error).message);
+    } finally {
+      setActing(false);
+    }
+  };
 
   const runAction = async (reason: string) => {
     if (!action) return;
@@ -98,6 +118,11 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
           <h1 className="text-[18px] font-[650] tracking-tight">
             <PRLink repo={repo} pr={pr} />
           </h1>
+          {view.title && (
+            <span className="max-w-[46ch] truncate text-[13.5px] text-mut" title={view.title}>
+              {view.title}
+            </span>
+          )}
           {view.round ? (
             <Pill tone={view.round.phase === "reviewing" ? "ok" : "acc"}>{view.round.phase}</Pill>
           ) : (
@@ -110,14 +135,49 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
               {view.observed.converged ? "converged" : `${findings.length} open`}
             </Pill>
           )}
-          <button
-            type="button"
-            onClick={() => load(true)}
-            disabled={refreshing}
-            className="ml-auto rounded-lg border border-edge px-3 py-1.5 text-[13px] font-semibold text-mut disabled:opacity-45"
-          >
-            {refreshing ? "Refreshing…" : "Refresh"}
-          </button>
+          <span className="ml-auto flex flex-wrap items-center gap-2">
+            {/* A pull request opened by link was read-only: the two actions
+                that matter existed only as hover buttons on an Overview row,
+                which is not where you are when you have just read its
+                findings. */}
+            {view.hold ? (
+              <button
+                type="button"
+                disabled={acting}
+                onClick={() => void runRound("unhold")}
+                className="rounded-lg border border-edge px-3 py-1.5 text-[13px] font-semibold text-mut disabled:opacity-45"
+              >
+                Unhold
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={acting}
+                onClick={() => setPending("hold")}
+                className="rounded-lg border border-edge px-3 py-1.5 text-[13px] font-semibold text-mut disabled:opacity-45"
+              >
+                Hold…
+              </button>
+            )}
+            {view.round && (
+              <button
+                type="button"
+                disabled={acting}
+                onClick={() => setPending("cancel")}
+                className="rounded-lg border border-bad-edge px-3 py-1.5 text-[13px] font-semibold text-bad disabled:opacity-45"
+              >
+                Cancel round…
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => load(true)}
+              disabled={refreshing}
+              className="rounded-lg border border-edge px-3 py-1.5 text-[13px] font-semibold text-mut disabled:opacity-45"
+            >
+              {refreshing ? "Refreshing…" : "Refresh"}
+            </button>
+          </span>
         </div>
         {view.round && (
           <div className="mt-2 flex flex-wrap gap-4 text-[12.5px] text-mut">
@@ -142,6 +202,35 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
           {view.hold.reason && <span className="ml-2 text-mut">“{view.hold.reason}”</span>}
           <span className="ml-2 text-faint">— crq will not review it until this is lifted.</span>
         </div>
+      )}
+
+      {pending && (
+        <Confirm
+          title={pending === "hold" ? `Hold ${repo}#${pr}?` : `Cancel the round on ${repo}#${pr}?`}
+          danger={pending === "cancel"}
+          confirmLabel={pending === "hold" ? "Hold it" : "Cancel the round"}
+          needsReason={pending === "hold"}
+          reasonLabel="Why is it held"
+          busy={acting}
+          error={roundErr}
+          body={
+            pending === "hold" ? (
+              "No round is enqueued or fired here until the hold is lifted. Reviews already in flight finish."
+            ) : (
+              <>
+                The current round is abandoned. Auto-review may enqueue this pull request again on its
+                next pass, at whatever head it then has.
+                {view.round?.phase === "fired" && (
+                  <p className="mt-2 text-warn">
+                    This round holds the fire slot; cancelling releases it for the next pull request.
+                  </p>
+                )}
+              </>
+            )
+          }
+          onConfirm={(reason) => void runRound(pending, reason)}
+          onCancel={() => setPending(null)}
+        />
       )}
 
       {action && (
@@ -250,8 +339,21 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
                 <Pill tone="ok">Running · {elapsed(view.round.fixing.since, now)}</Pill>
                 <div className="mt-1.5 text-mut">
                   {view.round.fixing.host} · attempt {view.round.fixing.attempt}
+                  {view.round.fixing.max_attempts ? ` of ${view.round.fixing.max_attempts}` : ""}
+                  {view.round.fixing.findings
+                    ? ` · working through ${view.round.fixing.findings} finding(s)`
+                    : ""}
                   {view.round.fixing.heartbeat && ` · heartbeat ${clock(view.round.fixing.heartbeat)}`}
                 </div>
+                {view.round.fixing.log && (
+                  <div className="mt-1 font-mono text-[11.5px] break-all text-faint">
+                    {view.round.fixing.log}
+                  </div>
+                )}
+                <p className="mt-1.5 text-[11.5px] text-faint">
+                  While a session holds this round the queue leaves it alone; the claim is released
+                  when the session pushes or exits.
+                </p>
               </div>
             </Card>
           )}

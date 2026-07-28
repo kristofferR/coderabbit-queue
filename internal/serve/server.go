@@ -188,7 +188,16 @@ func (s *Server) refresh(ctx context.Context) {
 	s.events.add(diffStates(prev, st, now)...)
 
 	botsFor := s.botsFor(&st)
-	ov := BuildOverview(st, now, s.opts.MinInterval, s.opts.Inflight, botsFor, s.opts.WeeklyLimit)
+	// The attempt budget is per repository, so the session card can say
+	// "attempt 2 of 5" rather than leaving the reader to guess whether that is
+	// nearly the last one.
+	maxAttempts := func(repo string) int {
+		if s.opts.SolverFor == nil {
+			return 0
+		}
+		return s.opts.SolverFor(st, repo).MaxAttempts
+	}
+	ov := BuildOverview(st, now, s.opts.MinInterval, s.opts.Inflight, botsFor, s.opts.WeeklyLimit, maxAttempts)
 	// Read alongside the snapshot rather than cached: it is a state read the
 	// server has already paid for, and a settings page showing a stale default
 	// is how two people overwrite each other.

@@ -80,6 +80,9 @@ type PRView struct {
 	Observed     *Observation `json:"observed,omitempty"`
 	ObserveError string       `json:"observe_error,omitempty"`
 
+	// Title is the pull request's own, so the page says what it is about rather
+	// than only which number it is.
+	Title string `json:"title,omitempty"`
 	// Cost is what the NEXT round would cost. Nil when it could not be worked
 	// out; CostError says why rather than leaving a blank where money goes.
 	Cost      *Cost  `json:"cost,omitempty"`
@@ -195,9 +198,10 @@ func (c *costCache) put(key string, e costEntry) {
 func buildPRView(st state.State, repo string, pr int, bots []BotName, inflight time.Duration) PRView {
 	v := PRView{Repo: repo, PR: pr, History: []HistoryEntry{}}
 	key := state.Key(repo, pr)
+	v.Title = titleOf(st, repo, pr)
 
 	if r, ok := st.Rounds[key]; ok {
-		row := RoundRow{Key: key, Repo: r.Repo, PR: r.PR, Head: r.Head, Phase: string(r.Phase),
+		row := RoundRow{Key: key, Title: r.Title, Repo: r.Repo, PR: r.PR, Head: r.Head, Phase: string(r.Phase),
 			FiredAt: r.FiredAt, Bots: botMarks(r, bots)}
 		rv := &RoundView{
 			Head: r.Head, Phase: string(r.Phase), Attempts: r.Attempts,

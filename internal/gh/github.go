@@ -792,6 +792,7 @@ type Issue struct {
 type Pull struct {
 	Number  int    `json:"number"`
 	State   string `json:"state"`
+	Title   string `json:"title"`
 	Body    string `json:"body"`
 	HTMLURL string `json:"html_url"`
 	Head    struct {
@@ -996,6 +997,7 @@ func (g *GitHub) EachOpenPR(ctx context.Context, target string, byRepo bool, fn 
 			Items []struct {
 				Number        int    `json:"number"`
 				RepositoryURL string `json:"repository_url"`
+				Title         string `json:"title"`
 				Body          string `json:"body"`
 				User          struct {
 					Login string `json:"login"`
@@ -1013,7 +1015,7 @@ func (g *GitHub) EachOpenPR(ctx context.Context, target string, byRepo bool, fn 
 			if repo == "" {
 				continue
 			}
-			stop, err := fn(SearchPR{Repo: repo, Number: item.Number, Author: item.User.Login, Body: item.Body})
+			stop, err := fn(SearchPR{Repo: repo, Number: item.Number, Author: item.User.Login, Title: item.Title, Body: item.Body})
 			if err != nil {
 				return err
 			}
@@ -1074,6 +1076,7 @@ type SearchPR struct {
 	Repo   string
 	Number int
 	Author string
+	Title  string
 	Body   string
 }
 

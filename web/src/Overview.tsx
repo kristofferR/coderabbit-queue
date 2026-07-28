@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { Event as EventItem, Overview, Snapshot } from "./api";
 import { act } from "./actions";
 import { Confirm } from "./Confirm";
-import { BotMarks, Card, CommitLink, Empty, Pill, PRLink, RepoIcon, Td, Th } from "./ui";
+import { BotMarks, Card, CommitLink, Empty, Pill, PRLink, PRTitle, RepoIcon, Td, Th } from "./ui";
 import { ago, clock, countdown, elapsed, useNow } from "./time";
 
 const WHY_TONE: Record<string, "ok" | "warn" | "mut"> = {
@@ -13,6 +13,27 @@ const WHY_TONE: Record<string, "ok" | "warn" | "mut"> = {
   "slot busy": "mut",
   "behind an earlier round": "mut",
 };
+
+type Filter = "all" | "in_flight" | "queued" | "held" | "fixing" | "attention";
+
+// Lanes a row can belong to. "finished" is a lane but never a chip: filtering
+// TO finished work is not a thing anyone wants to do on an operations page.
+type Lane = Filter | "finished";
+
+const FILTER_LABELS: Record<Filter, string> = {
+  all: "All",
+  in_flight: "In flight",
+  queued: "Queued",
+  held: "Held",
+  fixing: "Fixing",
+  attention: "Needs attention",
+};
+
+// A filtered count has to say what it is a count OF, or a narrowed table reads
+// as a fleet that suddenly has less work in it.
+function countLabel(shown: number, total: number, narrowed: boolean) {
+  return narrowed && shown !== total ? `${shown} of ${total}` : total;
+}
 
 type Pending =
   | { kind: "hold"; repo: string; pr: number }
@@ -29,6 +50,8 @@ export function OverviewPage({
   onSnapshot?: (s: Snapshot) => void;
 }) {
   const now = useNow();
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<Filter>("all");
   const [pending, setPending] = useState<Pending | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -47,6 +70,31 @@ export function OverviewPage({
       setBusy(false);
     }
   };
+  // Filtering is client-side on purpose: the whole snapshot is already here,
+  // so narrowing it costs nothing and cannot go stale against the tables it is
+  // narrowing.
+  const q = query.trim().toLowerCase();
+  const matches = (row: { repo: string; pr: number; title?: string }) =>
+    q === "" ||
+    `${row.repo}#${row.pr}`.toLowerCase().includes(q) ||
+    (row.title ?? "").toLowerCase().includes(q);
+
+  const attention = new Set(
+    ov.attention.map((a) => (a.subject ?? "").toLowerCase()).filter(Boolean),
+  );
+  const keep = <T extends { repo: string; pr: number; title?: string; key?: string }>(
+    rows: T[],
+    lane: Lane,
+  ) => rows.filter((r) => matches(r) && (filter === "all" || filter === lane ||
+      (filter === "attention" && attention.has((r.key ?? "").toLowerCase()))));
+
+  const inFlight = keep(ov.in_flight, "in_flight");
+  const queued = keep(ov.queue, "queued");
+  const held = keep(ov.held, "held");
+  const fixing = keep(ov.autofix.sessions, "fixing");
+  const finished = keep(ov.finished, "finished");
+  const narrowed = q !== "" || filter !== "all";
+
   return (
     <main className="mx-auto max-w-[1400px] px-6 pt-4.5 pb-16">
       <Banner ov={ov} now={now} />
@@ -65,10 +113,43 @@ export function OverviewPage({
         </div>
       ))}
 
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search repo, PR number or title…"
+          className="w-[300px] rounded-lg border border-edge bg-card px-2.5 py-1.5 text-[13px]"
+        />
+        {(["all", "in_flight", "queued", "held", "fixing", "attention"] as Filter[]).map((f) => (
+          <button
+            key={f}
+            type="button"
+            onClick={() => setFilter(f)}
+            className={`rounded-full border px-3 py-1 text-[12.5px] font-medium ${
+              filter === f ? "border-ink bg-ink text-white" : "border-edge text-mut hover:bg-[#F7F8FA]"
+            }`}
+          >
+            {FILTER_LABELS[f]}
+          </button>
+        ))}
+        {narrowed && (
+          <button
+            type="button"
+            onClick={() => {
+              setQuery("");
+              setFilter("all");
+            }}
+            className="text-[12.5px] text-acc hover:underline"
+          >
+            Clear
+          </button>
+        )}
+      </div>
+
       <div className="grid grid-cols-[minmax(0,1fr)_360px] items-start gap-4 max-[1400px]:grid-cols-[minmax(0,1fr)]">
       <div>
-      <Card title="In flight" count={ov.counts.in_flight}>
-        {ov.in_flight.length === 0 ? (
+      <Card title="In flight" count={countLabel(inFlight.length, ov.counts.in_flight, narrowed)}>
+        {inFlight.length === 0 ? (
           <Empty>Nothing is being reviewed right now.</Empty>
         ) : (
           <table className="mt-1.5 w-full border-collapse">
@@ -85,12 +166,12 @@ export function OverviewPage({
               </tr>
             </thead>
             <tbody>
-              {ov.in_flight.map((r) => (
+              {inFlight.map((r) => (
                 <tr key={r.key} className="group hover:bg-[#F7F8FA]">
                   <Td>
                     <div className="flex items-center gap-2 font-[550]">
                       <RepoIcon repo={r.repo} />
-                      <PRLink repo={r.repo} pr={r.pr} />
+                      <PRTitle repo={r.repo} pr={r.pr} title={r.title} />
                       {r.fixing && <Pill tone="ok">fixing</Pill>}
                     </div>
                     {r.next && <div className="mt-1 ml-6 text-[12.5px] text-mut">{r.next}</div>}
@@ -139,7 +220,7 @@ export function OverviewPage({
         count={`${ov.counts.queued} waiting`}
         end="only the front row carries a time — later starts are unknowable"
       >
-        {ov.queue.length === 0 ? (
+        {queued.length === 0 ? (
           <Empty>The queue is empty.</Empty>
         ) : (
           <table className="mt-1.5 w-full border-collapse">
@@ -156,13 +237,13 @@ export function OverviewPage({
               </tr>
             </thead>
             <tbody>
-              {ov.queue.map((q) => (
+              {queued.map((q) => (
                 <tr key={q.key} className="group hover:bg-[#F7F8FA]">
                   <Td className="tabular-nums">{q.position ? q.position : <span className="text-faint">—</span>}</Td>
                   <Td>
                     <div className="flex items-center gap-2 font-[550]">
                       <RepoIcon repo={q.repo} />
-                      <PRLink repo={q.repo} pr={q.pr} />
+                      <PRTitle repo={q.repo} pr={q.pr} title={q.title} />
                     </div>
                     {q.next && <div className="mt-1 ml-6 text-[12.5px] text-mut">{q.next}</div>}
                   </Td>
@@ -196,7 +277,7 @@ export function OverviewPage({
       </Card>
 
       {ov.held.length > 0 && (
-        <Card title="Held" count={ov.counts.held}>
+        <Card title="Held" count={countLabel(held.length, ov.counts.held, narrowed)}>
           <table className="mt-1.5 w-full border-collapse">
             <thead>
               <tr>
@@ -209,12 +290,12 @@ export function OverviewPage({
               </tr>
             </thead>
             <tbody>
-              {ov.held.map((h) => (
+              {held.map((h) => (
                 <tr key={h.key} className="hover:bg-[#F7F8FA]">
                   <Td>
                     <div className="flex items-center gap-2 font-[550]">
                       <RepoIcon repo={h.repo} />
-                      <PRLink repo={h.repo} pr={h.pr} />
+                      <PRTitle repo={h.repo} pr={h.pr} title={h.title} />
                     </div>
                   </Td>
                   <Td className="text-[13px]">
@@ -246,7 +327,7 @@ export function OverviewPage({
         title="Autofix"
         count={`${ov.autofix.sessions.length} running · ${ov.autofix.hosts.length} hosts`}
       >
-        {ov.autofix.sessions.map((s) => (
+        {fixing.map((s) => (
           <div key={s.key} className="flex flex-wrap items-center gap-4 border-b border-[#EEF0F3] px-[18px] py-3 text-[13px]">
             <Pill tone="ok">Fixing · {elapsed(s.since, now)}</Pill>
             <span className="flex items-center gap-2">
@@ -288,7 +369,7 @@ export function OverviewPage({
       </Card>
 
       <Card title="Recently finished" count={ov.finished.length}>
-        {ov.finished.length === 0 ? (
+        {finished.length === 0 ? (
           <Empty>Nothing has finished yet.</Empty>
         ) : (
           <table className="mt-1.5 w-full border-collapse">
@@ -301,12 +382,12 @@ export function OverviewPage({
               </tr>
             </thead>
             <tbody>
-              {ov.finished.map((d, i) => (
+              {finished.map((d, i) => (
                 <tr key={`${d.key}-${i}`} className="hover:bg-[#F7F8FA]">
                   <Td>
                     <div className="flex items-center gap-2 font-[550]">
                       <RepoIcon repo={d.repo} />
-                      <PRLink repo={d.repo} pr={d.pr} />
+                      <PRTitle repo={d.repo} pr={d.pr} title={d.title} />
                     </div>
                   </Td>
                   <Td className="text-[13px]">
