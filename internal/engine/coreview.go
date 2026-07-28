@@ -409,16 +409,21 @@ func DecideCoPost(r state.Round, obs Observation, cp CoReviewerPolicy, commandPr
 	if coCheckAny(obs, cp.Login) {
 		return false
 	}
-	// Fail closed: with the head's checks unreadable, a missing check is not
-	// evidence the bot is idle, and posting would double-ask a run already in
-	// flight.
-	if obs.co(cp.Login).ChecksUnknown {
-		return false
-	}
 	switch cp.Trigger {
 	case TriggerAlways:
+		// "Always" is the operator's explicit instruction to ask this reviewer
+		// on every head. An unreadable checks endpoint is not evidence that a
+		// review exists, and suppressing the command here leaves a required
+		// reviewer pending until the round times out with no recovery path.
+		// A check we can actually see still suppresses the command above.
 		return !obs.co(cp.Login).AutoActive
 	case TriggerSelfHeal:
+		// Self-heal is deliberately conservative: when checks are unreadable,
+		// the missing check is not evidence that an auto-review was missed.
+		// Avoid double-asking a run that may already be in flight.
+		if obs.co(cp.Login).ChecksUnknown {
+			return false
+		}
 		if r.ForceCoReviewer(cp.Login) {
 			return true
 		}

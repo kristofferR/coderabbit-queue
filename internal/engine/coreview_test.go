@@ -66,7 +66,14 @@ func TestDecideCoPostTriggerMatrix(t *testing.T) {
 			obs:  obsWith(CoSeen{}, CheckSeen{Bot: macroLogin, Verdict: dialect.CheckDone, CompletedAt: now}),
 			want: true,
 		},
+		{
+			name: "always posts when checks are unreadable",
+			cp:   policy(TriggerAlways),
+			obs:  obsWith(CoSeen{ChecksUnknown: true}),
+			want: true,
+		},
 		{name: "selfheal stays quiet for an inactive bot", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{}), anchor: staleAnchor, want: false},
+		{name: "selfheal stays quiet when checks are unreadable", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true, ChecksUnknown: true}), anchor: staleAnchor, want: false},
 		{name: "selfheal posts for an active bot that missed the head past grace", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true}), anchor: staleAnchor, want: true},
 		{name: "selfheal counts round activity as active", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{ActiveThisRound: true}), anchor: staleAnchor, want: true},
 		{name: "selfheal waits out the grace period", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true}), anchor: freshAnchor, want: false},
@@ -447,7 +454,10 @@ func TestReviewSkippedRunsCoReviewersInsteadOfFiring(t *testing.T) {
 		RequiredBots: []string{"coderabbitai[bot]", dialect.CodexBotLogin},
 		CoReviewers:  []CoReviewerPolicy{{Login: dialect.CodexBotLogin, Command: "@codex review", Trigger: TriggerAlways}}}
 	obs := Observation{Head: head, Open: true,
-		Events: []dialect.BotEvent{skippedEvent("56150a0423a243224b03f355c3a3ba6941011b5b", now)}}
+		Events: []dialect.BotEvent{skippedEvent("56150a0423a243224b03f355c3a3ba6941011b5b", now)},
+		Co: map[string]CoSeen{
+			dialect.NormalizeBotName(dialect.CodexBotLogin): {ChecksUnknown: true},
+		}}
 
 	// Even with a free slot and no block, crq must not fire CodeRabbit.
 	d := DecideFire(Global{SlotFree: true}, queued, obs, now, p)
