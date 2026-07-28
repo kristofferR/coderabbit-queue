@@ -123,9 +123,8 @@ type HistoryEntry struct {
 	Current bool       `json:"current,omitempty"`
 }
 
-// observeCache keeps one observation per (repo, pr, head). Keying on head
-// matters: a new head invalidates findings, and serving the previous head's
-// list would be worse than serving none.
+// observeCache keeps one observation per (repo, pr, head, reviewer config).
+// Both the head and effective reviewers shape convergence and findings.
 type observeCache struct {
 	mu      sync.Mutex
 	entries map[string]observeEntry
@@ -213,6 +212,23 @@ func costKey(repo string, pr int, head string, bots []BotName, remaining *int) s
 		b.WriteString("unknown")
 	} else {
 		b.WriteString(strconv.Itoa(*remaining))
+	}
+	return b.String()
+}
+
+func observationKey(repo string, pr int, head string, bots []BotName) string {
+	var b strings.Builder
+	b.WriteString(strings.ToLower(repo) + "#" + strconv.Itoa(pr) + "@" + head)
+	for _, bot := range bots {
+		b.WriteString("|" + bot.Login)
+		if bot.Primary {
+			b.WriteString(":primary")
+		}
+		if bot.Required {
+			b.WriteString(":required")
+		}
+		b.WriteString(":trigger=" + bot.Trigger + ":command=" + bot.Command)
+		b.WriteString(":grace=" + strconv.FormatInt(int64(bot.Grace), 10))
 	}
 	return b.String()
 }
@@ -353,7 +369,8 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 	st := s.lastState
 	s.mu.RUnlock()
 
-	view := buildPRView(st, repo, pr, s.botsFor(&st)(repo), s.pacing(st).Inflight, s.opts.Now(), s.maxAttempts(st))
+	bots := s.botsFor(&st)(repo)
+	view := buildPRView(st, repo, pr, bots, s.pacing(st).Inflight, s.opts.Now(), s.maxAttempts(st))
 
 	if s.observer != nil {
 		// The round's head is what invalidates a cached entry, so an untracked
@@ -364,7 +381,7 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 		if view.Round != nil {
 			head = view.Round.Head
 		}
-		key := strings.ToLower(repo) + "#" + strconv.Itoa(pr) + "@" + head
+		key := observationKey(repo, pr, head, bots)
 		if r.URL.Query().Get("refresh") == "1" {
 			s.observations.put(key, observeEntry{})
 		}

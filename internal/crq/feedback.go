@@ -90,6 +90,16 @@ type CoReviewerStatus struct {
 }
 
 func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackReport, error) {
+	return s.feedback(ctx, repo, pr, true)
+}
+
+// FeedbackReadOnly observes a pull request without persisting incidental
+// account-quota evidence. It is the dashboard's read-only path.
+func (s *Service) FeedbackReadOnly(ctx context.Context, repo string, pr int) (FeedbackReport, error) {
+	return s.feedback(ctx, repo, pr, false)
+}
+
+func (s *Service) feedback(ctx context.Context, repo string, pr int, persist bool) (FeedbackReport, error) {
 	repo = NormalizeRepo(repo)
 	now := s.clock()
 	st, _, err := s.store.Load(ctx)
@@ -115,10 +125,12 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// away, and the next fire went out inside a window the bot had already
 	// stated. It is the one write on this path, it happens once per notice rather
 	// than once per poll, and all it can do is stop a review.
-	if updated, err := s.recordObservedBlock(ctx, obs, st, now); err != nil {
-		return FeedbackReport{}, fmt.Errorf("recording the account block observed on %s: %w", QueueKey(repo, pr), err)
-	} else if updated != nil {
-		st = *updated
+	if persist {
+		if updated, err := s.recordObservedBlock(ctx, obs, st, now); err != nil {
+			return FeedbackReport{}, fmt.Errorf("recording the account block observed on %s: %w", QueueKey(repo, pr), err)
+		} else if updated != nil {
+			st = *updated
+		}
 	}
 	pull := obs.pull
 	head := ""

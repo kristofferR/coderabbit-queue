@@ -3,6 +3,9 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/state"
 )
 
 func TestWatchDispatchOptionHonorsFalse(t *testing.T) {
@@ -164,6 +167,28 @@ func TestSolverTargetIsUnambiguous(t *testing.T) {
 		if err := validateSolverTarget(target.repo, target.fleet); err != nil {
 			t.Errorf("valid target %+v was rejected: %v", target, err)
 		}
+	}
+}
+
+func TestSolverAgentHostMarksHistoricalProbesStale(t *testing.T) {
+	const stamp = "2026-07-28T10:00:00Z"
+	now, err := time.Parse(time.RFC3339, stamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := state.HostReport{
+		Host:  "fixer",
+		Roles: []string{"serve"},
+		Tools: []state.ToolReport{{Name: "codex", Path: "/usr/bin/codex"}},
+		At:    now,
+	}
+
+	got := solverAgentHost(report, "codex", now)
+	if !got.Stale {
+		t.Fatal("a host that no longer reports the autofix role must be stale")
+	}
+	if got.Has == nil || !*got.Has || got.Path != "/usr/bin/codex" {
+		t.Fatalf("historical probe = %+v, want the last known installed path", got)
 	}
 }
 

@@ -1350,6 +1350,26 @@ func (s *State) ReleaseArchivedDispatch(repo string, pr int, token string) bool 
 	return released
 }
 
+// MarkArchivedDispatchUnavailable records a provider outage on the archived
+// claim owned by token. A session can outlive the head it started on, so the
+// current round is not necessarily the claim owner.
+func (s *State) MarkArchivedDispatchUnavailable(repo string, pr int, token string, until time.Time, reason string) bool {
+	key := Key(repo, pr)
+	marked := false
+	if claim, ok := s.Dispatches[key]; ok && claim.Token == token {
+		claim.markUnavailable(until, reason)
+		s.Dispatches[key] = claim
+		marked = true
+	}
+	for i := range s.Archive {
+		r := &s.Archive[i]
+		if Key(r.Repo, r.PR) == key && r.MarkDispatchUnavailable(token, until, reason) {
+			marked = true
+		}
+	}
+	return marked
+}
+
 // RememberDispatch stores a newly granted claim independently of its round.
 func (s *State) RememberDispatch(repo string, pr int, claim DispatchClaim) {
 	if s.Dispatches == nil {
@@ -1473,16 +1493,20 @@ func (r *Round) MarkDispatchUnavailable(token string, until time.Time, reason st
 	if r.Dispatch == nil || r.Dispatch.Token != token {
 		return false
 	}
-	if r.Dispatch.UnavailableModels == nil {
-		r.Dispatch.UnavailableModels = map[string]time.Time{}
-	}
-	r.Dispatch.UnavailableModels[r.Dispatch.Model] = until.UTC()
-	r.Dispatch.LastFailure = reason
-	if r.Dispatch.Attempts > 0 {
-		r.Dispatch.Attempts--
-	}
-	r.Dispatch.AttemptResetAt = nil
+	r.Dispatch.markUnavailable(until, reason)
 	return true
+}
+
+func (c *DispatchClaim) markUnavailable(until time.Time, reason string) {
+	if c.UnavailableModels == nil {
+		c.UnavailableModels = map[string]time.Time{}
+	}
+	c.UnavailableModels[c.Model] = until.UTC()
+	c.LastFailure = reason
+	if c.Attempts > 0 {
+		c.Attempts--
+	}
+	c.AttemptResetAt = nil
 }
 
 // beginDispatchHold mirrors the new dispatch exclusion into queue state every

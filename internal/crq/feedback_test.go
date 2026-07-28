@@ -100,6 +100,31 @@ func TestFeedbackReturnsObservedAccountBlockPersistenceFailure(t *testing.T) {
 	}
 }
 
+func TestReadOnlyFeedbackDoesNotPersistObservedAccountBlocks(t *testing.T) {
+	cfg := firingConfig()
+	now := time.Now().UTC()
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("o/repo", 3)] = pull
+	notice := ghapi.IssueComment{
+		ID: 17, Body: "You are rate limited by coderabbit.ai. Reviews available in 3 minutes.",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	notice.User.Login = cfg.Bot
+	gh.comments[fakeKey("o/repo", 3)] = []ghapi.IssueComment{notice}
+
+	writeErr := errors.New("read-only feedback attempted a state write")
+	store := &failNthUpdateStore{StateStore: NewMemoryStore(cfg), n: 1, err: writeErr}
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+
+	if _, err := svc.FeedbackReadOnly(context.Background(), "o/repo", 3); err != nil {
+		t.Fatalf("read-only feedback failed: %v", err)
+	}
+}
+
 func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 	// A re-review with nothing new to say produces no review object: CodeRabbit
 	// only replies "Review finished" to the command. That reply must satisfy

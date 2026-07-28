@@ -668,15 +668,7 @@ func run(ctx context.Context, args []string) int {
 				return out
 			}
 			for _, r := range st.HostReportList() {
-				has := serve.HostHas{Host: state.WriterHost(r.Host)}
-				for _, t := range r.Tools {
-					if t.Name != agent {
-						continue
-					}
-					found := t.Path != ""
-					has.Has, has.Path = &found, t.Path
-				}
-				out.AgentOn = append(out.AgentOn, has)
+				out.AgentOn = append(out.AgentOn, solverAgentHost(r, agent, time.Now().UTC()))
 			}
 			return out
 		}
@@ -713,21 +705,23 @@ func run(ctx context.Context, args []string) int {
 		// is the only heartbeat there is: reporting once at startup left the
 		// still-running dashboard marking its own host stale after HostReportTTL,
 		// so Setup stopped naming the machine you were looking at it on.
-		service.ReportHost(ctx, "serve")
 		serveCtx, stopReports := context.WithCancel(ctx)
 		defer stopReports()
-		go func() {
-			tick := time.NewTicker(crq.HostReportTTL / 2)
-			defer tick.Stop()
-			for {
-				select {
-				case <-serveCtx.Done():
-					return
-				case <-tick.C:
-					service.ReportHost(serveCtx, "serve")
+		if !*readOnly {
+			service.ReportHost(ctx, "serve")
+			go func() {
+				tick := time.NewTicker(crq.HostReportTTL / 2)
+				defer tick.Stop()
+				for {
+					select {
+					case <-serveCtx.Done():
+						return
+					case <-tick.C:
+						service.ReportHost(serveCtx, "serve")
+					}
 				}
-			}
-		}()
+			}()
+		}
 		srv := serve.New(store, serve.Options{
 			Addr:         *addr,
 			AllowedHosts: splitList(allowHosts),
@@ -761,7 +755,7 @@ func run(ctx context.Context, args []string) int {
 			Log:         stderrLogger{},
 			Host:        host,
 			LookupToken: ghapi.LookupToken,
-			Observer:    prObserver{service},
+			Observer:    prObserver{svc: service, readOnly: *readOnly},
 			Coster:      prCoster{service},
 			Actor:       prActor{service},
 			ReadOnly:    *readOnly,
@@ -2422,6 +2416,21 @@ func parseAutofixReason(args []string) (rest []string, reason string, ok bool) {
 	return rest, reason, true
 }
 
+func solverAgentHost(report state.HostReport, agent string, now time.Time) serve.HostHas {
+	has := serve.HostHas{
+		Host:  state.WriterHost(report.Host),
+		Stale: !report.RolesFresh([]string{"autofix"}, now, crq.HostReportTTL),
+	}
+	for _, tool := range report.Tools {
+		if tool.Name != agent {
+			continue
+		}
+		found := tool.Path != ""
+		has.Has, has.Path = &found, tool.Path
+	}
+	return has
+}
+
 // keysOf flattens a config set into the sorted list the dashboard displays.
 func keysOf(set map[string]bool) []string {
 	if len(set) == 0 {
@@ -2438,10 +2447,19 @@ func keysOf(set map[string]bool) []string {
 // prObserver adapts the orchestrator's feedback path to the dashboard's
 // read-only view. The mapping lives here rather than in serve so that package
 // stays independent of the frozen CLI report shape.
-type prObserver struct{ svc *crq.Service }
+type prObserver struct {
+	svc      *crq.Service
+	readOnly bool
+}
 
 func (o prObserver) Observe(ctx context.Context, repo string, pr int) (serve.Observation, error) {
-	report, err := o.svc.Feedback(ctx, repo, pr)
+	var report crq.FeedbackReport
+	var err error
+	if o.readOnly {
+		report, err = o.svc.FeedbackReadOnly(ctx, repo, pr)
+	} else {
+		report, err = o.svc.Feedback(ctx, repo, pr)
+	}
 	if err != nil {
 		return serve.Observation{}, err
 	}

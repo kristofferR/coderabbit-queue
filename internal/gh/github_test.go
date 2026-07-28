@@ -778,12 +778,12 @@ func TestViewerLoginRetriesAfterATransientFailureButNotARefusal(t *testing.T) {
 	defer srv.Close()
 
 	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 1, maxWait: time.Millisecond, backoffBase: time.Millisecond, networkMaxWait: time.Millisecond}
-	if got := g.viewerLogin(context.Background()); got != "" {
-		t.Fatalf("viewerLogin = %q, want no answer while GitHub is failing", got)
+	if got, err := g.viewerLogin(context.Background()); err == nil || got != "" {
+		t.Fatalf("viewerLogin = %q, err %v, want the transient failure propagated", got, err)
 	}
 	atomic.StoreInt32(&down, 0)
-	if got := g.viewerLogin(context.Background()); got != "kristofferR" {
-		t.Errorf("viewerLogin = %q, want the identity once GitHub answers again", got)
+	if got, err := g.viewerLogin(context.Background()); err != nil || got != "kristofferR" {
+		t.Errorf("viewerLogin = %q, err %v, want the identity once GitHub answers again", got, err)
 	}
 
 	// A refusal IS an answer, and asking again every time would spend quota on
@@ -796,15 +796,15 @@ func TestViewerLoginRetriesAfterATransientFailureButNotARefusal(t *testing.T) {
 	}))
 	defer denied.Close()
 	d := &GitHub{token: "t", httpClient: denied.Client(), apiBase: denied.URL, maxRetries: 1, maxWait: time.Millisecond, backoffBase: time.Millisecond, networkMaxWait: time.Millisecond}
-	if got := d.viewerLogin(context.Background()); got != "" {
-		t.Fatalf("viewerLogin = %q, want none from a refused token", got)
+	if got, err := d.viewerLogin(context.Background()); err != nil || got != "" {
+		t.Fatalf("viewerLogin = %q, err %v, want none from a refused token", got, err)
 	}
 	// Counted from here: send retries a 401 once with a refreshed token, so the
 	// question is whether a SECOND call asks again, not how many requests the
 	// first one took.
 	asked := atomic.LoadInt32(&denials)
-	if got := d.viewerLogin(context.Background()); got != "" {
-		t.Fatalf("viewerLogin = %q, want none from a refused token", got)
+	if got, err := d.viewerLogin(context.Background()); err != nil || got != "" {
+		t.Fatalf("viewerLogin = %q, err %v, want none from a refused token", got, err)
 	}
 	if got := atomic.LoadInt32(&denials); got != asked {
 		t.Errorf("asked %d more times, want the refusal remembered", got-asked)

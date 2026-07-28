@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
@@ -278,6 +279,36 @@ func TestDisablingEnrollmentDropsTheQueuedRounds(t *testing.T) {
 	st, _, _ = store.Load(ctx)
 	if round := st.Round("o/stopped", 7); round == nil || round.Phase != PhaseQueued {
 		t.Errorf("round = %+v, want a fresh queued round once the repository is back on", round)
+	}
+}
+
+func TestDisablingEnrollmentRefusesAClaimedTriggerPost(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/stopped": true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		round, err := st.NewRound("o/stopped", 7, "abcdef123", time.Now())
+		if err != nil {
+			return err
+		}
+		round.Phase = PhaseReserved
+		st.PutRound(*round)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.SetEnrollment(ctx, "o/stopped", false, "stop reviewing this"); err == nil {
+		t.Fatal("turning the repository off succeeded while its review trigger was being posted")
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if enrollment, ok := st.Enrollment("o/stopped"); ok && !enrollment.Enabled {
+		t.Fatal("the rejected off action still changed enrollment")
 	}
 }
 

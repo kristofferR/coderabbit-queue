@@ -1125,14 +1125,23 @@ func (s *Service) releaseDispatchUnavailable(
 ) {
 	_, _ = s.store.Update(ctx, func(st *State) error {
 		round := st.Round(report.Repo, report.PR)
-		if round == nil || !round.MarkDispatchUnavailable(token, failure.RetryAt, failure.Reason) {
+		current := round != nil && round.MarkDispatchUnavailable(token, failure.RetryAt, failure.Reason)
+		archived := false
+		if !current {
+			archived = st.MarkArchivedDispatchUnavailable(
+				report.Repo, report.PR, token, failure.RetryAt, failure.Reason,
+			)
+		}
+		if !current && !archived {
 			return ErrNoChange
 		}
-		if !round.ReleaseDispatch(token) {
-			return ErrNoChange
+		if current {
+			if !round.ReleaseDispatch(token) {
+				return ErrNoChange
+			}
+			st.PutRound(*round)
 		}
 		st.ReleaseArchivedDispatch(report.Repo, report.PR, token)
-		st.PutRound(*round)
 		return nil
 	})
 }

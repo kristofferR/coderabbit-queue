@@ -193,6 +193,59 @@ func TestProviderOutageUsesFallbackWithoutSpendingAnAttempt(t *testing.T) {
 	}
 }
 
+func TestProviderOutageReleasesAnArchivedDispatchClaim(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	now := time.Now().UTC()
+	const (
+		repo  = "o/repo"
+		pr    = 18
+		token = "session"
+	)
+	if _, err := store.Update(ctx, func(st *State) error {
+		round, err := st.NewRound(repo, pr, "aaaaaaaa1", now)
+		if err != nil {
+			return err
+		}
+		if ok, why := round.ClaimDispatchModels("host", token, now, 5, []string{"opus"}); !ok {
+			return errors.New(why)
+		}
+		st.RememberDispatch(repo, pr, *round.Dispatch)
+		st.PutRound(*round)
+		_, err = st.Supersede(repo, pr, "bbbbbbbb2", now.Add(time.Minute))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	retryAt := now.Add(time.Hour)
+	svc.releaseDispatchUnavailable(ctx, NextReport{Repo: repo, PR: pr}, token, dialect.AgentFailure{
+		RetryAt: retryAt, Reason: "provider unavailable",
+	})
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.ArchivedDispatchHeld(repo, pr, now.Add(2*time.Minute)) {
+		t.Fatal("provider outage left the archived claim live")
+	}
+	for _, round := range st.Archive {
+		if round.Repo != repo || round.PR != pr || round.Dispatch == nil {
+			continue
+		}
+		if got := round.Dispatch.UnavailableModels["opus"]; !got.Equal(retryAt) {
+			t.Fatalf("archived outage = %s, want %s", got, retryAt)
+		}
+		if round.Dispatch.Attempts != 0 {
+			t.Fatalf("archived outage spent %d attempts, want 0", round.Dispatch.Attempts)
+		}
+		return
+	}
+	t.Fatal("no archived dispatch claim found")
+}
+
 // Dispatching is the default, so a machine with no fix agent configured must
 // still be able to watch: refusing to start would make the default setting
 // break the plain command. It observes instead — and says so, because an autofix watcher

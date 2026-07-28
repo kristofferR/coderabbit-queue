@@ -313,3 +313,15 @@ func TestCoOnlyRoundLeavesPrimaryPending(t *testing.T) {
 		t.Fatalf("marks = %+v, want the uncommanded primary pending", marks)
 	}
 }
+
+func TestObservationKeyIncludesEffectiveReviewers(t *testing.T) {
+	base := []BotName{{Login: "coderabbitai[bot]", Primary: true, Required: true}}
+	changed := []BotName{
+		{Login: "coderabbitai[bot]", Primary: true, Required: true},
+		{Login: "cursor[bot]", Required: true, Trigger: "always", Command: "bugbot run"},
+	}
+	if observationKey("o/r", 1, "abcdef123", base) ==
+		observationKey("o/r", 1, "abcdef123", changed) {
+		t.Fatal("reviewer change reused the old observation cache key")
+	}
+}

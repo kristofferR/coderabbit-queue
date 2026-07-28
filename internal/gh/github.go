@@ -1101,16 +1101,16 @@ func (g *GitHub) searchOwnerQualifier(ctx context.Context, login string) (string
 // Unreadable is a legitimate answer, not an error: a token without the scope to
 // read /user can still list public repositories, and a caller asking "is this
 // owner me" should get "not that I can tell" rather than a failed page.
-func (g *GitHub) viewerLogin(ctx context.Context) string {
+func (g *GitHub) viewerLogin(ctx context.Context) (string, error) {
 	g.viewerMu.Lock()
 	cached := g.viewer
 	g.viewerMu.Unlock()
 	switch cached {
 	case "":
 	case "-":
-		return ""
+		return "", nil
 	default:
-		return cached
+		return cached, nil
 	}
 	var me struct {
 		Login string `json:"login"`
@@ -1126,15 +1126,15 @@ func (g *GitHub) viewerLogin(ctx context.Context) string {
 		// picker on /users/{owner}/repos — which omits the caller's own private
 		// repositories — for the rest of the process, long after GitHub came
 		// back. Nothing is cached, so the next caller asks again.
-		return ""
+		return "", err
 	}
 	g.viewerMu.Lock()
 	g.viewer = login
 	g.viewerMu.Unlock()
 	if login == "-" {
-		return ""
+		return "", nil
 	}
-	return login
+	return login, nil
 }
 
 // deniedIdentity reports whether an error is GitHub REFUSING to say who the
@@ -1320,11 +1320,15 @@ func (g *GitHub) ListOwnerRepos(ctx context.Context, owner string, limit int) ([
 	if err != nil {
 		return nil, err
 	}
+	viewer, err := g.viewerLogin(ctx)
+	if err != nil {
+		return nil, err
+	}
 	base := "/users/" + owner + "/repos"
 	switch {
 	case qualifier == "org:":
 		base = "/orgs/" + owner + "/repos"
-	case strings.EqualFold(owner, g.viewerLogin(ctx)):
+	case strings.EqualFold(owner, viewer):
 		// /users/{owner}/repos lists only what is PUBLIC, whoever is asking. A
 		// personal account is the ordinary case for the paid private workflow, so
 		// the picker showed an empty list — or a partial one — while claiming to
