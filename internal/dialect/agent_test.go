@@ -20,4 +20,11 @@ func TestClassifyAgentFailure(t *testing.T) {
 	if ordinary := ClassifyAgentFailure([]byte("tests failed after editing"), reset); ordinary.Unavailable {
 		t.Fatal("an ordinary bad fix was refunded as a provider outage")
 	}
+	repositoryOutput := []byte(`The review says "service unavailable".
+The test printed: rate limit exceeded.
+source := ` + "`\"type\":\"overloaded_error\"`" + `
+`)
+	if ordinary := ClassifyAgentFailure(repositoryOutput, reset); ordinary.Unavailable {
+		t.Fatal("repository-controlled text was treated as a provider outage")
+	}
 }

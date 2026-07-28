@@ -15,10 +15,12 @@ type AgentFailure struct {
 	Reason      string
 }
 
-// ClassifyAgentFailure recognizes machine-readable and human-readable outage
-// responses emitted by supported coding agents. Unknown failures stay ordinary
-// fix failures: refunding a genuine bad fix forever would remove the loop's
-// safety bound.
+// ClassifyAgentFailure recognizes machine-readable outage responses emitted by
+// supported coding agents. The transcript also contains repository-controlled
+// command output, test failures, source code, and the review findings
+// themselves, so free-text markers are not trustworthy evidence. Unknown
+// failures stay ordinary fix failures: refunding a genuine bad fix forever
+// would remove the loop's safety bound.
 func ClassifyAgentFailure(log []byte, now time.Time) AgentFailure {
 	text := strings.ToLower(string(log))
 	var decoded []any
@@ -28,31 +30,11 @@ func ClassifyAgentFailure(log []byte, now time.Time) AgentFailure {
 			decoded = append(decoded, value)
 		}
 	}
-	markers := []string{
-		`"error":"rate_limit"`,
-		`"type":"rate_limit_error"`,
-		`"type":"overloaded_error"`,
-		"rate limit exceeded",
-		"too many requests",
-		"usage limit",
-		"weekly limit",
-		"you've hit your limit",
-		"quota exceeded",
-		"insufficient_quota",
-		"temporarily overloaded",
-		"service unavailable",
-	}
 	found := false
 	for _, value := range decoded {
 		if hasStringMember(value, "error", "rate_limit") ||
 			hasStringMember(value, "type", "rate_limit_error") ||
 			hasStringMember(value, "type", "overloaded_error") {
-			found = true
-			break
-		}
-	}
-	for _, marker := range markers {
-		if strings.Contains(text, marker) {
 			found = true
 			break
 		}
