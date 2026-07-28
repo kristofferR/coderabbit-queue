@@ -452,146 +452,133 @@ function AutofixEditor({
 /** A switch that can be locked — the primary always runs, and says so. */
 /* ------------------------------------------------------------------- Bots */
 
-export function BotsPage({
-  bots,
-  onSnapshot,
-}: {
-  bots: BotCard[];
-  onSnapshot?: (s: Snapshot) => void;
-}) {
+const STATUS: Record<string, { tone: "ok" | "warn" | "mut" | "acc"; label: string; note: string }> = {
+  working: { tone: "ok", label: "Working", note: "crq has seen it review here in the last week" },
+  quiet: { tone: "warn", label: "Quiet", note: "crq saw it once, but not lately" },
+  unverified: {
+    tone: "warn",
+    label: "Not verified",
+    note: "enabled, but crq has never seen it do anything here — it may not be set up",
+  },
+  off: { tone: "mut", label: "Not enabled", note: "crq does not ask for its review on this fleet" },
+};
+
+/**
+ * The review-bot guide.
+ *
+ * Deliberately NOT a control surface. Which bots run is a property of a
+ * repository (its Reviewers card) or of the fleet default (Settings), and
+ * offering the same switch a third time here would mean three places to look
+ * for one answer. This page exists for the question those pages cannot answer:
+ * what IS this bot, what does it cost, and is it actually set up.
+ *
+ * "Set up" is the honest part. crq cannot ask any vendor whether you have an
+ * account — it can only report what it has seen the bot do here. A bot enabled
+ * by a default nobody chose, on an account nobody has, is precisely the case
+ * that looks configured and reviews nothing, so it gets its own status rather
+ * than being folded into "enabled".
+ */
+export function BotsPage({ bots }: { bots: BotCard[] }) {
   const now = useNow(5000);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const primaryName = bots.find((b) => b.primary)?.name ?? "";
-
-  // Turning one off writes the fleet's whole co-reviewer list, because that is
-  // what the setting IS — "these bots run" rather than a flag per bot. The
-  // primary is absent from it: it is not a co-reviewer, and turning it off is a
-  // per-repository decision (a private repo on a free plan) rather than a fleet
-  // one.
-  const save = async (name: string, runs: boolean, required: boolean) => {
-    setBusy(name);
-    setError(null);
-    try {
-      const co = bots.filter((b) => !b.primary && b.enabled).map((b) => b.name);
-      const req = bots.filter((b) => b.required).map((b) => b.name);
-      const nextRuns = runs ? [...new Set([...co, name])] : co.filter((n) => n !== name);
-      const nextReq = required ? [...new Set([...req, name])] : req.filter((n) => n !== name);
-      const res = await act("fleet", {
-        fleet: { cobots: nextRuns.filter((n) => n !== primaryName), required: nextReq },
-      });
-      onSnapshot?.(res.snapshot);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  // Requiring implies running, and dropping a reviewer drops its requirement —
-  // the same two rules the per-repo Reviewers card applies, because it is the
-  // same pair of questions asked at a different scope.
-  const toggleRuns = (b: BotCard) => save(b.name, !b.enabled, b.enabled ? false : b.required);
-  const toggleRequired = (b: BotCard) => save(b.name, b.required ? b.enabled : true, !b.required);
-
   return (
     <main className="mx-auto max-w-[1120px] px-6 pt-5 pb-16">
       <h1 className="text-xl font-[650] tracking-tight">Review bots</h1>
       <p className="mt-1 max-w-[760px] text-[13.5px] text-mut">
-        Every reviewer crq knows how to drive, running here or not. “Last seen” is what crq itself
-        recorded — a trigger it posted, or a claim it observed — not a status read from the vendor.
+        Every reviewer crq knows how to drive. Status is what crq itself recorded — a trigger it
+        posted, a claim it observed — never a status read from the vendor, which none of them
+        offers. To change which bots run, use a repository's <b>Reviewers</b> card, or the fleet
+        default under <b>Settings</b>.
       </p>
-      {error && (
-        <div className="mt-3 rounded-lg border border-bad-edge bg-bad-bg px-3 py-2 text-[12.5px] text-bad">
-          {error}
-        </div>
-      )}
+
       <div className="mt-4 grid grid-cols-2 gap-4 max-[940px]:grid-cols-1">
-        {bots.map((b) => (
-          <section
-            key={b.login}
-            className={`flex flex-col rounded-[10px] border bg-card shadow-card ${
-              b.enabled ? "border-edge" : "border-dashed border-edge opacity-70"
-            }`}
-          >
-            <header className="flex items-center gap-3 px-5 pt-3.5">
-              <BotIcon login={b.login} name={b.name} size={36} />
-              <div>
-                <h2 className="text-base font-[650]">{b.name}</h2>
-                <div className="text-xs text-faint">
-                  {b.primary ? "primary reviewer" : "co-reviewer"} ·{" "}
-                  {b.metered ? "spends the shared quota" : "free, no crq quota"}
+        {bots.map((b) => {
+          const st = STATUS[b.status] ?? STATUS.off;
+          return (
+            <section
+              key={b.login}
+              className={`flex flex-col rounded-[10px] border bg-card shadow-card ${
+                b.enabled ? "border-edge" : "border-dashed border-edge"
+              }`}
+            >
+              <header className="flex items-start gap-3 px-5 pt-4">
+                <BotIcon login={b.login} name={b.name} size={38} />
+                <div className="min-w-0">
+                  <h2 className="text-base font-[650]">{b.name}</h2>
+                  <div className="text-xs text-faint">
+                    {b.primary ? "primary reviewer" : "co-reviewer"} ·{" "}
+                    {b.metered ? "spends the shared quota" : "free, no crq quota"}
+                  </div>
                 </div>
+                <span className="ml-auto shrink-0" title={st.note}>
+                  <Pill tone={st.tone}>{st.label}</Pill>
+                </span>
+              </header>
+
+              <div className="flex-1 px-5 pt-3 text-[13px] text-mut">
+                {b.pitch && <p>{b.pitch}</p>}
+                {b.cost && (
+                  <p className="mt-2">
+                    <span className="text-faint">Cost — </span>
+                    {b.cost}
+                  </p>
+                )}
+                {b.suited_to && (
+                  <p className="mt-2 rounded-lg border border-acc-edge bg-acc-bg px-2.5 py-1.5 text-[12.5px] text-acc">
+                    Worth it for {b.suited_to}.
+                  </p>
+                )}
+
+                <p className="mt-2.5 text-[12.5px] text-faint">
+                  {st.note}
+                  {b.last_seen && b.seen_on && (
+                    <>
+                      {" — last on "}
+                      <PRLink repo={b.seen_on.split("#")[0]} pr={Number(b.seen_on.split("#")[1] ?? 0)} />{" "}
+                      {ago(b.last_seen, now)}
+                    </>
+                  )}
+                  {b.repo_count > 0 && ` · ${b.repo_count} repo override(s) name it`}
+                </p>
+
+                {b.status !== "working" && (b.setup?.length ?? 0) > 0 && (
+                  <details className="mt-2.5 rounded-lg border border-edge bg-[#FBFBFC] px-2.5 py-1.5">
+                    <summary className="cursor-pointer text-[12.5px] font-[550]">Setting it up</summary>
+                    <ol className="mt-1.5 list-decimal pl-4 text-[12.5px]">
+                      {b.setup!.map((step) => (
+                        <li key={step} className="py-0.5">
+                          {step}
+                        </li>
+                      ))}
+                    </ol>
+                  </details>
+                )}
               </div>
-              <span className="ml-auto">
-                {b.last_seen ? <Pill tone="ok">Seen {ago(b.last_seen, now)}</Pill> : <Pill tone="mut">Not seen yet</Pill>}
-              </span>
-            </header>
-            <div className="flex-1 px-5 pt-3 text-[13px] text-mut">
-              <dl className="grid grid-cols-[110px_1fr] gap-y-1.5">
-                <dt className="text-faint">Runs</dt>
-                <dd className="flex items-center gap-2">
-                  <Toggle
-                    on={b.enabled}
-                    locked={b.primary || busy === b.name}
-                    title={
-                      b.primary
-                        ? "the primary runs everywhere by default — turn it off for one project on that project's page"
-                        : "runs on every repository that has not overridden its reviewers"
-                    }
-                    onClick={() => void toggleRuns(b)}
-                  />
-                  <span className="text-faint">
-                    {b.enabled ? "reviews every repo following the fleet" : "not run anywhere"}
-                  </span>
-                </dd>
-                <dt className="text-faint">Required</dt>
-                <dd className="flex items-center gap-2">
-                  <Toggle
-                    on={b.required}
-                    locked={busy === b.name}
-                    title="convergence waits for it"
-                    onClick={() => void toggleRequired(b)}
-                  />
-                  <span className="text-faint">
-                    {b.required ? "convergence waits for it" : "does not gate convergence"}
-                  </span>
-                </dd>
-                {b.command && (
-                  <>
-                    <dt className="text-faint">Trigger</dt>
-                    <dd className="font-mono text-[12.5px]">{b.command}</dd>
-                  </>
+
+              <footer className="mt-3 flex flex-wrap items-center gap-3 border-t border-[#EEF0F3] px-5 py-2.5 text-[12.5px]">
+                {b.site && (
+                  <a href={b.site} target="_blank" rel="noreferrer" className="text-acc hover:underline">
+                    {b.status === "off" || b.status === "unverified" ? "Sign up ↗" : "Vendor ↗"}
+                  </a>
                 )}
-                {b.trigger && (
-                  <>
-                    <dt className="text-faint">Mode</dt>
-                    <dd>
-                      {b.trigger}
-                      {b.trigger === "selfheal" && b.grace ? ` · grace ${b.grace}` : ""}
-                    </dd>
-                  </>
+                {b.docs && (
+                  <a href={b.docs} target="_blank" rel="noreferrer" className="text-acc hover:underline">
+                    Docs ↗
+                  </a>
                 )}
-                {b.seen_on && (
-                  <>
-                    <dt className="text-faint">Last on</dt>
-                    <dd>
-                      <PRLink repo={b.seen_on.split("#")[0]} pr={Number(b.seen_on.split("#")[1] ?? 0)} />
-                    </dd>
-                  </>
-                )}
-                <dt className="text-faint">Per-repo</dt>
-                <dd>{b.repo_count > 0 ? `${b.repo_count} repo override(s) name it` : "no repo overrides"}</dd>
-              </dl>
-            </div>
-            <footer className="px-5 pt-3 pb-4 text-[11.5px] text-faint">
-              {b.primary
-                ? "The primary runs everywhere by default; turn it off for one project on that project's page."
-                : "This switch is the fleet default. A repository that names its own reviewers is unaffected."}
-            </footer>
-          </section>
-        ))}
+                <a href="#/repos" className="ml-auto text-mut hover:underline">
+                  {b.enabled ? "Choose where it runs →" : "Turn it on →"}
+                </a>
+              </footer>
+            </section>
+          );
+        })}
       </div>
+
+      <p className="mt-4 max-w-[760px] text-[12px] text-faint">
+        Links go straight to each vendor. There are no referral links here: if any are added they
+        will say so on the link itself, and suggestions will stay based on what fits your setup
+        rather than on what pays.
+      </p>
     </main>
   );
 }

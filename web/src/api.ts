@@ -172,6 +172,13 @@ export type BotCard = {
   last_seen?: string;
   seen_on?: string;
   repo_count: number;
+  status: "working" | "quiet" | "unverified" | "off";
+  site?: string;
+  docs?: string;
+  pitch?: string;
+  cost?: string;
+  setup?: string[];
+  suited_to?: string;
 };
 
 export type Check = { key: string; label: string; status: "ok" | "warn" | "bad" | "unknown"; detail?: string };

@@ -147,6 +147,24 @@ type BotCard struct {
 	LastSeen  *time.Time `json:"last_seen,omitempty"`
 	SeenOn    string     `json:"seen_on,omitempty"`
 	RepoCount int        `json:"repo_count"`
+
+	// Status is what crq can honestly say about setup, from its OWN records —
+	// a trigger it posted, a claim it saw — never a status read from the vendor:
+	//
+	//	working    seen within the week
+	//	quiet      seen once, but not lately
+	//	unverified enabled, but crq has never seen it do anything here
+	//	off        not enabled on this fleet
+	Status string `json:"status"`
+
+	// The guide half. Everything below describes the vendor rather than crq's
+	// configuration of it, and none of it affects a decision crq makes.
+	Site     string   `json:"site,omitempty"`
+	Docs     string   `json:"docs,omitempty"`
+	Pitch    string   `json:"pitch,omitempty"`
+	Cost     string   `json:"cost,omitempty"`
+	Setup    []string `json:"setup,omitempty"`
+	SuitedTo string   `json:"suited_to,omitempty"`
 }
 
 type SetupView struct {
@@ -235,7 +253,7 @@ func BuildFleet(st state.State, cfg FleetConfig, ov Overview, tools []Tool, tool
 	return Snapshot{
 		Overview: ov,
 		Repos:    repoRows(st, cfg, now, botsFor, enrollFor, solverFor),
-		Bots:     botCards(st, cfg, botsFor("")),
+		Bots:     botCards(st, cfg, botsFor(""), now),
 		Setup:    setupView(st, cfg, ov, tools, toolsHost),
 		Settings: SettingsView{Config: cfg, Quota: ov.Quota, Plumbing: plumbing(st, cfg), Fleet: fleet},
 	}
@@ -371,7 +389,7 @@ func (c FleetConfig) fleetReviewers() (bots []string, required []string) {
 	return bots, required
 }
 
-func botCards(st state.State, cfg FleetConfig, fleetBots []BotName) []BotCard {
+func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Time) []BotCard {
 	seen := map[string]*time.Time{}
 	where := map[string]string{}
 	note := func(login string, at *time.Time, repo string, pr int) {
@@ -429,6 +447,11 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName) []BotCard {
 			Login: login, Name: name, Primary: primary, Metered: metered,
 			Enabled: on, Required: on && b.Required,
 			LastSeen: seen[key], SeenOn: where[key], RepoCount: repoCount[key],
+			Status: botStatus(on, seen[key], now),
+		}
+		if v, ok := dialect.VendorFor(login); ok {
+			card.Site, card.Docs = v.Site, v.Docs
+			card.Pitch, card.Cost, card.Setup, card.SuitedTo = v.Pitch, v.Cost, v.Setup, v.SuitedTo
 		}
 		if from != nil {
 			card.Command, card.Trigger, card.Grace = from.Command, from.Trigger, from.Grace
@@ -615,4 +638,23 @@ func itoa(n int64) string {
 		b[i] = '-'
 	}
 	return string(b[i:])
+}
+
+// botStatus is what crq can say about a bot's setup WITHOUT asking the vendor,
+// which it has no way to do for any of them.
+//
+// "Enabled" and "working" are different claims and the page must not merge
+// them: a bot enabled by a default nobody chose, on an account nobody has, is
+// exactly the case that looks configured and reviews nothing.
+func botStatus(enabled bool, lastSeen *time.Time, now time.Time) string {
+	switch {
+	case !enabled:
+		return "off"
+	case lastSeen == nil:
+		return "unverified"
+	case now.Sub(*lastSeen) <= 7*24*time.Hour:
+		return "working"
+	default:
+		return "quiet"
+	}
 }
