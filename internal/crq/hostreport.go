@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -22,11 +23,20 @@ var probedTools = []string{"crq", "git", "gh", "claude", "codex", "coderabbit", 
 // invisible to the service is the failure this exists to make visible, and it
 // cannot be seen from the shell.
 func (s *Service) ReportHost(ctx context.Context, roles ...string) {
+	// By name, not by path: what a reader wants to know is which agent this
+	// machine fixes with, and the name is also what the tool probes below answer
+	// for. A process with no fix agent says nothing rather than guessing — the
+	// record keeps whatever the autofix service on this host reported.
+	agent := ""
+	if path := s.cfg.fixAgent(); path != "" {
+		agent = filepath.Base(path)
+	}
 	report := HostReport{
 		Host:    s.cfg.Host,
 		Version: Version,
 		Caps:    WriterCaps,
 		Roles:   roles,
+		Agent:   agent,
 	}
 	for _, name := range probedTools {
 		t := ToolReport{Name: name}
@@ -87,6 +97,12 @@ func toolVersion(ctx context.Context, path string) string {
 // pass and rewrite state for ever.
 func sameHostReport(prev, next HostReport) bool {
 	if prev.Version != next.Version || prev.Caps != next.Caps {
+		return false
+	}
+	// Only when this reporter has an answer: a service that runs no fix sessions
+	// says nothing about the agent, and the record keeps what the autofix service
+	// on this host said — so its silence is not a difference to write out.
+	if next.Agent != "" && prev.Agent != next.Agent {
 		return false
 	}
 	for _, role := range next.Roles {

@@ -204,6 +204,62 @@ func TestReposFollowingFleetExcludesDisabledRepositories(t *testing.T) {
 	}
 }
 
+// Naming a different primary is a reviewer change, whichever door it comes
+// through. It arrives as a generic env setting rather than one of the four
+// typed ones, and that path recorded the value and stopped — so every completed
+// round stayed a "this head was reviewed" marker and the bot somebody had just
+// configured was never asked for one.
+func TestSetEnvPrimaryReopensCompletedRounds(t *testing.T) {
+	ctx := context.Background()
+	// From an env map, because the generic fleet settings are applied by
+	// re-parsing the configuration this host was built from.
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost", "CRQ_REPOS": "o/r",
+		"CRQ_COBOTS": "", "CRQ_MIN_INTERVAL": "0s", "CRQ_POLL": "1ms",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, pr, head := "o/r", 4, "aaaaaaaa1"
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = head + "bcdef1234"
+	gh.pulls[fakeKey(repo, pr)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 11)
+
+	if _, err := svc.SetEnv(ctx, "CRQ_BOT", "chatgpt-codex-connector[bot]", false); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.cfgFor(st, repo).Bot; got != "chatgpt-codex-connector[bot]" {
+		t.Fatalf("primary = %q, want the fleet record applied", got)
+	}
+	round := st.Round(repo, pr)
+	if round == nil || round.Phase != PhaseQueued || round.Head != head {
+		t.Fatalf("round = %#v, want the completed round requeued at the same head", round)
+	}
+
+	// And a setting that decides nothing about reviewers still reopens nothing:
+	// requeueing on every save would spend the account's quota on a timezone.
+	if _, err := svc.SetEnv(ctx, "CRQ_TZ", "Europe/Oslo", false); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := st.Round(repo, pr); r == nil || r.Phase != PhaseQueued {
+		t.Fatalf("round = %#v, want an unrelated setting to leave it exactly as it was", r)
+	}
+}
+
 func strptr(s string) *string { return &s }
 func intptr(n int) *int       { return &n }
 func boolptr(b bool) *bool    { return &b }

@@ -728,24 +728,47 @@ func (s *Service) SetEnv(ctx context.Context, key, value string, clear bool) (Fl
 		return view, err
 	}
 
+	// A generic setting can still change WHO reviews: CRQ_BOT names the primary,
+	// and a per-bot trigger key decides whether a co-reviewer runs at all. That
+	// is a reviewer change like the typed ones, and a completed round is the
+	// "this head was reviewed" marker — left alone, the reviewer just configured
+	// is never asked until somebody happens to push. Read the open pull requests
+	// before the write, for the same reason SetFleetSettings does: the requeue
+	// may only touch live pull requests and the CAS closure cannot ask GitHub.
+	loaded, _, err := s.store.Load(ctx)
+	if err != nil {
+		return FleetView{}, err
+	}
+	after := loaded
+	after.Fleet = fleetEnvSet(loaded.Fleet, key, value, clear)
+	open := map[string]map[int]bool{}
+	for _, repo := range s.reposFollowingFleet(loaded) {
+		if sameReviewers(s.cfgFor(loaded, repo), s.cfgFor(after, repo)) {
+			continue
+		}
+		prs, err := s.openPRs(ctx, repo)
+		if err != nil {
+			return FleetView{}, err
+		}
+		open[repo] = prs
+	}
+
 	now := s.clock().UTC()
 	st, err := s.store.Update(ctx, func(st *State) error {
-		fd := st.Fleet
-		if clear {
-			if _, ok := fd.Env[key]; !ok {
-				return ErrNoChange
-			}
-			delete(fd.Env, key)
-		} else {
-			if fd.Env == nil {
-				fd.Env = map[string]string{}
-			}
-			if cur, ok := fd.Env[key]; ok && cur == value {
-				return ErrNoChange
-			}
-			fd.Env[key] = value
+		if _, ok := st.Fleet.Env[key]; clear && !ok {
+			return ErrNoChange
 		}
-		st.SetFleetDefaults(fd, s.cfg.Host, now)
+		if cur, ok := st.Fleet.Env[key]; !clear && ok && cur == value {
+			return ErrNoChange
+		}
+		before := map[string]Config{}
+		for repo := range open {
+			before[repo] = s.cfgFor(*st, repo)
+		}
+		st.SetFleetDefaults(fleetEnvSet(st.Fleet, key, value, clear), s.cfg.Host, now)
+		for repo, was := range before {
+			s.reopenForChangedReviewers(st, repo, was, s.cfgFor(*st, repo), open[repo])
+		}
 		return nil
 	})
 	if err != nil && !errors.Is(err, ErrNoChange) {
@@ -757,6 +780,28 @@ func (s *Service) SetEnv(ctx context.Context, key, value string, clear bool) (Fl
 		return FleetView{}, err
 	}
 	return s.fleetViewOf(st), nil
+}
+
+// fleetEnvSet returns fd with one generic setting recorded or removed.
+//
+// The map is COPIED rather than written through. A caller comparing the result
+// against the record it came from would otherwise be comparing one map with
+// itself, and the whole point of building it is to ask what the change would do.
+func fleetEnvSet(fd FleetDefaults, key, value string, clear bool) FleetDefaults {
+	env := make(map[string]string, len(fd.Env)+1)
+	for k, v := range fd.Env {
+		env[k] = v
+	}
+	if clear {
+		delete(env, key)
+	} else {
+		env[key] = value
+	}
+	if len(env) == 0 {
+		env = nil
+	}
+	fd.Env = env
+	return fd
 }
 
 // splitCommas is the list form every reviewer setting uses.

@@ -295,7 +295,7 @@ func mustOverride(st *State, repo string) RepoReviewers {
 func (s *Service) reopenForChangedReviewers(st *State, repo string, before, after Config, open map[int]bool) {
 	beforeCo := before.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
 	afterCo := after.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
-	if sameLogins(before.RequiredBots, after.RequiredBots) && sameLogins(beforeCo, afterCo) {
+	if sameReviewers(before, after) {
 		return
 	}
 	// Only ADDING a reviewer can invalidate a finished round. A round that
@@ -408,6 +408,16 @@ func (s *Service) openPRs(ctx context.Context, repo string) (map[int]bool, error
 		return nil, err
 	}
 	return open, nil
+}
+
+// sameReviewers reports whether two resolved configurations ask the same bots to
+// review and gate. It is the question every requeue path starts from, wherever
+// the change came from: a per-repo override, a fleet default, or a fleet-wide
+// env setting that happens to name the primary.
+func sameReviewers(before, after Config) bool {
+	free := func(r Reviewer) bool { return !r.Metered() }
+	return sameLogins(before.RequiredBots, after.RequiredBots) &&
+		sameLogins(before.reviewerLogins(free), after.reviewerLogins(free))
 }
 
 // sameLogins compares two reviewer lists as sets, since order is presentation.

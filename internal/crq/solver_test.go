@@ -90,3 +90,83 @@ func TestSolverLayering(t *testing.T) {
 		t.Error("a record with nothing in it must not report the repository as overridden")
 	}
 }
+
+// The hosts that will ignore a solver setting have to be named wherever it was
+// recorded. Asking only about a repository's own record meant a FLEET model or
+// attempt limit — the one every repository inherits — warned about nobody,
+// while an old autofix service went on dispatching its install-time values.
+func TestSolverNamesLaggingHostsForAFleetRecordToo(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	now := svc.clock().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetHostReport(HostReport{
+			Host: "atlas", Caps: CapsSolver - 1, Roles: []string{"autofix"},
+		}, now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nothing recorded anywhere: there is no setting to be ignored.
+	if v, _ := svc.Solver(ctx, "o/plain"); len(v.Lagging) != 0 {
+		t.Errorf("lagging = %v, want nobody named when no record exists", v.Lagging)
+	}
+
+	if _, err := svc.SetFleetSolver(ctx, SolverChange{Model: strptr("opus")}); err != nil {
+		t.Fatal(err)
+	}
+	v, err := svc.Solver(ctx, "o/plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Sources["model"] != "fleet" {
+		t.Fatalf("model source = %q, want the fleet default answering", v.Sources["model"])
+	}
+	if len(v.Lagging) != 1 || v.Lagging[0] != "atlas" {
+		t.Errorf("lagging = %v, want the autofix host that predates solver settings named", v.Lagging)
+	}
+}
+
+// Which agent the fleet fixes with is a per-machine install answer, exported to
+// the autofix unit alone. A dashboard process has none of its own, and guessing
+// one made a codex fleet check every host for claude and report the setup that
+// works as the one that is missing.
+func TestSolverAgentComesFromTheHostsThatRunSessions(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig() // no fix agent: this is the serve process
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if v, _ := svc.Solver(ctx, "o/plain"); v.Agent != "" {
+		t.Errorf("agent = %q, want silence from a process that has not been told", v.Agent)
+	}
+
+	now := svc.clock().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetHostReport(HostReport{
+			Host: "atlas", Caps: WriterCaps, Roles: []string{"autofix"}, Agent: "codex",
+		}, now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := svc.Solver(ctx, "o/plain"); v.Agent != "codex" {
+		t.Errorf("agent = %q, want the one the autofix host reports", v.Agent)
+	}
+
+	// The serve heartbeat on that same machine says nothing about the agent,
+	// and silence must not erase what the autofix service reported.
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetHostReport(HostReport{Host: "atlas", Caps: WriterCaps, Roles: []string{"serve"}}, now)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := svc.Solver(ctx, "o/plain"); v.Agent != "codex" {
+		t.Errorf("agent = %q, want the autofix service's answer kept", v.Agent)
+	}
+}

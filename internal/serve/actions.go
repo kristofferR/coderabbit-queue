@@ -301,9 +301,10 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 // holding an IP literal cannot be rebound — the browser dials it, and the origin
 // is the address itself — so those pass, as does loopback by its own name. Every
 // other name has to be one this host answers to: the address the server was
-// asked to bind, the machine's own hostname (matched on its first label, so
-// `mac.local` and a tailnet's `mac.tailnet.ts.net` are the same machine), or one
-// named with --allow-host for a proxy or an alias crq cannot know about.
+// asked to bind, the machine's own hostname — itself, or its short name in a
+// zone nobody outside can publish in, so `mac.local` and a tailnet's
+// `mac.tailnet.ts.net` are the same machine — or one named with --allow-host for
+// a proxy or an alias crq cannot know about.
 //
 // An Origin, when the browser sends one, must agree with it: same-origin is the
 // whole claim being made, and a request that contradicts itself is not one.
@@ -339,16 +340,51 @@ func (s *Server) answersTo(host string) bool {
 			return true
 		}
 	}
-	// The bound address and this machine's name, both reduced to their first
-	// label: a host is reached as `mac`, `mac.local` and `mac.<tailnet>.ts.net`
-	// interchangeably, and all three are the same machine answering.
-	for _, own := range []string{hostname(s.opts.Addr), s.opts.Host} {
-		own = firstLabel(own)
-		if own != "" && own != "0.0.0.0" && own != "::" && own == firstLabel(host) {
+	// The bound address and this machine's own name, exactly as configured — and
+	// the short forms of it: a host is reached as `mac`, `mac.local` and
+	// `mac.<tailnet>.ts.net` interchangeably, and all of those are the same
+	// machine answering.
+	for _, own := range []string{hostname(s.opts.Addr), hostname(s.opts.Host)} {
+		if own == "" || own == "0.0.0.0" || own == "::" {
+			continue
+		}
+		if host == own {
+			return true
+		}
+		if short := firstLabel(own); short != "" && (host == short || isOwnNameIn(host, short)) {
 			return true
 		}
 	}
 	return false
+}
+
+// localZones are the suffixes this machine's own short name may be reached
+// under. They are the zones nobody outside can publish a record in: mDNS on the
+// local link, a home network's own domain, and a Tailscale tailnet.
+//
+// The list is what makes the name check a check at all. Comparing first labels
+// alone accepted ANY zone sharing this machine's name — `mac.attacker.example`
+// for a machine called `mac` — and that name is registrable, points wherever its
+// owner says, and is same-origin with the page doing the pointing. It defeated
+// the whole anti-rebinding check for any host whose name an attacker can guess,
+// which is most of them. A name in some other zone is a proxy or an alias crq
+// cannot know about, and --allow-host is how it is told.
+var localZones = []string{"local", "lan", "home.arpa", "internal"}
+
+// isOwnNameIn reports whether host is this machine's short name in one of the
+// zones above — `mac.local` — or in a tailnet, which puts its own name between
+// the machine and the zone: `mac.tail1234.ts.net`.
+func isOwnNameIn(host, own string) bool {
+	rest, ok := strings.CutPrefix(host, own+".")
+	if !ok {
+		return false
+	}
+	for _, zone := range localZones {
+		if rest == zone {
+			return true
+		}
+	}
+	return strings.HasSuffix(rest, ".ts.net")
 }
 
 // hostname is the lowercased name in an authority, without its port.

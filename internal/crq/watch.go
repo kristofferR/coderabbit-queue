@@ -966,7 +966,13 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 			// CARRIED from an older commit proves nothing about this head either.
 			// Both cases leave the round adoptable instead, so the queue can
 			// still buy the review that is actually missing.
-			if report.ReviewedBy[s.cfg.Bot] && len(engine.FindingsOnHead(report.Findings, report.Head)) > 0 {
+			//
+			// Who the primary IS comes from the state this write lands on, not
+			// from this watcher's startup env: a fleet that changed CRQ_BOT would
+			// otherwise have its new primary's review read as a co-reviewer's, and
+			// the head marked unreviewed for a review it already has.
+			if reviewedByConfiguredBot(report.ReviewedBy, s.cfgFor(*st, report.Repo).Bot) &&
+				len(engine.FindingsOnHead(report.Findings, report.Head)) > 0 {
 				if err := round.Dedupe(s.clock()); err != nil {
 					return err
 				}

@@ -649,7 +649,12 @@ func run(ctx context.Context, args []string) int {
 				agent = agent[i+1:]
 			}
 			if agent == "" {
-				agent = "claude"
+				// Nobody has said which agent this fleet fixes with, so there is
+				// nothing to check. Defaulting to claude answered a question no
+				// host had been asked: a codex installation had every host's
+				// claude probe reported as its agent's availability, and the
+				// setup that works read as the one that is missing.
+				return out
 			}
 			for _, r := range st.HostReportList() {
 				has := serve.HostHas{Host: r.Host}

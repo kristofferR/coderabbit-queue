@@ -120,7 +120,12 @@ func TestActionsAreRefusedOnANameThatOnlyResolvesHere(t *testing.T) {
 			t.Errorf("Host %q was refused: %v", host, err)
 		}
 	}
-	for _, host := range []string{"", "evil.test:7777", "crq.example.test.evil.test:7777"} {
+	for _, host := range []string{
+		"", "evil.test:7777", "crq.example.test.evil.test:7777",
+		// The machine is called `atlas`, and this name is not it: a zone its
+		// owner controls, pointed here, is the rebinding the check is for.
+		"atlas.attacker.example:7777", "atlas.evil.test",
+	} {
 		req := httptest.NewRequest(http.MethodPost, "/api/action/hold", nil)
 		req.Host = host
 		if err := srv.addressedHere(req); err == nil {

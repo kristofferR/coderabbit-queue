@@ -40,6 +40,16 @@ type HostReport struct {
 	// advertised the newest capabilities while an old `autofix` watcher went on
 	// ignoring the very setting LaggingRoleWriters was then told it honoured.
 	RoleCaps map[string]int `json:"role_caps,omitempty"`
+	// Agent is the fix agent this host is installed to run, by name ("claude",
+	// "codex"). Reported rather than inferred, and for the same reason the tool
+	// probes are: it is chosen per machine at install time and exported to the
+	// autofix unit alone, so no other process can read it. A dashboard that
+	// assumed one instead checked the wrong agent's availability on every host
+	// and reported a working codex fleet as missing its agent.
+	//
+	// Kept when a reporter names none, so the serve heartbeat on the same
+	// machine does not erase what its autofix service said.
+	Agent string `json:"agent,omitempty"`
 	// Tools is what this host can run, resolved across the roles reporting here
 	// — see RoleTools for why that is not simply the last report.
 	Tools []ToolReport `json:"tools,omitempty"`
@@ -154,6 +164,12 @@ func (s *State) SetHostReport(r HostReport, now time.Time) {
 			if _, known := caps[role]; !known {
 				caps[role] = prev.Caps
 			}
+		}
+		if r.Agent == "" {
+			// Only the autofix service knows this. Every other service on the
+			// machine reports nothing, and replacing the answer with silence
+			// would make the agent flicker away on the next heartbeat.
+			r.Agent = prev.Agent
 		}
 		r.unknown = carryUnknown(r.unknown, prev.unknown)
 	}
@@ -327,6 +343,23 @@ func (s *State) HostReportList() []HostReport {
 		return out[i].Host < out[j].Host
 	})
 	return out
+}
+
+// FixAgent is the agent the fleet's hosts say they run fix sessions with, from
+// the most recently heard-from host that has an answer. Empty when none has.
+//
+// The freshest report wins because hosts CAN disagree — an install is per
+// machine — and this answers "what is the fleet fixing with", which is a
+// question about the machines actually running. It is not a setting and must
+// never be treated as one: a host runs the agent it was installed with,
+// whatever this says.
+func (s *State) FixAgent() string {
+	for _, r := range s.HostReportList() {
+		if r.Agent != "" {
+			return r.Agent
+		}
+	}
+	return ""
 }
 
 // ToolOn reports what a named host says about one tool, and whether that host

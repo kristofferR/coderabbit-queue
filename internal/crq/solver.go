@@ -80,15 +80,29 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 	source("forks", own.Forks != nil, fleet.Forks != nil)
 	source("skip_authors", own.SetSkipAuthors, fleet.SetSkipAuthors)
 
-	if len(s.cfg.DispatchCommand) > 0 {
-		view.Agent = s.cfg.DispatchCommand[0]
+	// This host's own answer when it runs fix sessions, and the fleet's
+	// self-reports otherwise. The dashboard is normally the second case: the
+	// agent is exported to the autofix unit alone, so a process serving the page
+	// has none of its own and reported nothing — which the page then had to guess
+	// at, and it guessed claude on a fleet fixing with codex.
+	view.Agent = s.cfg.fixAgent()
+	if view.Agent == "" {
+		view.Agent = st.FixAgent()
 	}
 	if has && own.UpdatedAt != nil {
 		view.By = own.By
 		view.UpdatedAt = own.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z")
-		// The autofix role too, not just the queue's drivers: these settings are
-		// consumed when a fix session STARTS, and the watcher that starts one
-		// holds neither the leader lease nor the fire slot.
+	}
+	// The warning belongs to the SETTING, not to the layer that happens to hold
+	// it. Asking only about this repository's own record meant a fleet-wide
+	// model, effort, fork policy or attempt limit — which every repository
+	// inheriting it is run with — warned about nobody, while an old autofix
+	// service went on dispatching its install-time values.
+	//
+	// The autofix role too, not just the queue's drivers: these settings are
+	// consumed when a fix session STARTS, and the watcher that starts one holds
+	// neither the leader lease nor the fire slot.
+	if (has && own.UpdatedAt != nil) || fleet.UpdatedAt != nil {
 		view.Lagging = st.LaggingRoleWriters(CapsSolver, s.clock().UTC(), "autofix")
 	}
 	return view

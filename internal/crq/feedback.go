@@ -188,7 +188,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	report.CoReviewers = coReviewerStatuses(cfg, obs.eng, verdictCutoff)
 	if why := engine.PrimaryUnavailableReason(obs.eng, cfg.policy(), head); why != "" {
 		report.PrimaryUnavailable = true
-		report.PrimaryUnavailableReason = s.cfg.Bot + " " + why
+		report.PrimaryUnavailableReason = cfg.Bot + " " + why
 	}
 
 	// extractBots is the broader set whose findings we surface — a superset that
@@ -667,7 +667,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			if allReviewed(report.ReviewedBy) {
 				report.Reason = "all required reviewers finished; address findings, push once, and resolve threads"
 				s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending, &report.config)
-			} else if report.CodeRabbitDeferred && engine.DoneExceptWithEvidence(report.ReviewedBy, s.cfg.Bot, dialect.CodexBotLogin) {
+			} else if report.CodeRabbitDeferred && engine.DoneExceptWithEvidence(report.ReviewedBy, report.config.Bot, dialect.CodexBotLogin) {
 				// Degraded round: every required bot except the rate-limited
 				// CodeRabbit has finished. These findings are this round's work —
 				// fixing and pushing is exactly right; the CodeRabbit review stays

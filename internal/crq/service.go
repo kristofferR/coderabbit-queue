@@ -1568,8 +1568,13 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 	if !obs.HeadAt.IsZero() {
 		anchor = obs.HeadAt
 	}
+	// cfg.Bot, not this process's startup one: the primary is a fleet setting
+	// like any other, and reading the stale one made a review by the primary
+	// somebody had just changed fail to move the floor — so with no HeadAt to
+	// fall back on, a co-reviewer answer that had already arrived sat below it
+	// and the round waited out its timeout for an answer it already had.
 	for _, rv := range obs.Reviews {
-		if isConfiguredBotLogin(s.cfg.Bot, rv.Bot) && rv.Commit != "" && strings.HasPrefix(rv.Commit, round.Head) &&
+		if isConfiguredBotLogin(cfg.Bot, rv.Bot) && rv.Commit != "" && strings.HasPrefix(rv.Commit, round.Head) &&
 			!rv.SubmittedAt.IsZero() && rv.SubmittedAt.Before(anchor) {
 			anchor = rv.SubmittedAt
 		}
@@ -2357,7 +2362,10 @@ func (s *Service) Wait(ctx context.Context, repo string, pr int) (PumpResult, in
 				// A real primary review at this head is NOT a poisoned marker even with
 				// a co-bot pending (a deliberate dedupe when Codex is unobtainable).
 				// Deleting it would requeue the same head into ack-and-dedupe churn.
-				if reviewedByConfiguredBot(report.ReviewedBy, s.cfg.Bot) {
+				// The primary is the report's, not this process's startup one: a
+				// review by a primary the fleet changed would otherwise read as
+				// nobody's, and the marker it justifies would be deleted and rebought.
+				if reviewedByConfiguredBot(report.ReviewedBy, report.config.Bot) {
 					return PumpResult{Action: "deduped", Repo: repo, PR: pr, Head: result.Head}, 3, nil
 				}
 				// A completed round at this head with no real head review is a poisoned

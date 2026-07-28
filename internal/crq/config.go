@@ -61,8 +61,14 @@ type Config struct {
 	// WatchInterval paces `crq watch`; DispatchCommand is the fix session it
 	// runs with --dispatch, argv-style; DispatchMaxAttempts bounds dispatches per
 	// head so a fix that keeps not working stops.
-	WatchInterval       time.Duration
-	DispatchCommand     []string
+	WatchInterval   time.Duration
+	DispatchCommand []string
+	// FixAgent is the agent binary a fix session execs, chosen at install time
+	// and exported to the autofix unit as CRQ_FIX_AGENT. It is per HOST, not per
+	// repository: switching between claude and codex is a different command line
+	// rather than a different flag. Empty on a machine that runs no fix sessions,
+	// which is not the same as any particular agent.
+	FixAgent            string
 	DispatchMaxAttempts int
 	// FixModel/FixEffort/FixPrompt are the per-repository solver settings, put
 	// into the fix session's ENVIRONMENT rather than its argv. Argv is fixed
@@ -142,6 +148,19 @@ type Config struct {
 	// env is the map this configuration was parsed from, so WithFleet can
 	// re-parse it with the fleet's overrides layered on.
 	env map[string]string
+}
+
+// fixAgent is the agent this host's fix sessions would exec: the one the
+// autofix install chose, or the first word of a legacy CRQ_DISPATCH_CMD. Empty
+// on a machine that runs none.
+func (c Config) fixAgent() string {
+	if c.FixAgent != "" {
+		return c.FixAgent
+	}
+	if len(c.DispatchCommand) > 0 {
+		return c.DispatchCommand[0]
+	}
+	return ""
 }
 
 // Env is a copy of the environment this configuration was parsed from, for
@@ -295,6 +314,7 @@ func BuildConfig(env map[string]string) (Config, error) {
 		FiredMax:            intEnv(env, "CRQ_FIRED_MAX", 500),
 		WatchInterval:       durationEnv(env, "CRQ_WATCH_INTERVAL", 2*time.Minute),
 		DispatchCommand:     SplitArgv(env["CRQ_DISPATCH_CMD"]),
+		FixAgent:            strings.TrimSpace(env["CRQ_FIX_AGENT"]),
 		DispatchMaxAttempts: positiveIntEnv(env, "CRQ_DISPATCH_MAX_ATTEMPTS", 3),
 		DispatchForks:       boolEnv(env, "CRQ_DISPATCH_FORKS", false),
 		DispatchConcurrency: intEnv(env, "CRQ_DISPATCH_CONCURRENCY", 0),

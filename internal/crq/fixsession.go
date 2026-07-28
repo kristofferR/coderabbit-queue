@@ -32,10 +32,7 @@ import (
 // supervises IS the agent: a killed session kills the agent, and the exit
 // status is the agent's own rather than a shell's approximation of it.
 func FixSession(ctx context.Context, cfg Config) error {
-	agent := strings.TrimSpace(os.Getenv("CRQ_FIX_AGENT"))
-	if agent == "" && len(cfg.DispatchCommand) > 0 {
-		agent = cfg.DispatchCommand[0]
-	}
+	agent := cfg.fixAgent()
 	if agent == "" {
 		return errors.New("no fix agent configured (CRQ_FIX_AGENT); run crq autofix install")
 	}
