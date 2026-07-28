@@ -686,6 +686,10 @@ func run(ctx context.Context, args []string) int {
 			})
 		}
 		host, _ := os.Hostname()
+		// The dashboard is a service on this machine like the others, so the
+		// host table should say which machine serves it — otherwise the one
+		// host you are certainly talking to is the one it cannot name.
+		service.ReportHost(ctx, "serve")
 		srv := serve.New(store, serve.Options{
 			Addr:        *addr,
 			MinInterval: cfg.MinInterval,
