@@ -318,11 +318,23 @@ func (s *Server) assets() http.Handler {
 	}
 	files := http.FileServer(http.FS(s.opts.Assets))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if path := strings.TrimPrefix(r.URL.Path, "/"); path != "" {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path != "" {
 			if _, err := fs.Stat(s.opts.Assets, path); err != nil {
 				r = r.Clone(r.Context())
 				r.URL.Path = "/"
+				path = ""
 			}
+		}
+		// The bundles are content-hashed, so a name that resolves at all
+		// resolves to the same bytes for ever and can be cached hard. The page
+		// that NAMES them cannot: a cached index.html keeps asking for the
+		// bundle it was built against, so a restarted server serves new assets
+		// nobody ever requests and the dashboard silently stays a version behind.
+		if strings.HasPrefix(path, "assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
 		}
 		files.ServeHTTP(w, r)
 	})
