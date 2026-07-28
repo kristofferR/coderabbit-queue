@@ -31,6 +31,8 @@ export function SolverEditor({
   const [effort, setEffort] = useState(solver.effort ?? "");
   const [prompt, setPrompt] = useState(solver.prompt ?? "");
   const [attempts, setAttempts] = useState(String(solver.max_attempts));
+  const [severities, setSeverities] = useState(solver.severities ?? []);
+  const [askMode, setAskMode] = useState(solver.ask_mode ?? "blocked");
   const [forks, setForks] = useState(solver.forks);
   const [authors, setAuthors] = useState((solver.skip_authors ?? []).join(", "));
   const [busy, setBusy] = useState(false);
@@ -42,6 +44,8 @@ export function SolverEditor({
     effort: solver.effort ?? "",
     prompt: solver.prompt ?? "",
     attempts: String(solver.max_attempts),
+    severities: solver.severities ?? [],
+    askMode: solver.ask_mode ?? "blocked",
     forks: solver.forks,
     authors: (solver.skip_authors ?? []).join(", "),
   };
@@ -55,6 +59,8 @@ export function SolverEditor({
     setEffort(server.effort);
     setPrompt(server.prompt);
     setAttempts(server.attempts);
+    setSeverities(server.severities);
+    setAskMode(server.askMode);
     setForks(server.forks);
     setAuthors(server.authors);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -65,6 +71,8 @@ export function SolverEditor({
     effort: effort !== server.effort,
     prompt: prompt !== server.prompt,
     attempts: attempts !== server.attempts,
+    severities: JSON.stringify(severities) !== JSON.stringify(server.severities),
+    askMode: askMode !== server.askMode,
     forks: forks !== server.forks,
     authors: authors !== server.authors,
   };
@@ -89,12 +97,18 @@ export function SolverEditor({
   // values — an empty model, 0 attempts — but "Blocked" is a real fork policy
   // and an empty author list means "skip nobody", so these two can only return
   // to inheritance by asking for it.
-  const inherit = (field: "models" | "effort" | "forks" | "skip_authors") =>
+  const inherit = (
+    field: "models" | "effort" | "severities" | "ask_mode" | "forks" | "skip_authors",
+  ) =>
     void post(
       field === "models"
         ? { unset_models: true }
         : field === "effort"
           ? { unset_effort: true }
+        : field === "severities"
+          ? { unset_severities: true }
+        : field === "ask_mode"
+          ? { unset_ask_mode: true }
         : field === "forks"
           ? { unset_forks: true }
           : { unset_skip_authors: true },
@@ -115,6 +129,8 @@ export function SolverEditor({
             ...(changed.effort ? { effort } : {}),
             ...(changed.prompt ? { prompt } : {}),
             ...(changed.attempts ? { max_attempts: Number(attempts) || 0 } : {}),
+            ...(changed.severities ? { severities } : {}),
+            ...(changed.askMode ? { ask_mode: askMode } : {}),
             ...(changed.forks ? { forks } : {}),
             ...(changed.authors
               ? {
@@ -311,6 +327,122 @@ export function SolverEditor({
                 failures per cycle; outages do not count, exhausted cycles cool down and retry
               </span>
             </Row>
+            <tr>
+              <td colSpan={2} className="pt-4">
+                <div className="rounded-[10px] border border-acc-edge bg-acc-bg/50 p-4">
+                  <div className="flex flex-wrap items-start gap-3">
+                    <div>
+                      <h3 className="text-[14px] font-[650] text-ink">Autofix policy</h3>
+                      <p className="mt-0.5 max-w-[680px] text-[12.5px] text-mut">
+                        Decide what the unattended agent may tackle and when uncertainty should become
+                        a question instead of a guessed change.
+                      </p>
+                    </div>
+                    <Pill tone="acc">guardrails</Pill>
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-[145px_minmax(0,1fr)] gap-x-4 gap-y-4">
+                    <PolicyLabel label="Fix findings" source={src("severities")} />
+                    <div>
+                      <div className="flex flex-wrap gap-2">
+                        {[
+                          ["critical", "Critical"],
+                          ["major", "Major"],
+                          ["potential", "Potential"],
+                          ["minor", "Minor"],
+                          ["unknown", "Unclassified"],
+                        ].map(([value, label]) => {
+                          const active = severities.includes(value);
+                          return (
+                            <button
+                              key={value}
+                              type="button"
+                              aria-pressed={active}
+                              onClick={() =>
+                                setSeverities((current) =>
+                                  active
+                                    ? current.length > 1
+                                      ? current.filter((severity) => severity !== value)
+                                      : current
+                                    : [...current, value],
+                                )
+                              }
+                              className={`rounded-full border px-3 py-1 text-[12.5px] font-semibold ${
+                                active
+                                  ? "border-ink bg-ink text-white"
+                                  : "border-edge bg-white text-mut hover:border-edge2"
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div className="mt-2 flex items-center gap-2 text-[11.5px] text-faint">
+                        <span>
+                          Only {severities.join(", ")} findings are handed to the agent. Turn autofix
+                          off above to stop all fixing.
+                        </span>
+                        <Inherit
+                          shown={src("severities") === "repo"}
+                          busy={busy}
+                          onClick={() => inherit("severities")}
+                        />
+                      </div>
+                    </div>
+
+                    <PolicyLabel label="Ask me" source={src("ask_mode")} />
+                    <div className="grid grid-cols-3 gap-2 max-[960px]:grid-cols-1">
+                      {[
+                        {
+                          value: "blocked",
+                          title: "Only when blocked",
+                          detail: "Use best judgment unless a safe fix is impossible.",
+                        },
+                        {
+                          value: "uncertain",
+                          title: "When confidence is low",
+                          detail: "Stop instead of guessing through unclear intent.",
+                        },
+                        {
+                          value: "ambiguous",
+                          title: "At first ambiguity",
+                          detail: "Ask when reasonable solutions change behavior differently.",
+                        },
+                      ].map((choice) => (
+                        <button
+                          key={choice.value}
+                          type="button"
+                          aria-pressed={askMode === choice.value}
+                          onClick={() => setAskMode(choice.value as typeof askMode)}
+                          className={`rounded-lg border p-3 text-left ${
+                            askMode === choice.value
+                              ? "border-acc bg-white shadow-sm"
+                              : "border-edge bg-white/60 hover:border-edge2"
+                          }`}
+                        >
+                          <span className="block text-[12.5px] font-semibold text-ink">
+                            {choice.title}
+                          </span>
+                          <span className="mt-1 block text-[11.5px] leading-snug text-faint">
+                            {choice.detail}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                    <div />
+                    <div className="flex items-center gap-2 text-[11.5px] text-faint">
+                      A clarification preserves the attempt and holds the PR with the agent's question.
+                      <Inherit
+                        shown={src("ask_mode") === "repo"}
+                        busy={busy}
+                        onClick={() => inherit("ask_mode")}
+                      />
+                    </div>
+                  </div>
+                </div>
+              </td>
+            </tr>
             <Row label="Fork PRs" source={src("forks")}>
               <button
                 type="button"
@@ -387,6 +519,15 @@ export function SolverEditor({
       </div>
     </Card>
     </>
+  );
+}
+
+function PolicyLabel({ label, source }: { label: string; source: string }) {
+  return (
+    <div>
+      <div className="text-[13px] font-[550] text-ink">{label}</div>
+      <Pill tone={source === "repo" ? "ok" : source === "fleet" ? "acc" : "mut"}>{source}</Pill>
+    </div>
   );
 }
 

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { BotCard, Event as EventItem, Overview, RepoRow, Snapshot } from "./api";
 import { QuickSettings } from "./QuickSettings";
+import { AutofixLog } from "./AutofixLog";
 import { act } from "./actions";
 import { Confirm } from "./Confirm";
 import { BotMarks, Card, CommitLink, Empty, Pill, PRLink, PRTitle, RepoIcon, Td, Th } from "./ui";
@@ -369,19 +370,24 @@ export function OverviewPage({
         count={`${countLabel(fixing.length, ov.autofix.sessions.length, narrowed)} running · ${ov.autofix.hosts.length} hosts`}
       >
         {fixing.map((s) => (
-          <div key={s.key} className="flex flex-wrap items-center gap-4 border-b border-[#EEF0F3] px-[18px] py-3 text-[13px]">
-            <Pill tone="ok">Fixing · {elapsed(s.since, now)}</Pill>
-            <span className="flex items-center gap-2">
-              <RepoIcon repo={s.repo} />
-              <PRLink repo={s.repo} pr={s.pr} className="font-[550]" />
-              <CommitLink repo={s.repo} sha={s.head} />
-            </span>
-            <span className="text-faint">
-              {s.host}
-              {s.model ? ` · ${s.model}` : ""}
-              {s.attempt ? ` · attempt ${s.attempt}` : ""}
-              {s.heartbeat ? ` · heartbeat ${clock(s.heartbeat)}` : ""}
-            </span>
+          <div key={s.key} className="border-b border-[#EEF0F3] px-[18px] py-3 text-[13px]">
+            <div className="flex flex-wrap items-center gap-4">
+              <Pill tone="ok">Fixing · {elapsed(s.since, now)}</Pill>
+              <span className="flex items-center gap-2">
+                <RepoIcon repo={s.repo} />
+                <PRLink repo={s.repo} pr={s.pr} className="font-[550]" />
+                <CommitLink repo={s.repo} sha={s.head} />
+              </span>
+              <span className="text-faint">
+                {s.host}
+                {s.model ? ` · ${s.model}` : ""}
+                {s.attempt ? ` · attempt ${s.attempt}` : ""}
+                {s.heartbeat ? ` · heartbeat ${clock(s.heartbeat)}` : ""}
+              </span>
+            </div>
+            <div className="mt-1.5">
+              <AutofixLog repo={s.repo} pr={s.pr} />
+            </div>
           </div>
         ))}
         <div className="flex flex-wrap gap-3 px-[18px] py-3">

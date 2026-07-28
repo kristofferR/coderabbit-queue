@@ -82,6 +82,10 @@ type Options struct {
 	// Coster estimates what a round would cost. Optional: without it the PR page
 	// simply shows no price, rather than a wrong one.
 	Coster Coster
+	// TailLog reads a bounded tail of a session log after the handler resolves
+	// the current session from state. Nil means this dashboard cannot access
+	// logs on its host.
+	TailLog func(context.Context, string, string, int64) (LogTail, error)
 	// SolverFor resolves a repository's fix-session settings. Nil leaves the
 	// repository page without a solver card rather than showing env values that
 	// no repository record could change.
@@ -187,6 +191,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/pr/{owner}/{name}/{pr}", s.handlePR)
 	mux.HandleFunc("GET /api/discover", s.handleDiscover)
 	mux.HandleFunc("GET /api/enroll-preview", s.handleEnrollPreview)
+	mux.HandleFunc("GET /api/autofix-log/{owner}/{name}/{pr}", s.handleAutofixLog)
 	mux.HandleFunc("POST /api/setup/refresh", s.handleSetupRefresh)
 	mux.HandleFunc("POST /api/action/{action}", s.handleAction)
 	mux.Handle("/", s.assets())

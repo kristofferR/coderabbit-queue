@@ -1122,6 +1122,31 @@ func TestSessionLogPruneLeavesRoomForTheNewLog(t *testing.T) {
 	}
 }
 
+func TestAutofixPolicyFiltersAndExtractsClarification(t *testing.T) {
+	findings := []dialect.Finding{
+		{ID: "major", Severity: "major"},
+		{ID: "minor", Severity: "minor"},
+		{ID: "unknown"},
+	}
+	got := autofixFindings(findings, map[string]bool{"minor": true})
+	if len(got) != 1 || got[0].ID != "minor" {
+		t.Fatalf("filtered findings = %+v, want only minor", got)
+	}
+	if got := autofixFindings(findings, nil); len(got) != len(findings) {
+		t.Fatalf("unset policy filtered %d findings to %d", len(findings), len(got))
+	}
+	prompt := appendAutofixPolicy("use bun", map[string]bool{"minor": true}, "uncertain")
+	if !strings.Contains(prompt, "configured severities: minor") ||
+		!strings.Contains(prompt, clarificationMarker) ||
+		!strings.Contains(prompt, "confidence is low") {
+		t.Fatalf("policy prompt did not carry its enforcement contract:\n%s", prompt)
+	}
+	log := `{"type":"result","result":"` + clarificationMarker + ` Which API behavior should remain compatible?\"}`
+	if got := clarificationFromLog(log); got != "Which API behavior should remain compatible?" {
+		t.Fatalf("clarification = %q", got)
+	}
+}
+
 // A fork PR's branch lives in the contributor's repository, so the session
 // pushes there — and no branch of `origin` (the base repository this worktree
 // came from) will ever contain that commit. Read as unpushed work, every

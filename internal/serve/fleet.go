@@ -133,6 +133,8 @@ type RepoSolver struct {
 	Effort       string            `json:"effort,omitempty"`
 	Prompt       string            `json:"prompt,omitempty"`
 	MaxAttempts  int               `json:"max_attempts"`
+	Severities   []string          `json:"severities"`
+	AskMode      string            `json:"ask_mode"`
 	Forks        bool              `json:"forks"`
 	SkipAuthors  []string          `json:"skip_authors"`
 	Sources      map[string]string `json:"sources"`

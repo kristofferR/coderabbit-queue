@@ -456,10 +456,14 @@ type SolverChange struct {
 	Effort           *string  `json:"effort"`
 	Prompt           *string  `json:"prompt"`
 	MaxAttempts      *int     `json:"max_attempts"`
+	Severities       []string `json:"severities"`
+	AskMode          *string  `json:"ask_mode"`
 	Forks            *bool    `json:"forks"`
 	SkipAuthors      []string `json:"skip_authors"`
 	UnsetModels      bool     `json:"unset_models,omitempty"`
 	UnsetEffort      bool     `json:"unset_effort,omitempty"`
+	UnsetSeverities  bool     `json:"unset_severities,omitempty"`
+	UnsetAskMode     bool     `json:"unset_ask_mode,omitempty"`
 	UnsetForks       bool     `json:"unset_forks,omitempty"`
 	UnsetSkipAuthors bool     `json:"unset_skip_authors,omitempty"`
 	Clear            bool     `json:"clear"`

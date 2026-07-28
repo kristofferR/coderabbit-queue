@@ -303,9 +303,10 @@ Change how fix sessions run, per repository or fleet-wide:
 ```bash
 crq solver REPO                                       # effective settings + where each came from
 crq solver set REPO --models opus,sonnet,haiku --effort high --attempts 5
+crq solver set REPO --severities minor,potential --ask uncertain
 crq solver set REPO --prompt "This project uses bun, never npm."
 crq solver set --fleet --effort medium                # the default every repository inherits
-crq solver set REPO --inherit models,effort,forks,skip-authors
+crq solver set REPO --inherit models,effort,severities,ask,forks,skip-authors
 crq solver clear REPO | crq solver clear --fleet
 ```
 
@@ -315,7 +316,12 @@ failed fix sessions do, and rotate through the ranking. Exhausting a fix-attempt
 increasing cooldown (one hour up to one day), then automatically opens a fresh cycle. If every model
 is parked, crq waits for the earliest reset instead of permanently exhausting the PR.
 
-`--inherit` hands a setting back to the layer beneath. It is required for models, effort, forks and
+`--severities` limits the findings handed to an unattended agent. `--ask` controls how readily it
+stops instead of guessing: only when blocked, when confidence is low, or at the first meaningful
+ambiguity. A clarification preserves the attempt and holds the PR with the agent's concrete question.
+
+`--inherit` hands a setting back to the layer beneath. It is required for models, effort, severity
+scope, clarification policy, forks and
 skipped authors because an empty model ranking or effort means "use the agent default", `off` is a
 real fork policy, and an empty author list means "skip nobody". `--attempts 0` inherits directly.
 

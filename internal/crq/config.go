@@ -81,6 +81,10 @@ type Config struct {
 	FixModel  string
 	FixEffort string
 	FixPrompt string
+	// FixSeverities is the set of finding severities a session may act on.
+	// FixAskMode controls when it should stop and surface a clarification.
+	FixSeverities map[string]bool
+	FixAskMode    string
 	// DispatchForks allows fix sessions on pull requests whose head branch lives
 	// in another repository. Off by default: a session runs an agent over that
 	// branch's code with approvals bypassed and a write token in reach.
@@ -329,6 +333,8 @@ func BuildConfig(env map[string]string) (Config, error) {
 		FixModel:            strings.TrimSpace(env["CRQ_FIX_MODEL"]),
 		FixEffort:           strings.TrimSpace(env["CRQ_FIX_EFFORT"]),
 		FixPrompt:           strings.TrimSpace(env["CRQ_FIX_PROMPT"]),
+		FixSeverities:       severitySet(stringEnv(env, "CRQ_FIX_SEVERITIES", "critical,major,potential,minor,unknown")),
+		FixAskMode:          askModeEnv(env["CRQ_FIX_ASK"]),
 		DispatchMaxAttempts: positiveIntEnv(env, "CRQ_DISPATCH_MAX_ATTEMPTS", 5),
 		DispatchForks:       boolEnv(env, "CRQ_DISPATCH_FORKS", false),
 		DispatchConcurrency: intEnv(env, "CRQ_DISPATCH_CONCURRENCY", 0),
@@ -374,6 +380,26 @@ func BuildConfig(env map[string]string) (Config, error) {
 		cfg.FixModel = cfg.FixModels[0]
 	}
 	return cfg, nil
+}
+
+func severitySet(raw string) map[string]bool {
+	out := map[string]bool{}
+	for _, severity := range strings.Split(raw, ",") {
+		severity = strings.ToLower(strings.TrimSpace(severity))
+		if severity != "" {
+			out[severity] = true
+		}
+	}
+	return out
+}
+
+func askModeEnv(raw string) string {
+	switch mode := strings.ToLower(strings.TrimSpace(raw)); mode {
+	case "uncertain", "ambiguous":
+		return mode
+	default:
+		return "blocked"
+	}
 }
 
 func configuredModels(ranked, legacy string) []string {

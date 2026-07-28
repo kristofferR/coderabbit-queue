@@ -499,6 +499,12 @@ func (c Config) withSolver(sv SolverSettings) Config {
 	if sv.MaxAttempts != nil {
 		out.DispatchMaxAttempts = *sv.MaxAttempts
 	}
+	if sv.SetSeverities || len(sv.Severities) > 0 {
+		out.FixSeverities = severitySet(strings.Join(sv.Severities, ","))
+	}
+	if sv.SetAskMode || sv.AskMode != "" {
+		out.FixAskMode = sv.AskMode
+	}
 	if sv.Forks != nil {
 		out.DispatchForks = *sv.Forks
 	}

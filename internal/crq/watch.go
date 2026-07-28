@@ -613,6 +613,13 @@ func (s *Service) queueDispatch(
 	if s.cfg.DryRun {
 		return false, "dry run: would dispatch a fix session", nil, nil
 	}
+	solver := s.repoCfg(ctx, report.Repo)
+	if len(report.Findings) > 0 {
+		report.Findings = autofixFindings(report.Findings, solver.FixSeverities)
+		if len(report.Findings) == 0 {
+			return false, "autofix policy excludes every open finding", nil, nil
+		}
+	}
 	var ok bool
 	var why string
 	if opts.Once {
@@ -625,7 +632,6 @@ func (s *Service) queueDispatch(
 	}
 	token := randomToken()
 	maxAttempts := s.recordedMaxAttempts(ctx, report.Repo, opts.MaxAttempts)
-	solver := s.repoCfg(ctx, report.Repo)
 	models := append([]string(nil), solver.FixModels...)
 	if len(models) == 0 && solver.FixModel != "" {
 		models = []string{solver.FixModel}
@@ -796,6 +802,7 @@ func (s *Service) dispatchWithStart(
 	// session script reads them; a script from an older install ignores them
 	// and runs exactly as it did.
 	solver := s.repoCfg(runCtx, report.Repo)
+	sessionPrompt := appendAutofixPolicy(solver.FixPrompt, solver.FixSeverities, solver.FixAskMode)
 	cmd.Env = append(os.Environ(),
 		"CRQ_DISPATCH_REPO="+report.Repo,
 		fmt.Sprintf("CRQ_DISPATCH_PR=%d", report.PR),
@@ -805,7 +812,7 @@ func (s *Service) dispatchWithStart(
 		// in os.Environ(); only the per-repository half is added here.
 		"CRQ_FIX_MODEL="+model,
 		"CRQ_FIX_EFFORT="+solver.FixEffort,
-		"CRQ_FIX_PROMPT="+solver.FixPrompt,
+		"CRQ_FIX_PROMPT="+sessionPrompt,
 	)
 	// The session's push is a plain `git push`, and git reads no GITHUB_TOKEN of
 	// its own. The mirror carries a credential helper that reads this variable
@@ -831,6 +838,18 @@ func (s *Service) dispatchWithStart(
 	}
 	s.noteDispatchHealth(context.WithoutCancel(ctx), true, "")
 	runErr := cmd.Wait()
+	_ = logFile.Sync()
+	if question := clarificationFromLog(string(readLogTail(logPath, 256<<10))); question != "" {
+		// Asking is not a failed solution attempt. Release it without consuming
+		// the per-head budget, then hold the PR with the exact question so it
+		// appears in the dashboard's existing attention and held surfaces.
+		s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
+		reason := "Autofix needs clarification: " + question
+		if _, err := s.Hold(context.WithoutCancel(ctx), report.Repo, report.PR, reason); err != nil {
+			return false, fmt.Sprintf("%s (could not place the clarification hold: %v; log: %s)", reason, err, logPath)
+		}
+		return false, fmt.Sprintf("%s (log: %s)", reason, logPath)
+	}
 	// A session the WATCHER stopped did not use up the head's attempt budget.
 	//
 	// That budget exists to stop a fix which keeps not working from looping for
@@ -841,7 +860,6 @@ func (s *Service) dispatchWithStart(
 	// went on asking for a fix.
 	attempted := ctx.Err() == nil
 	if runErr != nil && attempted {
-		_ = logFile.Sync()
 		if failure := dialect.ClassifyAgentFailure(readLogTail(logPath, 256<<10), s.clock()); failure.Unavailable {
 			s.releaseDispatchUnavailable(context.WithoutCancel(ctx), report, token, failure)
 			if lost() {
@@ -877,6 +895,67 @@ func (s *Service) dispatchWithStart(
 	}
 	_ = co.Remove(context.WithoutCancel(ctx))
 	return true, ""
+}
+
+func autofixFindings(findings []dialect.Finding, allowed map[string]bool) []dialect.Finding {
+	if len(allowed) == 0 {
+		return findings
+	}
+	out := make([]dialect.Finding, 0, len(findings))
+	for _, finding := range findings {
+		severity := strings.ToLower(strings.TrimSpace(finding.Severity))
+		if severity == "" {
+			severity = "unknown"
+		}
+		if allowed[severity] {
+			out = append(out, finding)
+		}
+	}
+	return out
+}
+
+const clarificationMarker = "CRQ_NEEDS_CLARIFICATION:"
+
+func appendAutofixPolicy(prompt string, severities map[string]bool, askMode string) string {
+	allowed := sortedKeys(severities)
+	if len(allowed) == 0 {
+		allowed = append([]string(nil), knownSeverities...)
+	}
+	instruction := "Autofix policy:\n- Work only on findings passed to this session (configured severities: " +
+		strings.Join(allowed, ", ") + ").\n"
+	switch askMode {
+	case "ambiguous":
+		instruction += "- Stop at the first meaningful ambiguity: if multiple reasonable solutions would change behavior differently, do not guess.\n"
+	case "uncertain":
+		instruction += "- Stop when confidence is low that the chosen solution is the intended one; do not guess through unclear requirements.\n"
+	default:
+		instruction += "- Use best judgment and stop for clarification only when missing information makes a safe fix impossible.\n"
+	}
+	instruction += "- To ask, make no further edits and end your response with exactly `" +
+		clarificationMarker + " <one concrete question>`."
+	if strings.TrimSpace(prompt) == "" {
+		return instruction
+	}
+	return strings.TrimSpace(prompt) + "\n\n" + instruction
+}
+
+func clarificationFromLog(body string) string {
+	at := strings.LastIndex(body, clarificationMarker)
+	if at < 0 {
+		return ""
+	}
+	question := body[at+len(clarificationMarker):]
+	if end := strings.IndexByte(question, '\n'); end >= 0 {
+		question = question[:end]
+	}
+	question = strings.TrimSpace(question)
+	question = strings.ReplaceAll(question, `\n`, " ")
+	question = strings.ReplaceAll(question, `\"`, `"`)
+	question = strings.Trim(question, `\"' }\t\r\n`)
+	if len(question) > 500 {
+		question = question[:500]
+	}
+	return strings.TrimSpace(question)
 }
 
 // sessionWork reports whether this checkout holds work that exists nowhere else,

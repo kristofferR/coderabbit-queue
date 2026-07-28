@@ -53,6 +53,8 @@ export type ActionBody = {
     effort?: string;
     prompt?: string;
     max_attempts?: number;
+    severities?: string[];
+    ask_mode?: string;
     forks?: boolean;
     skip_authors?: string[];
     /**
@@ -62,6 +64,8 @@ export type ActionBody = {
      */
     unset_models?: boolean;
     unset_effort?: boolean;
+    unset_severities?: boolean;
+    unset_ask_mode?: boolean;
     unset_forks?: boolean;
     unset_skip_authors?: boolean;
     clear?: boolean;

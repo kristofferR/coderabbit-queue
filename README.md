@@ -420,9 +420,10 @@ crq fleet env <KEY> [<value>|--clear]   # any single setting, by its environment
 crq fleet set [--bots <a,b>] [--required <a,b>] [--min-interval <dur>] [--weekly-limit <n>]
               [--autofix-default on|off] [--dry-run]   # --dry-run reports the impact, writes nothing
 
-crq solver <repo>         # how fix sessions run here (ranked models, effort, attempts, forks, prompt)
-crq solver set <repo> [--models <first,next,...>] [--effort <e>] [--attempts <n>] [--forks on|off] [--prompt <text>]
-crq solver set <repo> --inherit models,effort,forks,skip-authors # hand settings back to the fleet
+crq solver <repo>         # models, scope, clarification policy, attempts, forks and prompt
+crq solver set <repo> [--models <first,next,...>] [--severities minor,potential] [--ask uncertain]
+crq solver set <repo> [--effort <e>] [--attempts <n>] [--forks on|off] [--prompt <text>]
+crq solver set <repo> --inherit models,effort,severities,ask,forks,skip-authors # follow the fleet
 crq solver set --fleet [...]                          # the default every repository inherits
 
 crq repos                 # which projects crq reviews, and where each answer comes from

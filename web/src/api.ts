@@ -276,6 +276,8 @@ export type RepoSolver = {
   effort?: string;
   prompt?: string;
   max_attempts: number;
+  severities: string[];
+  ask_mode: "blocked" | "uncertain" | "ambiguous";
   forks: boolean;
   skip_authors: string[];
   sources: Record<string, string>;

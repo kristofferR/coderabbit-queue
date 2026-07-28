@@ -38,6 +38,14 @@ type SolverSettings struct {
 	// MaxAttempts bounds fix sessions per head, so a fix that keeps not working
 	// stops. Nil inherits.
 	MaxAttempts *int `json:"max_attempts,omitempty"`
+	// Severities limits which findings autofix hands to an agent. SetSeverities
+	// distinguishes an explicit empty selection ("fix nothing") from inherit.
+	Severities    []string `json:"severities,omitempty"`
+	SetSeverities bool     `json:"set_severities,omitempty"`
+	// AskMode controls how readily a fix session stops for clarification.
+	// SetAskMode distinguishes an explicit choice from inherit.
+	AskMode    string `json:"ask_mode,omitempty"`
+	SetAskMode bool   `json:"set_ask_mode,omitempty"`
 	// Forks allows sessions on pull requests whose head branch lives in another
 	// repository. Off by default fleet-wide: a session runs an agent over that
 	// branch's code with approvals bypassed and a write token in reach.
@@ -65,7 +73,8 @@ type SolverSettings struct {
 func (s SolverSettings) Empty() bool {
 	return !s.SetModels && len(s.Models) == 0 && s.Model == "" &&
 		!s.SetEffort && s.Effort == "" && s.Prompt == "" &&
-		s.MaxAttempts == nil && s.Forks == nil && !s.SetSkipAuthors &&
+		s.MaxAttempts == nil && !s.SetSeverities && len(s.Severities) == 0 && !s.SetAskMode &&
+		s.Forks == nil && !s.SetSkipAuthors &&
 		len(s.unknown) == 0
 }
 
@@ -94,6 +103,14 @@ func (s SolverSettings) Merge(over SolverSettings) SolverSettings {
 	}
 	if over.MaxAttempts != nil {
 		out.MaxAttempts = over.MaxAttempts
+	}
+	if over.SetSeverities || len(over.Severities) > 0 {
+		out.Severities = append([]string(nil), over.Severities...)
+		out.SetSeverities = true
+	}
+	if over.SetAskMode || over.AskMode != "" {
+		out.AskMode = over.AskMode
+		out.SetAskMode = true
 	}
 	if over.Forks != nil {
 		out.Forks = over.Forks

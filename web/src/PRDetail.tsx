@@ -6,6 +6,7 @@ import { BotIcon, BotMarks, Card, CommitLink, Empty, Pill, PRLink, RepoIcon } fr
 import { ago, clock, countdown, elapsed, useNow } from "./time";
 import { act } from "./actions";
 import { Confirm } from "./Confirm";
+import { AutofixLog } from "./AutofixLog";
 
 const SEV_ORDER = ["critical", "major", "potential", "minor", "unknown"];
 const SEV_TONE: Record<string, "bad" | "warn" | "mut"> = {
@@ -438,6 +439,9 @@ export function PRDetailPage({ repo, pr, rev }: { repo: string; pr: number; rev?
                     {view.round.fixing.log}
                   </div>
                 )}
+                <div className="mt-2">
+                  <AutofixLog repo={repo} pr={pr} />
+                </div>
                 <p className="mt-1.5 text-[11.5px] text-faint">
                   While a session holds this round the queue leaves it alone; the claim is released
                   when the session pushes or exits.

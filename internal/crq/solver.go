@@ -27,6 +27,8 @@ type SolverView struct {
 	Effort       string   `json:"effort,omitempty"`
 	Prompt       string   `json:"prompt,omitempty"`
 	MaxAttempts  int      `json:"max_attempts"`
+	Severities   []string `json:"severities"`
+	AskMode      string   `json:"ask_mode"`
 	Forks        bool     `json:"forks"`
 	SkipAuthors  []string `json:"skip_authors"`
 
@@ -61,6 +63,7 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 		Models: append([]string{}, cfg.FixModels...),
 		Model:  cfg.FixModel, Effort: cfg.FixEffort, Prompt: cfg.FixPrompt,
 		MaxAttempts: cfg.DispatchMaxAttempts, Forks: cfg.DispatchForks,
+		Severities: sortedKeys(cfg.FixSeverities), AskMode: cfg.FixAskMode,
 		SkipAuthors: sortedKeys(cfg.SkipAuthors),
 		Sources:     map[string]string{},
 	}
@@ -84,6 +87,10 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 		fleet.SetEffort || fleet.Effort != "")
 	source("prompt", own.Prompt != "", fleet.Prompt != "")
 	source("max_attempts", own.MaxAttempts != nil, fleet.MaxAttempts != nil)
+	source("severities", own.SetSeverities || len(own.Severities) > 0,
+		fleet.SetSeverities || len(fleet.Severities) > 0)
+	source("ask_mode", own.SetAskMode || own.AskMode != "",
+		fleet.SetAskMode || fleet.AskMode != "")
 	source("forks", own.Forks != nil, fleet.Forks != nil)
 	source("skip_authors", own.SetSkipAuthors, fleet.SetSkipAuthors)
 
@@ -150,6 +157,8 @@ type SolverChange struct {
 	Effort      *string  `json:"effort"`
 	Prompt      *string  `json:"prompt"`
 	MaxAttempts *int     `json:"max_attempts"`
+	Severities  []string `json:"severities"`
+	AskMode     *string  `json:"ask_mode"`
 	Forks       *bool    `json:"forks"`
 	SkipAuthors []string `json:"skip_authors"`
 	// Unset* hands ONE setting back to the layer beneath, the same instruction
@@ -158,6 +167,8 @@ type SolverChange struct {
 	// an empty author list is "skip nobody", so none can also mean inheritance.
 	UnsetModels      bool `json:"unset_models,omitempty"`
 	UnsetEffort      bool `json:"unset_effort,omitempty"`
+	UnsetSeverities  bool `json:"unset_severities,omitempty"`
+	UnsetAskMode     bool `json:"unset_ask_mode,omitempty"`
 	UnsetForks       bool `json:"unset_forks,omitempty"`
 	UnsetSkipAuthors bool `json:"unset_skip_authors,omitempty"`
 	// Clear drops the whole record, returning every setting to the fleet default.
@@ -169,6 +180,8 @@ type SolverChange struct {
 // as a flag value, and a session that dies on its first argument is a fix that
 // silently never happens.
 var knownEfforts = []string{"low", "medium", "high", "xhigh", "max"}
+var knownSeverities = []string{"critical", "major", "potential", "minor", "unknown"}
+var knownAskModes = []string{"blocked", "uncertain", "ambiguous"}
 
 // SetSolver records how repo's fix sessions should run.
 func (s *Service) SetSolver(ctx context.Context, repo string, change SolverChange) (SolverView, error) {
@@ -327,6 +340,35 @@ func applySolverChange(sv SolverSettings, change SolverChange) (SolverSettings, 
 		} else {
 			sv.MaxAttempts = &n
 		}
+	}
+	if change.UnsetSeverities {
+		sv.Severities, sv.SetSeverities = nil, false
+	} else if change.Severities != nil {
+		if len(change.Severities) == 0 {
+			return sv, errors.New("choose at least one severity, or turn autofix off for the repository")
+		}
+		seen := map[string]bool{}
+		severities := make([]string, 0, len(change.Severities))
+		for _, severity := range change.Severities {
+			severity = strings.ToLower(strings.TrimSpace(severity))
+			if !containsString(knownSeverities, severity) {
+				return sv, fmt.Errorf("severity %q is not one of %s", severity, strings.Join(knownSeverities, ", "))
+			}
+			if !seen[severity] {
+				seen[severity] = true
+				severities = append(severities, severity)
+			}
+		}
+		sv.Severities, sv.SetSeverities = severities, true
+	}
+	if change.UnsetAskMode {
+		sv.AskMode, sv.SetAskMode = "", false
+	} else if change.AskMode != nil {
+		mode := strings.ToLower(strings.TrimSpace(*change.AskMode))
+		if !containsString(knownAskModes, mode) {
+			return sv, fmt.Errorf("ask mode %q is not one of %s", mode, strings.Join(knownAskModes, ", "))
+		}
+		sv.AskMode, sv.SetAskMode = mode, true
 	}
 	if change.UnsetForks {
 		sv.Forks = nil

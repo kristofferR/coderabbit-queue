@@ -117,11 +117,28 @@ func TestSolverLayering(t *testing.T) {
 	if _, err := svc.SetSolver(ctx, "o/special", SolverChange{MaxAttempts: intptr(99)}); err == nil {
 		t.Error("an absurd attempt budget must be refused")
 	}
+	ask := "uncertain"
+	if _, err := svc.SetSolver(ctx, "o/special", SolverChange{
+		Severities: []string{"minor", "minor"}, AskMode: &ask,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := svc.Solver(ctx, "o/special"); strings.Join(v.Severities, ",") != "minor" ||
+		v.AskMode != "uncertain" || v.Sources["severities"] != "repo" || v.Sources["ask_mode"] != "repo" {
+		t.Errorf("policy view = %+v, want the repository's minor-only, ask-when-uncertain policy", v)
+	}
+	badAsk := "whenever"
+	if _, err := svc.SetSolver(ctx, "o/special", SolverChange{AskMode: &badAsk}); err == nil {
+		t.Error("an unknown clarification threshold must be refused")
+	}
+	if _, err := svc.SetSolver(ctx, "o/special", SolverChange{Severities: []string{}}); err == nil {
+		t.Error("an empty severity policy must direct the operator to the autofix switch")
+	}
 
 	// Emptying every field clears the record rather than leaving one that
 	// overrides nothing.
 	if _, err := svc.SetSolver(ctx, "o/special", SolverChange{
-		Model: strptr(""), MaxAttempts: intptr(0),
+		Model: strptr(""), MaxAttempts: intptr(0), UnsetSeverities: true, UnsetAskMode: true,
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -650,6 +650,7 @@ func run(ctx context.Context, args []string) int {
 				Overridden: v.Overridden, Agent: v.Agent, Models: v.Models, ModelChoices: v.ModelChoices,
 				Model: v.Model, Effort: v.Effort,
 				Prompt: v.Prompt, MaxAttempts: v.MaxAttempts, Forks: v.Forks,
+				Severities: v.Severities, AskMode: v.AskMode,
 				SkipAuthors: v.SkipAuthors, Sources: v.Sources, By: v.By,
 				Lagging: hostsOfWriters(v.Lagging),
 			}
@@ -758,8 +759,12 @@ func run(ctx context.Context, args []string) int {
 			LookupToken: ghapi.LookupToken,
 			Observer:    prObserver{svc: service, readOnly: *readOnly},
 			Coster:      prCoster{service},
-			Actor:       prActor{service},
-			ReadOnly:    *readOnly,
+			TailLog: func(ctx context.Context, repo, path string, maxBytes int64) (serve.LogTail, error) {
+				tail, err := service.TailSessionLog(ctx, repo, path, maxBytes)
+				return serve.LogTail{Text: tail.Text, Size: tail.Size, Truncated: tail.Truncated}, err
+			},
+			Actor:    prActor{service},
+			ReadOnly: *readOnly,
 			Fleet: serve.FleetConfig{
 				GateRepo:       cfg.GateRepo,
 				StateRef:       cfg.StateRef,
@@ -1228,9 +1233,11 @@ every agent rejects differently and none ignores.
 `)
 	case "solver":
 		fmt.Print(`crq solver <repo>
-crq solver set <repo> [--models <first,next,...>] [--effort <e>] [--prompt <text>]
-                      [--attempts <n>] [--forks on|off] [--skip-authors <a,b>]
-                      [--inherit models,effort,forks,skip-authors]
+	crq solver set <repo> [--models <first,next,...>] [--effort <e>] [--prompt <text>]
+	                      [--severities <critical,major,potential,minor,unknown>]
+	                      [--ask blocked|uncertain|ambiguous]
+	                      [--attempts <n>] [--forks on|off] [--skip-authors <a,b>]
+	                      [--inherit models,effort,severities,ask,forks,skip-authors]
 crq solver set --fleet [...]           (the default every repository inherits)
 crq solver clear <repo> | crq solver clear --fleet
 
@@ -1243,8 +1250,10 @@ this repository. .sources says which layer answered for each setting.
   --models        preferred model followed by ordered fallbacks
   --model         legacy spelling for a one-entry model ranking
   --effort        low | medium | high | xhigh | max
-  --prompt        standing instruction appended to every fix session here
-                  ("this project uses bun, never npm")
+	  --prompt        standing instruction appended to every fix session here
+	                  ("this project uses bun, never npm")
+	  --severities    only hand these finding severities to the agent
+	  --ask           when uncertainty becomes a dashboard clarification
   --attempts      failed code-fix sessions per head before crq stops; provider
                   outages do not count; 0 inherits
   --forks         allow sessions on pull requests from another repository.
@@ -2876,7 +2885,7 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 		switch name {
 		case "--fleet":
 			fleet = true
-		case "--models", "--model", "--effort", "--prompt":
+		case "--models", "--model", "--effort", "--prompt", "--severities", "--ask":
 			hasMutation = true
 			v, ok := value()
 			if !ok {
@@ -2891,6 +2900,10 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 				change.Effort = &v
 			case "--prompt":
 				change.Prompt = &v
+			case "--severities":
+				change.Severities = splitList(&v)
+			case "--ask":
+				change.AskMode = &v
 			}
 		case "--attempts":
 			hasMutation = true
@@ -2938,12 +2951,16 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 					change.UnsetModels = true
 				case "effort":
 					change.UnsetEffort = true
+				case "severities":
+					change.UnsetSeverities = true
+				case "ask", "ask-mode", "ask_mode":
+					change.UnsetAskMode = true
 				case "forks":
 					change.UnsetForks = true
 				case "skip-authors", "skip_authors":
 					change.UnsetSkipAuthors = true
 				default:
-					fatal(fmt.Errorf("--inherit: %q is not a solver setting that can be unset (models, effort, forks, skip-authors)", field))
+					fatal(fmt.Errorf("--inherit: %q is not a solver setting that can be unset (models, effort, severities, ask, forks, skip-authors)", field))
 					return 1
 				}
 			}
@@ -3021,8 +3038,10 @@ func (a prActor) SetSolver(ctx context.Context, repo string, change serve.Solver
 	c := crq.SolverChange{
 		Models: change.Models, Model: change.Model, Effort: change.Effort, Prompt: change.Prompt,
 		MaxAttempts: change.MaxAttempts, Forks: change.Forks,
+		Severities: change.Severities, AskMode: change.AskMode,
 		SkipAuthors: change.SkipAuthors, Clear: change.Clear,
 		UnsetModels: change.UnsetModels, UnsetEffort: change.UnsetEffort,
+		UnsetSeverities: change.UnsetSeverities, UnsetAskMode: change.UnsetAskMode,
 		UnsetForks:       change.UnsetForks,
 		UnsetSkipAuthors: change.UnsetSkipAuthors,
 	}
