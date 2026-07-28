@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import type { Snapshot } from "./api";
 
@@ -14,13 +15,6 @@ import type { Snapshot } from "./api";
  * queued, and stops the moment either becomes false.
  */
 export function isFirstRun(snap: Snapshot): boolean {
-  const cfg = snap.settings.config;
-  // Enrollment is a CONFIGURATION, not a set of rows. With no allow-list crq
-  // reviews every repository in the configured scope, and until one of them has
-  // a round there is no row here to count — so counting rows told a fleet that
-  // was already operating in scope-wide mode that nothing was enrolled, and
-  // offered to add a repository it does not need.
-  const scopeWide = (cfg.scope?.length ?? 0) > 0 && (cfg.allow_repos?.length ?? 0) === 0;
   const enrolled = snap.repos.filter((r) => r.reviewed).length;
   const anyWork =
     snap.overview.counts.in_flight +
@@ -28,16 +22,14 @@ export function isFirstRun(snap: Snapshot): boolean {
       snap.overview.counts.held +
       snap.overview.counts.fixing >
     0;
-  return !scopeWide && enrolled === 0 && !anyWork && snap.overview.finished.length === 0;
+  return enrolled === 0 && !anyWork && snap.overview.finished.length === 0;
 }
 
 export function FirstRun({ snap }: { snap: Snapshot }) {
   const setup = snap.setup;
   const bots = snap.bots.filter((b) => b.enabled);
   const working = snap.bots.filter((b) => b.status === "working").length;
-  const agent =
-    snap.repos.some((repo) => repo.solver?.agent) ||
-    (setup.fleet ?? []).some((host) => host.agent);
+  const agent = snap.repos.find((repo) => repo.solver?.agent)?.solver?.agent ?? "";
   const hosts = setup.fleet?.length ?? 0;
 
   // The steps are the real ones, in order, each answering itself from live
@@ -69,18 +61,18 @@ export function FirstRun({ snap }: { snap: Snapshot }) {
       done: working > 0,
       body: (
         <>
-          {bots.length} reviewer(s) enabled, {working} of which crq has seen working here. Enabled and
-          working are different things — a bot nobody signed up for looks configured and reviews
+          {bots.length} reviewer(s) enabled, {working} of which crq has seen working here. Enabled
+          and working are different things — a bot nobody signed up for looks configured and reviews
           nothing.{" "}
-          <a href="#/bots" className="text-acc hover:underline">
+          <Link to="/bots" className="text-acc hover:underline">
             Compare and set them up →
-          </a>
+          </Link>
         </>
       ),
     },
     {
       title: "An agent to fix what they find",
-      done: agent,
+      done: agent !== "",
       body: (
         <>
           Optional, and the half most people skip: crq can run a coding agent over the findings and
@@ -94,20 +86,20 @@ export function FirstRun({ snap }: { snap: Snapshot }) {
       body: (
         <>
           Nothing is enrolled yet, which is why this page is here instead of the queue.{" "}
-          <a href="#/repos" className="font-semibold text-acc hover:underline">
+          <Link to="/repos" className="font-semibold text-acc hover:underline">
             Add a repository →
-          </a>
+          </Link>
         </>
       ),
     },
   ];
 
   return (
-    <main className="mx-auto max-w-[860px] px-6 pt-8 pb-16 max-[600px]:px-3 max-[600px]:pt-4">
+    <main className="mx-auto max-w-[860px] px-6 pt-8 pb-16">
       <h1 className="text-[26px] font-[680] tracking-tight">Nothing is enrolled yet</h1>
       <p className="mt-2 text-[14.5px] text-mut">
-        crq keeps automated reviewers off each other's toes. It runs three kinds of work, and knowing
-        which is which explains most of what the rest of this dashboard says.
+        crq keeps automated reviewers off each other's toes. It runs three kinds of work, and
+        knowing which is which explains most of what the rest of this dashboard says.
       </p>
 
       <div className="mt-4 grid grid-cols-3 gap-3 max-[760px]:grid-cols-1">
@@ -125,7 +117,10 @@ export function FirstRun({ snap }: { snap: Snapshot }) {
             v: "A coding agent that fixes what the reviewers found and pushes. Separate from both, and off wherever you say so.",
           },
         ].map((c) => (
-          <div key={c.k} className="rounded-[10px] border border-edge bg-card px-4 py-3 shadow-card">
+          <div
+            key={c.k}
+            className="rounded-[10px] border border-edge bg-card px-4 py-3 shadow-card"
+          >
             <div className="text-[13px] font-[650]">{c.k}</div>
             <div className="mt-1 text-[12.5px] text-mut">{c.v}</div>
           </div>
@@ -151,11 +146,12 @@ export function FirstRun({ snap }: { snap: Snapshot }) {
       </ol>
 
       <p className="mt-5 text-[12.5px] text-faint">
-        This page is not a mode and there is no flag to get stuck on: it is showing because nothing is
-        enrolled and nothing has ever been queued. Enrol one repository and the queue replaces it.{" "}
-        <a href="#/setup" className="text-acc hover:underline">
+        This page is not a mode and there is no flag to get stuck on: it is showing because nothing
+        is enrolled and nothing has ever been queued. Enrol one repository and the queue replaces
+        it.{" "}
+        <Link to="/setup" className="text-acc hover:underline">
           Setup
-        </a>{" "}
+        </Link>{" "}
         has the full check list either way.
       </p>
     </main>

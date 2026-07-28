@@ -1,9 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
-import type { Candidate, EnrollImpact, Snapshot } from "./api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { act } from "./actions";
-import { Card, Empty, Pill, RepoIcon } from "./ui";
+import type { Candidate, EnrollImpact, Snapshot } from "./api";
+import { discover, enrollmentImpact } from "./api";
 import { Confirm } from "./Confirm";
 import { ago, useNow } from "./time";
+import { Card, Empty, Pill, RepoIcon } from "./ui";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./ui/dialog";
+import { useOperation } from "./useOperation";
 
 /**
  * The repository picker.
@@ -29,60 +32,42 @@ export function AddRepo({
 }) {
   const now = useNow(30000);
   const [rows, setRows] = useState<Candidate[] | null>(null);
-  // Owners whose listing hit the per-owner bound. The rows below are then the
-  // most recently pushed of them and not the whole set, and a filter that finds
-  // nothing is not the same as a repository that is not there.
-  const [truncated, setTruncated] = useState<string[]>([]);
-  const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
-  // A save can succeed and still not be in force everywhere: on a mixed-version
-  // fleet the response names the hosts too old to read the record. Discarding it
-  // here let this screen report a fleet-wide decision that some of the fleet
-  // cannot honour, which is the one thing the warning exists to prevent.
-  const [warning, setWarning] = useState<string | null>(null);
+  const requested = useRef(false);
+  const { run: runRequest, error } = useOperation();
+  const { run: runPreview } = useOperation();
   // The backlog contract: enrolling a repository with a dozen open pull
   // requests becomes a dozen metered reviews on the next pass. Nothing is
   // written until this has been shown and confirmed.
-  const [pending, setPending] = useState<{ repo: string; impact?: EnrollImpact; error?: string } | null>(
-    null,
+  const [pending, setPending] = useState<{
+    repo: string;
+    impact?: EnrollImpact;
+    error?: string;
+    errorKind?: "preview" | "enroll";
+  } | null>(null);
+
+  const load = useCallback(
+    (refresh = false) => {
+      setLoading(true);
+      runRequest(discover(refresh), {
+        onSuccess: ({ repos }) => setRows(repos),
+        onFinally: () => setLoading(false),
+      });
+    },
+    [runRequest],
   );
 
-  const load = async (refresh = false) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/discover${refresh ? "?refresh=1" : ""}`, {
-        headers: { "X-CRQ-Dashboard": "1" },
-      });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-      setRows(body.repos as Candidate[]);
-      setTruncated((body.truncated as string[] | null) ?? []);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setLoading(false);
+  useEffect(() => {
+    if (!open) {
+      requested.current = false;
+      return;
     }
-  };
-
-  useEffect(() => {
-    if (open && rows === null && !loading) void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
-
-  // Escape closes it, as every dialog should. No focus trap here: this one is
-  // a picker with a long scrolling list, and trapping Tab in it would strand a
-  // keyboard user who tabs past the last row.
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+    if (rows !== null || requested.current) return;
+    requested.current = true;
+    load();
+  }, [load, open, rows]);
 
   const shown = useMemo(() => {
     if (!rows) return [];
@@ -92,72 +77,56 @@ export function AddRepo({
 
   if (!open) return null;
 
-  const preview = async (repo: string) => {
+  const preview = (repo: string) => {
     setPending({ repo });
-    try {
-      const res = await fetch(`/api/enroll-preview?repo=${encodeURIComponent(repo)}`, {
-        headers: { "X-CRQ-Dashboard": "1" },
-      });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-      setPending({ repo, impact: body as EnrollImpact });
-    } catch (e) {
+    runPreview(enrollmentImpact(repo), {
+      onSuccess: (impact) => setPending({ repo, impact }),
       // A price we could not work out must not silently become a free-looking
       // Add: the dialog stays, and says why.
-      setPending({ repo, error: (e as Error).message });
-    }
+      onFailure: (failure) => setPending({ repo, error: failure.message, errorKind: "preview" }),
+    });
   };
 
-  const add = async (repo: string) => {
+  const add = (repo: string) => {
     setBusy(repo);
-    setError(null);
-    setWarning(null);
-    try {
-      const res = await act("enroll", { repo, enabled: true });
-      onSnapshot?.(res.snapshot);
-      setWarning(res.warning ? `${repo}: ${res.warning}` : null);
-      setPending(null);
-      // Reflect it locally too: the listing is cached server-side and would
-      // otherwise keep offering an Add button for a repository already added.
-      setRows(
-        (cur) =>
-          cur?.map((r) =>
-            r.repo.toLowerCase() === repo.toLowerCase()
-              ? { ...r, enrollment: { source: "state", enabled: true } }
-              : r,
-          ) ?? cur,
-      );
-    } catch (e) {
-      setPending({ repo, impact: pending?.impact, error: (e as Error).message });
-    } finally {
-      setBusy(null);
-    }
+    runRequest(act("enroll", { repo, enabled: true }), {
+      onSuccess: ({ snapshot }) => {
+        onSnapshot?.(snapshot);
+        setPending(null);
+        // Reflect it locally too: the listing is cached server-side and would
+        // otherwise keep offering an Add button for a repository already added.
+        setRows(
+          (cur) =>
+            cur?.map((r) =>
+              r.repo.toLowerCase() === repo.toLowerCase()
+                ? { ...r, enrollment: { source: "state", enabled: true } }
+                : r,
+            ) ?? cur,
+        );
+      },
+      onFailure: (failure) =>
+        setPending((current) =>
+          current?.repo === repo
+            ? { ...current, error: failure.message, errorKind: "enroll" }
+            : current,
+        ),
+      onFinally: () => setBusy(null),
+    });
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-[rgb(27_36_48/0.28)] px-4 pt-[8vh] max-[600px]:px-0 max-[600px]:pt-0">
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="Add a repository"
-        className="flex max-h-[80vh] w-full max-w-[720px] flex-col overflow-hidden rounded-[10px] border border-edge bg-card shadow-[0_16px_48px_rgb(27_36_48/0.24)] max-[600px]:h-full max-[600px]:max-h-none max-[600px]:rounded-none max-[600px]:border-0"
-      >
-        <div className="flex flex-wrap items-center gap-3 border-b border-edge px-5 py-3.5 max-[600px]:px-3.5">
-          <h2 className="text-[15px] font-[650]">Add a repository</h2>
-          <span className="text-[12.5px] text-faint max-[600px]:order-3 max-[600px]:basis-full">
+    <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && onClose()}>
+      <DialogContent className="top-[8vh] flex max-h-[84vh] max-w-[720px] flex-col overflow-hidden p-0">
+        <div className="flex items-center gap-3 border-b border-edge px-5 py-3.5">
+          <DialogTitle>Add a repository</DialogTitle>
+          <DialogDescription className="pr-8 text-[12.5px] text-faint">
             everything in CRQ_SCOPE, most recently pushed first
-          </span>
-          <button
-            type="button"
-            onClick={onClose}
-            className="ml-auto rounded-lg border border-edge px-3 py-1 text-[13px] font-semibold text-mut"
-          >
-            Close
-          </button>
+          </DialogDescription>
         </div>
 
-        <div className="flex items-center gap-2.5 border-b border-edge px-5 py-2.5 max-[600px]:px-3.5">
+        <div className="flex items-center gap-2.5 border-b border-edge px-5 py-2.5">
           <input
+            aria-label="Filter repositories"
             autoFocus
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -175,19 +144,8 @@ export function AddRepo({
         </div>
 
         {error && (
-          <div className="border-b border-bad-edge bg-bad-bg px-5 py-2 text-[12.5px] text-bad">{error}</div>
-        )}
-        {warning && (
-          <div className="border-b border-warn-edge bg-warn-bg px-5 py-2 text-[12.5px] text-warn">
-            {warning}
-          </div>
-        )}
-        {truncated.length > 0 && (
-          <div className="border-b border-warn-edge bg-warn-bg px-5 py-2 text-[12.5px] text-warn">
-            This is not everything {truncated.join(", ")} {truncated.length === 1 ? "has" : "have"} —
-            the listing stops at the 1000 most recently pushed. A repository below that line is still
-            eligible: add it by name with{" "}
-            <span className="font-mono">crq repos add owner/name</span>.
+          <div className="border-b border-bad-edge bg-bad-bg px-5 py-2 text-[12.5px] text-bad">
+            {error}
           </div>
         )}
 
@@ -205,25 +163,32 @@ export function AddRepo({
                 return (
                   <li
                     key={r.repo}
-                    className="relative flex flex-wrap items-center gap-2.5 border-b border-[#EEF0F3] px-5 py-2 text-[13px] last:border-none max-[600px]:pr-24 max-[600px]:pl-3.5"
+                    className="flex flex-wrap items-center gap-2.5 border-b border-[#EEF0F3] px-5 py-2 text-[13px] last:border-none"
                   >
                     <RepoIcon repo={r.repo} />
-                    <span className="min-w-0 break-all font-[550]">{r.repo}</span>
+                    <span className="min-w-[160px] flex-1 break-all font-[550]">{r.repo}</span>
                     {r.private && <Pill tone="mut">private</Pill>}
                     {r.archived && <Pill tone="mut">archived</Pill>}
                     {r.fork && <Pill tone="mut">fork</Pill>}
-                    <span className="basis-full pl-[26px] text-[12px] text-faint">
+                    <span className="text-[12px] text-faint max-sm:order-last max-sm:basis-full max-sm:pl-[26px]">
                       {r.issues > 0 && `${r.issues} open issue/PR${r.issues === 1 ? "" : "s"}`}
                       {r.pushed_at && ` · pushed ${ago(r.pushed_at, now)}`}
                     </span>
-                    <span className="ml-auto max-[600px]:absolute max-[600px]:right-3.5">
+                    <span className="ml-auto shrink-0">
                       {blocked ? (
-                        <span className="text-[12px] text-faint" title="CRQ_EXCLUDE is a per-host kill switch">
+                        <span
+                          className="text-[12px] text-faint"
+                          title="CRQ_EXCLUDE is a per-host kill switch"
+                        >
                           excluded by env
                         </span>
                       ) : already ? (
                         <Pill tone="ok">
-                          {e?.source === "state" ? "added" : e?.source === "env" ? "via env" : "in scope"}
+                          {e?.source === "state"
+                            ? "added"
+                            : e?.source === "env"
+                              ? "via env"
+                              : "in scope"}
                         </Pill>
                       ) : (
                         <button
@@ -247,12 +212,14 @@ export function AddRepo({
           <Confirm
             title={`Review ${pending.repo}?`}
             confirmLabel={busy ? "Adding…" : "Add it"}
-            busy={busy === pending.repo || (!pending.impact && !pending.error)}
+            busy={busy === pending.repo}
             error={pending.error}
             body={
-              pending.error ? (
-                <>Could not work out what this would enqueue. Adding anyway is still safe — the daemon
-                will pick up whatever is open — but the cost is unknown from here.</>
+              pending.errorKind === "preview" ? (
+                <>
+                  Could not work out what this would enqueue. Adding anyway is still safe — the
+                  daemon will pick up whatever is open — but the cost is unknown from here.
+                </>
               ) : pending.impact ? (
                 <>
                   <p>{pending.impact.summary}.</p>
@@ -262,8 +229,9 @@ export function AddRepo({
                     </p>
                   ))}
                   <p className="mt-2 text-[12px] text-faint">
-                    Estimate; published prices last checked {pending.impact.prices_checked_at}. Reviews
-                    start on the daemon's next pass, one metered review at a time across the fleet.
+                    Estimate; published prices last checked {pending.impact.prices_checked_at}.
+                    Reviews start on the daemon's next pass, one metered review at a time across the
+                    fleet.
                   </p>
                 </>
               ) : (
@@ -275,13 +243,13 @@ export function AddRepo({
           />
         )}
 
-        <p className="border-t border-edge px-5 py-2.5 text-[12px] text-faint max-[600px]:px-3.5">
+        <p className="border-t border-edge px-5 py-2.5 text-[12px] text-faint">
           Adding records the decision in shared state, so every host agrees. Its pull requests are
           picked up on the daemon's next pass, with the fleet's default reviewers — change those on
           the repository's own page.
         </p>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -312,25 +280,18 @@ export function EnrollmentEditor({
 }) {
   const [confirming, setConfirming] = useState(false);
   const [why, setWhy] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const { run: runOperation, running: busy, error } = useOperation();
   const [warning, setWarning] = useState<string | null>(null);
 
-  const run = async (body: Parameters<typeof act>[1]) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await act("enroll", body);
-      onSnapshot?.(res.snapshot);
-      setWarning(res.warning ?? null);
-      setConfirming(false);
-      setWhy("");
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const run = (body: Parameters<typeof act>[1]) =>
+    runOperation(act("enroll", body), {
+      onSuccess: ({ snapshot, warning: nextWarning }) => {
+        onSnapshot?.(snapshot);
+        setWarning(nextWarning ?? null);
+        setConfirming(false);
+        setWhy("");
+      },
+    });
 
   const excluded = source === "excluded";
   return (
@@ -375,7 +336,7 @@ export function EnrollmentEditor({
               confirming ? (
                 <>
                   <input
-                    autoFocus
+                    aria-label="Reason for stopping automatic review"
                     value={why}
                     onChange={(e) => setWhy(e.target.value)}
                     placeholder="why — every screen that shows this will show it"

@@ -1,9 +1,14 @@
-import type { Snapshot } from "./api";
+import { Effect } from "effect";
+import type { DashboardError } from "./client";
+import { requestJson } from "./client";
+import type { ActionResult } from "./data/contracts";
+import { ActionResponseSchema } from "./data/contracts";
+
+export type { ActionResult } from "./data/contracts";
 
 export type ActionName =
   | "hold"
   | "unhold"
-  | "prioritize"
   | "cancel"
   | "autofix"
   | "enroll"
@@ -48,34 +53,14 @@ export type ActionBody = {
   value?: string;
   /** A fix-session change; an empty repo means the fleet default. */
   solver?: {
-    models?: string[];
     model?: string;
     effort?: string;
     prompt?: string;
     max_attempts?: number;
-    severities?: string[];
-    ask_mode?: string;
     forks?: boolean;
     skip_authors?: string[];
-    /**
-     * Hand one setting back to the layer beneath. Empty models and effort mean
-     * "agent default", `false` is a real fork policy, and an empty author list
-     * means "skip nobody", so those values cannot also mean inheritance.
-     */
-    unset_models?: boolean;
-    unset_effort?: boolean;
-    unset_severities?: boolean;
-    unset_ask_mode?: boolean;
-    unset_forks?: boolean;
-    unset_skip_authors?: boolean;
     clear?: boolean;
   };
-};
-
-/** A save can succeed and still be ignored by a host on an older binary. */
-export type ActionResult = { snapshot: Snapshot; warning?: string };
-export type FleetPreviewResult = {
-  impact: { summary: string; changes: string[]; reopened: number };
 };
 
 /**
@@ -87,109 +72,17 @@ export type FleetPreviewResult = {
  * server is unauthenticated on the tailnet, and a browser cannot set a custom
  * header cross-origin without a preflight the server never approves.
  */
-export function act(action: "fleet", body: ActionBody & { preview: true }): Promise<FleetPreviewResult>;
-export function act(action: ActionName, body: ActionBody): Promise<ActionResult>;
-export async function act(
+export function act(
   action: ActionName,
   body: ActionBody,
-): Promise<ActionResult | FleetPreviewResult> {
-  const res = await fetch(`/api/action/${action}`, {
+): Effect.Effect<ActionResult, DashboardError> {
+  return requestJson(ActionResponseSchema, `/api/action/${action}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-CRQ-Dashboard": "1" },
     body: JSON.stringify(body),
-  });
-  const text = await res.text();
-  if (!res.ok) {
-    let message = `HTTP ${res.status}`;
-    try {
-      message = (JSON.parse(text) as { error?: string }).error ?? message;
-    } catch {
-      /* a non-JSON body is still worth showing verbatim */
-    }
-    throw new Error(message);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error("server returned an invalid JSON response");
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("server returned an invalid JSON response");
-  }
-  if (body.preview && "impact" in parsed) {
-    if (!isFleetPreviewResult(parsed)) {
-      throw new Error("server returned an invalid JSON response");
-    }
-    return parsed;
-  }
-  return "snapshot" in parsed ? (parsed as ActionResult) : { snapshot: parsed as Snapshot };
-}
-
-/** Re-probe this server's service PATH and return the rebuilt setup snapshot. */
-export async function refreshSetup(): Promise<Snapshot> {
-  const res = await fetch("/api/setup/refresh", {
-    method: "POST",
-    headers: { "X-CRQ-Dashboard": "1" },
-  });
-  const text = await res.text();
-  if (!res.ok) {
-    let message = `HTTP ${res.status}`;
-    try {
-      message = (JSON.parse(text) as { error?: string }).error ?? message;
-    } catch {
-      /* keep the status when the server returned a non-JSON error */
-    }
-    throw new Error(message);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error("server returned an invalid setup snapshot");
-  }
-  if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    !("snapshot" in parsed) ||
-    !isSnapshot(parsed.snapshot)
-  ) {
-    throw new Error("server returned an invalid setup snapshot");
-  }
-  return parsed.snapshot;
-}
-
-function isSnapshot(value: unknown): value is Snapshot {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  return (
-    "overview" in value &&
-    typeof value.overview === "object" &&
-    value.overview !== null &&
-    "repos" in value &&
-    Array.isArray(value.repos) &&
-    "bots" in value &&
-    Array.isArray(value.bots) &&
-    "setup" in value &&
-    typeof value.setup === "object" &&
-    value.setup !== null &&
-    "settings" in value &&
-    typeof value.settings === "object" &&
-    value.settings !== null &&
-    "events" in value &&
-    Array.isArray(value.events)
-  );
-}
-
-function isFleetPreviewResult(value: object): value is FleetPreviewResult {
-  if (!("impact" in value) || value.impact === null || typeof value.impact !== "object") return false;
-  const impact = value.impact;
-  return (
-    "summary" in impact &&
-    typeof impact.summary === "string" &&
-    "changes" in impact &&
-    Array.isArray(impact.changes) &&
-    impact.changes.every((change) => typeof change === "string") &&
-    "reopened" in impact &&
-    typeof impact.reopened === "number"
+  }).pipe(
+    // Older servers returned a bare snapshot. Keep that compatibility at this
+    // one boundary instead of teaching every action caller about two envelopes.
+    Effect.map((parsed) => ("snapshot" in parsed ? parsed : { snapshot: parsed })),
   );
 }

@@ -2636,7 +2636,9 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 	}
 	var answered []string
 	for _, cb := range cfg.CoBots {
-		if engine.CoReviewedHead(obs, cb.Login) {
+		// Setup status is not head-scoped: activity on an earlier head still
+		// proves that the reviewer is installed and working.
+		if engine.CoReviewerActive(obs, cb.Login) {
 			answered = append(answered, cb.Login)
 		}
 	}

@@ -13,6 +13,52 @@ const (
 	macroLogin  = dialect.MacroscopeLogin
 )
 
+func TestCoReviewerActiveIgnoresHeadScope(t *testing.T) {
+	cases := []struct {
+		name string
+		obs  Observation
+		want bool
+	}{
+		{
+			name: "review on an earlier head",
+			obs:  Observation{Head: "new", Reviews: []ReviewSeen{{Bot: bugbotLogin, Commit: "old"}}},
+			want: true,
+		},
+		{
+			name: "classified comment",
+			obs:  Observation{Head: "new", Events: []dialect.BotEvent{{Bot: bugbotLogin}}},
+			want: true,
+		},
+		{
+			name: "comment attributed to reviewer",
+			obs:  Observation{Head: "new", Events: []dialect.BotEvent{{Bot: macroLogin, For: bugbotLogin}}},
+			want: true,
+		},
+		{
+			name: "explicit attribution takes precedence over author",
+			obs:  Observation{Head: "new", Events: []dialect.BotEvent{{Bot: bugbotLogin, For: macroLogin}}},
+		},
+		{
+			name: "check activity",
+			obs:  Observation{Head: "new", Checks: []CheckSeen{{Bot: bugbotLogin}}},
+			want: true,
+		},
+		{
+			name: "different reviewer",
+			obs:  Observation{Head: "new", Reviews: []ReviewSeen{{Bot: macroLogin, Commit: "old"}}},
+		},
+		{name: "no activity", obs: Observation{Head: "new"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := CoReviewerActive(tc.obs, bugbotLogin); got != tc.want {
+				t.Fatalf("CoReviewerActive = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestDecideCoPostTriggerMatrix is the trigger-mode decision matrix:
 // never/selfheal/always crossed with the bot's observed activity, plus the
 // mode-independent guards (already commanded, live command, head evidence,

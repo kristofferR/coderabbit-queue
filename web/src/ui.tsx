@@ -1,4 +1,6 @@
-import { useState, type ReactNode } from "react";
+import { Link } from "@tanstack/react-router";
+import { ExternalLink } from "lucide-react";
+import { type ReactNode, useState } from "react";
 import type { Bot } from "./api";
 
 /** Status pill: always a dot *and* a word, never colour alone. */
@@ -38,9 +40,9 @@ export function Card({
   children: ReactNode;
 }) {
   return (
-    <section className="mb-3.5 min-w-0 overflow-hidden rounded-[10px] border border-edge bg-card shadow-card">
-      <header className="flex flex-wrap items-baseline gap-2.5 px-[18px] pt-3 max-[600px]:px-3.5">
-        <h2 className="text-[14.5px] font-[650]">{title}</h2>
+    <section className="data-card mb-3.5 overflow-x-auto rounded-[10px] border border-edge bg-card shadow-card">
+      <header className="sticky left-0 flex min-w-fit flex-wrap items-baseline gap-2.5 border-b border-edge/70 px-[18px] py-2.5">
+        <h2 className="text-[14px] font-[650] tracking-[-0.01em]">{title}</h2>
         {count !== undefined && <span className="text-[12.5px] text-faint">{count}</span>}
         {end && <span className="ml-auto text-[12.5px] text-faint">{end}</span>}
       </header>
@@ -86,7 +88,15 @@ export function RepoIcon({ repo, size = 16 }: { repo: string; size?: number }) {
 }
 
 /** A reviewer's GitHub avatar, with the same server-side fetch and fallback. */
-export function BotIcon({ login, name, size = 20 }: { login: string; name: string; size?: number }) {
+export function BotIcon({
+  login,
+  name,
+  size = 20,
+}: {
+  login: string;
+  name: string;
+  size?: number;
+}) {
   const [failed, setFailed] = useState(false);
   const style = { width: size, height: size, borderRadius: size > 24 ? 10 : 5 };
   if (failed) {
@@ -117,13 +127,25 @@ export function BotIcon({ login, name, size = 20 }: { login: string; name: strin
  * name goes to crq's own view because that is where the round lives; the arrow
  * is for when you actually want the pull request.
  */
-export function PRLink({ repo, pr, className = "" }: { repo: string; pr: number; className?: string }) {
-  const name = repo.split("/").pop() ?? repo;
+export function PRLink({
+  repo,
+  pr,
+  className = "",
+}: {
+  repo: string;
+  pr: number;
+  className?: string;
+}) {
+  const [owner = "", name = repo] = repo.split("/");
   return (
     <span className="inline-flex items-baseline gap-1">
-      <a href={`#/pr/${repo}/${pr}`} className={`text-acc hover:underline ${className}`}>
+      <Link
+        to="/pr/$owner/$name/$pr"
+        params={{ owner, name, pr }}
+        className={`text-acc hover:underline ${className}`}
+      >
         {name}#{pr}
-      </a>
+      </Link>
       <a
         href={`https://github.com/${repo}/pull/${pr}`}
         target="_blank"
@@ -131,7 +153,8 @@ export function PRLink({ repo, pr, className = "" }: { repo: string; pr: number;
         title="Open the pull request on GitHub"
         className="text-faint hover:text-acc"
       >
-        ↗
+        <ExternalLink aria-hidden className="inline size-3" />
+        <span className="sr-only">Open on GitHub</span>
       </a>
     </span>
   );
@@ -200,7 +223,6 @@ export function BotMarks({ bots }: { bots: Bot[] }) {
   );
 }
 
-
 export function Th({ children, className = "" }: { children?: ReactNode; className?: string }) {
   return (
     <th
@@ -211,26 +233,9 @@ export function Th({ children, className = "" }: { children?: ReactNode; classNa
   );
 }
 
-export function Td({
-  children,
-  className = "",
-  label,
-  primary,
-  actions,
-}: {
-  children?: ReactNode;
-  className?: string;
-  label?: string;
-  primary?: boolean;
-  actions?: boolean;
-}) {
+export function Td({ children, className = "" }: { children?: ReactNode; className?: string }) {
   return (
-    <td
-      data-label={label}
-      data-primary={primary || undefined}
-      data-actions={actions || undefined}
-      className={`border-b border-[#EEF0F3] px-[18px] py-2.5 align-top ${className}`}
-    >
+    <td className={`border-b border-[#EEF0F3] px-[18px] py-2.5 align-top ${className}`}>
       {children}
     </td>
   );

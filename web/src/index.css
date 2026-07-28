@@ -1,12 +1,13 @@
 @import "tailwindcss";
+@import "tw-animate-css";
 
 /* The Operations Desk palette the mockups settled on. */
 @theme {
-  --color-bg: #f2f3f6;
+  --color-bg: #f1f3f5;
   --color-card: #ffffff;
   --color-edge: #e3e6eb;
   --color-edge2: #c9cfd8;
-  --color-ink: #1b2430;
+  --color-ink: #17212d;
   --color-mut: #5b6472;
   --color-faint: #8b93a0;
   --color-ok: #1f7a4d;
@@ -24,182 +25,92 @@
   --color-acc-edge: #c9d8ef;
   --font-sans: "IBM Plex Sans", system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, monospace;
-  --shadow-card: 0 1px 2px rgb(27 36 48 / 0.05), 0 4px 14px rgb(27 36 48 / 0.04);
+  --shadow-card: 0 1px 2px rgb(23 33 45 / 0.05), 0 7px 22px rgb(23 33 45 / 0.035);
+}
+
+html {
+  color-scheme: light;
+  background: var(--color-bg);
 }
 
 body {
-  @apply bg-bg text-ink font-sans text-sm;
-  min-width: 0;
-  overflow-x: hidden;
+  @apply bg-bg text-ink font-sans text-sm antialiased;
+  min-width: 320px;
+  min-height: 100vh;
+  background-image:
+    linear-gradient(rgb(23 33 45 / 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(23 33 45 / 0.025) 1px, transparent 1px);
+  background-size: 32px 32px;
 }
 
-button,
+::selection {
+  background: #b9f4d2;
+  color: #10251a;
+}
+
 a,
+button,
 input,
 select,
-textarea,
-summary {
-  -webkit-tap-highlight-color: transparent;
+textarea {
+  transition:
+    color 120ms ease,
+    background-color 120ms ease,
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    opacity 120ms ease;
+}
+
+:where(a, button, input, select, textarea):focus-visible {
+  outline: 2px solid var(--color-acc);
+  outline-offset: 2px;
+}
+
+button:not(:disabled) {
+  cursor: pointer;
+}
+
+.data-card table {
+  min-width: max(100%, 680px);
+}
+
+.data-card tbody tr:last-child td {
+  border-bottom: 0;
 }
 
 /* Columns that go first when the window is narrow. Cost and reason never do. */
 @media (max-width: 1150px) {
-  .c-host { display: none; }
+  .c-host {
+    display: none;
+  }
 }
 @media (max-width: 940px) {
-  .c-att { display: none; }
+  .c-att {
+    display: none;
+  }
 }
 
-/*
- * Phone tables become compact records instead of desktop tables squeezed into
- * a horizontal scroller. data-label keeps every value understandable after the
- * header row disappears, while primary and action cells get the space their
- * content actually needs.
- */
-@media (max-width: 700px) {
-  .responsive-table,
-  .responsive-table tbody,
-  .responsive-table tr,
-  .responsive-table td {
-    display: block;
-    width: 100%;
+@media (max-width: 640px) {
+  .data-card table {
+    min-width: 560px;
   }
 
-  .responsive-table {
-    margin-top: 0.35rem;
+  .data-card :is(th, td).c-actions {
+    position: sticky;
+    right: 0;
+    z-index: 1;
+    background: color-mix(in srgb, var(--color-card) 94%, transparent);
+    box-shadow: -8px 0 14px rgb(23 33 45 / 0.05);
   }
+}
 
-  .responsive-table thead {
-    display: none;
-  }
-
-  .responsive-table tr {
-    display: flex;
-    flex-direction: column;
-    border-bottom: 1px solid #eef0f3;
-    padding: 0.7rem 0.875rem;
-  }
-
-  .responsive-table tr:last-child {
-    border-bottom: 0;
-  }
-
-  .responsive-table td {
-    display: grid;
-    grid-template-columns: 5.25rem minmax(0, 1fr);
-    gap: 0.65rem;
-    border: 0;
-    padding: 0.2rem 0;
-    min-width: 0;
-  }
-
-  .responsive-table td::before {
-    content: attr(data-label);
-    color: #8b93a0;
-    font-size: 0.66rem;
-    font-weight: 600;
-    letter-spacing: 0.055em;
-    line-height: 1.25rem;
-    text-transform: uppercase;
-  }
-
-  .responsive-table td[data-primary] {
-    order: -1;
-    display: block;
-    padding: 0 0 0.45rem;
-  }
-
-  .responsive-table td[data-primary]::before,
-  .responsive-table td[data-actions]::before,
-  .responsive-table td[data-label=""]::before {
-    display: none;
-  }
-
-  .responsive-table td[data-actions] {
-    display: block;
-    padding-top: 0.55rem;
-  }
-
-  .responsive-table .c-host,
-  .responsive-table .c-att {
-    display: none;
-  }
-
-  .mobile-actions {
-    justify-content: flex-start;
-    gap: 0.4rem;
-    opacity: 1;
-  }
-
-  .mobile-actions button {
-    min-height: 2rem;
-    border: 1px solid #e3e6eb;
-    border-radius: 0.5rem;
-    padding: 0.25rem 0.65rem;
-    text-decoration: none;
-  }
-
-  input,
-  select,
-  textarea {
-    max-width: 100%;
-  }
-
-  .config-table,
-  .config-table tbody,
-  .config-table tr,
-  .config-table td,
-  .env-table,
-  .env-table tbody,
-  .env-table tr,
-  .env-table td {
-    display: block;
-    width: 100%;
-  }
-
-  .config-table tr,
-  .env-table tr {
-    border-bottom: 1px solid #eef0f3;
-    padding: 0.75rem 0;
-  }
-
-  .config-table td,
-  .env-table td {
-    border: 0;
-    padding: 0;
-  }
-
-  .config-table td:first-child {
-    margin-bottom: 0.55rem;
-  }
-
-  .config-table td[colspan] {
-    margin: 0;
-    padding-top: 0.25rem;
-  }
-
-  .env-table .env-name,
-  .env-table .env-value,
-  .env-table .env-actions {
-    width: 100%;
-    padding-right: 0.875rem;
-    padding-left: 0.875rem;
-    text-align: left;
-  }
-
-  .env-table .env-name {
-    padding-bottom: 0.4rem;
-  }
-
-  .env-table .env-actions {
-    padding-top: 0.55rem;
-  }
-
-  .env-table .env-value {
-    overflow-wrap: anywhere;
-  }
-
-  .env-table .env-actions > div {
-    justify-content: flex-start;
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

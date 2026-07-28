@@ -1,9 +1,12 @@
-import { useEffect, useState } from "react";
-import type { BotCard, FleetSettings, Snapshot } from "./api";
-import { act, type ActionBody } from "./actions";
-import { BotIcon, Card, Pill, Toggle } from "./ui";
+import { Link } from "@tanstack/react-router";
+import { type ReactNode, useEffect, useState } from "react";
+import { act } from "./actions";
+import type { BotCard, FleetImpact, FleetSettings, Snapshot } from "./api";
+import { fleetImpact } from "./api";
 import { Confirm } from "./Confirm";
-import { sameSet } from "./sets";
+import { BotIcon, Card, Pill, Toggle } from "./ui";
+import { sameMembers } from "./ui/utils";
+import { useOperation } from "./useOperation";
 
 /**
  * The fleet defaults, editable.
@@ -32,109 +35,87 @@ export function FleetEditor({
   const [weekly, setWeekly] = useState(String(fleet.weekly_limit));
   const [autofix, setAutofix] = useState(fleet.autofix_default);
 
-  const [impact, setImpact] = useState<{ summary: string; changes: string[]; reopened: number } | null>(null);
-  const [clearing, setClearing] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [impact, setImpact] = useState<FleetImpact | null>(null);
+  const { run: runOperation, running: busy, error } = useOperation();
 
-  // The controls below are keyed by the registry NAME, not the GitHub login:
-  // `codex` is `chatgpt-codex-connector[bot]` and `bugbot` is `cursor[bot]`.
-  // Building the state from logins made every such reviewer render as off, and
-  // clicking the apparent off switch appended a second spelling instead of
-  // removing the first — so they could not be turned off from here at all.
-  const nameOf = (login: string) =>
-    bots.find((b) => short(b.login) === short(login))?.name ?? short(login);
-  const fleetRuns = fleet.reviewers.filter((r) => r.budget !== "account").map((r) => nameOf(r.login));
-  const fleetRequired = fleet.reviewers.filter((r) => r.required).map((r) => nameOf(r.login));
+  const fleetRuns = fleet.reviewers
+    .filter((r) => r.budget !== "account")
+    .map((r) => short(r.login));
+  const fleetRequired = fleet.reviewers.filter((r) => r.required).map((r) => short(r.login));
+  const fleetRunsKey = [...fleetRuns].sort().join("\0");
+  const fleetRequiredKey = [...fleetRequired].sort().join("\0");
 
   useEffect(() => {
-    setRuns(fleetRuns);
-    setRequired(fleetRequired);
+    setRuns(fleetRunsKey === "" ? [] : fleetRunsKey.split("\0"));
+    setRequired(fleetRequiredKey === "" ? [] : fleetRequiredKey.split("\0"));
     setMinInterval(fleet.min_interval);
     setWeekly(String(fleet.weekly_limit));
     setAutofix(fleet.autofix_default);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fleet.updated_at, fleet.recorded, fleet.min_interval, fleet.weekly_limit, fleet.autofix_default]);
+  }, [
+    fleetRunsKey,
+    fleetRequiredKey,
+    fleet.min_interval,
+    fleet.weekly_limit,
+    fleet.autofix_default,
+  ]);
 
   const dirty =
-    !sameSet(runs, fleetRuns) ||
-    !sameSet(required, fleetRequired) ||
+    !sameMembers(runs, fleetRuns) ||
+    !sameMembers(required, fleetRequired) ||
     minInterval !== fleet.min_interval ||
     weekly !== String(fleet.weekly_limit) ||
     autofix !== fleet.autofix_default;
 
-  // Only what THIS form actually edited. The wire model makes every field
-  // optional for exactly this reason: posting all five means someone who came
-  // here to change the pacing also re-posts the reviewer lists as they looked
-  // when the page loaded, silently undoing whatever another operator saved in
-  // between. An omitted field is "leave it alone"; an empty list is still sent,
-  // because "explicitly none" is a change like any other.
-  const change = (): NonNullable<ActionBody["fleet"]> => {
-    const c: NonNullable<ActionBody["fleet"]> = {};
-    if (!sameSet(runs, fleetRuns)) c.cobots = runs;
-    if (!sameSet(required, fleetRequired)) c.required = required;
-    if (minInterval !== fleet.min_interval) c.min_interval = minInterval;
-    if (weekly !== String(fleet.weekly_limit)) c.weekly_limit = Number(weekly);
-    if (autofix !== fleet.autofix_default) c.autofix_default = autofix;
-    return c;
-  };
+  const change = () => ({
+    cobots: runs,
+    required,
+    min_interval: minInterval,
+    weekly_limit: Number(weekly),
+    autofix_default: autofix,
+  });
 
   // Ask first. The answer is the confirmation's whole body — there is no
   // generic "are you sure", because the useful question is always "what does
   // this actually do to the 7 repositories following the fleet".
-  const preview = async (clear = false) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await act("fleet", { fleet: clear ? { clear: true } : change(), preview: true });
-      setClearing(clear);
-      setImpact(res.impact);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const preview = () => runOperation(fleetImpact(change()), { onSuccess: setImpact });
 
-  const save = async (clear = false) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await act("fleet", { fleet: clear ? { clear: true } : change() });
-      onSnapshot?.(res.snapshot);
-      setImpact(null);
-      setClearing(false);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const save = (clear = false) =>
+    runOperation(act("fleet", { fleet: clear ? { clear: true } : change() }), {
+      onSuccess: ({ snapshot }) => {
+        onSnapshot?.(snapshot);
+        setImpact(null);
+      },
+    });
 
   const source = (key: string) => fleet.sources?.[key] ?? "env";
 
   return (
     <Card
       title="Fleet defaults"
-      end={fleet.recorded ? `recorded${fleet.by ? ` by ${fleet.by}` : ""}` : "not recorded — this host's env"}
+      end={
+        fleet.recorded
+          ? `recorded${fleet.by ? ` by ${fleet.by}` : ""}`
+          : "not recorded — this host's env"
+      }
     >
       <div className="px-[18px] pb-4 pt-1">
         <p className="text-[12.5px] text-faint">
-          Three layers, least specific first: this host's env, then this record, then a repository's own
-          override. A setting still reading <b>env</b> below is this host's file alone — changing it here
-          records it for every host.
+          Three layers, least specific first: this host's env, then this record, then a repository's
+          own override. A setting still reading <b>env</b> below is this host's file alone —
+          changing it here records it for every host.
         </p>
 
         {(fleet.overriding?.length ?? 0) > 0 && (
           <p className="mt-2 text-[12.5px] text-faint">
-            {fleet.overriding!.length} repositor{fleet.overriding!.length === 1 ? "y has" : "ies have"} their
-            own reviewers and are not reached by the default below:{" "}
-            {fleet.overriding!.map((r, i) => (
+            {fleet.overriding?.length} repositor
+            {fleet.overriding?.length === 1 ? "y has" : "ies have"} their own reviewers and are not
+            reached by the default below:{" "}
+            {fleet.overriding?.map((r, i) => (
               <span key={r}>
                 {i > 0 && ", "}
-                <a href="#/repos" className="text-acc hover:underline">
+                <Link to="/repos" className="text-acc hover:underline">
                   {r.split("/").pop()}
-                </a>
+                </Link>
               </span>
             ))}
             .
@@ -143,64 +124,76 @@ export function FleetEditor({
 
         {fleet.lagging_hosts && fleet.lagging_hosts.length > 0 && (
           <div className="mt-2.5 rounded-lg border border-warn-edge bg-warn-bg px-3 py-2 text-[12.5px] text-warn">
-            These hosts run a binary that predates fleet defaults and will keep deciding from their own env:{" "}
-            {fleet.lagging_hosts.join(", ")}
+            These hosts run a binary that predates fleet defaults and will keep deciding from their
+            own env: {fleet.lagging_hosts.join(", ")}
           </div>
         )}
 
-        <table className="config-table mt-2.5 w-full border-collapse">
+        <table className="mt-2.5 w-full border-collapse">
           <tbody>
             <Row label="Reviewers" source={source("reviewers")}>
               <div className="flex flex-wrap items-center gap-3">
-                {bots.map((b) => (
-                  <div
-                    key={b.login}
-                    className="flex items-center gap-2.5 rounded-lg border border-edge px-2.5 py-1.5"
-                  >
-                    <BotIcon login={b.login} name={b.name} size={18} />
-                    <span className="text-[12.5px] font-[550]">{b.name}</span>
-                    <span className="ml-1 flex items-center gap-1.5">
-                      <Toggle
-                        on={b.primary || runs.includes(b.name)}
-                        label={`Runs ${b.name}`}
-                        locked={b.primary}
-                        title={
-                          b.primary
-                            ? "the primary runs everywhere by default — turn it off for one project on that project's page"
-                            : "runs on every repository that has not overridden its reviewers"
-                        }
-                        onClick={() =>
-                          setRuns((cur) => {
-                            const on = cur.includes(b.name);
-                            if (on) setRequired((r) => r.filter((n) => n !== b.name));
-                            return on ? cur.filter((n) => n !== b.name) : [...cur, b.name];
-                          })
-                        }
-                      />
-                      <span className="text-[12px] text-faint">runs</span>
-                    </span>
-                    <span className="flex items-center gap-1.5">
-                      <Toggle
-                        on={required.includes(b.name)}
-                        label={`Requires ${b.name}`}
-                        title="convergence waits for it"
-                        onClick={() =>
-                          setRequired((cur) => {
-                            const on = cur.includes(b.name);
-                            if (!on && !b.primary) setRuns((r) => (r.includes(b.name) ? r : [...r, b.name]));
-                            return on ? cur.filter((n) => n !== b.name) : [...cur, b.name];
-                          })
-                        }
-                      />
-                      <span className="text-[12px] text-faint">required</span>
-                    </span>
-                  </div>
-                ))}
+                {bots.map((b) => {
+                  const reviewer = short(b.login);
+                  return (
+                    <div
+                      key={b.login}
+                      className="flex items-center gap-2.5 rounded-lg border border-edge px-2.5 py-1.5"
+                    >
+                      <BotIcon login={b.login} name={b.name} size={18} />
+                      <span className="text-[12.5px] font-[550]">{b.name}</span>
+                      <span className="ml-1 flex items-center gap-1.5">
+                        <Toggle
+                          on={b.primary || runs.includes(reviewer)}
+                          label={`${b.name} runs by default`}
+                          locked={b.primary}
+                          title={
+                            b.primary
+                              ? "the primary runs everywhere by default — turn it off for one project on that project's page"
+                              : "runs on every repository that has not overridden its reviewers"
+                          }
+                          onClick={() =>
+                            setRuns((current) => {
+                              const on = current.includes(reviewer);
+                              if (on)
+                                setRequired((items) => items.filter((name) => name !== reviewer));
+                              return on
+                                ? current.filter((name) => name !== reviewer)
+                                : [...current, reviewer];
+                            })
+                          }
+                        />
+                        <span className="text-[12px] text-faint">runs</span>
+                      </span>
+                      <span className="flex items-center gap-1.5">
+                        <Toggle
+                          on={required.includes(reviewer)}
+                          label={`${b.name} required by default`}
+                          title="convergence waits for it"
+                          onClick={() =>
+                            setRequired((current) => {
+                              const on = current.includes(reviewer);
+                              if (!on && !b.primary)
+                                setRuns((items) =>
+                                  items.includes(reviewer) ? items : [...items, reviewer],
+                                );
+                              return on
+                                ? current.filter((name) => name !== reviewer)
+                                : [...current, reviewer];
+                            })
+                          }
+                        />
+                        <span className="text-[12px] text-faint">required</span>
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             </Row>
 
             <Row label="Pacing" source={source("min_interval")}>
               <input
+                aria-label="Minimum interval between review fires"
                 value={minInterval}
                 onChange={(e) => setMinInterval(e.target.value)}
                 className="w-28 rounded-lg border border-edge bg-[#FBFBFC] px-2 py-1 font-mono text-[12.5px]"
@@ -212,13 +205,15 @@ export function FleetEditor({
 
             <Row label="Weekly limit" source={source("weekly_limit")}>
               <input
+                aria-label="Weekly CodeRabbit review limit"
                 value={weekly}
                 inputMode="numeric"
                 onChange={(e) => setWeekly(e.target.value.replace(/[^0-9]/g, ""))}
                 className="w-20 rounded-lg border border-edge bg-[#FBFBFC] px-2 py-1 font-mono text-[12.5px]"
               />
               <span className="ml-2 text-[12px] text-faint">
-                the vendor's fair-use threshold — 60 on Pro, 90 on Pro+; 0 counts without forecasting
+                the vendor's fair-use threshold — 60 on Pro, 90 on Pro+; 0 counts without
+                forecasting
               </span>
             </Row>
 
@@ -273,7 +268,7 @@ export function FleetEditor({
             <button
               type="button"
               disabled={busy}
-              onClick={() => void preview(true)}
+              onClick={() => void save(true)}
               className="ml-auto text-[12.5px] text-acc hover:underline disabled:opacity-45"
             >
               Drop the record — follow this host's env again
@@ -284,15 +279,9 @@ export function FleetEditor({
 
       {impact && (
         <Confirm
-          title={clearing ? "Drop fleet defaults?" : "Save fleet defaults?"}
+          title="Save fleet defaults?"
           danger={impact.reopened > 0}
-          confirmLabel={
-            impact.reopened > 0
-              ? `${clearing ? "Drop" : "Save"} and reopen ${impact.reopened}`
-              : clearing
-                ? "Drop the record"
-                : "Save"
-          }
+          confirmLabel={impact.reopened > 0 ? `Save and reopen ${impact.reopened}` : "Save"}
           busy={busy}
           error={error}
           body={
@@ -305,31 +294,21 @@ export function FleetEditor({
               {impact.summary}
               {impact.reopened > 0 && (
                 <p className="mt-2 text-warn">
-                  Reopened rounds are reviewed again, and the metered ones spend the shared allowance.
+                  Reopened rounds are reviewed again, and the metered ones spend the shared
+                  allowance.
                 </p>
               )}
             </>
           }
-          onConfirm={() => void save(clearing)}
-          onCancel={() => {
-            setImpact(null);
-            setClearing(false);
-          }}
+          onConfirm={() => void save()}
+          onCancel={() => setImpact(null)}
         />
       )}
     </Card>
   );
 }
 
-function Row({
-  label,
-  source,
-  children,
-}: {
-  label: string;
-  source: string;
-  children: React.ReactNode;
-}) {
+function Row({ label, source, children }: { label: string; source: string; children: ReactNode }) {
   return (
     <tr className="border-b border-[#EEF0F3] last:border-none">
       <td className="w-40 py-2.5 pr-3 align-top">

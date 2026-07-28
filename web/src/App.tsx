@@ -1,171 +1,149 @@
-import { useEffect, useState } from "react";
-import type { Live, Snapshot } from "./api";
-import { subscribe } from "./api";
-import { OverviewPage } from "./Overview";
-import { BotsPage, ReposPage, SettingsPage } from "./Pages";
-import { PRDetailPage } from "./PRDetail";
-import { FirstRun, isFirstRun } from "./FirstRun";
-import { SetupPage } from "./Setup";
+import { Link, Outlet, useRouterState } from "@tanstack/react-router";
+import { Activity, Bot, Boxes, Gauge, Settings, Wrench } from "lucide-react";
+import { DashboardProvider } from "./DashboardProvider";
+import { useDashboard } from "./DashboardState";
 import { ago, useNow } from "./time";
 
 const NAV = [
-  { label: "Overview", href: "#/" },
-  { label: "Repos", href: "#/repos" },
-  { label: "Bots", href: "#/bots" },
-  { label: "Setup", href: "#/setup" },
-  { label: "Settings", href: "#/settings" },
-];
+  { label: "Overview", to: "/", icon: Gauge },
+  { label: "Repos", to: "/repos", icon: Boxes },
+  { label: "Bots", to: "/bots", icon: Bot },
+  { label: "Setup", to: "/setup", icon: Wrench },
+  { label: "Settings", to: "/settings", icon: Settings },
+] as const;
 
 export function App() {
-  const [snap, setSnap] = useState<Snapshot | null>(null);
-  const [live, setLive] = useState<Live>("connecting");
-  const [route, setRoute] = useState(() => location.hash || "#/");
-  // Why there is no state at all, when the server can say. A read that fails
-  // before the first one ever succeeds leaves the stream healthy and empty, so
-  // this is the only thing that distinguishes "still loading" from "broken".
-  const [unavailable, setUnavailable] = useState<string | null>(null);
-  const now = useNow(5000);
+  return (
+    <DashboardProvider>
+      <DashboardShell />
+    </DashboardProvider>
+  );
+}
 
-  useEffect(() => subscribe(setSnap, setLive, setUnavailable), []);
-  useEffect(() => {
-    const onHash = () => setRoute(location.hash || "#/");
-    addEventListener("hashchange", onHash);
-    return () => removeEventListener("hashchange", onHash);
-  }, []);
-  const pr = prRoute(route);
+function DashboardShell() {
+  const { snapshot, live } = useDashboard();
+  const now = useNow(5000);
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const activePath = pathname.startsWith("/pr/") ? "/" : pathname;
 
   return (
-    <div className="min-w-0">
-      <header className="sticky top-0 z-20 flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-edge bg-card/95 px-6 py-2.5 backdrop-blur max-[600px]:px-3 max-[600px]:py-2">
-        <span className="flex min-w-0 items-baseline gap-2.5">
-          <span className="rounded-md bg-ink px-1.5 py-0.5 font-mono text-[13px] font-medium text-white">crq</span>
-          <span className="truncate text-base font-[650] tracking-tight">Code Review Queue</span>
-        </span>
-        <nav
-          aria-label="Primary"
-          className="ml-2 flex gap-1 max-[600px]:order-3 max-[600px]:-mx-3 max-[600px]:w-[calc(100%+1.5rem)] max-[600px]:overflow-x-auto max-[600px]:px-3 max-[600px]:pb-0.5"
-        >
-          {NAV.map((n) => (
-            <a
-              key={n.href}
-              href={n.href}
-              aria-current={route === n.href || (n.href === "#/repos" && route.startsWith("#/repos/")) ? "page" : undefined}
-              className={`shrink-0 rounded-lg px-3 py-1.5 text-[13.5px] font-medium max-[600px]:py-2 ${
-                route === n.href || (n.href === "#/repos" && route.startsWith("#/repos/"))
-                  ? "bg-bg text-ink"
-                  : "text-mut hover:bg-bg"
-              }`}
-            >
-              {n.label}
-            </a>
-          ))}
-        </nav>
-        <span className="ml-auto flex shrink-0 items-center gap-2 text-xs text-mut">
+    <div className="min-h-screen">
+      <header className="sticky top-0 z-40 border-b border-white/10 bg-ink text-white shadow-[0_8px_24px_rgb(14_24_36/0.16)]">
+        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-x-5 gap-y-2 px-4 py-2.5 sm:px-6">
+          <Link
+            to="/"
+            className="group flex items-center gap-3"
+            aria-label="Code Review Queue overview"
+          >
+            <span className="rounded-[5px] bg-[#B9F4D2] px-1.5 py-0.5 font-mono text-[13px] font-semibold tracking-[-0.03em] text-[#10251A] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.3)]">
+              crq
+            </span>
+            <span className="flex flex-col leading-none">
+              <span className="text-[14.5px] font-[650] tracking-[-0.015em]">
+                Code Review Queue
+              </span>
+              <span className="mt-1 font-mono text-[9px] tracking-[0.14em] text-white/45 uppercase">
+                fleet control
+              </span>
+            </span>
+          </Link>
+
+          <nav
+            aria-label="Dashboard"
+            className="order-3 flex w-full gap-1 overflow-x-auto sm:order-none sm:w-auto"
+          >
+            {NAV.map(({ icon: Icon, label, to }) => {
+              const active = activePath === to;
+              return (
+                <Link
+                  key={to}
+                  to={to}
+                  aria-current={active ? "page" : undefined}
+                  className={`inline-flex shrink-0 items-center gap-1.5 rounded-md px-3 py-1.5 text-[13px] font-medium ${
+                    active
+                      ? "bg-white text-ink shadow-sm"
+                      : "text-white/65 hover:bg-white/8 hover:text-white"
+                  }`}
+                >
+                  <Icon aria-hidden className="size-3.5" strokeWidth={1.8} />
+                  {label}
+                </Link>
+              );
+            })}
+          </nav>
+
           <span
-            className={`size-2 rounded-full ${
-              snap?.stale
-                ? "bg-bad"
-                : live === "live"
-                  ? "bg-ok"
-                  : live === "connecting"
-                    ? "bg-faint"
-                    : "bg-warn-fg"
+            title={
+              live === "live"
+                ? `Live, revision ${snapshot?.overview.rev ?? "unknown"}`
+                : live === "connecting"
+                  ? "Connecting to the dashboard server"
+                  : `Reconnecting; last state ${ago(snapshot?.overview.wrote_at, now)}`
+            }
+            className={`ml-auto flex items-center gap-2 rounded-full border px-2.5 py-1 font-mono text-[10.5px] ${
+              live === "live"
+                ? "border-[#68D99B]/30 bg-[#68D99B]/10 text-[#A7EDC5]"
+                : "border-white/15 bg-white/5 text-white/60"
             }`}
-          />
-          <span className="max-[600px]:hidden">
-            {live === "live" && snap?.stale ? (
-              <>stale · rev {snap.overview.rev}</>
-            ) : live === "live" ? (
-              <>live · rev {snap?.overview.rev ?? "—"}</>
+          >
+            <span
+              className={`size-2 rounded-full ${
+                live === "live"
+                  ? "bg-[#68D99B] shadow-[0_0_0_3px_rgb(104_217_155/0.12)]"
+                  : live === "connecting"
+                    ? "animate-pulse bg-white/35"
+                    : "bg-[#F3B66A]"
+              }`}
+            />
+            {live === "live" ? (
+              <>LIVE · REV {snapshot?.overview.rev ?? "—"}</>
             ) : live === "connecting" ? (
-              "connecting…"
+              "CONNECTING…"
             ) : (
-              <>reconnecting… showing state from {ago(snap?.overview.wrote_at, now)}</>
+              <>STALE · {ago(snapshot?.overview.wrote_at, now)}</>
             )}
           </span>
-          <span className="hidden max-[600px]:inline">
-            {snap?.stale ? "stale" : live === "live" ? "live" : live === "connecting" ? "connecting" : "offline"}
-          </span>
-        </span>
+        </div>
       </header>
 
-      {snap?.stale && (
-        <div className="border-b border-bad-edge bg-bad-bg px-6 py-2 text-[12.5px] text-bad max-[600px]:px-3">
-          <span className="font-mono">crq serve</span> has not been able to read the state ref since{" "}
-          {ago(snap.stale.since, now)} — this page is the last state it loaded, and an action taken
-          here may already be acting on a queue that has moved. ({snap.stale.error})
+      {live === "reconnecting" && snapshot && (
+        <div
+          role="status"
+          className="border-b border-warn-edge bg-warn-bg px-4 py-2 text-[12.5px] text-warn sm:px-6"
+        >
+          Lost the connection to <span className="font-mono">crq serve</span>. This is the last
+          state it sent — countdowns keep ticking against it, so treat times as approximate until it
+          reconnects.
         </div>
       )}
 
-      {live === "reconnecting" && snap && (
-        <div className="border-b border-warn-edge bg-warn-bg px-6 py-2 text-[12.5px] text-warn max-[600px]:px-3">
-          Lost the connection to <span className="font-mono">crq serve</span>. This is the last state it
-          sent — countdowns keep ticking against it, so treat times as approximate until it reconnects.
-        </div>
-      )}
-
-      {!snap ? (
-        <Loading live={live} error={unavailable} />
-      ) : pr ? (
-        <PRDetailPage key={`${pr.repo}#${pr.pr}`} repo={pr.repo} pr={pr.pr} rev={snap.overview.rev} />
-      ) : route === "#/repos" || route === "#/repos/add" ? (
-        <ReposPage
-          repos={snap.repos}
-          bots={snap.bots}
-          held={snap.overview.held}
-          startAdding={route === "#/repos/add"}
-          onSnapshot={setSnap}
-        />
-      ) : route === "#/bots" ? (
-        <BotsPage bots={snap.bots} />
-      ) : route === "#/setup" ? (
-        <SetupPage setup={snap.setup} bots={snap.bots} repos={snap.repos} onSnapshot={setSnap} />
-      ) : route === "#/settings" ? (
-        <SettingsPage settings={snap.settings} bots={snap.bots} onSnapshot={setSnap} />
-      ) : isFirstRun(snap) ? (
-        <FirstRun snap={snap} />
-      ) : (
-        <OverviewPage
-          ov={snap.overview}
-          events={snap.events}
-          repos={snap.repos}
-          bots={snap.bots}
-          onSnapshot={setSnap}
-        />
-      )}
+      <Outlet />
     </div>
   );
 }
 
-/** #/pr/owner/name/123 — the only route that carries parameters. */
-function prRoute(route: string): { repo: string; pr: number } | null {
-  const parts = route.replace(/^#\//, "").split("/");
-  if (parts.length !== 4 || parts[0] !== "pr") return null;
-  const pr = Number(parts[3]);
-  if (!Number.isFinite(pr) || pr <= 0) return null;
-  return { repo: `${parts[1]}/${parts[2]}`, pr };
+export function RouteError({ error }: { error: Error }) {
+  return (
+    <main className="mx-auto max-w-[900px] px-6 py-16">
+      <div className="rounded-xl border border-bad-edge bg-bad-bg p-5 text-bad">
+        <Activity aria-hidden className="mb-3 size-5" />
+        <h1 className="font-[650]">This dashboard view could not render</h1>
+        <p className="mt-1 text-sm">{error.message}</p>
+      </div>
+    </main>
+  );
 }
 
-function Loading({ live, error }: { live: Live; error: string | null }) {
-  if (live !== "reconnecting" && error) {
-    // The server is there and answering; it is the state ref it cannot read.
-    // Saying "Reading the state ref…" here waits on something that is not going
-    // to happen, and hides the one sentence that says what to fix.
-    return (
-      <main className="mx-auto max-w-[1400px] px-6 py-16 max-[600px]:px-3 max-[600px]:py-10">
-        <div className="rounded-[10px] border border-bad-edge bg-bad-bg px-5 py-4 text-[13px] text-bad">
-          <span className="font-mono">crq serve</span> cannot read the state ref, so there is nothing
-          to show yet. It keeps retrying.
-          <div className="mt-2 font-mono text-[12.5px]">{error}</div>
-        </div>
-      </main>
-    );
-  }
+export function NotFound() {
   return (
-    <main className="mx-auto max-w-[1400px] px-6 py-16 text-mut max-[600px]:px-3 max-[600px]:py-10">
-      {live === "reconnecting"
-        ? "Cannot reach the server. Retrying…"
-        : "Reading the state ref…"}
+    <main className="mx-auto max-w-[900px] px-6 py-16 text-mut">
+      <p className="font-mono text-xs tracking-wider text-faint uppercase">
+        404 · unknown control surface
+      </p>
+      <h1 className="mt-2 text-xl font-[650] text-ink">That dashboard route does not exist.</h1>
+      <Link to="/" className="mt-4 inline-block font-semibold text-acc hover:underline">
+        Return to Overview
+      </Link>
     </main>
   );
 }

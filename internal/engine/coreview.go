@@ -440,3 +440,24 @@ func DecideCoPost(r state.Round, obs Observation, cp CoReviewerPolicy, commandPr
 		return false
 	}
 }
+
+// CoReviewerActive reports whether this reviewer has produced any observable
+// activity on the pull request, regardless of which head it belongs to.
+func CoReviewerActive(obs Observation, login string) bool {
+	for _, review := range obs.Reviews {
+		if sameBot(review.Bot, login) {
+			return true
+		}
+	}
+	for _, ev := range obs.Events {
+		if eventConcerns(ev, login) {
+			return true
+		}
+	}
+	for _, check := range obs.Checks {
+		if sameBot(check.Bot, login) {
+			return true
+		}
+	}
+	return false
+}

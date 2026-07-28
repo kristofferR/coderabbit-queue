@@ -1,4 +1,5 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { type ReactNode, useState } from "react";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./ui/dialog";
 
 /**
  * A single-step confirmation. Consequences come from live state and are stated
@@ -30,83 +31,29 @@ export function Confirm({
   onCancel: () => void;
 }) {
   const [reason, setReason] = useState("");
-  const reasonHintId = useId();
   const blocked = needsReason && reason.trim() === "";
-  const panel = useRef<HTMLDivElement>(null);
-  const reasonInput = useRef<HTMLInputElement>(null);
-  const returnTo = useRef<Element | null>(null);
-  const onCancelRef = useRef(onCancel);
-  onCancelRef.current = onCancel;
-
-  // A confirmation that spends quota or archives a round must not leave the
-  // row behind it reachable by keyboard: Tab stays inside, Escape cancels, and
-  // focus goes back where it came from so the list does not jump to the top.
-  useEffect(() => {
-    returnTo.current = document.activeElement;
-    const focusable = () =>
-      Array.from(
-        panel.current?.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), input:not([disabled]), [href], select, textarea, [tabindex]:not([tabindex="-1"])',
-        ) ?? [],
-      );
-    (needsReason ? reasonInput.current : null)?.focus();
-    if (!panel.current?.contains(document.activeElement)) focusable()[0]?.focus();
-
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onCancelRef.current();
-        return;
-      }
-      if (e.key !== "Tab") return;
-      const items = focusable();
-      if (items.length === 0) return;
-      const first = items[0];
-      const last = items[items.length - 1];
-      const active = document.activeElement;
-      if (e.shiftKey && (active === first || !panel.current?.contains(active))) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && active === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      (returnTo.current as HTMLElement | null)?.focus?.();
-    };
-  }, []);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-[rgb(27_36_48/0.28)] px-4 pt-[12vh] max-[600px]:items-end max-[600px]:px-0 max-[600px]:pt-0">
-      <div
-        ref={panel}
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        className="max-h-[88vh] w-full max-w-[520px] overflow-y-auto rounded-[10px] border border-edge bg-card p-5 shadow-[0_16px_48px_rgb(27_36_48/0.24)] max-[600px]:rounded-b-none max-[600px]:border-x-0 max-[600px]:border-b-0 max-[600px]:p-4"
+    <Dialog open onOpenChange={(open) => !open && onCancel()}>
+      <DialogContent
+        className="p-5"
+        onPointerDownOutside={(event) => busy && event.preventDefault()}
+        onEscapeKeyDown={(event) => busy && event.preventDefault()}
       >
-        <h2 className={`text-[15px] font-[650] ${danger ? "text-bad" : "text-ink"}`}>{title}</h2>
-        <div className="mt-2 text-[13px] text-mut">{body}</div>
+        <DialogTitle className={danger ? "text-bad" : "text-ink"}>{title}</DialogTitle>
+        <DialogDescription asChild>
+          <div className="mt-2 text-[13px] text-mut">{body}</div>
+        </DialogDescription>
 
         {needsReason && (
           <label className="mt-3 block">
             <span className="text-[12.5px] font-medium">{reasonLabel ?? "Reason"}</span>
             <input
-              ref={reasonInput}
-              required
-              aria-invalid={blocked}
-              aria-describedby={reasonHintId}
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               placeholder="why — this is what every screen will show"
               className="mt-1 w-full rounded-lg border border-edge bg-[#FBFBFC] px-2.5 py-1.5 text-[13px]"
             />
-            <span id={reasonHintId} className="mt-1 block text-[11.5px] text-faint">
-              A reason is required and will be shown with this decision.
-            </span>
           </label>
         )}
 
@@ -116,7 +63,7 @@ export function Confirm({
           </div>
         )}
 
-        <div className="mt-4 flex items-center gap-2.5 max-[420px]:grid max-[420px]:grid-cols-2">
+        <div className="mt-4 flex items-center gap-2.5">
           <button
             type="button"
             disabled={busy || blocked}
@@ -136,7 +83,7 @@ export function Confirm({
             Cancel
           </button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
