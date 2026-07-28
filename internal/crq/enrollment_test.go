@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
@@ -279,6 +281,59 @@ func TestDisablingEnrollmentDropsTheQueuedRounds(t *testing.T) {
 	st, _, _ = store.Load(ctx)
 	if round := st.Round("o/stopped", 7); round == nil || round.Phase != PhaseQueued {
 		t.Errorf("round = %+v, want a fresh queued round once the repository is back on", round)
+	}
+}
+
+func TestDisabledEnrollmentDoesNotRetryAnInflightRound(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/stopped": true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	now := time.Now().UTC()
+
+	if _, err := store.Update(ctx, func(st *State) error {
+		round, err := st.NewRound("o/stopped", 7, "abcdef123", now.Add(-time.Hour))
+		if err != nil {
+			return err
+		}
+		round.Phase = PhaseFired
+		round.FiredAt = &now
+		st.PutRound(*round)
+		st.FireSlot = &FireSlot{Key: QueueKey(round.Repo, round.PR), Token: round.Token, Since: now}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SetEnrollment(ctx, "o/stopped", false, "stop reviewing this"); err != nil {
+		t.Fatal(err)
+	}
+
+	blocked := now.Add(time.Hour)
+	if _, err := store.Update(ctx, func(st *State) error {
+		round := st.Round("o/stopped", 7)
+		return svc.applyTransition(st, round, engine.Transition{
+			Outcome: engine.OutRetry,
+			Reason:  dialect.ReasonRateLimited,
+			RetryAt: blocked,
+			Blocked: &engine.AccountBlock{Until: blocked},
+		}, now, cfg)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("o/stopped", 7); round != nil {
+		t.Fatalf("disabled round = %+v, want it archived instead of retryable", round)
+	}
+	if len(st.Archive) != 1 || st.Archive[0].Repo != "o/stopped" ||
+		st.Archive[0].PR != 7 || st.Archive[0].Phase != PhaseAbandoned {
+		t.Fatalf("archive = %+v, want the disabled in-flight round retained as abandoned", st.Archive)
+	}
+	if st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.Equal(blocked) {
+		t.Fatalf("account block = %v, want the purchased response's global quota evidence retained", st.Account.BlockedUntil)
 	}
 }
 

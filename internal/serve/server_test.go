@@ -32,6 +32,17 @@ func (o *countingObserver) Observe(context.Context, string, int) (Observation, e
 	return Observation{}, nil
 }
 
+type sequenceObserver struct {
+	observations []Observation
+	calls        int
+}
+
+func (o *sequenceObserver) Observe(context.Context, string, int) (Observation, error) {
+	got := o.observations[o.calls]
+	o.calls++
+	return got, nil
+}
+
 // Before the first load returns there is no snapshot — and no error either. The
 // zero Snapshot encodes its collections as null, and the client takes a 200 for
 // live state and iterates them straight away, so the dashboard crashed during
@@ -42,6 +53,7 @@ func TestHandlersRefuseUntilTheFirstLoadSucceeds(t *testing.T) {
 	for _, path := range []string{"/api/snapshot", "/api/overview"} {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil)
+		req.Host = "localhost"
 		switch path {
 		case "/api/snapshot":
 			srv.handleSnapshot(rec, req)
@@ -81,6 +93,7 @@ func TestHandlersRefuseUntilTheFirstLoadSucceeds(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	req = httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/events", nil)
+	req.Host = "localhost"
 	srv.handleEvents(rec, req)
 	if body := rec.Body.String(); body != "" {
 		t.Errorf("the stream sent %q before any load; a browser would take it for live state", body)
@@ -89,7 +102,9 @@ func TestHandlersRefuseUntilTheFirstLoadSucceeds(t *testing.T) {
 	// Once a load lands, everything answers.
 	srv.refresh(context.Background())
 	rec = httptest.NewRecorder()
-	srv.handleSnapshot(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/snapshot", nil))
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/snapshot", nil)
+	req.Host = "localhost"
+	srv.handleSnapshot(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("snapshot = %d after a successful load, want 200", rec.Code)
 	}
@@ -151,6 +166,7 @@ func TestTheStreamSaysWhyThereIsNoStateYet(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/events", nil)
+	req.Host = "localhost"
 	srv.handleEvents(rec, req)
 
 	body := rec.Body.String()
@@ -210,6 +226,24 @@ func TestActionsAreRefusedOnANameThatOnlyResolvesHere(t *testing.T) {
 	req.Header.Set("Origin", "http://evil.test")
 	if err := srv.addressedHere(req); err == nil {
 		t.Error("a cross-origin POST to localhost was accepted")
+	}
+}
+
+func TestSnapshotStreamsAreRefusedOnANameThatOnlyResolvesHere(t *testing.T) {
+	srv := New(&stubLoader{}, Options{Addr: "127.0.0.1:7777", Host: "atlas"})
+	srv.loaded = true
+
+	for _, handle := range []func(http.ResponseWriter, *http.Request){
+		srv.handleSnapshot,
+		srv.handleEvents,
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+		req.Host = "attacker.example:7777"
+		handle(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("snapshot read on rebound host = %d, want 403", rec.Code)
+		}
 	}
 }
 
@@ -437,5 +471,37 @@ func TestObservationKeyIncludesEffectiveReviewers(t *testing.T) {
 	if observationKey("o/r", 1, "abcdef123", base) ==
 		observationKey("o/r", 1, "abcdef123", changed) {
 		t.Fatal("reviewer change reused the old observation cache key")
+	}
+}
+
+func TestPRObservationCacheRejectsAnObservationForAnotherHead(t *testing.T) {
+	now := time.Now().UTC()
+	observer := &sequenceObserver{observations: []Observation{
+		{Head: "bbbbbbbbb", CheckedAt: now},
+		{Head: "ccccccccc", CheckedAt: now.Add(time.Second)},
+	}}
+	srv := New(&stubLoader{}, Options{Addr: "127.0.0.1:7777", Observer: observer})
+	srv.loaded = true
+	srv.lastState = state.New()
+	srv.lastState.Rounds = map[string]state.Round{
+		"o/r#1": {Repo: "o/r", PR: 1, Head: "aaaaaaaaa", Phase: state.PhaseCompleted},
+	}
+
+	request := func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost:7777/api/pr/o/r/1", nil)
+		req.Header.Set("X-CRQ-Dashboard", "1")
+		req.SetPathValue("owner", "o")
+		req.SetPathValue("name", "r")
+		req.SetPathValue("pr", "1")
+		srv.handlePR(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PR read = %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+	request()
+	request()
+	if observer.calls != 2 {
+		t.Fatalf("observer calls = %d, want a refetch because the cached observation belonged to another head", observer.calls)
 	}
 }

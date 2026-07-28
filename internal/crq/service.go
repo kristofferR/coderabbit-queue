@@ -520,7 +520,7 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	// A session's push supersedes the round that asked, and the reply used to be
 	// archived unread — so crq believed the account was free and posted the
 	// command again minutes after being told to wait.
-	if updated, err := s.recordObservedBlock(ctx, obs, st, now); err != nil {
+	if updated, err := s.recordObservedBlock(ctx, cfg, obs, st, now); err != nil {
 		return PumpResult{}, err
 	} else if updated != nil {
 		st = *updated
@@ -653,8 +653,8 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 // allowance is not a property of a round, so any current notice from the primary
 // counts here. AcceptAccountBlock still decides whether it replaces the standing
 // window, and never shortens it.
-func (s *Service) recordObservedBlock(ctx context.Context, obs observation, st State, now time.Time) (*State, error) {
-	blk := engine.ObservedAccountBlock(obs.eng, s.cfg.policy(), st.Account, now)
+func (s *Service) recordObservedBlock(ctx context.Context, cfg Config, obs observation, st State, now time.Time) (*State, error) {
+	blk := engine.ObservedAccountBlock(obs.eng, cfg.policy(), st.Account, now)
 	if blk == nil || s.cfg.DryRun || !observedAccountBlockChanges(st.Account, blk) {
 		return nil, nil
 	}
@@ -931,6 +931,16 @@ func (s *Service) applyTransition(st *State, r *Round, tr engine.Transition, now
 	case engine.OutRetry:
 		if tr.Blocked != nil {
 			applyAccountBlock(st, tr.Blocked, now)
+		}
+		// Turning a repository off leaves an already-purchased response in
+		// flight, because that answer is still worth collecting. If the answer
+		// instead says to retry, the next command would be a new purchase after
+		// the switch was thrown. Keep any account-wide block learned above, but
+		// end this repository's round before it becomes fire-eligible again.
+		if rec, ok := st.Enrollment(r.Repo); ok && !rec.Enabled {
+			st.EndRound(r.Repo, r.PR, "repository turned off before retry")
+			releaseSlot(st, key)
+			return nil
 		}
 		if err := r.AwaitRetry(tr.RetryAt, tr.Reason, now); err != nil {
 			return err
@@ -1995,12 +2005,17 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 		if st.Account.CalibAskedAt == nil && st.Account.CheckedAt != nil && now.Sub(*st.Account.CheckedAt) < s.cfg.CalibrationTTL {
 			return ErrNoChange
 		}
-		// A fresh reading replaces the whole quota; carry the account-quota comment
-		// identity over so the engine can still recognise an edited comment it
-		// already accounted for.
+		// Calibration owns only its reading fields. Edit those on the existing
+		// record so the rolling fire history and members written by a newer
+		// binary survive this older writer's routine probe.
 		rlID, rlUpdated := st.Account.RLCommentID, st.Account.RLCommentUpdated
 		prevBlock, prevRemaining := st.Account.BlockedUntil, st.Account.Remaining
-		st.Account = quota
+		st.Account.Scope = quota.Scope
+		st.Account.BlockedUntil = quota.BlockedUntil
+		st.Account.Remaining = quota.Remaining
+		st.Account.Source = quota.Source
+		st.Account.CheckedAt = quota.CheckedAt
+		st.Account.CalibAskedAt = quota.CalibAskedAt
 		if st.Account.RLCommentID == 0 {
 			st.Account.RLCommentID = rlID
 			st.Account.RLCommentUpdated = rlUpdated

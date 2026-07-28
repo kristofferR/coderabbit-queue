@@ -126,7 +126,7 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 	// stated. It is the one write on this path, it happens once per notice rather
 	// than once per poll, and all it can do is stop a review.
 	if persist {
-		if updated, err := s.recordObservedBlock(ctx, obs, st, now); err != nil {
+		if updated, err := s.recordObservedBlock(ctx, cfg, obs, st, now); err != nil {
 			return FeedbackReport{}, fmt.Errorf("recording the account block observed on %s: %w", QueueKey(repo, pr), err)
 		} else if updated != nil {
 			st = *updated
@@ -230,7 +230,7 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 		// before that round belongs to the previous head. Unresolved threads are
 		// still surfaced below across commits, while thread-less body findings
 		// must be re-reported by the current round instead of trapping the loop.
-		if anchorOK && s.cfg.isConfiguredBot(login) &&
+		if anchorOK && cfg.isConfiguredBot(login) &&
 			(head == "" || !strings.HasPrefix(review.CommitID, head)) &&
 			!notBefore(review.SubmittedAt, anchorCutoff) {
 			continue
@@ -404,7 +404,7 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 		if !dialect.InBots(extractBots, comment.User.Login) {
 			continue
 		}
-		if s.cr.IsReviewSkipped(comment.Body) && s.cfg.isConfiguredBot(comment.User.Login) &&
+		if s.cr.IsReviewSkipped(comment.Body) && cfg.isConfiguredBot(comment.User.Login) &&
 			skipAppliesToHead(comment.Body, head) &&
 			!skipPredatesHead(comment, headCutoffOf) {
 			// Checked BEFORE the rate-limit guard below: the skip notice embeds
@@ -448,7 +448,7 @@ func (s *Service) feedback(ctx context.Context, repo string, pr int, persist boo
 		if _, ok := coEventKinds[comment.ID]; ok {
 			continue
 		}
-		if s.cfg.isConfiguredBot(comment.User.Login) {
+		if cfg.isConfiguredBot(comment.User.Login) {
 			continue
 		}
 		if dialect.IsNonActionableText(comment.Body) {

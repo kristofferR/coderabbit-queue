@@ -37,6 +37,30 @@ func TestStoppedHostRoleExpiresWhileTheOtherKeepsReporting(t *testing.T) {
 	}
 }
 
+func TestFixAgentIgnoresAHostWhoseAutofixRoleExpired(t *testing.T) {
+	base := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	st := New()
+	st.SetHostReport(HostReport{Host: "stale", Roles: []string{"autofix"}, Agent: "claude"}, base)
+	st.SetHostReport(HostReport{Host: "live", Roles: []string{"autofix"}, Agent: "codex"}, base.Add(10*time.Minute))
+
+	// The stale host keeps reporting serve, so its record is freshest even
+	// after its autofix role has expired.
+	now := base.Add(HostReportTTL + time.Minute)
+	st.SetHostReport(HostReport{Host: "stale", Roles: []string{"serve"}}, now)
+	if got := st.FixAgent(now); got != "codex" {
+		t.Fatalf("fix agent = %q, want the host whose autofix service is still live", got)
+	}
+
+	// Freshness is also enforced without another report getting a chance to
+	// prune the stored role.
+	unpruned := New()
+	unpruned.SetHostReport(HostReport{Host: "stale", Roles: []string{"autofix"}, Agent: "claude"}, base)
+	unpruned.SetHostReport(HostReport{Host: "live", Roles: []string{"autofix"}, Agent: "codex"}, base.Add(10*time.Minute))
+	if got := unpruned.FixAgent(now); got != "codex" {
+		t.Fatalf("fix agent with unpruned stale role = %q, want the still-fresh host", got)
+	}
+}
+
 // A record an older binary wrote carries roles and no dates. They are exactly
 // as old as the record, which is the honest date to expire them from — anything
 // else either drops a live role or keeps a dead one.

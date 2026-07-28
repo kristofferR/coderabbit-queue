@@ -366,9 +366,9 @@ func (s *State) HostReportList() []HostReport {
 // question about the machines actually running. It is not a setting and must
 // never be treated as one: a host runs the agent it was installed with,
 // whatever this says.
-func (s *State) FixAgent() string {
+func (s *State) FixAgent(now time.Time) string {
 	for _, r := range s.HostReportList() {
-		if r.Agent != "" {
+		if r.Agent != "" && r.RolesFresh([]string{"autofix"}, now, HostReportTTL) {
 			return r.Agent
 		}
 	}

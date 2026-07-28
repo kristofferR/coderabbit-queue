@@ -156,7 +156,11 @@ func (s *Service) PreviewFleet(ctx context.Context, change FleetChange) (FleetIm
 	if err != nil {
 		return FleetImpact{}, err
 	}
-	return s.fleetImpact(st, next), nil
+	open, err := s.openPRsForReviewerChange(ctx, st, next)
+	if err != nil {
+		return FleetImpact{}, err
+	}
+	return s.fleetImpact(st, next, open), nil
 }
 
 // SetFleetSettings records the change and requeues whatever it invalidates.
@@ -169,20 +173,13 @@ func (s *Service) SetFleetSettings(ctx context.Context, change FleetChange) (Fle
 	if err != nil {
 		return FleetView{}, FleetImpact{}, err
 	}
-	impact := s.fleetImpact(st, next)
-
 	// Read before the write, for the same reason SetReviewers does: the requeue
 	// may only touch live pull requests and the CAS closure cannot ask GitHub.
-	open := map[string]map[int]bool{}
-	if impact.Reopened > 0 {
-		for _, repo := range s.reposFollowingFleet(st) {
-			prs, err := s.openPRs(ctx, repo)
-			if err != nil {
-				return FleetView{}, FleetImpact{}, err
-			}
-			open[repo] = prs
-		}
+	open, err := s.openPRsForReviewerChange(ctx, st, next)
+	if err != nil {
+		return FleetView{}, FleetImpact{}, err
 	}
+	impact := s.fleetImpact(st, next, open)
 
 	now := s.clock().UTC()
 	written, err := s.store.Update(ctx, func(st *State) error {
@@ -292,7 +289,7 @@ func (s *Service) applyFleetChange(st State, change FleetChange) (FleetDefaults,
 }
 
 // fleetImpact describes, in product terms, what moving from st to next would do.
-func (s *Service) fleetImpact(st State, next FleetDefaults) FleetImpact {
+func (s *Service) fleetImpact(st State, next FleetDefaults, open map[string]map[int]bool) FleetImpact {
 	after := st
 	after.Fleet = next
 	impact := FleetImpact{Changes: []string{}}
@@ -373,7 +370,7 @@ func (s *Service) fleetImpact(st State, next FleetDefaults) FleetImpact {
 			continue
 		}
 		for _, r := range st.Rounds {
-			if NormalizeRepo(r.Repo) == repo && r.Phase == PhaseCompleted {
+			if NormalizeRepo(r.Repo) == repo && r.Phase == PhaseCompleted && open[repo][r.PR] {
 				impact.Reopened++
 			}
 		}
@@ -392,6 +389,40 @@ func (s *Service) fleetImpact(st State, next FleetDefaults) FleetImpact {
 		impact.Summary += fmt.Sprintf(" (%d with their own answer to what changed are unaffected)", impact.Overridden)
 	}
 	return impact
+}
+
+// openPRsForReviewerChange reads the live set only for repositories where an
+// added reviewer invalidates completed dedup markers. Both the preview count and
+// the subsequent write use this same set, so the dialog describes work that
+// will actually be requeued rather than every historical completed round.
+func (s *Service) openPRsForReviewerChange(ctx context.Context, st State, next FleetDefaults) (map[string]map[int]bool, error) {
+	after := st
+	after.Fleet = next
+	open := map[string]map[int]bool{}
+	for _, repo := range s.reposFollowingFleet(st) {
+		wasCfg, isCfg := s.cfgFor(st, repo), s.cfgFor(after, repo)
+		wasCo := wasCfg.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
+		isCo := isCfg.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
+		if !addedReviewers(wasCfg, isCfg, wasCo, isCo) {
+			continue
+		}
+		hasCompleted := false
+		for _, r := range st.Rounds {
+			if NormalizeRepo(r.Repo) == repo && r.Phase == PhaseCompleted {
+				hasCompleted = true
+				break
+			}
+		}
+		if !hasCompleted {
+			continue
+		}
+		prs, err := s.openPRs(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		open[repo] = prs
+	}
+	return open, nil
 }
 
 // fullyOverridesReviewers reports whether repo answers BOTH reviewer questions

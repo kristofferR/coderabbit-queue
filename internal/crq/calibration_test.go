@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -73,6 +74,60 @@ func TestCalibrationNeverShortensAStandingBlock(t *testing.T) {
 	}
 	if got.Account.BlockedUntil == nil || got.Account.BlockedUntil.Before(longer.Add(-2*time.Minute)) {
 		t.Errorf("blocked until %v, want the probe's longer window near %s", got.Account.BlockedUntil, longer)
+	}
+}
+
+func TestCalibrationPreservesRollingFireHistory(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CalibrationPR = 77
+	cfg.GateRepo = "o/state"
+	cfg.CalibrationTTL = time.Minute
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	svc.now = func() time.Time { return now }
+
+	reply := ghapi.IssueComment{ID: 5, Body: "auto-generated reply by CodeRabbit\nYou have 3 reviews remaining.",
+		CreatedAt: now.Add(-10 * time.Second), UpdatedAt: now.Add(-10 * time.Second)}
+	reply.User.Login = cfg.Bot
+	gh.comments[fakeKey(cfg.GateRepo, 77)] = []ghapi.IssueComment{reply}
+	fired := now.Add(-time.Hour)
+	coverage := now.Add(-24 * time.Hour)
+	var carried AccountQuota
+	if err := json.Unmarshal([]byte(`{"future_quota_policy":{"mode":"audit"}}`), &carried); err != nil {
+		t.Fatal(err)
+	}
+	carried.Fires = []time.Time{fired}
+	carried.FiresFrom = &coverage
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Account = carried
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := svc.RefreshQuota(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Account.Fires) != 1 || !got.Account.Fires[0].Equal(fired) {
+		t.Fatalf("fires = %v, want calibration to preserve the rolling usage log", got.Account.Fires)
+	}
+	if got.Account.FiresFrom == nil || !got.Account.FiresFrom.Equal(coverage) {
+		t.Fatalf("fires_from = %v, want calibration to preserve coverage", got.Account.FiresFrom)
+	}
+	raw, err := json.Marshal(got.Account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields["future_quota_policy"]; !ok {
+		t.Fatalf("calibration dropped a newer binary's account member: %s", raw)
 	}
 }
 

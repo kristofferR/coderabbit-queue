@@ -60,6 +60,35 @@ type fakeGitHub struct {
 	now func() time.Time
 }
 
+func TestObservedBlockUsesTheStateResolvedPrimaryAndFallback(t *testing.T) {
+	ctx := context.Background()
+	startup := firingConfig()
+	startup.Bot = "startup-primary[bot]"
+	startup.RateLimitFallback = 5 * time.Minute
+	store := NewMemoryStore(startup)
+	svc := NewService(startup, newFakeGitHub(), store, nil)
+	now := time.Now().UTC()
+	effective := startup
+	effective.Bot = "fleet-primary[bot]"
+	effective.RateLimitFallback = 47 * time.Minute
+	obs := observation{eng: engine.Observation{Events: []dialect.BotEvent{{
+		Kind: dialect.EvRateLimited, Bot: effective.Bot,
+		CommentID: 91, UpdatedAt: now,
+	}}}}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := svc.recordObservedBlock(ctx, effective, obs, st, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := now.Add(effective.RateLimitFallback)
+	if updated == nil || updated.Account.BlockedUntil == nil || !updated.Account.BlockedUntil.Equal(want) {
+		t.Fatalf("blocked until = %v, want the fleet-resolved fallback %s", updated, want)
+	}
+}
+
 func (f *fakeGitHub) clock() time.Time {
 	if f.now != nil {
 		return f.now().UTC()

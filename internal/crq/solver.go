@@ -103,7 +103,7 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 	// at, and it guessed claude on a fleet fixing with codex.
 	view.Agent = s.cfg.fixAgent()
 	if view.Agent == "" {
-		view.Agent = st.FixAgent()
+		view.Agent = st.FixAgent(s.clock().UTC())
 	}
 	view.ModelChoices = modelChoicesFor(view.Agent, view.Models)
 	if has && own.UpdatedAt != nil {

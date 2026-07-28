@@ -454,6 +454,10 @@ func (s *Server) snapshot() (Snapshot, bool, error) {
 }
 
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
+	if err := s.addressedHere(r); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
 	snap, loaded, err := s.snapshot()
 	if !loaded {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": firstLoadError(err)})
@@ -497,6 +501,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // handleEvents streams whole snapshots. The state blob is small, so replacing
 // it wholesale is simpler than diffing and makes reconnection trivially correct.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	if err := s.addressedHere(r); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)

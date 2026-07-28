@@ -388,7 +388,8 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("refresh") == "1" {
 			s.observations.put(key, observeEntry{})
 		}
-		if e, ok := s.observations.get(key); ok && head != "" && (e.err != "" || !e.obs.CheckedAt.IsZero()) {
+		if e, ok := s.observations.get(key); ok && head != "" &&
+			(e.err != "" || (!e.obs.CheckedAt.IsZero() && e.obs.Head == head)) {
 			if e.err != "" {
 				view.ObserveError = e.err
 			} else {

@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -513,6 +514,39 @@ func TestFleetReachesRepositoriesThatOverrideOnlyOneHalf(t *testing.T) {
 	}
 	if impact.Overridden != 1 {
 		t.Errorf("overridden = %d, want only the repository that answers both questions itself", impact.Overridden)
+	}
+}
+
+func TestFleetImpactCountsOnlyOpenCompletedRounds(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = nil
+	cfg.RequiredBots = []string{cfg.Bot}
+	cfg.AllowRepos = map[string]bool{"o/repo": true}
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: "o/repo", Number: 1}}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		for _, pr := range []int{1, 2} {
+			round, err := st.NewRound("o/repo", pr, fmt.Sprintf("head-%d", pr), time.Now())
+			if err != nil {
+				return err
+			}
+			round.Phase = PhaseCompleted
+			st.PutRound(*round)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	impact, err := svc.PreviewFleet(ctx, FleetChange{CoBots: []string{"codex"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if impact.Reopened != 1 {
+		t.Fatalf("reopened = %d, want only the completed round whose PR is still open", impact.Reopened)
 	}
 }
 

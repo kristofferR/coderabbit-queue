@@ -2187,6 +2187,47 @@ func TestFeedbackSurfacesSkippedReviewDespiteRateLimitMarker(t *testing.T) {
 	}
 }
 
+func TestFeedbackUsesTheFleetEditedPrimary(t *testing.T) {
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":          "o/gate",
+		"CRQ_HOST":          "test",
+		"CRQ_COBOTS":        "",
+		"CRQ_REQUIRED_BOTS": "coderabbitai[bot]",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const primary = "replacement-reviewer[bot]"
+	body := corpusMessage(t, "coderabbit/review-skipped-too-many-files.md")
+	gh := newFakeGitHub()
+	sha := "56150a0423a243224b03f355c3a3ba6941011b5b"
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey("o/repo", 214)] = pull
+	skip := ghapi.IssueComment{ID: 5074197614, Body: body,
+		CreatedAt: time.Now().UTC().Add(-time.Hour), UpdatedAt: time.Now().UTC().Add(-time.Minute)}
+	skip.User.Login = primary
+	gh.comments[fakeKey("o/repo", 214)] = []ghapi.IssueComment{skip}
+
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.Fleet = fleetEnvSet(st.Fleet, "CRQ_BOT", primary, false)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := NewService(cfg, gh, store, nil).Feedback(context.Background(), "o/repo", 214)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, finding := range rep.Findings {
+		if finding.CommentID == skip.ID {
+			return
+		}
+	}
+	t.Fatalf("the skip notice from the state-resolved primary was dropped: %#v", rep.Findings)
+}
+
 // TestAccountBlockIgnoredWhenPrimaryWillNotReview pins the rule that stopped
 // agents reasoning about CodeRabbit on repos it never reviews. On a summary-only
 // round the account block is meaningless: it must not extend the wait deadline,
