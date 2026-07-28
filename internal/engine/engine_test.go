@@ -484,7 +484,7 @@ func TestDecideCodexPost(t *testing.T) {
 		want           bool
 	}{
 		{name: "required, no auto, first fire", round: state.Round{Head: head}, obs: base, policy: codexReq, want: true},
-		{name: "auto-active never posts", round: state.Round{Head: head}, obs: Observation{Head: head, Open: true, Co: codexSeen(CoSeen{AutoActive: true})}, policy: codexReq, want: false},
+		{name: "always mode overrides historical auto activity", round: state.Round{Head: head}, obs: Observation{Head: head, Open: true, Co: codexSeen(CoSeen{AutoActive: true})}, policy: codexReq, want: true},
 		{name: "already reviewed head", round: state.Round{Head: head}, obs: Observation{Head: head, Open: true, Reviews: []ReviewSeen{codexReviewHead}}, policy: codexReq, want: false},
 		{name: "command already present", round: state.Round{Head: head}, obs: base, policy: codexReq, commandPresent: true, want: false},
 		{name: "not required", round: state.Round{Head: head}, obs: base, policy: policy, want: false},
@@ -581,8 +581,8 @@ func TestDecideFireCodexDedupe(t *testing.T) {
 	// Same, but Codex auto-reviews: crq must not post; wait for its own review,
 	// bounded (FireCoReviewWait) rather than left queued with no deadline.
 	autoObs := Observation{Head: head, Open: true, Co: codexSeen(CoSeen{AutoActive: true}), Reviews: []ReviewSeen{crReviewed}}
-	if d := DecideFire(free, queued, autoObs, now, codexReq); d.Verdict != FireCoReviewWait {
-		t.Fatalf("auto-active codex must wait (bounded), not dedupe, got %+v", d)
+	if d := DecideFire(free, queued, autoObs, now, codexReq); d.Verdict != FireCoOnly || !codexPosted(d) {
+		t.Fatalf("always-mode codex must be commanded, not deduped, got %+v", d)
 	}
 	// A live `@codex review` command already on the PR: crq must not repost it;
 	// wait for its answer, bounded.
@@ -891,8 +891,8 @@ func TestDecideFireBlockedCodexDeferred(t *testing.T) {
 	}
 	// Auto-active Codex reviews unprompted → nothing to post; blocked FireNo.
 	autoObs := Observation{Head: head, Open: true, Co: codexSeen(CoSeen{AutoActive: true})}
-	if d := DecideFire(g, queued, autoObs, now, degrade); d.Verdict != FireNo {
-		t.Fatalf("auto-active codex must not be commanded, got %+v", d)
+	if d := DecideFire(g, queued, autoObs, now, degrade); d.Verdict != FireCoDeferred || !codexPosted(d) {
+		t.Fatalf("always-mode codex must be commanded while the primary is blocked, got %+v", d)
 	}
 	// Unblocked → the normal fire path is untouched.
 	if d := DecideFire(Global{SlotFree: true}, queued, open, now, degrade); d.Verdict != FirePost || !codexPosted(d) {

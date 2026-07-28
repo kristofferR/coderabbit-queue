@@ -162,10 +162,9 @@ func TestCodexReplayRequiredFiresOnceAndGatesCompletion(t *testing.T) {
 	}
 }
 
-// (ii) Codex configured-required but auto-review is active (a Codex review
-// exists that no `@codex review` command preceded): crq must never post the
-// Codex command; the round still gates on Codex's own review.
-func TestCodexReplayAutoActiveSuppressesCommand(t *testing.T) {
+// (ii) Codex configured-required in always mode: historical auto-review
+// activity must not override the explicit trigger policy for the new head.
+func TestCodexReplayAlwaysModeOverridesHistoricalAutoActivity(t *testing.T) {
 	base := time.Date(2026, 7, 17, 9, 0, 0, 0, time.UTC)
 	f := newCodexReplayFixture(t, base, func(cfg *Config) {
 		cfg.RequiredBots = []string{cfg.Bot, codexLogin}
@@ -174,15 +173,16 @@ func TestCodexReplayAutoActiveSuppressesCommand(t *testing.T) {
 	oldHead, head := "1111222233334444", "5555666677778888"
 	f.openPull(repo, pr, head)
 	f.setCommitDate(head, base.Add(-time.Hour))
-	// History: Codex reviewed the previous head unprompted → auto-review is on.
+	// History: Codex reviewed the previous head unprompted. That may predict
+	// another automatic review, but "always" still commands this head.
 	f.codexReview(repo, pr, 400, oldHead, base.Add(-2*time.Hour))
 
 	f.enqueue(repo, pr)
 	if res := f.pump(); res.Action != "fired" {
 		t.Fatalf("expected fire, got %+v", res)
 	}
-	if got := f.codexPosted(repo, pr); got != 0 {
-		t.Fatalf("auto-active codex must never be commanded, got %d posts", got)
+	if got := f.codexPosted(repo, pr); got != 1 {
+		t.Fatalf("always-mode codex must be commanded once, got %d posts", got)
 	}
 
 	// CodeRabbit finishes; the round still waits for Codex's auto review.
@@ -192,8 +192,8 @@ func TestCodexReplayAutoActiveSuppressesCommand(t *testing.T) {
 	if r := f.round(repo, pr); r == nil || r.Phase != PhaseReviewing {
 		t.Fatalf("round must wait for codex auto review, got %+v", r)
 	}
-	if got := f.codexPosted(repo, pr); got != 0 {
-		t.Fatalf("waiting must not trigger a codex post, got %d", got)
+	if got := f.codexPosted(repo, pr); got != 1 {
+		t.Fatalf("waiting must not duplicate the codex post, got %d", got)
 	}
 
 	// Codex auto-reviews the head (clean) — round completes.

@@ -18,7 +18,7 @@ type TriggerMode string
 const (
 	TriggerNever    TriggerMode = "never"    // crq never posts this bot's command
 	TriggerSelfHeal TriggerMode = "selfheal" // post only when an active bot missed the head past a grace period
-	TriggerAlways   TriggerMode = "always"   // post at fire time unless the bot auto-reviews
+	TriggerAlways   TriggerMode = "always"   // post at fire time unless current-head evidence suppresses it
 )
 
 // CoReviewerPolicy is the configured stance toward one co-reviewer: whether

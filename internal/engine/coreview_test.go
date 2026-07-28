@@ -45,7 +45,7 @@ func TestDecideCoPostTriggerMatrix(t *testing.T) {
 	}{
 		{name: "never posts nothing even when silent", cp: policy(TriggerNever), obs: obsWith(CoSeen{}), anchor: staleAnchor, want: false},
 		{name: "always posts for a silent bot", cp: policy(TriggerAlways), obs: obsWith(CoSeen{}), want: true},
-		{name: "always defers to auto-review", cp: policy(TriggerAlways), obs: obsWith(CoSeen{AutoActive: true}), want: false},
+		{name: "always overrides historical auto-review activity", cp: policy(TriggerAlways), obs: obsWith(CoSeen{AutoActive: true}), want: true},
 		{name: "always respects a live command", cp: policy(TriggerAlways), obs: obsWith(CoSeen{}), commandPresent: true, want: false},
 		{name: "always respects the recorded round command", cp: policy(TriggerAlways), round: commanded, obs: obsWith(CoSeen{}), want: false},
 		{
@@ -335,13 +335,13 @@ func TestSummaryOnlyPlanRunsCoReviewersAlone(t *testing.T) {
 		}
 	})
 
-	t.Run("waits bounded for an auto-reviewing codex", func(t *testing.T) {
+	t.Run("always mode commands an historically auto-reviewing codex", func(t *testing.T) {
 		d := DecideFire(free, queued, obs([]dialect.BotEvent{notice}, nil, CoSeen{AutoActive: true}), now, p)
-		if d.Verdict != FireCoReviewWait {
-			t.Fatalf("verdict = %v (%s), want FireCoReviewWait", d.Verdict, d.Reason)
+		if d.Verdict != FireCoOnly {
+			t.Fatalf("verdict = %v (%s), want FireCoOnly", d.Verdict, d.Reason)
 		}
-		if len(d.PostCo) != 0 {
-			t.Fatalf("PostCo = %v, want no post for an auto-reviewing bot", d.PostCo)
+		if len(d.PostCo) != 1 {
+			t.Fatalf("PostCo = %v, want one explicit always-mode post", d.PostCo)
 		}
 	})
 

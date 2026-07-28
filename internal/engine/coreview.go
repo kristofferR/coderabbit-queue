@@ -388,11 +388,10 @@ func CoOnlyEligible(r state.Round, obs Observation, login string, blockedUntil *
 // the bot has not reviewed the head, and no check run of its exists for the
 // head (including in-progress — a running check will deliver evidence).
 //
-// Modes: never — false. always — post unless the bot auto-reviews (today's
-// Codex behavior; required-ness lives in the config default that picks the
-// mode). selfheal — post only for a bot observed active that missed the head,
-// once the anchor (the round's fire) is older than the grace period; the
-// caller passes anchor and now so the fire path and the sweep share the rule.
+// Modes: never — false. always — post whenever the common current-head guards
+// above allow it. selfheal — post only for a bot observed active that missed
+// the head, once the anchor (the round's fire) is older than the grace period;
+// the caller passes anchor and now so the fire path and the sweep share the rule.
 func DecideCoPost(r state.Round, obs Observation, cp CoReviewerPolicy, commandPresent bool, anchor, now time.Time) bool {
 	if roundCoCommandID(r, cp.Login) != 0 {
 		return false
@@ -412,11 +411,13 @@ func DecideCoPost(r state.Round, obs Observation, cp CoReviewerPolicy, commandPr
 	switch cp.Trigger {
 	case TriggerAlways:
 		// "Always" is the operator's explicit instruction to ask this reviewer
-		// on every head. An unreadable checks endpoint is not evidence that a
-		// review exists, and suppressing the command here leaves a required
-		// reviewer pending until the round times out with no recovery path.
-		// A check we can actually see still suppresses the command above.
-		return !obs.co(cp.Login).AutoActive
+		// on every head. AutoActive can come from an older head and therefore
+		// cannot override that instruction; current-head review/check/command
+		// evidence already suppresses duplicates in the common guards above.
+		// Likewise, an unreadable checks endpoint is not evidence that a review
+		// exists. Suppressing either case leaves a required reviewer pending
+		// until the round times out with no recovery path.
+		return true
 	case TriggerSelfHeal:
 		// Self-heal is deliberately conservative: when checks are unreadable,
 		// the missing check is not evidence that an auto-review was missed.
