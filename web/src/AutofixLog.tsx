@@ -18,28 +18,31 @@ export function AutofixLog({ repo, pr }: { repo: string; pr: number }) {
     let stopped = false;
     setTail(null);
     setError(null);
-    let latest = 0;
+    const controller = new AbortController();
+    let timer: number | undefined;
     const refresh = async () => {
-      const id = ++latest;
       try {
         const response = await fetch(`/api/autofix-log/${repo}/${pr}`, {
           headers: { "X-CRQ-Dashboard": "1" },
+          signal: controller.signal,
         });
         const body = (await response.json()) as Tail & { error?: string };
         if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
-        if (!stopped && id === latest) {
+        if (!stopped) {
           setTail(body);
           setError(null);
         }
       } catch (cause) {
-        if (!stopped && id === latest) setError((cause as Error).message);
+        if (!stopped) setError((cause as Error).message);
+      } finally {
+        if (!stopped) timer = window.setTimeout(() => void refresh(), 1000);
       }
     };
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 1000);
     return () => {
       stopped = true;
-      window.clearInterval(timer);
+      controller.abort();
+      if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [open, repo, pr]);
 
