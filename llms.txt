@@ -305,8 +305,13 @@ crq solver REPO                                       # effective settings + whe
 crq solver set REPO --model opus --effort high --attempts 5
 crq solver set REPO --prompt "This project uses bun, never npm."
 crq solver set --fleet --effort medium                # the default every repository inherits
+crq solver set REPO --inherit forks,skip-authors      # those two back to the layer beneath
 crq solver clear REPO | crq solver clear --fleet
 ```
+
+`--inherit` exists for the two settings whose own values cannot say it: `off` is a real fork policy
+and an empty author list means "skip nobody". The others express it directly — an empty `--model` or
+`--effort`, `--attempts 0`.
 
 Three layers again — env, fleet, repository — with `.sources` naming which answered. The AGENT is
 not per repository: it is baked into the session script by `crq autofix install`, because switching

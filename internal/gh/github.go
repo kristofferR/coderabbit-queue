@@ -1101,8 +1101,17 @@ func (g *GitHub) viewerLogin(ctx context.Context) string {
 		Login string `json:"login"`
 	}
 	login := "-"
-	if err := g.request(ctx, http.MethodGet, "/user", nil, &me); err == nil && me.Login != "" {
+	err := g.request(ctx, http.MethodGet, "/user", nil, &me)
+	switch {
+	case err == nil && me.Login != "":
 		login = me.Login
+	case err != nil && !deniedIdentity(err):
+		// A timeout, a 5xx or an exhausted quota is not an answer about this
+		// token. Remembering "-" for one would keep every later repository
+		// picker on /users/{owner}/repos — which omits the caller's own private
+		// repositories — for the rest of the process, long after GitHub came
+		// back. Nothing is cached, so the next caller asks again.
+		return ""
 	}
 	g.viewerMu.Lock()
 	g.viewer = login
@@ -1111,6 +1120,22 @@ func (g *GitHub) viewerLogin(ctx context.Context) string {
 		return ""
 	}
 	return login
+}
+
+// deniedIdentity reports whether an error is GitHub REFUSING to say who the
+// token is, rather than failing to answer. Only the refusal is worth caching: a
+// token without the scope for /user will never grow one mid-process, and a rate
+// limit surfaces as its own error rather than an APIError.
+func deniedIdentity(err error) bool {
+	var api *APIError
+	if !errors.As(err, &api) {
+		return errors.Is(err, ErrNotFound)
+	}
+	switch api.Status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+		return true
+	}
+	return false
 }
 
 type SearchPR struct {

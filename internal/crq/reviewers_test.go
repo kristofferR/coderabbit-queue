@@ -3,6 +3,7 @@ package crq
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
@@ -275,4 +276,28 @@ func TestForRepoOverridesEveryDerivedView(t *testing.T) {
 			t.Error("excluding every co-reviewer must not remove the primary")
 		}
 	})
+}
+
+// Deciding and committing are two steps, and BOTH layers that name reviewers
+// can move between them. The repository override was already revalidated inside
+// the CAS; the fleet record was not, so an operator changing the fleet primary
+// or its co-reviewers could have their save report success and still be
+// overtaken by an in-flight decision posting the commands they had just
+// replaced.
+func TestAFleetReviewerChangeInvalidatesADecisionInFlight(t *testing.T) {
+	now := time.Date(2026, 7, 28, 9, 0, 0, 0, time.UTC)
+	st := &State{}
+	cfg := firingConfig().WithFleet(st.Fleet)
+	if reviewersChanged(st, "o/repo", cfg) {
+		t.Fatal("nothing has been recorded, so nothing has changed")
+	}
+
+	st.SetFleetDefaults(FleetDefaults{CoBots: []string{"codex"}, SetCoBots: true}, "atlas", now)
+	if !reviewersChanged(st, "o/repo", cfg) {
+		t.Error("a fleet co-reviewer change must invalidate a decision made before it")
+	}
+	// And the configuration built from the new record commits against it.
+	if reviewersChanged(st, "o/repo", firingConfig().WithFleet(st.Fleet)) {
+		t.Error("the decision made from the current record must still commit")
+	}
 }

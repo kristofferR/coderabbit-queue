@@ -893,7 +893,7 @@ func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, he
 		if head != "" && r.Head != head {
 			return ErrNoChange
 		}
-		if cfg != nil && overrideChanged(st, repo, *cfg) {
+		if cfg != nil && reviewersChanged(st, repo, *cfg) {
 			return ErrNoChange
 		}
 		if holdUnacked && st.FireSlot != nil && st.FireSlot.Key == QueueKey(repo, pr) {

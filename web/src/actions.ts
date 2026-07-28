@@ -53,6 +53,13 @@ export type ActionBody = {
     max_attempts?: number;
     forks?: boolean;
     skip_authors?: string[];
+    /**
+     * Hand one setting back to the layer beneath. The others express it in
+     * their own values, but `false` is a real fork policy and an empty author
+     * list means "skip nobody", so those two need their own instruction.
+     */
+    unset_forks?: boolean;
+    unset_skip_authors?: boolean;
     clear?: boolean;
   };
 };

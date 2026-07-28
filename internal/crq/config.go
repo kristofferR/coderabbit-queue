@@ -101,7 +101,14 @@ type Config struct {
 	FeedbackBotsExplicit bool
 	// OverrideAt is when the per-repo reviewer override this configuration was
 	// built from was last written, so a fire can tell whether it still holds.
-	OverrideAt        *time.Time
+	OverrideAt *time.Time
+	// FleetAt is the same fact one layer up: when the fleet defaults this
+	// configuration was built from were last written. Both are needed, because
+	// either layer can name the primary, the co-reviewers or the required set —
+	// and a fire revalidating only the repository override would post the old
+	// commands on the authority of fleet settings that were replaced while it
+	// was deciding.
+	FleetAt           *time.Time
 	RateLimitCommand  string
 	RateLimitMarker   string
 	CalibrationMarker string

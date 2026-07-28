@@ -170,3 +170,46 @@ func TestSolverAgentComesFromTheHostsThatRunSessions(t *testing.T) {
 		t.Errorf("agent = %q, want the autofix service's answer kept", v.Agent)
 	}
 }
+
+// The fork policy and the skip list are the two solver settings whose own
+// values cannot express "follow the fleet again": false is a real fork policy
+// and an empty author list means "skip nobody". Without an unset instruction a
+// repository that had set either could only rejoin the fleet by clearing every
+// solver setting it had, prompt included.
+func TestSolverFieldsCanReturnToInheritance(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if _, err := svc.SetFleetSolver(ctx, SolverChange{
+		Forks: boolptr(true), SkipAuthors: []string{"dependabot[bot]"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SetSolver(ctx, "o/repo", SolverChange{
+		Prompt: strptr("this project uses bun"), Forks: boolptr(false), SkipAuthors: []string{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	v, _ := svc.Solver(ctx, "o/repo")
+	if v.Forks || v.Sources["forks"] != "repo" || v.Sources["skip_authors"] != "repo" {
+		t.Fatalf("view = %+v, want both settings held by the repository", v)
+	}
+
+	if _, err := svc.SetSolver(ctx, "o/repo", SolverChange{
+		UnsetForks: true, UnsetSkipAuthors: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	v, _ = svc.Solver(ctx, "o/repo")
+	if !v.Forks || v.Sources["forks"] != "fleet" {
+		t.Errorf("forks = %v from %q, want the fleet's answer back", v.Forks, v.Sources["forks"])
+	}
+	if len(v.SkipAuthors) != 1 || v.Sources["skip_authors"] != "fleet" {
+		t.Errorf("skip authors = %v from %q, want the fleet's list back", v.SkipAuthors, v.Sources["skip_authors"])
+	}
+	if v.Prompt != "this project uses bun" {
+		t.Errorf("prompt = %q, want the settings it was not asked about left alone", v.Prompt)
+	}
+}

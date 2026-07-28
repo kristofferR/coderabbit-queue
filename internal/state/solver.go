@@ -47,9 +47,15 @@ type SolverSettings struct {
 
 // Empty reports whether this record says nothing at all, which is how a "clear"
 // is distinguished from a setting of every field to its zero value.
+//
+// A carried member counts, for the same reason it does in FleetDefaults:
+// clearing the last field THIS binary knows would otherwise drop the repository
+// record — or collapse the fleet defaults around it — and take a newer binary's
+// solver setting with it.
 func (s SolverSettings) Empty() bool {
 	return s.Model == "" && s.Effort == "" && s.Prompt == "" &&
-		s.MaxAttempts == nil && s.Forks == nil && !s.SetSkipAuthors
+		s.MaxAttempts == nil && s.Forks == nil && !s.SetSkipAuthors &&
+		len(s.unknown) == 0
 }
 
 // Merge layers one record over another: every field this one states wins, and

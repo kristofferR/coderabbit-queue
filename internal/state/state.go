@@ -136,6 +136,13 @@ type Round struct {
 	// rules walk that map as "the co-reviewers", and the primary appearing there
 	// would quietly join them.
 	PrimaryAnsweredAt *time.Time `json:"primary_answered_at,omitempty"`
+	// PrimaryAnsweredBy is WHICH primary produced that evidence. CRQ_BOT is a
+	// setting, and a fleet that changes it leaves rounds answered by the retired
+	// one behind: attributing them to whatever the reading process calls its
+	// primary shows the new bot as working and the old one as silent, which is
+	// the two claims exactly backwards. The identity travels as data here for
+	// the same reason it does in CoBots.
+	PrimaryAnsweredBy string `json:"primary_answered_by,omitempty"`
 
 	// RetryAt is the earliest time this head may fire again (awaiting_retry).
 	RetryAt *time.Time `json:"retry_at,omitempty"`
@@ -301,16 +308,18 @@ func (r *Round) NoteCoAnswer(login string, at time.Time) {
 	r.setCo(login, c)
 }
 
-// NotePrimaryAnswer records that the primary was OBSERVED producing head
-// evidence, on the same terms NoteCoAnswer sets for a co-reviewer: the FIRST
-// observation wins, since a round is one head and re-stamping it would rewrite
-// state on every sweep.
-func (r *Round) NotePrimaryAnswer(at time.Time) {
+// NotePrimaryAnswer records that login, the primary at the time, was OBSERVED
+// producing head evidence. Same terms as NoteCoAnswer sets for a co-reviewer:
+// the FIRST observation wins, since a round is one head and re-stamping it
+// would rewrite state on every sweep. The login is stored with it so a later
+// reader is not left inferring who answered from its own configuration.
+func (r *Round) NotePrimaryAnswer(login string, at time.Time) {
 	if r.PrimaryAnsweredAt != nil {
 		return
 	}
 	t := at.UTC()
 	r.PrimaryAnsweredAt = &t
+	r.PrimaryAnsweredBy = login
 }
 
 // ClearCoClaim releases login's claim without recording a command.

@@ -13,6 +13,13 @@ import type { Snapshot } from "./api";
  * queued, and stops the moment either becomes false.
  */
 export function isFirstRun(snap: Snapshot): boolean {
+  const cfg = snap.settings.config;
+  // Enrollment is a CONFIGURATION, not a set of rows. With no allow-list crq
+  // reviews every repository in the configured scope, and until one of them has
+  // a round there is no row here to count — so counting rows told a fleet that
+  // was already operating in scope-wide mode that nothing was enrolled, and
+  // offered to add a repository it does not need.
+  const scopeWide = (cfg.scope?.length ?? 0) > 0 && (cfg.allow_repos?.length ?? 0) === 0;
   const enrolled = snap.repos.filter((r) => r.reviewed).length;
   const anyWork =
     snap.overview.counts.in_flight +
@@ -20,7 +27,7 @@ export function isFirstRun(snap: Snapshot): boolean {
       snap.overview.counts.held +
       snap.overview.counts.fixing >
     0;
-  return enrolled === 0 && !anyWork && snap.overview.finished.length === 0;
+  return !scopeWide && enrolled === 0 && !anyWork && snap.overview.finished.length === 0;
 }
 
 export function FirstRun({ snap }: { snap: Snapshot }) {

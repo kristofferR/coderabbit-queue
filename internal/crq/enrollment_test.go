@@ -475,3 +475,50 @@ func TestPreviewEnrollBoundsItsPerPullRequestReads(t *testing.T) {
 		t.Errorf("review reads = %d, want at most %d", got, maxExamined)
 	}
 }
+
+// The preview quotes a price for a BACKLOG, and enrolling spends the account's
+// included reviews down as it works through it. Pricing every pull request
+// against the same unchanged count told an operator with one review left that a
+// whole backlog was included — the one way this dialog can talk somebody into a
+// bill it never checked for.
+func TestPreviewEnrollSpendsTheAllowanceAcrossTheBacklog(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.Reviewers = buildReviewers(cfg.Bot, cfg.ReviewCommand, cfg.RequiredBots, nil, false)
+	gh := newFakeGitHub()
+	for i := 1; i <= 3; i++ {
+		gh.searchPRs = append(gh.searchPRs, ghapi.SearchPR{Repo: "o/backlog", Number: i, Author: "kristofferR"})
+		var pull ghapi.Pull
+		pull.State = "open"
+		pull.Number = i
+		pull.Head.SHA = fmt.Sprintf("%016d", i)
+		pull.ChangedFiles = 4
+		gh.pulls[fakeKey("o/backlog", i)] = pull
+	}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		remaining := 1
+		st.Account.Remaining = &remaining
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	impact, err := svc.PreviewEnroll(ctx, "o/backlog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if impact.Eligible != 3 || impact.Metered != 3 {
+		t.Fatalf("impact = %+v, want three eligible metered reviews", impact)
+	}
+	// One review left covers the first pull request. The other two are past the
+	// allowance, and crq has not learned whether usage-based reviews are on —
+	// so they are unknown rather than free.
+	if impact.Unpriced != 2 {
+		t.Errorf("unpriced = %d, want the two beyond the one included review", impact.Unpriced)
+	}
+	if !strings.Contains(impact.Summary, "could not") {
+		t.Errorf("summary = %q, want it to say the price past the allowance is unread", impact.Summary)
+	}
+}

@@ -444,11 +444,13 @@ type FleetChange struct {
 
 // SolverChange mirrors crq.SolverChange on the wire.
 type SolverChange struct {
-	Model       *string  `json:"model"`
-	Effort      *string  `json:"effort"`
-	Prompt      *string  `json:"prompt"`
-	MaxAttempts *int     `json:"max_attempts"`
-	Forks       *bool    `json:"forks"`
-	SkipAuthors []string `json:"skip_authors"`
-	Clear       bool     `json:"clear"`
+	Model            *string  `json:"model"`
+	Effort           *string  `json:"effort"`
+	Prompt           *string  `json:"prompt"`
+	MaxAttempts      *int     `json:"max_attempts"`
+	Forks            *bool    `json:"forks"`
+	SkipAuthors      []string `json:"skip_authors"`
+	UnsetForks       bool     `json:"unset_forks,omitempty"`
+	UnsetSkipAuthors bool     `json:"unset_skip_authors,omitempty"`
+	Clear            bool     `json:"clear"`
 }

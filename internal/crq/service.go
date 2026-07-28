@@ -326,7 +326,7 @@ func (s *Service) enqueueBatch(ctx context.Context, items []queueCandidate) erro
 				continue
 			}
 			// Asked again here, against the state this write lands on, for the
-			// same reason overrideChanged is: the scan decided from a snapshot,
+			// same reason reviewersChanged is: the scan decided from a snapshot,
 			// and a repository turned off since then has already had its pending
 			// rounds abandoned. Creating one now would put a metered review back
 			// in the queue after the off switch reported success.
@@ -893,7 +893,7 @@ func (s *Service) applyTransition(st *State, r *Round, tr engine.Transition, now
 		// the decision and this write would therefore be answered by neither: the
 		// marker dedupes the head under the set that no longer gates it. Drop the
 		// stale transition; the next pump decides again under the new set.
-		if overrideChanged(st, r.Repo, cfg) {
+		if reviewersChanged(st, r.Repo, cfg) {
 			return ErrNoChange
 		}
 		if err := r.Complete(); err != nil {
@@ -1062,7 +1062,7 @@ func firedOrEnqueuedAt(r Round) time.Time {
 // Acting on it would post a trigger for a co-reviewer an operator has just
 // removed, skip one they have just required, or record that a head is reviewed
 // by a set that no longer gates it — so the verdicts the reviewer configuration
-// decides revalidate it (overrideChanged) inside their own commit point, the CAS
+// decides revalidate it (reviewersChanged) inside their own commit point, the CAS
 // mutation that claims the trigger, reserves the slot or writes the dedupe
 // marker. Checking it in a separate read here would leave exactly the window it
 // is meant to close: SetReviewers commits in between, and the mutation goes on
@@ -1150,7 +1150,7 @@ func (s *Service) dedupeRound(ctx context.Context, cfg Config, round Round, now 
 		// SetReviewers cannot see it coming, the round is still queued when the
 		// override lands (requeuing a queued round is a no-op), yet the marker is
 		// exactly what stops the newly required reviewer from ever being asked.
-		if !sameRound(r, round) || !firable(st, r, now) || overrideChanged(st, round.Repo, cfg) {
+		if !sameRound(r, round) || !firable(st, r, now) || reviewersChanged(st, round.Repo, cfg) {
 			return ErrNoChange
 		}
 		if err := r.Dedupe(now); err != nil {
@@ -1219,7 +1219,7 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 			r := st.Round(round.Repo, round.PR)
 			// postCo below was chosen by cfg's reviewers; a change since means the
 			// claims written here are for a set the operator has replaced.
-			if !sameRound(r, round) || !firable(st, r, now) || overrideChanged(st, round.Repo, cfg) {
+			if !sameRound(r, round) || !firable(st, r, now) || reviewersChanged(st, round.Repo, cfg) {
 				return ErrNoChange
 			}
 			if err := r.Reserve(token, s.cfg.WriterID(), now); err != nil {
@@ -1286,7 +1286,7 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 			return ErrNoChange
 		}
 		r := st.Round(round.Repo, round.PR)
-		if !sameRound(r, round) || !firable(st, r, now) || overrideChanged(st, round.Repo, cfg) {
+		if !sameRound(r, round) || !firable(st, r, now) || reviewersChanged(st, round.Repo, cfg) {
 			return ErrNoChange
 		}
 		if err := r.Reserve(token, s.cfg.WriterID(), now); err != nil {
@@ -1404,7 +1404,7 @@ func (s *Service) fireCoOnly(ctx context.Context, cfg Config, round Round, login
 		r := st.Round(round.Repo, round.PR)
 		// The claim is what authorizes the posts below, so the reviewer set that
 		// chose them must still be the configured one when it commits.
-		if !sameRound(r, round) || !firable(st, r, now) || overrideChanged(st, round.Repo, cfg) {
+		if !sameRound(r, round) || !firable(st, r, now) || reviewersChanged(st, round.Repo, cfg) {
 			return ErrNoChange
 		}
 		for _, login := range logins {
@@ -1798,7 +1798,7 @@ func (s *Service) fireCoDeferred(ctx context.Context, cfg Config, round Round, d
 		// As in fireCoOnly: the claims and adoptions written here name the
 		// co-reviewers cfg chose, so a reviewer change since voids them.
 		if !sameRound(r, round) || (r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry) ||
-			overrideChanged(st, round.Repo, cfg) {
+			reviewersChanged(st, round.Repo, cfg) {
 			return ErrNoChange
 		}
 		if _, held := st.HeldPR(round.Repo, round.PR); held {
@@ -1896,7 +1896,7 @@ func (s *Service) selfHealCoReviewers(ctx context.Context, cfg Config, round Rou
 		claimed := false
 		updated, err := s.store.Update(ctx, func(st *State) error {
 			r := st.Round(round.Repo, round.PR)
-			if !sameRound(r, round) || r.Co(login).CommandID != 0 || overrideChanged(st, round.Repo, cfg) {
+			if !sameRound(r, round) || r.Co(login).CommandID != 0 || reviewersChanged(st, round.Repo, cfg) {
 				return ErrNoChange
 			}
 			if _, held := st.HeldPR(round.Repo, round.PR); held {
@@ -2614,7 +2614,7 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 			r.NoteCoAnswer(login, now)
 		}
 		if primary {
-			r.NotePrimaryAnswer(now)
+			r.NotePrimaryAnswer(cfg.Bot, now)
 		}
 		if sameCoAnswers(before, r.CoBots) && beforePrimary == r.PrimaryAnsweredAt {
 			return ErrNoChange

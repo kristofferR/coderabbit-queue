@@ -1207,6 +1207,7 @@ every agent rejects differently and none ignores.
 		fmt.Print(`crq solver <repo>
 crq solver set <repo> [--model <m>] [--effort <e>] [--prompt <text>]
                       [--attempts <n>] [--forks on|off] [--skip-authors <a,b>]
+                      [--inherit forks,skip-authors]
 crq solver set --fleet [...]           (the default every repository inherits)
 crq solver clear <repo> | crq solver clear --fleet
 
@@ -1225,6 +1226,11 @@ this repository. .sources says which layer answered for each setting.
                   Off by default: a session runs an agent over somebody else's
                   code with approvals bypassed and a write token in reach
   --skip-authors  pull-request authors crq does not enqueue here
+  --inherit       hand one setting back to the layer beneath: forks,
+                  skip-authors. The others say it in their own values (an empty
+                  --model or --effort, --attempts 0), but 'off' is a real fork
+                  policy and an empty author list means "skip nobody", so those
+                  two need saying separately
 
 The AGENT itself is not per repository. It is chosen by 'crq autofix install'
 and baked into the session script, because switching between claude and codex
@@ -2840,6 +2846,25 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 				return 1
 			}
 			change.SkipAuthors = splitList(&v)
+		case "--inherit":
+			// Its own instruction, not a value some other flag could carry:
+			// --forks off is a fork policy and --skip-authors "" is "skip
+			// nobody", so neither can also mean "follow the layer beneath".
+			v, ok := value()
+			if !ok {
+				return 1
+			}
+			for _, field := range splitList(&v) {
+				switch strings.ToLower(field) {
+				case "forks":
+					change.UnsetForks = true
+				case "skip-authors", "skip_authors":
+					change.UnsetSkipAuthors = true
+				default:
+					fatal(fmt.Errorf("--inherit: %q is not a solver setting that can be unset (forks, skip-authors)", field))
+					return 1
+				}
+			}
 		default:
 			if strings.HasPrefix(arg, "-") {
 				fatal(fmt.Errorf("unknown flag %s (see crq help solver)", arg))
@@ -2901,6 +2926,7 @@ func (a prActor) SetSolver(ctx context.Context, repo string, change serve.Solver
 		Model: change.Model, Effort: change.Effort, Prompt: change.Prompt,
 		MaxAttempts: change.MaxAttempts, Forks: change.Forks,
 		SkipAuthors: change.SkipAuthors, Clear: change.Clear,
+		UnsetForks: change.UnsetForks, UnsetSkipAuthors: change.UnsetSkipAuthors,
 	}
 	// An empty repo means the fleet default, the same convention the CLI's
 	// --fleet flag expresses.

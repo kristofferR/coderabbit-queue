@@ -117,7 +117,16 @@ type SolverChange struct {
 	MaxAttempts *int     `json:"max_attempts"`
 	Forks       *bool    `json:"forks"`
 	SkipAuthors []string `json:"skip_authors"`
-	Clear       bool     `json:"clear"`
+	// Unset* hands ONE setting back to the layer beneath, the same instruction
+	// FleetChange's Unset* fields carry. The others express it in their own
+	// values — an empty model or effort, 0 attempts — but these two cannot:
+	// false is a real fork policy and an empty author list is "skip nobody", so
+	// without this a repository that once set either could only follow the fleet
+	// again by clearing every solver setting it had.
+	UnsetForks       bool `json:"unset_forks,omitempty"`
+	UnsetSkipAuthors bool `json:"unset_skip_authors,omitempty"`
+	// Clear drops the whole record, returning every setting to the fleet default.
+	Clear bool `json:"clear"`
 }
 
 // knownEfforts are the reasoning levels every supported agent understands. An
@@ -238,11 +247,15 @@ func applySolverChange(sv SolverSettings, change SolverChange) (SolverSettings, 
 			sv.MaxAttempts = &n
 		}
 	}
-	if change.Forks != nil {
+	if change.UnsetForks {
+		sv.Forks = nil
+	} else if change.Forks != nil {
 		forks := *change.Forks
 		sv.Forks = &forks
 	}
-	if change.SkipAuthors != nil {
+	if change.UnsetSkipAuthors {
+		sv.SkipAuthors, sv.SetSkipAuthors = nil, false
+	} else if change.SkipAuthors != nil {
 		authors := make([]string, 0, len(change.SkipAuthors))
 		for _, a := range change.SkipAuthors {
 			if a = strings.TrimSpace(a); a != "" {

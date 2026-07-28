@@ -3,6 +3,7 @@ package serve
 import (
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -561,7 +562,17 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Tim
 		}
 		if r.PrimaryAnsweredAt != nil {
 			answerLog = true
-			note(cfg.primaryLogin(), r.PrimaryAnsweredAt, r.Repo, r.PR)
+			// Whoever the primary was WHEN it answered, not whoever this
+			// process calls its primary now. A fleet that changes CRQ_BOT would
+			// otherwise hand the retired bot's evidence to the new one, showing
+			// the one that has never run as working and the one that did as
+			// silent. Rounds recorded before the login was stored have none, and
+			// the running primary is the best guess left for those.
+			by := r.PrimaryAnsweredBy
+			if by == "" {
+				by = cfg.primaryLogin()
+			}
+			note(by, r.PrimaryAnsweredAt, r.Repo, r.PR)
 		}
 	}
 	for _, r := range st.Rounds {
@@ -876,7 +887,7 @@ func hostTools(st state.State, now time.Time) []HostTools {
 	}
 	newest := ""
 	for _, r := range reports {
-		if r.Version > newest {
+		if newerVersion(r.Version, newest) {
 			newest = r.Version
 		}
 	}
@@ -886,9 +897,10 @@ func hostTools(st state.State, now time.Time) []HostTools {
 		row := HostTools{
 			Host: hostOf(r.Host), Version: r.Version, Caps: r.Caps, Roles: r.Roles,
 			At: &at, Stale: now.Sub(r.At) > state.HostReportTTL,
-			// Compared as strings, which is enough for the only question being
-			// asked: is this host running something OTHER than the newest crq
-			// in the fleet. A wrong answer here costs a warning, not a decision.
+			// Behind is "not the newest crq in the fleet", so it only has to be
+			// as right as newest is. That is why newest is picked numerically:
+			// as strings, 2.9.0 outranks 2.10.0 and the table inverts — the
+			// upgraded hosts get the warning and the stale ones read as current.
 			Behind: r.Version != "" && newest != "" && r.Version != newest,
 			Tools:  []ToolSeen{},
 		}
@@ -898,6 +910,44 @@ func hostTools(st state.State, now time.Time) []HostTools {
 		out = append(out, row)
 	}
 	return out
+}
+
+// newerVersion reports whether a is a later crq than b, comparing the
+// dot-separated components as numbers. Text order is wrong the first time the
+// fleet crosses a digit boundary — "2.9.0" sorts above "2.10.0" — and picking
+// the wrong newest inverts the whole table. A component that is not a number
+// falls back to text order, so an unexpected shape is still ordered rather than
+// ignored.
+func newerVersion(a, b string) bool {
+	if a == "" || a == b {
+		return false
+	}
+	if b == "" {
+		return true
+	}
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(as) || i < len(bs); i++ {
+		x, y := versionPart(as, i), versionPart(bs, i)
+		if x == y {
+			continue
+		}
+		xn, xerr := strconv.Atoi(x)
+		yn, yerr := strconv.Atoi(y)
+		if xerr == nil && yerr == nil {
+			return xn > yn
+		}
+		return x > y
+	}
+	return false
+}
+
+// versionPart is one component of a version, or "0" past its end: "2.1" and
+// "2.1.0" are the same release.
+func versionPart(parts []string, i int) string {
+	if i < len(parts) {
+		return parts[i]
+	}
+	return "0"
 }
 
 // whereTool finds a host that reports having a tool, and where. Used for bot

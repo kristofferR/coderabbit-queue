@@ -754,3 +754,59 @@ func TestListOwnerReposUsesTheAuthenticatedEndpointForItsOwnAccount(t *testing.T
 		t.Fatalf("requested %q, want the public endpoint for another owner", paths)
 	}
 }
+
+// "crq cannot read who this token is" is cached for the process, because a
+// token without the scope will not grow one. A 500 or a timeout is not that
+// answer — caching it kept every later repository picker on the public-only
+// listing, which omits the caller's own private repositories, long after GitHub
+// came back.
+func TestViewerLoginRetriesAfterATransientFailureButNotARefusal(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "t")
+	var down int32 = 1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/user" {
+			http.NotFound(w, r)
+			return
+		}
+		if atomic.LoadInt32(&down) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"message":"unavailable"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"login":"kristofferR"}`))
+	}))
+	defer srv.Close()
+
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 1, maxWait: time.Millisecond, backoffBase: time.Millisecond, networkMaxWait: time.Millisecond}
+	if got := g.viewerLogin(context.Background()); got != "" {
+		t.Fatalf("viewerLogin = %q, want no answer while GitHub is failing", got)
+	}
+	atomic.StoreInt32(&down, 0)
+	if got := g.viewerLogin(context.Background()); got != "kristofferR" {
+		t.Errorf("viewerLogin = %q, want the identity once GitHub answers again", got)
+	}
+
+	// A refusal IS an answer, and asking again every time would spend quota on
+	// a question whose answer cannot change within the process.
+	var denials int32
+	denied := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&denials, 1)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+	}))
+	defer denied.Close()
+	d := &GitHub{token: "t", httpClient: denied.Client(), apiBase: denied.URL, maxRetries: 1, maxWait: time.Millisecond, backoffBase: time.Millisecond, networkMaxWait: time.Millisecond}
+	if got := d.viewerLogin(context.Background()); got != "" {
+		t.Fatalf("viewerLogin = %q, want none from a refused token", got)
+	}
+	// Counted from here: send retries a 401 once with a refreshed token, so the
+	// question is whether a SECOND call asks again, not how many requests the
+	// first one took.
+	asked := atomic.LoadInt32(&denials)
+	if got := d.viewerLogin(context.Background()); got != "" {
+		t.Fatalf("viewerLogin = %q, want none from a refused token", got)
+	}
+	if got := atomic.LoadInt32(&denials); got != asked {
+		t.Errorf("asked %d more times, want the refusal remembered", got-asked)
+	}
+}

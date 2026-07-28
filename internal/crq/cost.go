@@ -84,14 +84,29 @@ func (s *Service) Cost(ctx context.Context, repo string, pr int) (RoundCost, err
 // costFrom is the pure half, so a caller that already holds the state and the
 // diff stat does not pay for either again.
 func (s *Service) costFrom(st State, repo string, pr int, head string, d dialect.DiffStat) RoundCost {
+	return s.costWith(st, repo, pr, head, d, accountAllowance(st))
+}
+
+// accountAllowance is what the account last told crq about its included
+// reviews. Absent stays absent: RemainingKnown false is "crq has not seen a
+// count", which prices differently from having seen a zero.
+func accountAllowance(st State) dialect.Allowance {
+	a := dialect.Allowance{}
+	if st.Account.Remaining != nil {
+		a.Remaining, a.RemainingKnown = *st.Account.Remaining, true
+	}
+	return a
+}
+
+// costWith prices one head against an allowance the caller supplies, so a
+// caller pricing a BACKLOG can spend it down across the pull requests. Pricing
+// every one of them against the same unchanged count reported a 20-deep backlog
+// as entirely included when the account had one review left.
+func (s *Service) costWith(st State, repo string, pr int, head string, d dialect.DiffStat, allowance dialect.Allowance) RoundCost {
 	cfg := s.cfgFor(st, repo)
 	out := RoundCost{Repo: repo, PR: pr, Head: head, Exact: true, PricesCheckedAt: dialect.PricesCheckedAt}
 	out.Diff.Additions, out.Diff.Deletions, out.Diff.ChangedFiles = d.Additions, d.Deletions, d.ChangedFiles
 
-	allowance := dialect.Allowance{}
-	if st.Account.Remaining != nil {
-		allowance.Remaining, allowance.RemainingKnown = *st.Account.Remaining, true
-	}
 	// Usage-based billing is only ever learned from the CLI's own guidance, and
 	// crq does not persist it yet — so it stays UNKNOWN rather than "off". The
 	// two are not interchangeable: "off" is a claim that an exhausted allowance

@@ -581,3 +581,46 @@ func TestAnOlderHeartbeatKeepsANewerBinarysHostMembers(t *testing.T) {
 		t.Errorf("a tool member this binary does not know was erased by a re-probe: %#v", tool)
 	}
 }
+
+// Carrying a member is not enough on its own: a record whose last RECOGNISED
+// field is cleared must still read as recorded, or the writer that treats
+// "empty" as "delete this" erases the newer binary's setting on the one path
+// the round trip exists to survive.
+func TestClearingTheLastKnownFieldKeepsACarriedMember(t *testing.T) {
+	foreign := `{
+	  "v": 4, "rev": 2, "next_seq": 1,
+	  "fleet": {
+	    "min_interval": "90s",
+	    "future_pacing": {"burst": 3},
+	    "solver": {"model": "opus", "future_solver_flag": "sandbox"}
+	  }
+	}`
+
+	var st State
+	if err := json.Unmarshal([]byte(foreign), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Fleet.Solver.Empty() {
+		t.Error("a solver record carrying a newer binary's member is not empty")
+	}
+	if st.Fleet.Empty() {
+		t.Error("fleet defaults carrying a newer binary's member are not empty")
+	}
+
+	// An operator clearing every setting THIS build knows, field by field.
+	fd := st.Fleet
+	fd.MinInterval = ""
+	fd.Solver.Model = ""
+	if fd.Solver.Empty() || fd.Empty() {
+		t.Fatalf("clearing the known fields must not empty a carrying record: %+v", fd)
+	}
+	st.SetFleetDefaults(fd, "atlas", time.Now())
+
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "future_pacing") || !strings.Contains(string(out), "future_solver_flag") {
+		t.Errorf("a carried member was erased by clearing the fields around it:\n%s", out)
+	}
+}

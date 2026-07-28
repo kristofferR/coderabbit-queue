@@ -480,6 +480,13 @@ func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact,
 	// One read per eligible pull request, for the diff each would be reviewed
 	// at. Already bounded by maxExamined above — nothing past it was examined,
 	// so nothing past it can be eligible.
+	//
+	// The allowance is spent down as the backlog is priced, because that is what
+	// enrolling would do to it: every metered review here takes one of the
+	// account's included reviews, and pricing each pull request against the same
+	// unchanged count called a whole backlog free on the strength of the one
+	// review left for its first member.
+	allowance := accountAllowance(st)
 	for _, pr := range eligible {
 		// costFrom, not Cost: the state is already in hand, and Cost would load
 		// the ref again per pull request — four requests each, 100 across the
@@ -489,11 +496,11 @@ func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact,
 			impact.Unpriced++
 			continue
 		}
-		cost := s.costFrom(st, repo, pr, pull.Head.SHA, dialect.DiffStat{
+		cost := s.costWith(st, repo, pr, pull.Head.SHA, dialect.DiffStat{
 			Additions:    pull.Additions,
 			Deletions:    pull.Deletions,
 			ChangedFiles: pull.ChangedFiles,
-		})
+		}, allowance)
 		if len(cost.Unpriced) > 0 {
 			// A reviewer crq cannot price makes this pull request's total a
 			// floor, not an answer. Adding it in would let the sentence below
@@ -505,6 +512,9 @@ func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact,
 		for _, r := range cost.Reviewers {
 			if dialect.NormalizeBotName(r.Bot) == dialect.NormalizeBotName(cfg.Bot) {
 				impact.Metered++
+				if allowance.Remaining > 0 {
+					allowance.Remaining--
+				}
 			}
 		}
 	}

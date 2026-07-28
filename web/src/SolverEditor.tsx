@@ -67,17 +67,35 @@ export function SolverEditor({
   };
   const dirty = Object.values(changed).some(Boolean);
 
-  const save = async (clear = false) => {
+  const post = async (edited: NonNullable<Parameters<typeof act>[1]["solver"]>) => {
     setBusy(true);
     setError(null);
     try {
-      // Only what was actually edited. The values shown here are EFFECTIVE
-      // ones, resolved through env, fleet and repository — so posting all six
-      // recorded the inherited ones as this repository's own answer, and a
-      // later fleet change to the attempt count or the fork policy stopped
-      // reaching a repository whose owner had only ever edited its prompt.
-      // The API omits to mean inherit; that is what this preserves.
-      const edited = clear
+      const res = await act("solver", { repo, solver: edited });
+      onSnapshot?.(res.snapshot);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Hand one setting back to the fleet. The other rows say it in their own
+  // values — an empty model, 0 attempts — but "Blocked" is a real fork policy
+  // and an empty author list means "skip nobody", so these two can only return
+  // to inheritance by asking for it.
+  const inherit = (field: "forks" | "skip_authors") =>
+    void post(field === "forks" ? { unset_forks: true } : { unset_skip_authors: true });
+
+  // Only what was actually edited. The values shown here are EFFECTIVE ones,
+  // resolved through env, fleet and repository — so posting all six recorded
+  // the inherited ones as this repository's own answer, and a later fleet
+  // change to the attempt count or the fork policy stopped reaching a
+  // repository whose owner had only ever edited its prompt. The API omits to
+  // mean inherit; that is what this preserves.
+  const save = (clear = false) =>
+    void post(
+      clear
         ? { clear: true }
         : {
             ...(changed.model ? { model } : {}),
@@ -93,15 +111,8 @@ export function SolverEditor({
                     .filter(Boolean),
                 }
               : {}),
-          };
-      const res = await act("solver", { repo, solver: edited });
-      onSnapshot?.(res.snapshot);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
+          },
+    );
 
   const src = (key: string) => solver.sources?.[key] ?? "env";
 
@@ -202,6 +213,7 @@ export function SolverEditor({
               <span className="ml-2 text-[12px] text-faint">
                 a session runs an agent over that branch's code with approvals bypassed
               </span>
+              <Inherit shown={src("forks") === "repo"} busy={busy} onClick={() => inherit("forks")} />
             </Row>
             <Row label="Skip authors" source={src("skip_authors")}>
               <input
@@ -209,6 +221,11 @@ export function SolverEditor({
                 onChange={(e) => setAuthors(e.target.value)}
                 placeholder="dependabot[bot], …"
                 className="w-full rounded-lg border border-edge bg-[#FBFBFC] px-2 py-1 font-mono text-[12.5px]"
+              />
+              <Inherit
+                shown={src("skip_authors") === "repo"}
+                busy={busy}
+                onClick={() => inherit("skip_authors")}
               />
             </Row>
             <Row label="Extra prompt" source={src("prompt")}>
@@ -258,6 +275,25 @@ export function SolverEditor({
         </p>
       </div>
     </Card>
+  );
+}
+
+/**
+ * The way back to the fleet for a setting whose own values cannot say it.
+ * Shown only where this repository actually holds an override, because on the
+ * other layers there is nothing to give back.
+ */
+function Inherit({ shown, busy, onClick }: { shown: boolean; busy: boolean; onClick: () => void }) {
+  if (!shown) return null;
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={onClick}
+      className="ml-2 text-[12px] text-acc hover:underline disabled:opacity-45"
+    >
+      follow the fleet
+    </button>
   );
 }
 

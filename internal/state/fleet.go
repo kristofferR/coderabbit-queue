@@ -62,10 +62,15 @@ type FleetDefaults struct {
 // Empty reports whether the record says nothing at all. A record that has been
 // emptied field by field must not keep reading as "recorded": every setting
 // would show its env value while the fleet claimed to have an answer.
+//
+// A carried member counts as something said. A newer binary's fleet setting is
+// a setting this one cannot name, and answering "empty" for it would have
+// SetFleetDefaults replace the whole record with a zero value — erasing it on
+// the one path the round trip exists to survive.
 func (f FleetDefaults) Empty() bool {
 	return !f.SetCoBots && !f.SetRequired && f.MinInterval == "" &&
 		f.WeeklyLimit == nil && f.AutofixDefault == nil && f.Solver.Empty() &&
-		len(f.Env) == 0
+		len(f.Env) == 0 && len(f.unknown) == 0
 }
 
 // AutofixDefaultOn is the answer for a repository with no explicit switch.

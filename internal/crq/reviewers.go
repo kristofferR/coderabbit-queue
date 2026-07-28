@@ -384,6 +384,12 @@ func (c Config) WithFleet(fd FleetDefaults) Config {
 			}
 		}
 	}
+	// Stamped whatever the record says, and before the early return below: what
+	// a fire revalidates is that the record it decided from is still the record,
+	// and a fleet that changed only settings this build ignores has still
+	// replaced the one it read. Set after the rebuild above, which returns a
+	// configuration parsed from scratch.
+	out.FleetAt = fd.UpdatedAt
 	if d, err := time.ParseDuration(strings.TrimSpace(fd.MinInterval)); err == nil && fd.MinInterval != "" {
 		out.MinInterval = d
 	}
@@ -407,8 +413,9 @@ func (c Config) WithFleet(fd FleetDefaults) Config {
 	return out
 }
 
-// overrideChanged reports whether repo's reviewer override differs from the one
-// cfg was built from.
+// reviewersChanged reports whether the recorded configuration repo's reviewers
+// are resolved from — the fleet defaults, then repo's own override — differs
+// from the one cfg was built from.
 //
 // Deciding and writing are two steps. An operator removing a co-reviewer between
 // them would otherwise have crq claim and post that bot's trigger anyway, on the
@@ -416,15 +423,27 @@ func (c Config) WithFleet(fd FleetDefaults) Config {
 // from INSIDE the CAS mutation that commits the decision, where the state it
 // reads is the state the write lands on; a separate read beforehand would leave
 // the same window one step earlier.
-func overrideChanged(st *State, repo string, cfg Config) bool {
+//
+// BOTH layers, because both decide who reviews: the fleet record names the
+// primary, the co-reviewers and the required set for every repository that has
+// no override of its own, so asking only about the override let a fleet change
+// that had already reported success be overtaken by the decision it replaced.
+func reviewersChanged(st *State, repo string, cfg Config) bool {
 	ov, _ := st.RepoOverride(repo)
+	return stampChanged(ov.UpdatedAt, cfg.OverrideAt) ||
+		stampChanged(st.Fleet.UpdatedAt, cfg.FleetAt)
+}
+
+// stampChanged compares a record's write time with the one a configuration was
+// built from, treating absent and present as different answers.
+func stampChanged(recorded, built *time.Time) bool {
 	switch {
-	case ov.UpdatedAt == nil && cfg.OverrideAt == nil:
+	case recorded == nil && built == nil:
 		return false
-	case ov.UpdatedAt == nil || cfg.OverrideAt == nil:
+	case recorded == nil || built == nil:
 		return true
 	default:
-		return !ov.UpdatedAt.Equal(*cfg.OverrideAt)
+		return !recorded.Equal(*built)
 	}
 }
 

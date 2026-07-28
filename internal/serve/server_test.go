@@ -167,3 +167,71 @@ func TestSnapshotDigestIgnoresTheClockButNotWhatItDecides(t *testing.T) {
 		t.Error("the quota block expired without changing the digest, so nothing would be pushed")
 	}
 }
+
+// The rolling-upgrade table is only as right as its idea of "newest". Compared
+// as text, 2.9.0 outranks 2.10.0 the first time the fleet crosses a digit
+// boundary — and then every upgraded host is warned about while the hosts still
+// running the old binary read as current, which is the warning exactly
+// backwards.
+func TestNewestHostVersionIsPickedNumerically(t *testing.T) {
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	st := state.State{HostReports: map[string]state.HostReport{
+		"atlas": {Host: "atlas", Version: "2.9.0", At: now},
+		"borg":  {Host: "borg", Version: "2.10.0", At: now},
+	}}
+
+	behind := map[string]bool{}
+	for _, row := range hostTools(st, now) {
+		behind[row.Host] = row.Behind
+	}
+	if !behind["atlas"] {
+		t.Error("2.9.0 is behind 2.10.0 and must be marked so")
+	}
+	if behind["borg"] {
+		t.Error("2.10.0 is the newest crq reporting and must not be marked behind")
+	}
+}
+
+// A round's answer belongs to whichever primary produced it. CRQ_BOT is a
+// setting, so a fleet that changes it leaves rounds the retired bot answered
+// behind — and attributing those to whatever this process calls its primary
+// showed the newly configured bot as working and the one that actually reviewed
+// as silent, which is both claims backwards.
+func TestAPrimarysAnswerStaysWithThePrimaryThatGaveIt(t *testing.T) {
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	answered := now.Add(-time.Hour)
+	st := state.State{Rounds: map[string]state.Round{
+		"o/repo#1": {
+			Repo: "o/repo", PR: 1, Head: "abcdef123", Phase: state.PhaseCompleted,
+			PrimaryAnsweredAt: &answered, PrimaryAnsweredBy: "coderabbitai[bot]",
+		},
+	}}
+	// The dashboard has since been configured with a different primary.
+	cfg := FleetConfig{GateRepo: "o/gate", Reviewers: []ReviewerCfg{
+		{Login: "macroscope[bot]", Name: "macroscope", Primary: true, Metered: true},
+	}}
+	running := []BotName{{Login: "macroscope[bot]", Name: "macroscope", Primary: true}}
+
+	macroscope := func(st state.State) BotCard {
+		for _, card := range botCards(st, cfg, running, now) {
+			if card.Login == "macroscope[bot]" {
+				return card
+			}
+		}
+		t.Fatalf("no card for the configured primary")
+		return BotCard{}
+	}
+	if got := macroscope(st); got.LastSeen != nil || got.Status == "working" {
+		t.Errorf("the new primary was credited with a review it never did: %+v", got)
+	}
+
+	// A round recorded before the login was stored has nobody to attribute it
+	// to but the running primary, which is what crq assumed for every round
+	// until now — so the fallback stays, and only rounds that name a bot move.
+	legacy := st.Rounds["o/repo#1"]
+	legacy.PrimaryAnsweredBy = ""
+	st.Rounds["o/repo#1"] = legacy
+	if got := macroscope(st); got.LastSeen == nil || !got.LastSeen.Equal(answered) {
+		t.Errorf("an unattributed answer must still count for the running primary: %+v", got)
+	}
+}
