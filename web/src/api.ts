@@ -191,6 +191,9 @@ export type BotCard = {
   cost?: string;
   setup?: string[];
   suited_to?: string;
+  prices_checked_at?: string;
+  suggested?: boolean;
+  because?: string;
 };
 
 export type Check = { key: string; label: string; status: "ok" | "warn" | "bad" | "unknown"; detail?: string };

@@ -380,7 +380,35 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
             </Card>
           )}
 
-          {(view.cost || view.cost_error) && <CostCard cost={view.cost} error={view.cost_error} />}
+          {view.observed?.converged && (
+          <Card title="Verdict">
+            <div className="px-[18px] pb-3.5 pt-1">
+              <p className="text-[13.5px]">
+                <b className="text-ok">Nothing left to do</b> — {view.observed.reason || "every required reviewer finished"}.
+              </p>
+              <div className="mt-2 text-[12.5px] text-mut">
+                <div className="mb-1 text-[11px] font-medium tracking-[0.06em] text-faint uppercase">
+                  Reviewed by
+                </div>
+                <span className="flex flex-wrap items-center gap-2.5">
+                  {Object.entries(view.observed.reviewed_by ?? {}).map(([bot, done]) => (
+                    <span key={bot} className="flex items-center gap-1.5">
+                      <BotIcon login={bot} name={bot} size={18} />
+                      <span className={done ? "text-ok" : "text-faint"}>{done ? "✓" : "pending"}</span>
+                    </span>
+                  ))}
+                </span>
+              </div>
+              <p className="mt-2.5 text-[12.5px] text-faint">
+                What happens next: nothing. Merge when you are ready. Push another commit and a fresh
+                round is enqueued for the new head — a converged round is the record that THIS head
+                was reviewed, not that the pull request is finished.
+              </p>
+            </div>
+          </Card>
+        )}
+
+        {(view.cost || view.cost_error) && <CostCard cost={view.cost} error={view.cost_error} />}
 
           {(view.round?.dismissed?.length ?? 0) > 0 && (
             <Card title="Dismissed" count={view.round!.dismissed!.length}>

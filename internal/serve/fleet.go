@@ -208,6 +208,13 @@ type BotCard struct {
 	Cost     string   `json:"cost,omitempty"`
 	Setup    []string `json:"setup,omitempty"`
 	SuitedTo string   `json:"suited_to,omitempty"`
+	// PricesCheckedAt dates the cost line, because an undated price is a price
+	// that has quietly stopped being true.
+	PricesCheckedAt string `json:"prices_checked_at,omitempty"`
+	// Suggested says crq has a REASON to recommend this bot here, and Because
+	// is that reason. A badge with no stated criterion is an advertisement.
+	Suggested bool   `json:"suggested,omitempty"`
+	Because   string `json:"because,omitempty"`
 }
 
 type SetupView struct {
@@ -562,6 +569,22 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Tim
 		if v, ok := dialect.VendorFor(login); ok {
 			card.Site, card.Docs = v.Site, v.Docs
 			card.Pitch, card.Cost, card.Setup, card.SuitedTo = v.Pitch, v.Cost, v.Setup, v.SuitedTo
+			card.PricesCheckedAt = dialect.PricesCheckedAt
+			// A suggestion is only worth making when crq can name the evidence.
+			// The local signal is the honest one it has: a CLI on a host means
+			// an account behind it, which is the thing that decides whether a
+			// bot will ever answer.
+			// Anything crq has not seen working. That covers the two cases worth
+			// a nudge: a bot switched off that you evidently have an account
+			// for, and one switched ON that has never answered — where the CLI
+			// being present says the account is fine and the setup is not.
+			if card.Status != "working" {
+				if host, path := whereTool(st, name); path != "" {
+					card.Suggested = true
+					card.Because = "the " + name + " CLI is on " + host +
+						", so the account behind it is probably already yours"
+				}
+			}
 		}
 		if from != nil {
 			card.Command, card.Trigger, card.Grace = from.Command, from.Trigger, from.Grace
@@ -831,4 +854,22 @@ func hostTools(st state.State, now time.Time) []HostTools {
 		out = append(out, row)
 	}
 	return out
+}
+
+// whereTool finds a host that reports having a tool, and where. Used for bot
+// suggestions: a CLI present on a machine is evidence of an account behind it,
+// which is what decides whether that bot will ever answer.
+//
+// It reports the FIRST host that has it rather than all of them, because the
+// suggestion only needs to be true somewhere — and naming one machine reads as
+// evidence where naming three reads as a survey.
+func whereTool(st state.State, tool string) (string, string) {
+	for _, r := range st.HostReportList() {
+		for _, t := range r.Tools {
+			if t.Name == tool && t.Path != "" {
+				return hostOf(r.Host), t.Path
+			}
+		}
+	}
+	return "", ""
 }

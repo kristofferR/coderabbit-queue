@@ -674,6 +674,14 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
                   <p className="mt-2">
                     <span className="text-faint">Cost — </span>
                     {b.cost}
+                    {b.prices_checked_at && (
+                      <span className="text-faint"> (checked {b.prices_checked_at})</span>
+                    )}
+                  </p>
+                )}
+                {b.suggested && b.because && (
+                  <p className="mt-2 rounded-lg border border-ok-edge bg-ok-bg px-2.5 py-1.5 text-[12.5px] text-ok">
+                    <b>Suggested here</b> — {b.because}.
                   </p>
                 )}
                 {b.suited_to && (
