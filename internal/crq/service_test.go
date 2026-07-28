@@ -3346,6 +3346,58 @@ func TestFeedbackRecordsARateLimitNoticeItObserves(t *testing.T) {
 	}
 }
 
+// A fleet setting that has nothing to do with the account must not throw away
+// an observed block. Update reports ErrNoChange as success, so refusing the
+// write on a whole-revision mismatch left the caller believing the window had
+// been recorded while the account stayed open — and the next fire went out
+// inside it.
+func TestObservedAccountBlockSurvivesAnUnrelatedFleetChange(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = "a0646f010abcdef0"
+	gh.pulls[fakeKey("o/carrier", 82)] = pull
+
+	notice := time.Now().UTC().Add(-time.Minute)
+	rl := ghapi.IssueComment{ID: 501,
+		Body:      "<!-- rate limited by coderabbit.ai -->\n> ## Review limit reached\n> **Next review available in:** **40 minutes**",
+		CreatedAt: notice, UpdatedAt: notice}
+	rl.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/carrier", 82)] = []ghapi.IssueComment{rl}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obs, err := svc.observe(ctx, svc.fleetCfg(st), "o/carrier", 82, nil, nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Somebody changes an unrelated policy while this notice is being read.
+	if _, err := store.Update(ctx, func(w *State) error {
+		w.SetFleetValue("settle", "30s")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.recordObservedBlock(ctx, obs, st, now); err != nil {
+		t.Fatal(err)
+	}
+	after, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Account.BlockedUntil == nil {
+		t.Fatal("the observed block was discarded because an unrelated fleet setting moved")
+	}
+}
+
 func TestObservedAccountBlockPersistsANewerNoticeAtTheStandingWindow(t *testing.T) {
 	now := time.Date(2026, 7, 27, 8, 0, 0, 0, time.UTC)
 	standing := now.Add(time.Hour)

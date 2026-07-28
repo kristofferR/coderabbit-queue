@@ -67,10 +67,12 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 		return result, err
 	}
 	// Which comments count as a trigger depends on who reviews, so the whole
-	// path takes a configuration value rather than reading the Service's. That
-	// is what lets per-repo reviewers substitute one here later without
-	// threading anything new through.
-	cfg := s.cfg
+	// path takes a configuration value rather than reading the Service's — the
+	// effective one, fleet policy and this repository's override included.
+	// Reading this host's own would compare the comments against a command crq
+	// never posted, read every spent trigger as edited by hand, and keep them on
+	// the PR for ever.
+	cfg := s.cfgFor(st, repo)
 	observedPosted := collectPosted(st, repo, pr)
 	if len(observedPosted.commands) == 0 {
 		result.Kept = append(result.Kept, "no round on this pr posted a trigger comment")

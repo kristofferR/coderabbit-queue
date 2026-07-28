@@ -106,6 +106,28 @@ func validRepoSlug(repo string) bool {
 	return ok && validNameSegment(owner) && validNameSegment(name)
 }
 
+// validOwnerLogin reports whether login is a GitHub user or organisation login.
+//
+// Stricter than validNameSegment on purpose: a repository NAME may hold
+// underscores and dots, a login may not, and a login may neither begin nor end
+// with a hyphen. Everything this validates is looked up as /users/<login>, so a
+// value outside those rules is one no account can ever have — and recorded for
+// the fleet, a single such entry fails the whole scan on every host at once,
+// which is precisely the mistake worth catching at `crq config set` instead.
+func validOwnerLogin(login string) bool {
+	if login == "" || strings.HasPrefix(login, "-") || strings.HasSuffix(login, "-") {
+		return false
+	}
+	for _, r := range login {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // validNameSegment reports whether part is one segment a GitHub owner or
 // repository name could be.
 //

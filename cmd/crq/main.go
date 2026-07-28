@@ -123,7 +123,7 @@ func run(ctx context.Context, args []string) int {
 		if result.CalibrationPR > 0 {
 			fmt.Printf("export CRQ_CAL_PR=%q\n", strconv.Itoa(result.CalibrationPR))
 		}
-		fmt.Printf("export CRQ_SCOPE=%q\n", strings.Join(cfg.Scope, ","))
+		fmt.Printf("export CRQ_SCOPE=%q\n", strings.Join(result.Scope, ","))
 		fmt.Printf("export CRQ_STATE_REF=%q\n", result.StateRef)
 		return 0
 	case "status":

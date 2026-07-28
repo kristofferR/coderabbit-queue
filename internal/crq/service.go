@@ -596,14 +596,30 @@ func (s *Service) recordObservedBlock(ctx context.Context, obs observation, st S
 	if blk == nil || s.cfg.DryRun || !observedAccountBlockChanges(st.Account, blk) {
 		return nil, nil
 	}
+	// Update swallows ErrNoChange, so whether the block was recorded has to be
+	// carried out of the mutation rather than read from its error.
+	var recorded *engine.AccountBlock
 	updated, err := s.store.Update(ctx, func(w *State) error {
-		if fleetRevision(*w) != cfg.FleetRevision {
+		recorded = nil
+		current := s.fleetCfg(*w)
+		// Only the SCOPE decides whose account this notice is evidence about.
+		// Any other fleet setting moving between the observation and this write
+		// leaves the notice just as valid, and comparing the whole revision
+		// discarded it — silently, since a returned ErrNoChange reads as a
+		// successful update. The account then stayed open for the rest of a
+		// window the bot had already stated, and the next fire went out inside
+		// it. So the window is recomputed here instead, under the policy that is
+		// current at the moment of the write, against the quota this write lands
+		// on.
+		if !sameFoldedSet(current.Scope, cfg.Scope) {
 			return ErrNoChange
 		}
-		if !observedAccountBlockChanges(w.Account, blk) {
+		blk := engine.ObservedAccountBlock(obs.eng, current.policy(), w.Account, now)
+		if blk == nil || !observedAccountBlockChanges(w.Account, blk) {
 			return ErrNoChange
 		}
 		applyAccountBlock(w, blk, now)
+		recorded = blk
 		return nil
 	})
 	if err != nil {
@@ -612,14 +628,19 @@ func (s *Service) recordObservedBlock(ctx context.Context, obs observation, st S
 		}
 		return nil, err
 	}
-	// Like every other writer of this window: the dashboard is where an operator
-	// reads whether the account is available, and the decision that follows this
-	// is usually FireNo — which writes nothing further, leaving the issue claiming
-	// a free account for the whole block while state and `crq status` say
-	// otherwise.
-	s.sync(ctx, updated)
-	if s.log != nil {
-		s.log.Printf("account blocked until %s (observed, not tied to a round)", blk.Until.UTC().Format(time.RFC3339))
+	// The state is handed back either way — it is newer than the caller's, and a
+	// window another host recorded in the meantime is one this decision has to
+	// respect. Only the report of a WRITE is conditional.
+	if recorded != nil {
+		// Like every other writer of this window: the dashboard is where an operator
+		// reads whether the account is available, and the decision that follows this
+		// is usually FireNo — which writes nothing further, leaving the issue claiming
+		// a free account for the whole block while state and `crq status` say
+		// otherwise.
+		s.sync(ctx, updated)
+		if s.log != nil {
+			s.log.Printf("account blocked until %s (observed, not tied to a round)", recorded.Until.UTC().Format(time.RFC3339))
+		}
 	}
 	return &updated, nil
 }

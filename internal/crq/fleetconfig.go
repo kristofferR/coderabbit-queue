@@ -530,7 +530,7 @@ func ValidateFleetSetting(key, value string) error {
 func fleetOwners(value string) ([]string, error) {
 	owners := splitList(value)
 	for _, owner := range owners {
-		if !validNameSegment(owner) {
+		if !validOwnerLogin(owner) {
 			return nil, fmt.Errorf("scope must be owner or organisation logins, got %q", owner)
 		}
 	}

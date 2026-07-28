@@ -398,6 +398,17 @@ func (s *Service) drainEnv(plan DrainInstall) map[string]string {
 }
 
 func drainEnvFor(cfg Config, plan DrainInstall) map[string]string {
+	// Only an operator's OWN list travels. When it was derived from who reviews,
+	// writing the currently derived logins out makes the service read them back
+	// as an explicit choice, frozen: a later fleet `cobots` change that enables
+	// an optional reviewer would then never reach the surfaced set, and a round
+	// could converge without ever showing that bot's findings. Empty is the
+	// environment's "unset" — the same reasoning, and the same encoding, as the
+	// implicit co-reviewer trigger below.
+	feedbackBots := ""
+	if cfg.FeedbackBotsExplicit {
+		feedbackBots = strings.Join(cfg.FeedbackBots, ",")
+	}
 	env := map[string]string{
 		"CRQ_REPOS": strings.Join(sortedRepoList(cfg.AllowRepos), ","),
 		// The denylist travels with the allowlist. Carrying one and not the other
@@ -411,7 +422,7 @@ func drainEnvFor(cfg Config, plan DrainInstall) map[string]string {
 		"CRQ_AUTOREVIEW_SKIP_MARKER": cfg.SkipMarker,
 		"CRQ_BOT":                    cfg.Bot,
 		"CRQ_REQUIRED_BOTS":          strings.Join(cfg.RequiredBots, ","),
-		"CRQ_FEEDBACK_BOTS":          strings.Join(cfg.FeedbackBots, ","),
+		"CRQ_FEEDBACK_BOTS":          feedbackBots,
 		"CRQ_REVIEW_CMD":             cfg.ReviewCommand,
 		"CRQ_RATELIMIT_CMD":          cfg.RateLimitCommand,
 		"CRQ_RL_MARKER":              cfg.RateLimitMarker,
@@ -441,7 +452,15 @@ func drainEnvFor(cfg Config, plan DrainInstall) map[string]string {
 	coNames := make([]string, 0, len(cfg.CoBots))
 	for _, co := range cfg.CoBots {
 		coNames = append(coNames, co.Name)
-		prefix := "CRQ_COBOT_" + strings.ToUpper(co.Name)
+	}
+	written := map[string]bool{}
+	writeCoBot := func(co CoBotConfig) {
+		key := strings.ToUpper(co.Name)
+		if written[key] {
+			return
+		}
+		written[key] = true
+		prefix := "CRQ_COBOT_" + key
 		env[prefix+"_CMD"] = co.Command
 		// The explicitness bit has to survive the install, not just the mode. An
 		// implicit trigger is the registry default for how the bot is REQUIRED,
@@ -459,6 +478,21 @@ func drainEnvFor(cfg Config, plan DrainInstall) map[string]string {
 		env[prefix+"_TRIGGER"] = trigger
 		env[prefix+"_REQUIRED"] = strconv.FormatBool(co.Required)
 		env[prefix+"_GRACE"] = co.SelfHealGrace.String()
+	}
+	// The enabled entries first: they carry the requiredness this host resolved,
+	// and with it the trigger mode that requiredness implies.
+	for _, co := range cfg.CoBots {
+		writeCoBot(co)
+	}
+	// Then the registry-wide fallbacks for the bots this host has switched off.
+	// A command, trigger or grace set for one of those is still the value this
+	// host would drive it with the moment something enables it — a per-repo
+	// reviewer override, or a fleet `cobots` change that names the bot without
+	// naming its per-bot keys. Carrying only the enabled set left the service
+	// running that bot on registry defaults while the installing shell's preview
+	// showed the host's own.
+	for _, co := range cfg.KnownCoBots {
+		writeCoBot(co)
 	}
 	// Explicitly carry an empty set: omitting this key would re-enable every
 	// default co-reviewer when the service starts.

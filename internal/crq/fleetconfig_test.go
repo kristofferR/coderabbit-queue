@@ -91,10 +91,16 @@ func TestFleetRefusesWhatItCannotRead(t *testing.T) {
 	// EachOpenPR as a user or organisation name, so a repository typed here — or
 	// anything else GitHub cannot resolve — fails every pass, on every host at
 	// once, because the value is fleet-wide.
-	for _, owner := range []string{"owner/repo", "own er", "owner?", ".."} {
+	// A login may not begin or end with a hyphen, and holds neither underscores
+	// nor dots — those are repository-name characters, and accepting them here
+	// records a scope no /users/<login> lookup can ever resolve.
+	for _, owner := range []string{"owner/repo", "own er", "owner?", "..", "-team", "team-", "a_team", "a.team"} {
 		if err := svc.SetFleetConfig(ctx, "scope", owner); err == nil {
 			t.Errorf("scope accepted the malformed owner %q", owner)
 		}
+	}
+	if err := svc.SetFleetConfig(ctx, "scope", "acme-2,Some-Org"); err != nil {
+		t.Errorf("a pair of ordinary owner logins was rejected: %v", err)
 	}
 	if err := svc.SetFleetConfig(ctx, "required-bots", ""); err == nil {
 		t.Error("an empty required reviewer set was accepted")

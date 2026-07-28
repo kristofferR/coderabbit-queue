@@ -14,6 +14,12 @@ type InitResult struct {
 	DashboardIssue int    `json:"dashboard_issue"`
 	CalibrationPR  int    `json:"calibration_pr,omitempty"`
 	StateRef       string `json:"state_ref"`
+	// Scope is the owner list in force after the fleet's policy is applied, not
+	// the one this host started with. Joining an existing queue is exactly when
+	// the two differ, and the setup lines this result prints are copied into a
+	// config file verbatim — printing the host's own would install a fallback
+	// that scans the wrong account the moment the fleet key is unset.
+	Scope []string `json:"scope,omitempty"`
 }
 
 func Init(ctx context.Context, cfg Config, gh *ghapi.GitHub, store StateStore) (InitResult, error) {
@@ -57,6 +63,7 @@ func Init(ctx context.Context, cfg Config, gh *ghapi.GitHub, store StateStore) (
 		DashboardIssue: cfg.DashboardIssue,
 		CalibrationPR:  cfg.CalibrationPR,
 		StateRef:       cfg.StateRef,
+		Scope:          cfg.Scope,
 	}, nil
 }
 

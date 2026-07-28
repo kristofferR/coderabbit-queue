@@ -290,7 +290,10 @@ func TestDrainUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 	cfg.SkipMarker = "<!-- custom-skip -->"
 	cfg.Bot = "custom-reviewer[bot]"
 	cfg.RequiredBots = []string{"custom-reviewer[bot]", "cursor[bot]"}
+	// Named by the operator: it reaches past who reviews, which only an explicit
+	// CRQ_FEEDBACK_BOTS can do — and only an explicit one travels.
 	cfg.FeedbackBots = []string{"custom-reviewer[bot]", "cursor[bot]", "observer[bot]"}
+	cfg.FeedbackBotsExplicit = true
 	cfg.ReviewCommand = "@custom review this"
 	cfg.RateLimitCoDegrade = false
 	cfg.MinInterval = time.Hour
@@ -357,6 +360,52 @@ func TestDrainEnvInstallsAnImplicitTriggerAsUnset(t *testing.T) {
 	}
 	if reloaded.Trigger != engine.TriggerAlways {
 		t.Fatalf("required codex reloaded with trigger %q, want always", reloaded.Trigger)
+	}
+}
+
+// A derived surfaced set must install as unset, for the same reason as the
+// implicit trigger: written out as a value, the service reads it back as the
+// operator's own list and stops recomputing it, so a co-reviewer the fleet
+// enables later never has its findings surfaced.
+func TestDrainEnvInstallsDerivedFeedbackBotsAsUnset(t *testing.T) {
+	cfg := firingConfig()
+	cfg.FeedbackBots = []string{cfg.Bot, dialect.CodexBotLogin}
+	cfg.FeedbackBotsExplicit = false
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	env := svc.drainEnv(DrainInstall{})
+	bots, ok := env["CRQ_FEEDBACK_BOTS"]
+	if !ok || bots != "" {
+		t.Fatalf("CRQ_FEEDBACK_BOTS = %q, present=%t; want an explicit empty value", bots, ok)
+	}
+}
+
+// The per-bot settings of a co-reviewer this host has switched OFF still travel.
+// They are what a repository override — or a fleet `cobots` change that names
+// the bot without naming its keys — picks the bot up with, and the installing
+// shell's own preview uses them.
+func TestDrainEnvCarriesDisabledCoBotFallbacks(t *testing.T) {
+	cfg := firingConfig()
+	cfg.CoBots = nil
+	cfg.KnownCoBots = []CoBotConfig{{
+		Name: "bugbot", Login: "cursor[bot]", Command: "bugbot run please",
+		Trigger: engine.TriggerAlways, TriggerExplicit: true,
+		SelfHealGrace: 42 * time.Minute,
+	}}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	env := svc.drainEnv(DrainInstall{})
+	if got := env["CRQ_COBOTS"]; got != "" {
+		t.Fatalf("CRQ_COBOTS = %q, want the enabled set to stay empty", got)
+	}
+	for key, want := range map[string]string{
+		"CRQ_COBOT_BUGBOT_CMD":     "bugbot run please",
+		"CRQ_COBOT_BUGBOT_TRIGGER": "always",
+		"CRQ_COBOT_BUGBOT_GRACE":   "42m0s",
+	} {
+		if got := env[key]; got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
 	}
 }
 
