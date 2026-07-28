@@ -77,6 +77,18 @@ export function OverviewPage({
       setBusy(false);
     }
   };
+  const prioritize = async (repo: string, pr: number) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const { snapshot } = await act("prioritize", { repo, pr });
+      onSnapshot?.(snapshot);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
   // Filtering is client-side on purpose: the whole snapshot is already here,
   // so narrowing it costs nothing and cannot go stale against the tables it is
   // narrowing.
@@ -124,6 +136,11 @@ export function OverviewPage({
           )}
         </div>
       ))}
+      {error && !pending && (
+        <div className="mb-3.5 rounded-[10px] border border-bad-edge bg-bad-bg px-4 py-2.5 text-[13.5px] text-bad">
+          {error}
+        </div>
+      )}
 
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <input
@@ -276,6 +293,7 @@ export function OverviewPage({
                   <Td className="c-host font-mono text-[13px] text-mut">{q.host ?? "—"}</Td>
                   <Td>
                     <RowActions
+                      onPrioritize={() => prioritize(q.repo, q.pr)}
                       onSettings={() => setSettingsFor(q.repo)}
                       onHold={() => setPending({ kind: "hold", repo: q.repo, pr: q.pr })}
                       onCancel={() =>
@@ -538,16 +556,28 @@ function ActivityFeed({ events, now }: { events: EventItem[]; now: number }) {
 
 /** Row actions stay hidden until the row is hovered, as in the mockups. */
 function RowActions({
+  onPrioritize,
   onHold,
   onCancel,
   onSettings,
 }: {
+  onPrioritize?: () => void;
   onHold: () => void;
   onCancel: () => void;
   onSettings?: () => void;
 }) {
   return (
     <span className="flex justify-end gap-2.5 whitespace-nowrap opacity-0 transition-opacity group-hover:opacity-100">
+      {onPrioritize && (
+        <button
+          type="button"
+          onClick={onPrioritize}
+          title="move to top of review and autofix queues"
+          className="text-[12.5px] text-acc hover:underline"
+        >
+          ↑ Top
+        </button>
+      )}
       {onSettings && (
         <button
           type="button"

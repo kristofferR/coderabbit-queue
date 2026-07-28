@@ -3,6 +3,7 @@ import type { Snapshot } from "./api";
 export type ActionName =
   | "hold"
   | "unhold"
+  | "prioritize"
   | "cancel"
   | "autofix"
   | "enroll"

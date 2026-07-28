@@ -253,8 +253,9 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	// its findings grew from 15 to 25. This is the same fix the quota-free
 	// rescue scan already needed, for the same reason.
 	type candidate struct {
-		repo string
-		pull ghapi.Pull
+		repo     string
+		pull     ghapi.Pull
+		priority int64
 	}
 	var candidates []candidate
 	gate := NormalizeRepo(s.cfg.GateRepo)
@@ -317,7 +318,11 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		}
 		open := make(map[int]bool, len(pulls))
 		for _, pull := range pulls {
-			candidates = append(candidates, candidate{repo, pull})
+			var priority int64
+			if round := st.Round(repo, pull.Number); round != nil && round.Seq < 0 {
+				priority = round.Seq
+			}
+			candidates = append(candidates, candidate{repo: repo, pull: pull, priority: priority})
 			open[pull.Number] = true
 		}
 		// This list is the authoritative set of open pull requests for the
@@ -330,11 +335,30 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			s.log.Printf("watch: %s: retiring closed rounds: %v", repo, err)
 		}
 	}
-	if len(candidates) > 0 {
-		s.watchOffset = (s.watchOffset + 1) % len(candidates)
+	// Operator-prioritized PRs always lead the pass, ordered by their queue
+	// sequence. Everyone else keeps the rotating start that prevents a fixed
+	// repository/PR order from starving the tail when dispatch capacity is full.
+	var prioritized, regular []candidate
+	for _, c := range candidates {
+		if c.priority < 0 {
+			prioritized = append(prioritized, c)
+		} else {
+			regular = append(regular, c)
+		}
+	}
+	sort.SliceStable(prioritized, func(i, j int) bool {
+		return prioritized[i].priority < prioritized[j].priority
+	})
+	if len(regular) > 0 {
+		s.watchOffset = (s.watchOffset + 1) % len(regular)
+		rotated := append([]candidate(nil), regular[s.watchOffset:]...)
+		rotated = append(rotated, regular[:s.watchOffset]...)
+		candidates = append(prioritized, rotated...)
+	} else {
+		candidates = prioritized
 	}
 	for i := range candidates {
-		c := candidates[(i+s.watchOffset)%len(candidates)]
+		c := candidates[i]
 		repo, pull := c.repo, c.pull
 		{
 			if err := ctx.Err(); err != nil {

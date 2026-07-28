@@ -20,6 +20,7 @@ import (
 type Actor interface {
 	Hold(ctx context.Context, repo string, pr int, reason string) error
 	Unhold(ctx context.Context, repo string, pr int) error
+	Prioritize(ctx context.Context, repo string, pr int) error
 	Cancel(ctx context.Context, repo string, pr int) error
 	SetAutofix(ctx context.Context, repo string, enabled bool, reason string) error
 	ClearAutofix(ctx context.Context, repo string) error
@@ -146,6 +147,8 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		err = s.needPR(req, func() error { return s.actor.Hold(ctx, req.Repo, req.PR, req.Reason) })
 	case "unhold":
 		err = s.needPR(req, func() error { return s.actor.Unhold(ctx, req.Repo, req.PR) })
+	case "prioritize":
+		err = s.needPR(req, func() error { return s.actor.Prioritize(ctx, req.Repo, req.PR) })
 	case "cancel":
 		err = s.needPR(req, func() error { return s.actor.Cancel(ctx, req.Repo, req.PR) })
 	case "autofix":

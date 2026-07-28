@@ -849,6 +849,22 @@ func run(ctx context.Context, args []string) int {
 		}
 		printJSON(map[string]any{"status": "cancelled", "repo": crq.NormalizeRepo(repo), "pr": pr})
 		return 0
+	case "prioritize":
+		repo, pr, err := target(ctx, service, args[1:], "crq prioritize [<repo> <pr>]")
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		if err := service.Prioritize(ctx, repo, pr); err != nil {
+			fatal(err)
+			return 1
+		}
+		printJSON(map[string]any{"status": "prioritized", "repo": crq.NormalizeRepo(repo), "pr": pr})
+		return 0
 	case "debug":
 		return debug(ctx, service, store, cfg, args[1:])
 	default:
@@ -984,6 +1000,7 @@ USAGE
   crq doctor                       emit JSON readiness report for agents and humans
   crq status [--line]              print the dashboard, or one line for a status bar
   crq cancel [<repo> <pr>]         remove queued/in-flight state for a PR
+  crq prioritize [<repo> <pr>]     move a tracked PR to the top of review and autofix
   crq debug <enqueue|pump|refresh|state>
                                    maintenance tools; not for normal review loops
 
@@ -1597,6 +1614,12 @@ actually knows which one that is.
 `)
 	case "cancel":
 		fmt.Print("crq cancel <repo> <pr>\n\nRemove a PR from queued/in-flight crq state.\n")
+	case "prioritize":
+		fmt.Print(`crq prioritize [<repo> <pr>]
+
+Move a tracked pull request to the top of both the review and autofix queues.
+Inside a pull request checkout, the target can be omitted.
+`)
 	case "debug":
 		fmt.Print(`crq debug <enqueue|pump|refresh|state>
 
@@ -2438,6 +2461,10 @@ func (a prActor) Hold(ctx context.Context, repo string, pr int, reason string) e
 func (a prActor) Unhold(ctx context.Context, repo string, pr int) error {
 	_, err := a.svc.Unhold(ctx, repo, pr)
 	return err
+}
+
+func (a prActor) Prioritize(ctx context.Context, repo string, pr int) error {
+	return a.svc.Prioritize(ctx, repo, pr)
 }
 
 func (a prActor) Cancel(ctx context.Context, repo string, pr int) error {

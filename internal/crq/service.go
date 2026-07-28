@@ -179,6 +179,30 @@ func (s *Service) Unhold(ctx context.Context, repo string, pr int) (HoldResult, 
 	return result, nil
 }
 
+// Prioritize moves a tracked PR ahead of every other round. The queue sequence
+// is shared by autoreview and autofix, so one action accelerates whichever kind
+// of work the PR needs next.
+func (s *Service) Prioritize(ctx context.Context, repo string, pr int) error {
+	repo = NormalizeRepo(repo)
+	if s.cfg.DryRun {
+		return nil
+	}
+	updated, err := s.store.Update(ctx, func(st *State) error {
+		if !st.MoveToFront(repo, pr) {
+			return fmt.Errorf("%s#%d is not currently tracked", repo, pr)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	s.sync(ctx, updated)
+	if s.log != nil {
+		s.log.Printf("%s#%d moved to the top of the queue", repo, pr)
+	}
+	return nil
+}
+
 // triggerPostClaimed reports the two claim states after which Hold cannot
 // promise that no new review command will be posted. The hold and each claim
 // are CAS writes, so checking them in the hold write makes either ordering

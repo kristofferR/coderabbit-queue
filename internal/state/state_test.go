@@ -450,3 +450,28 @@ func TestRequestedRoundsExcludesCoOnly(t *testing.T) {
 		t.Fatalf("a co-only round must keep its anchor and marker, got %+v", r)
 	}
 }
+
+func TestMoveToFrontReordersAndCanBeRepeated(t *testing.T) {
+	st := New()
+	for pr := 1; pr <= 3; pr++ {
+		if _, err := st.NewRound("o/r", pr, "aaaaaaaa1", t0); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if !st.MoveToFront("o/r", 3) {
+		t.Fatal("MoveToFront rejected a tracked round")
+	}
+	if got := st.NextEligible(t0); got == nil || got.PR != 3 || got.Seq != -1 {
+		t.Fatalf("first prioritized round = %+v, want PR 3 at sequence -1", got)
+	}
+	if !st.MoveToFront("o/r", 2) {
+		t.Fatal("second MoveToFront rejected a tracked round")
+	}
+	if got := st.NextEligible(t0); got == nil || got.PR != 2 || got.Seq != -2 {
+		t.Fatalf("second prioritized round = %+v, want PR 2 at sequence -2", got)
+	}
+	if st.MoveToFront("o/r", 99) {
+		t.Fatal("MoveToFront accepted an untracked round")
+	}
+}

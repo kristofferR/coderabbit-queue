@@ -590,6 +590,37 @@ func TestWatchPassRotatesSoNoPRIsStarved(t *testing.T) {
 	}
 }
 
+func TestWatchPassVisitsPrioritizedPRBeforeFairnessRotation(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/r": true}
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	for _, pr := range []int{1, 2, 3, 4} {
+		var p ghapi.Pull
+		p.State = "open"
+		p.Number = pr
+		p.Head.SHA = "aaaaaaaa1"
+		gh.pulls[fakeKey("o/r", pr)] = p
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, "o/r", 4, "aaaaaaaa1", PhaseQueued, time.Now().UTC(), 0)
+	if err := svc.Prioritize(context.Background(), "o/r", 4); err != nil {
+		t.Fatal(err)
+	}
+
+	var order []int
+	if err := svc.watchPass(context.Background(), WatchOptions{}, newDispatchPool(4), func(e WatchEvent) error {
+		order = append(order, e.PR)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(order) == 0 || order[0] != 4 {
+		t.Fatalf("visit order = %v, want prioritized PR 4 first", order)
+	}
+}
+
 // A session that commits its fixes but does not push them leaves a clean working
 // tree, and deleting that worktree destroys the only copy of the fix.
 func TestDispatchKeepsACommittedButUnpushedFix(t *testing.T) {

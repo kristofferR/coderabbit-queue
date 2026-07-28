@@ -1058,6 +1058,28 @@ func (s *State) PutRound(r Round) {
 	s.Rounds[Key(r.Repo, r.PR)] = r
 }
 
+// MoveToFront gives the current round the lowest sequence in the state.
+//
+// Normal rounds have positive sequences. Explicitly prioritized rounds use
+// negative ones, which keeps the existing queue contract understood by older
+// binaries while also letting autofix distinguish operator priority from
+// ordinary FIFO order.
+func (s *State) MoveToFront(repo string, pr int) bool {
+	r := s.Round(repo, pr)
+	if r == nil {
+		return false
+	}
+	min := int64(0)
+	for _, other := range s.Rounds {
+		if other.Seq < min {
+			min = other.Seq
+		}
+	}
+	r.Seq = min - 1
+	s.PutRound(*r)
+	return true
+}
+
 // NewRound begins a round for a head with no current round. It refuses to
 // clobber an existing round — supersede via EndRound first — so "two rounds
 // for one PR" cannot happen by accident.
