@@ -105,7 +105,7 @@ func fixSessionArgv(agent, prompt string, extra []string, model, effort string) 
 		// exec is codex's non-interactive form; the prompt is its final
 		// positional argument. --skip-git-repo-check because the session runs
 		// in a detached worktree crq created.
-		argv = append(argv, "exec", "--skip-git-repo-check",
+		argv = append(argv, "exec", "--json", "--skip-git-repo-check",
 			"--dangerously-bypass-approvals-and-sandbox")
 		if model != "" {
 			argv = append(argv, "--model", model)

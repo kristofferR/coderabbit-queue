@@ -207,6 +207,11 @@ func (s *Service) ClearEnrollment(ctx context.Context, repo string) (EnrollmentV
 		// they do when the switch is thrown explicitly — resolved from the state
 		// the write lands on, not from the one before the clear.
 		if !s.enrollmentOf(*st, repo).Enabled {
+			for _, round := range st.Rounds {
+				if NormalizeRepo(round.Repo) == repo && triggerPostClaimed(&round) {
+					return errors.New("a review trigger is already being posted; wait for it to finish before turning the repository off")
+				}
+			}
 			s.abandonPendingRounds(st, repo)
 		}
 		return nil

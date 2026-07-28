@@ -149,9 +149,9 @@ func (s *GitStateStore) Load(ctx context.Context) (State, Revision, error) {
 	if err != nil {
 		return State{}, Revision{}, err
 	}
-	// Peek at the schema version before a full decode. V3 is the one supported
-	// migration: v4 intentionally fences v3 pumping clients from administrative
-	// holds, while preserving every live v3 round during the rollout.
+	// Peek at the schema version before a full decode. V4 is the one supported
+	// migration: v5 intentionally fences v4 writers that would erase dispatch
+	// scheduling fields, while preserving every live v4 round during rollout.
 	var probe struct {
 		Version int `json:"v"`
 	}

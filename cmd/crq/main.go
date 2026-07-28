@@ -2639,6 +2639,7 @@ func runFleet(ctx context.Context, service *crq.Service, args []string) int {
 	}
 	var change crq.FleetChange
 	dryRun := false
+	hasMutation := false
 	if action == "env" {
 		// `crq fleet env` reads or writes ONE setting by its environment name,
 		// which is how the settings that have no flag of their own are reached.
@@ -2696,24 +2697,28 @@ func runFleet(ctx context.Context, service *crq.Service, args []string) int {
 		case "--dry-run":
 			dryRun = true
 		case "--bots":
+			hasMutation = true
 			v, ok := value()
 			if !ok {
 				return 1
 			}
 			change.CoBots = splitList(&v)
 		case "--required":
+			hasMutation = true
 			v, ok := value()
 			if !ok {
 				return 1
 			}
 			change.Required = splitList(&v)
 		case "--min-interval":
+			hasMutation = true
 			v, ok := value()
 			if !ok {
 				return 1
 			}
 			change.MinInterval = &v
 		case "--weekly-limit":
+			hasMutation = true
 			v, ok := value()
 			if !ok {
 				return 1
@@ -2725,6 +2730,7 @@ func runFleet(ctx context.Context, service *crq.Service, args []string) int {
 			}
 			change.WeeklyLimit = &n
 		case "--autofix-default":
+			hasMutation = true
 			v, ok := value()
 			if !ok {
 				return 1
@@ -2739,6 +2745,10 @@ func runFleet(ctx context.Context, service *crq.Service, args []string) int {
 			fatal(fmt.Errorf("unknown flag %s (see crq help fleet)", arg))
 			return 1
 		}
+	}
+	if action != "set" && hasMutation {
+		fatal(fmt.Errorf("fleet mutation flags are valid only with `crq fleet set`"))
+		return 1
 	}
 
 	switch action {
@@ -2847,6 +2857,7 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 	var repo string
 	var change crq.SolverChange
 	fleet := false
+	hasMutation := false
 	for i := 0; i < len(rest); i++ {
 		arg := rest[i]
 		name, inline, hasInline := strings.Cut(arg, "=")
@@ -2865,6 +2876,7 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 		case "--fleet":
 			fleet = true
 		case "--models", "--model", "--effort", "--prompt":
+			hasMutation = true
 			v, ok := value()
 			if !ok {
 				return 1
@@ -2880,6 +2892,7 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 				change.Prompt = &v
 			}
 		case "--attempts":
+			hasMutation = true
 			v, ok := value()
 			if !ok {
 				return 1
@@ -2891,6 +2904,7 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 			}
 			change.MaxAttempts = &n
 		case "--forks":
+			hasMutation = true
 			v, ok := value()
 			if !ok {
 				return 1
@@ -2902,12 +2916,14 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 			}
 			change.Forks = &on
 		case "--skip-authors":
+			hasMutation = true
 			v, ok := value()
 			if !ok {
 				return 1
 			}
 			change.SkipAuthors = splitList(&v)
 		case "--inherit":
+			hasMutation = true
 			// Its own instruction, not a value some other flag could carry:
 			// --forks off is a fork policy and --skip-authors "" is "skip
 			// nobody", so neither can also mean "follow the layer beneath".
@@ -2944,6 +2960,10 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 	}
 	if err := validateSolverTarget(repo, fleet); err != nil {
 		fatal(err)
+		return 1
+	}
+	if action != "set" && hasMutation {
+		fatal(errors.New("solver mutation flags are valid only with `crq solver set`"))
 		return 1
 	}
 	if action == "clear" {

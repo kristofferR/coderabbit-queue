@@ -355,6 +355,40 @@ func TestClearingEnrollmentIntoAnExcludingEnvDropsTheQueuedRounds(t *testing.T) 
 	}
 }
 
+func TestClearingEnrollmentIntoAnExcludingEnvRefusesAClaimedTrigger(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/listed": true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if _, err := svc.SetEnrollment(ctx, "o/adopted", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		round, err := st.NewRound("o/adopted", 3, "abcdef123", time.Now())
+		if err != nil {
+			return err
+		}
+		round.Phase = PhaseReserved
+		st.PutRound(*round)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.ClearEnrollment(ctx, "o/adopted"); err == nil {
+		t.Fatal("clear succeeded while its review trigger was being posted")
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if enrollment, ok := st.Enrollment("o/adopted"); !ok || !enrollment.Enabled {
+		t.Fatalf("rejected clear changed enrollment: %+v (present %v)", enrollment, ok)
+	}
+}
+
 // The converse: clearing a record for a repository this host's env DOES list
 // leaves it enrolled, so its queued work must survive untouched.
 func TestClearingEnrollmentBackIntoEnvKeepsTheQueuedRounds(t *testing.T) {

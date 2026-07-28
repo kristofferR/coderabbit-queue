@@ -991,6 +991,59 @@ func TestFeedbackSkipsReactionsForTidiedCommand(t *testing.T) {
 	}
 }
 
+func TestTidyUsesFleetResolvedConfiguration(t *testing.T) {
+	ctx := context.Background()
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost", "CRQ_COBOTS": "",
+		"CRQ_REVIEW_CMD": "@host review", "CRQ_TIDY": "0",
+	})
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+	repo, pr, head := "o/r", 24, "cccccccc33333333"
+	const commandBody = "@fleet review"
+
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = head
+	gh.pulls[fakeKey(repo, pr)] = pull
+	gh.commits[head] = commitAt(now.Add(-10 * time.Minute))
+	command := ghapi.IssueComment{
+		ID: 200, Body: commandBody,
+		CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now.Add(-2 * time.Hour),
+	}
+	command.User.Login = "kristofferR"
+	gh.comments[fakeKey(repo, pr)] = []ghapi.IssueComment{command}
+	review := ghapi.Review{
+		ID: 201, CommitID: head, State: "COMMENTED",
+		SubmittedAt: now.Add(-time.Minute), Body: "review complete",
+	}
+	review.User.Login = cfg.Bot
+	gh.reviews[fakeKey(repo, pr)] = []ghapi.Review{review}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	st, err := store.Update(ctx, func(st *State) error {
+		st.Fleet = fleetEnvSet(st.Fleet, "CRQ_TIDY", "1", false)
+		st.Fleet = fleetEnvSet(st.Fleet, "CRQ_REVIEW_CMD", commandBody, false)
+		return completedRound(st, repo, pr, now, func(r *Round) error {
+			if err := r.Fire(command.ID, command.CreatedAt); err != nil {
+				return err
+			}
+			r.RecordPosted(cfg.Bot, command.ID, command.CreatedAt)
+			return nil
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.tidyProgressed(ctx, st, repo, pr); err != nil {
+		t.Fatal(err)
+	}
+	if len(gh.deleted) != 1 || gh.deleted[0] != command.ID {
+		t.Fatalf("deleted = %v, want the command recognized under fleet settings", gh.deleted)
+	}
+}
+
 // completedRound builds a round that fired (via fire) and then completed, which
 // is the "has progressed" precondition every tidy candidate needs.
 func completedRound(st *State, repo string, pr int, now time.Time, fire func(*Round) error) error {

@@ -480,7 +480,7 @@ func TestFixSessionArgvPerAgent(t *testing.T) {
 
 	codex := fixSessionArgv("/usr/bin/codex", prompt, []string{"--foo"}, "", "")
 	joined = strings.Join(codex, " ")
-	for _, want := range []string{"exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--foo", prompt} {
+	for _, want := range []string{"exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--foo", prompt} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("codex argv %q missing %q", joined, want)
 		}

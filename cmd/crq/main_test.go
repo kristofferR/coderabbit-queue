@@ -170,6 +170,33 @@ func TestSolverTargetIsUnambiguous(t *testing.T) {
 	}
 }
 
+func TestMutationFlagsRequireSetAction(t *testing.T) {
+	ctx := t.Context()
+	for _, tc := range []struct {
+		name string
+		run  func() int
+	}{
+		{name: "fleet show", run: func() int {
+			return runFleet(ctx, nil, []string{"--bots", "codex"})
+		}},
+		{name: "fleet clear", run: func() int {
+			return runFleet(ctx, nil, []string{"clear", "--weekly-limit", "60"})
+		}},
+		{name: "solver show", run: func() int {
+			return runSolver(ctx, nil, []string{"owner/repo", "--forks", "on"})
+		}},
+		{name: "solver clear", run: func() int {
+			return runSolver(ctx, nil, []string{"clear", "owner/repo", "--attempts", "2"})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if code := tc.run(); code == 0 {
+				t.Fatal("mutation flag outside set action succeeded")
+			}
+		})
+	}
+}
+
 func TestSolverAgentHostMarksHistoricalProbesStale(t *testing.T) {
 	const stamp = "2026-07-28T10:00:00Z"
 	now, err := time.Parse(time.RFC3339, stamp)
