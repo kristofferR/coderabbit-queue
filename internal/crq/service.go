@@ -1218,7 +1218,7 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 			// The rolling fair-use log. Written in the same CAS as the fire it
 			// records, so a count can never include a fire that did not land.
 			st.NoteFire(firedAt)
-			dl := firedAt.Add(s.cfg.FeedbackWaitTimeout)
+			dl := firedAt.Add(s.feedbackWait(*st))
 			r.WaitDeadline = &dl
 			st.Warn = ""
 			st.FireSlot = &FireSlot{Key: key, Token: token, Since: now}
@@ -1474,7 +1474,7 @@ func (s *Service) fireCoOnly(ctx context.Context, cfg Config, round Round, login
 				return err
 			}
 			r.Token = ""
-			dl := firedAt.Add(s.cfg.FeedbackWaitTimeout)
+			dl := firedAt.Add(s.feedbackWait(*st))
 			r.WaitDeadline = &dl
 			r.CoOnly = true // no primary review was requested for this round
 			st.Warn = ""
@@ -1590,7 +1590,7 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 		if !sameRound(r, round) || !firable(st, r, now) {
 			return ErrNoChange
 		}
-		deadline := now.Add(s.cfg.FeedbackWaitTimeout)
+		deadline := now.Add(s.feedbackWait(*st))
 		if err := r.AwaitCoReview(deadline, anchor); err != nil {
 			return err
 		}
@@ -1652,7 +1652,7 @@ func (s *Service) recordFire(ctx context.Context, cfg Config, round Round, token
 			// The rolling fair-use log. Written in the same CAS as the fire it
 			// records, so a count can never include a fire that did not land.
 			st.NoteFire(firedAt)
-			dl := firedAt.Add(s.cfg.FeedbackWaitTimeout)
+			dl := firedAt.Add(s.feedbackWait(*st))
 			r.WaitDeadline = &dl
 			st.Warn = ""
 			st.PutRound(*r)

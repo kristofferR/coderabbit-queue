@@ -68,6 +68,17 @@ type Snapshot struct {
 	Settings SettingsView `json:"settings"`
 	// Events is live-only, since this server started. See events.go.
 	Events []Event `json:"events"`
+	// Stale says this snapshot is the last one that loaded and the state ref has
+	// not been readable since. Everything else here is a past that may already
+	// have moved, and a dashboard presenting it as live is the one failure a
+	// live dashboard must not have.
+	Stale *Staleness `json:"stale,omitempty"`
+}
+
+// Staleness is why the snapshot stopped being current, and since when.
+type Staleness struct {
+	Error string    `json:"error"`
+	Since time.Time `json:"since"`
 }
 
 // RepoRow is one repository as the Repos page lists it.

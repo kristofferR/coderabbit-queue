@@ -76,3 +76,41 @@ func TestStaleRoleSeesPastAFreshRecord(t *testing.T) {
 		t.Error("autofix has not been heard from in a TTL and the record still names it")
 	}
 }
+
+// Tool probes describe the PATH of the service that took them, and those PATHs
+// differ: the autofix unit adds the selected agent's directory and serve does
+// not. Replacing the list with whichever service wrote last made the dashboard
+// alternate between "the fix agent is here" and "it is missing" while the
+// service that actually runs sessions never changed.
+func TestToolReportsStayWithTheRoleThatProbedThem(t *testing.T) {
+	base := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	st := New()
+
+	st.SetHostReport(HostReport{Host: "mac", Roles: []string{"autofix"}, Tools: []ToolReport{
+		{Name: "git", Path: "/usr/bin/git"},
+		{Name: "claude", Path: "/opt/agents/claude"},
+	}}, base)
+	// serve runs on the same machine with a plainer PATH and cannot see the agent.
+	st.SetHostReport(HostReport{Host: "mac", Roles: []string{"serve"}, Tools: []ToolReport{
+		{Name: "git", Path: "/usr/bin/git"},
+		{Name: "claude"},
+	}}, base.Add(time.Minute))
+
+	agent, ok := st.ToolOn("mac", "claude")
+	if !ok || !agent.Found() || agent.Path != "/opt/agents/claude" {
+		t.Errorf("claude = %+v, want the answer from the role that runs fix sessions", agent)
+	}
+	if probed := st.HostReports["mac"].RoleTools["serve"]; len(probed) != 2 || probed[1].Found() {
+		t.Errorf("serve's own probe = %+v, want it kept as reported", probed)
+	}
+
+	// Once autofix stops reporting there is nobody left to outrank serve, so its
+	// answer is the host's answer.
+	st.SetHostReport(HostReport{Host: "mac", Roles: []string{"serve"}, Tools: []ToolReport{
+		{Name: "git", Path: "/usr/bin/git"},
+		{Name: "claude"},
+	}}, base.Add(HostReportTTL+time.Minute))
+	if agent, _ := st.ToolOn("mac", "claude"); agent.Found() {
+		t.Errorf("claude = %+v, want serve's answer once autofix has aged out", agent)
+	}
+}

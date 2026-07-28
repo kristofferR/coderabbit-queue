@@ -28,7 +28,21 @@ const FireLogMax = 1000
 // reviewed is the question no other record can answer, because rounds are
 // superseded and the archive is a 50-entry ring that a busy day evicts in hours.
 func (s *State) NoteFire(t time.Time) {
-	s.Account.Fires = append(s.Account.Fires, t.UTC())
+	at := t.UTC()
+	if s.Account.FiresFrom == nil {
+		// The first fire this log ever saw starts its coverage. A log written by
+		// a binary that predates this field starts at its oldest entry, which is
+		// the most it can honestly claim.
+		from := at
+		if len(s.Account.Fires) > 0 && s.Account.Fires[0].Before(from) {
+			from = s.Account.Fires[0]
+		}
+		s.Account.FiresFrom = &from
+	} else if at.Before(*s.Account.FiresFrom) {
+		from := at
+		s.Account.FiresFrom = &from
+	}
+	s.Account.Fires = append(s.Account.Fires, at)
 	s.trimFireLog()
 }
 
@@ -56,6 +70,13 @@ func (s *State) trimFireLog() {
 	}
 	if len(keep) > FireLogMax {
 		keep = keep[len(keep)-FireLogMax:]
+		// The window drops only entries older than any rolling week asks about,
+		// so it costs no coverage. The CAP does: it discards by count, and the
+		// entries it throws away may still be inside the week. Coverage really
+		// does restart at the oldest one left.
+		if from := keep[0]; s.Account.FiresFrom == nil || s.Account.FiresFrom.Before(from) {
+			s.Account.FiresFrom = &from
+		}
 	}
 	s.Account.Fires = keep
 }
@@ -77,10 +98,19 @@ func (s *State) WeeklyFires(now time.Time) int {
 	return s.FiresSince(now.Add(-7 * 24 * time.Hour))
 }
 
-// FireLogSince is when the log starts, which is what makes its count honest: a
-// count over three days of history is not a weekly count, and a caller that
-// cannot tell the difference will read a fresh log as a quiet week.
+// FireLogSince is when the log's coverage starts, which is what makes its count
+// honest: a count over three days of history is not a weekly count, and a
+// caller that cannot tell the difference will read a fresh log as a quiet week.
+//
+// The oldest RETAINED fire cannot answer this. On a quiet fleet — one fire on
+// day 0, the next on day 20 — recording the second trims the first, and reading
+// the start off the survivors turned a period the log had watched all along
+// back into a floor for another week.
 func (s *State) FireLogSince() *time.Time {
+	if s.Account.FiresFrom != nil {
+		from := *s.Account.FiresFrom
+		return &from
+	}
 	if len(s.Account.Fires) == 0 {
 		return nil
 	}

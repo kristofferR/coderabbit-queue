@@ -35,6 +35,11 @@ type Overview struct {
 	Held      []HeldRow   `json:"held"`
 	Autofix   AutofixView `json:"autofix"`
 	Finished  []DoneRow   `json:"finished"`
+
+	// Stale mirrors Snapshot.Stale, so a caller reading only the overview can
+	// still tell a live queue from the last one that loaded. Set by the handler,
+	// not by BuildOverview: it describes the READ, not the state.
+	Stale *Staleness `json:"stale,omitempty"`
 }
 
 // Headline is the one-line status, following the same precedence ladder the

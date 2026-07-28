@@ -84,9 +84,6 @@ type WatchEvent struct {
 // session for one PR, and bounded per head, so a fix that keeps not working
 // stops instead of spending a review round each time.
 func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchEvent) error) error {
-	if opts.Interval <= 0 {
-		opts.Interval = s.cfg.WatchInterval
-	}
 	if opts.MaxAttempts <= 0 {
 		opts.MaxAttempts = s.cfg.DispatchMaxAttempts
 	}
@@ -147,7 +144,14 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 	defer pool.wait()
 	defer endSessions()
 	for {
+		// Resolved per pass, not once at startup: the interval is fleet-settable
+		// from the dashboard, and a watcher that read it when the service booted
+		// reported the new cadence while still running on the old one until
+		// somebody restarted it. This run's own --interval still wins.
 		wait := opts.Interval
+		if wait <= 0 {
+			wait = s.watchInterval(ctx)
+		}
 		if err := s.watchPass(sessionCtx, opts, pool, emit); err != nil {
 			reset, throttled := ghapi.ThrottleWait(err)
 			if !throttled {
@@ -178,6 +182,18 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 			return err
 		}
 	}
+}
+
+// watchInterval is the pass cadence with the fleet's recorded default applied,
+// falling back to this host's env when the ref cannot be read — a watcher must
+// not stop pacing itself because one load failed.
+func (s *Service) watchInterval(ctx context.Context) time.Duration {
+	if st, _, err := s.store.Load(ctx); err == nil {
+		if d := s.cfg.WithFleet(st.Fleet).WatchInterval; d > 0 {
+			return d
+		}
+	}
+	return s.cfg.WatchInterval
 }
 
 func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispatchPool, emit func(WatchEvent) error) error {
@@ -326,7 +342,11 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			// the shared quota. Next is a MUTATING oracle — it enqueues and can
 			// fire — so the marker has to be honoured before calling it, not
 			// after.
-			if s.cfg.SkipsReview(pull.Body) {
+			//
+			// Read through the pass's state, the way autoReviewPass reads it: the
+			// marker is fleet-settable, and a watcher answering from its startup
+			// env fired a PR carrying the marker the fleet had just configured.
+			if s.cfgFor(st, repo).SkipsReview(pull.Body) {
 				event := WatchEvent{
 					Repo: repo, PR: pull.Number,
 					Action: "skipped", Reason: "fleet auto-review skip marker present",

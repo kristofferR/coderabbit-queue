@@ -41,6 +41,12 @@ type Options struct {
 	// WeeklyLimit is the vendor's weekly fair-use threshold. 0 counts without
 	// forecasting.
 	WeeklyLimit int
+	// PacingFor resolves the three settings above against the state being
+	// rendered, because all three are fleet-settable: taken from startup, a
+	// saved pacing or fair-use change reported itself on the settings page while
+	// the queue cards and the fair-use card went on using the old numbers until
+	// somebody restarted the server. Nil keeps the startup values.
+	PacingFor func(st state.State) Pacing
 	// Poll is how often the state ref is re-read. There is no webhook for a git
 	// ref, so this is a poll by necessity; a push only happens when Rev moves.
 	Poll time.Duration
@@ -81,6 +87,23 @@ type Options struct {
 	// refuse — useful when pointing a dashboard at someone else's fleet.
 	Actor    Actor
 	ReadOnly bool
+}
+
+// Pacing is the fire-pacing configuration the overview renders, resolved
+// against one state snapshot.
+type Pacing struct {
+	MinInterval time.Duration
+	Inflight    time.Duration
+	WeeklyLimit int
+}
+
+// pacing resolves the pacing settings for st, falling back to the values this
+// server was started with.
+func (s *Server) pacing(st state.State) Pacing {
+	if s.opts.PacingFor == nil {
+		return Pacing{MinInterval: s.opts.MinInterval, Inflight: s.opts.Inflight, WeeklyLimit: s.opts.WeeklyLimit}
+	}
+	return s.opts.PacingFor(st)
 }
 
 // Server holds the latest snapshot and fans it out to connected browsers.
@@ -189,9 +212,7 @@ func (s *Server) refresh(ctx context.Context) {
 
 	st, _, err := s.loader.Load(ctx)
 	if err != nil {
-		s.mu.Lock()
-		s.loadErr = err
-		s.mu.Unlock()
+		s.markStale(err)
 		return
 	}
 	now := s.opts.Now()
@@ -212,7 +233,8 @@ func (s *Server) refresh(ctx context.Context) {
 		}
 		return s.opts.SolverFor(st, repo).MaxAttempts
 	}
-	ov := BuildOverview(st, now, s.opts.MinInterval, s.opts.Inflight, botsFor, s.opts.WeeklyLimit, maxAttempts)
+	pace := s.pacing(st)
+	ov := BuildOverview(st, now, pace.MinInterval, pace.Inflight, botsFor, pace.WeeklyLimit, maxAttempts)
 	// Read alongside the snapshot rather than cached: it is a state read the
 	// server has already paid for, and a settings page showing a stale default
 	// is how two people overwrite each other.
@@ -228,7 +250,7 @@ func (s *Server) refresh(ctx context.Context) {
 	snap.Events = s.events.list()
 
 	s.mu.Lock()
-	changed := ov.Rev != s.lastRev
+	changed := ov.Rev != s.lastRev || s.last.Stale != nil
 	s.last, s.lastRev, s.loadErr, s.lastState = snap, ov.Rev, nil, st
 	subs := make([]chan []byte, 0, len(s.subs))
 	for ch := range s.subs {
@@ -241,6 +263,44 @@ func (s *Server) refresh(ctx context.Context) {
 		// the clock moved.
 		return
 	}
+	broadcast(snap, subs)
+}
+
+// markStale records that the state ref could not be read and tells everyone
+// looking at the last good snapshot.
+//
+// Storing the error alone was not enough. The snapshot handlers only refuse
+// when nothing has ever loaded, so once one load had succeeded a browser — and
+// an action's post-write refresh — kept getting HTTP 200 and a state that had
+// stopped being current, presented exactly as a live one. Nothing said the
+// dashboard had lost the ref.
+func (s *Server) markStale(err error) {
+	s.mu.Lock()
+	s.loadErr = err
+	if s.last.Overview.Rev == 0 {
+		// Nothing has ever loaded: the handlers already refuse outright, and
+		// there is no snapshot to mark.
+		s.mu.Unlock()
+		return
+	}
+	if s.last.Stale == nil {
+		// Since is when the ref was LOST, not when the latest retry failed:
+		// re-stamping it every poll would show an outage that is always five
+		// seconds old.
+		s.last.Stale = &Staleness{Error: err.Error(), Since: s.opts.Now()}
+	} else {
+		s.last.Stale.Error = err.Error()
+	}
+	snap := s.last
+	subs := make([]chan []byte, 0, len(s.subs))
+	for ch := range s.subs {
+		subs = append(subs, ch)
+	}
+	s.mu.Unlock()
+	broadcast(snap, subs)
+}
+
+func broadcast(snap Snapshot, subs []chan []byte) {
 	payload, err := json.Marshal(snap)
 	if err != nil {
 		return
@@ -274,7 +334,9 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, snap.Overview)
+	ov := snap.Overview
+	ov.Stale = snap.Stale
+	writeJSON(w, http.StatusOK, ov)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

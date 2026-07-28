@@ -51,10 +51,18 @@ export function App() {
         <span className="ml-auto flex items-center gap-2 text-xs text-mut">
           <span
             className={`size-2 rounded-full ${
-              live === "live" ? "bg-ok" : live === "connecting" ? "bg-faint" : "bg-warn-fg"
+              snap?.stale
+                ? "bg-bad"
+                : live === "live"
+                  ? "bg-ok"
+                  : live === "connecting"
+                    ? "bg-faint"
+                    : "bg-warn-fg"
             }`}
           />
-          {live === "live" ? (
+          {live === "live" && snap?.stale ? (
+            <>stale · rev {snap.overview.rev}</>
+          ) : live === "live" ? (
             <>live · rev {snap?.overview.rev ?? "—"}</>
           ) : live === "connecting" ? (
             "connecting…"
@@ -63,6 +71,14 @@ export function App() {
           )}
         </span>
       </header>
+
+      {snap?.stale && (
+        <div className="border-b border-bad-edge bg-bad-bg px-6 py-2 text-[12.5px] text-bad">
+          <span className="font-mono">crq serve</span> has not been able to read the state ref since{" "}
+          {ago(snap.stale.since, now)} — this page is the last state it loaded, and an action taken
+          here may already be acting on a queue that has moved. ({snap.stale.error})
+        </div>
+      )}
 
       {live === "reconnecting" && snap && (
         <div className="border-b border-warn-edge bg-warn-bg px-6 py-2 text-[12.5px] text-warn">

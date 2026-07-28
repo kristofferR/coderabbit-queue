@@ -417,6 +417,13 @@ export type Snapshot = {
   setup: SetupView;
   settings: SettingsView;
   events: Event[];
+  /**
+   * Set when the server is connected but can no longer read the state ref.
+   * Distinct from a lost EventSource: the stream is fine, the state behind it
+   * is not, and a page that renders this as live is the one failure a live
+   * dashboard must not have.
+   */
+  stale?: { error: string; since: string };
 };
 
 /** Connection state, so the UI can say "stale" instead of quietly lying. */

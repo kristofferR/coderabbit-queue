@@ -31,6 +31,7 @@ var (
 	fleetFields         = jsonFieldNames(reflect.TypeOf(FleetDefaults{}))
 	solverFields        = jsonFieldNames(reflect.TypeOf(SolverSettings{}))
 	repoReviewersFields = jsonFieldNames(reflect.TypeOf(RepoReviewers{}))
+	enrollmentFields    = jsonFieldNames(reflect.TypeOf(RepoEnrollment{}))
 	accountFields       = jsonFieldNames(reflect.TypeOf(AccountQuota{}))
 	coBotFields         = jsonFieldNames(reflect.TypeOf(CoBotRound{}))
 	dispatchFields      = jsonFieldNames(reflect.TypeOf(DispatchClaim{}))
@@ -177,6 +178,31 @@ func (r *RepoReviewers) UnmarshalJSON(raw []byte) error {
 func (r RepoReviewers) MarshalJSON() ([]byte, error) {
 	type plain RepoReviewers
 	return mergeUnknown(plain(r), r.unknown)
+}
+
+// UnmarshalJSON decodes one repository's enrollment record and remembers
+// anything it did not recognise. Same nesting argument as the reviewer
+// override: "enrolled" is a member every binary that has the map recognises,
+// so only the record itself can carry a member a newer one added inside it.
+func (e *RepoEnrollment) UnmarshalJSON(raw []byte) error {
+	type plain RepoEnrollment
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknown(raw, enrollmentFields)
+	if err != nil {
+		return err
+	}
+	*e = RepoEnrollment(decoded)
+	e.unknown = unknown
+	return nil
+}
+
+// MarshalJSON writes an enrollment record back with the members it did not recognise intact.
+func (e RepoEnrollment) MarshalJSON() ([]byte, error) {
+	type plain RepoEnrollment
+	return mergeUnknown(plain(e), e.unknown)
 }
 
 // The same nesting argument applies to records that have been recognised for

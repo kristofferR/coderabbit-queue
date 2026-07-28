@@ -702,7 +702,11 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			if settledAt.IsZero() {
 				settledAt = s.clock()
 			}
-			if s.cfg.SettleWindow <= 0 || s.clock().Sub(settledAt) >= s.cfg.SettleWindow {
+			// report.config, not s.cfg: every setting the wait is paced by is
+			// fleet-settable, and this loop re-resolves it against the state ref
+			// on each poll. Reading the startup env would keep an in-flight wait
+			// running on a cadence the dashboard has already replaced.
+			if report.config.SettleWindow <= 0 || s.clock().Sub(settledAt) >= report.config.SettleWindow {
 				if report.Converged {
 					s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending, &report.config)
 				}
@@ -748,7 +752,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		// exits promptly, and if Codex never answers the round degrades
 		// gracefully back to riding out the window.)
 		if blockedUntil != nil && !report.CodeRabbitDeferred {
-			extended := extendDeadlineForBlock(deadline, blockedUntil, now, s.cfg.FeedbackWaitTimeout)
+			extended := extendDeadlineForBlock(deadline, blockedUntil, now, report.config.FeedbackWaitTimeout)
 			if extended.After(deadline) {
 				deadline = extended
 				s.pushWaitDeadline(ctx, repo, pr, head, deadline)
@@ -770,13 +774,13 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			return report, 2, nil
 		}
 		if s.log != nil && time.Since(lastLog) >= 30*time.Second {
-			activeElapsed := feedbackWaitElapsed(deadline, s.cfg.FeedbackWaitTimeout, now)
+			activeElapsed := feedbackWaitElapsed(deadline, report.config.FeedbackWaitTimeout, now)
 			if blockedUntil != nil && report.CodeRabbitDeferred {
-				s.log.Printf("%s#%d degraded to codex-only — coderabbit rate-limited until %s; waiting for codex on %s (%s / %s)", repo, pr, blockedUntil.UTC().Format(time.RFC3339), report.Head, activeElapsed.Round(time.Second), s.cfg.FeedbackWaitTimeout)
+				s.log.Printf("%s#%d degraded to codex-only — coderabbit rate-limited until %s; waiting for codex on %s (%s / %s)", repo, pr, blockedUntil.UTC().Format(time.RFC3339), report.Head, activeElapsed.Round(time.Second), report.config.FeedbackWaitTimeout)
 			} else if blockedUntil != nil {
-				s.log.Printf("%s#%d queued — account blocked until %s; waiting, not counting it against the %s review wait (%s active)", repo, pr, blockedUntil.UTC().Format(time.RFC3339), s.cfg.FeedbackWaitTimeout, activeElapsed.Round(time.Second))
+				s.log.Printf("%s#%d queued — account blocked until %s; waiting, not counting it against the %s review wait (%s active)", repo, pr, blockedUntil.UTC().Format(time.RFC3339), report.config.FeedbackWaitTimeout, activeElapsed.Round(time.Second))
 			} else {
-				s.log.Printf("%s#%d waiting for review feedback on %s — reviewed %s (%s / %s)", repo, pr, report.Head, reviewedSummary(report.ReviewedBy), activeElapsed.Round(time.Second), s.cfg.FeedbackWaitTimeout)
+				s.log.Printf("%s#%d waiting for review feedback on %s — reviewed %s (%s / %s)", repo, pr, report.Head, reviewedSummary(report.ReviewedBy), activeElapsed.Round(time.Second), report.config.FeedbackWaitTimeout)
 			}
 			lastLog = time.Now()
 		}
@@ -813,7 +817,7 @@ func (s *Service) ensureWaitDeadline(ctx context.Context, repo string, pr int, h
 		if r.FiredAt != nil {
 			start = r.FiredAt.UTC()
 		}
-		dl := start.Add(s.cfg.FeedbackWaitTimeout)
+		dl := start.Add(s.feedbackWait(*st))
 		r.WaitDeadline = &dl
 		st.PutRound(*r)
 		changed = true
@@ -830,7 +834,7 @@ func (s *Service) ensureWaitDeadline(ctx context.Context, repo string, pr int, h
 	}
 	// The round is no longer a wait (completed/none): synthesize a transient
 	// deadline so the loop still bounds its poll.
-	return s.clock().Add(s.cfg.FeedbackWaitTimeout), nil
+	return s.clock().Add(s.feedbackWait(updated)), nil
 }
 
 // pushWaitDeadline moves the fired/reviewing round's wait deadline later (never

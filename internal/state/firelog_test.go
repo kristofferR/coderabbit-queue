@@ -69,3 +69,40 @@ func TestFireLogAndFairUse(t *testing.T) {
 		t.Errorf("log = %d entries, want it capped at %d", got, FireLogMax)
 	}
 }
+
+// Coverage is when the log STARTED, not when its oldest survivor was recorded.
+// A quiet fleet's first fire ages out of the retention window as soon as a
+// later one trims it, and reading the start off the survivors turned a period
+// the log had watched all along back into a floor for another week.
+func TestCoverageOutlivesTheOldestRetainedFire(t *testing.T) {
+	start := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	s := New()
+
+	s.NoteFire(start)
+	s.NoteFire(start.Add(20 * 24 * time.Hour))
+	if got := len(s.Account.Fires); got != 1 {
+		t.Fatalf("log = %d entries, want the day-0 fire trimmed by the window", got)
+	}
+
+	now := start.Add(21 * 24 * time.Hour)
+	u := s.FairUse(now, 60)
+	if !u.Complete {
+		t.Errorf("usage = %+v, want a complete week: the log has been running for three", u)
+	}
+	if u.Since == nil || !u.Since.Equal(start) {
+		t.Errorf("since = %v, want the first fire the log ever saw (%v)", u.Since, start)
+	}
+
+	// The entry CAP is different: it discards by count, so the history it drops
+	// may still be inside the rolling week. Coverage really does restart there.
+	capped := New()
+	for i := 0; i <= FireLogMax; i++ {
+		capped.NoteFire(start.Add(time.Duration(i) * time.Minute))
+	}
+	if got := len(capped.Account.Fires); got != FireLogMax {
+		t.Fatalf("log = %d entries, want it capped at %d", got, FireLogMax)
+	}
+	if capped.Account.FiresFrom == nil || !capped.Account.FiresFrom.Equal(capped.Account.Fires[0]) {
+		t.Errorf("coverage = %v, want it to restart at the oldest entry the cap left", capped.Account.FiresFrom)
+	}
+}

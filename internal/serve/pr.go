@@ -158,8 +158,30 @@ func (c *observeCache) put(key string, e observeEntry) {
 	c.entries[key] = e
 }
 
-// costCache mirrors observeCache. Keyed on the head too: a price for a head
-// that has been superseded is a price for the wrong diff.
+// costKey names everything a price depends on. The head alone is not enough:
+// the estimate is a sum over the repository's EFFECTIVE reviewers priced
+// against the account's remaining allowance, so adding a paid reviewer — or
+// exhausting the allowance — at the same commit changes the answer. Keyed on
+// the head alone, the page went on serving the old figure for the whole TTL,
+// and an SSE reload could not shift it because it asked the same question.
+func costKey(repo string, pr int, head string, bots []BotName, remaining *int) string {
+	var b strings.Builder
+	b.WriteString(strings.ToLower(repo) + "#" + strconv.Itoa(pr) + "@" + head)
+	for _, bot := range bots {
+		b.WriteString("|" + bot.Login)
+	}
+	b.WriteString("|allowance=")
+	if remaining == nil {
+		b.WriteString("unknown")
+	} else {
+		b.WriteString(strconv.Itoa(*remaining))
+	}
+	return b.String()
+}
+
+// costCache mirrors observeCache. Keyed by costKey: a price for a head that has
+// been superseded — or for a reviewer set or allowance that has moved since —
+// is a price for the wrong question.
 type costCache struct {
 	mu      sync.Mutex
 	entries map[string]costEntry
@@ -278,7 +300,7 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 	st := s.lastState
 	s.mu.RUnlock()
 
-	view := buildPRView(st, repo, pr, s.botsFor(&st)(repo), s.opts.Inflight, s.opts.Now())
+	view := buildPRView(st, repo, pr, s.botsFor(&st)(repo), s.pacing(st).Inflight, s.opts.Now())
 
 	if s.observer != nil {
 		head := ""
@@ -320,7 +342,7 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 		if view.Round != nil {
 			head = view.Round.Head
 		}
-		key := strings.ToLower(repo) + "#" + strconv.Itoa(pr) + "@" + head
+		key := costKey(repo, pr, head, s.botsFor(&st)(repo), st.Account.Remaining)
 		if r.URL.Query().Get("refresh") == "1" {
 			s.costs.put(key, costEntry{})
 		}

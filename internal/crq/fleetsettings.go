@@ -291,11 +291,19 @@ func (s *Service) fleetImpact(st State, next FleetDefaults) FleetImpact {
 	after.Fleet = next
 	impact := FleetImpact{Changes: []string{}}
 
+	// Which repositories a change reaches depends on WHICH setting changed, and
+	// the answers differ: a reviewer default stops at a repository that answers
+	// both reviewer questions itself, the autofix default stops at one with its
+	// own switch, and pacing or the weekly limit stop nowhere at all — they are
+	// account-wide. Counting reviewer overrides for every kind of change told an
+	// operator turning autofix on that the repository with custom reviewers was
+	// "unaffected", moments before agents started running in it.
+	all := s.fleetRepos(st)
 	following := s.reposFollowingFleet(st)
-	impact.Repos = len(following)
-	for repo := range st.Repos {
-		if fullyOverridesReviewers(st, repo) {
-			impact.Overridden++
+	affected := map[string]bool{}
+	reaches := func(repos []string) {
+		for _, repo := range repos {
+			affected[repo] = true
 		}
 	}
 
@@ -308,22 +316,39 @@ func (s *Service) fleetImpact(st State, next FleetDefaults) FleetImpact {
 	if !sameLogins(beforeCo, afterCo) {
 		impact.Changes = append(impact.Changes, fmt.Sprintf("co-reviewers running: %s → %s",
 			shortBots(beforeCo), shortBots(afterCo)))
+		reaches(following)
 	}
 	if !sameLogins(beforeCfg.RequiredBots, afterCfg.RequiredBots) {
 		impact.Changes = append(impact.Changes, fmt.Sprintf("required reviewers: %s → %s",
 			shortBots(beforeCfg.RequiredBots), shortBots(afterCfg.RequiredBots)))
+		reaches(following)
 	}
 	if beforeCfg.MinInterval != afterCfg.MinInterval {
 		impact.Changes = append(impact.Changes,
 			fmt.Sprintf("pacing: %s → %s", beforeCfg.MinInterval, afterCfg.MinInterval))
+		reaches(all) // one queue, one fire slot: pacing is not a per-repo answer
 	}
 	if beforeCfg.WeeklyReviewLimit != afterCfg.WeeklyReviewLimit {
 		impact.Changes = append(impact.Changes,
 			fmt.Sprintf("weekly limit: %d → %d", beforeCfg.WeeklyReviewLimit, afterCfg.WeeklyReviewLimit))
+		reaches(all) // one account allowance, likewise
 	}
 	if st.AutofixDefaultOn() != after.AutofixDefaultOn() {
 		impact.Changes = append(impact.Changes,
 			fmt.Sprintf("autofix default: %s → %s", onOff(st.AutofixDefaultOn()), onOff(after.AutofixDefaultOn())))
+		// A default reaches every repository without a switch of its own,
+		// whatever it may have decided about its reviewers.
+		for _, repo := range all {
+			if _, explicit := st.AutofixSwitch(repo); !explicit {
+				affected[repo] = true
+			}
+		}
+	}
+	impact.Repos = len(affected)
+	for _, repo := range all {
+		if !affected[repo] {
+			impact.Overridden++
+		}
 	}
 
 	// A completed round is the "this head was reviewed" marker. Requiring a
@@ -350,13 +375,13 @@ func (s *Service) fleetImpact(st State, next FleetDefaults) FleetImpact {
 	case len(impact.Changes) == 0:
 		impact.Summary = "nothing would change"
 	case impact.Reopened > 0:
-		impact.Summary = fmt.Sprintf("affects %d repositories following the fleet; %d completed round(s) would be reopened and reviewed again",
+		impact.Summary = fmt.Sprintf("affects %d repositories; %d completed round(s) would be reopened and reviewed again",
 			impact.Repos, impact.Reopened)
 	default:
-		impact.Summary = fmt.Sprintf("affects %d repositories following the fleet; no round would be reopened", impact.Repos)
+		impact.Summary = fmt.Sprintf("affects %d repositories; no round would be reopened", impact.Repos)
 	}
 	if impact.Overridden > 0 {
-		impact.Summary += fmt.Sprintf(" (%d with their own reviewer override are unaffected)", impact.Overridden)
+		impact.Summary += fmt.Sprintf(" (%d with their own answer to what changed are unaffected)", impact.Overridden)
 	}
 	return impact
 }
@@ -377,9 +402,21 @@ func fullyOverridesReviewers(st State, repo string) bool {
 }
 
 // reposFollowingFleet is every repository crq knows about that inherits at
-// least one half of the fleet's reviewer default — the ones a change to it can
-// actually reach.
+// least one half of the fleet's REVIEWER default — the ones a change to it can
+// actually reach. Settings that are not per repository (pacing, the weekly
+// limit) reach fleetRepos instead; this exclusion is about reviewers only.
 func (s *Service) reposFollowingFleet(st State) []string {
+	return s.fleetReposWhere(st, func(repo string) bool {
+		return !fullyOverridesReviewers(st, repo)
+	})
+}
+
+// fleetRepos is every repository crq knows about and would act on at all.
+func (s *Service) fleetRepos(st State) []string {
+	return s.fleetReposWhere(st, func(string) bool { return true })
+}
+
+func (s *Service) fleetReposWhere(st State, keep func(repo string) bool) []string {
 	seen := map[string]bool{}
 	var out []string
 	add := func(repo string) {
@@ -387,7 +424,7 @@ func (s *Service) reposFollowingFleet(st State) []string {
 		if repo == "" || seen[repo] {
 			return
 		}
-		if fullyOverridesReviewers(st, repo) {
+		if !keep(repo) {
 			return
 		}
 		// A repository turned off follows nothing. It still has an enrollment

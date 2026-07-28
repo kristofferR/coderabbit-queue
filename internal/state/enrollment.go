@@ -19,6 +19,8 @@ type RepoEnrollment struct {
 	Reason    string     `json:"reason,omitempty"`
 	By        string     `json:"by,omitempty"`
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+
+	unknown unknownFields
 }
 
 // Enrollment returns repo's enrollment record, and whether one exists.

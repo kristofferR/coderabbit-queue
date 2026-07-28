@@ -224,6 +224,17 @@ func (s *Service) leaderTTL(st State) time.Duration {
 	return s.cfg.LeaderTTL
 }
 
+// feedbackWait is how long a fired round is waited on, resolved for the same
+// reason and in the same way. The deadline is STAMPED into the round, so the
+// startup value did not merely mispace one poll: it outlived the setting on
+// every round fired after the fleet shortened or lengthened the wait.
+func (s *Service) feedbackWait(st State) time.Duration {
+	if resolved := s.cfg.WithFleet(st.Fleet).FeedbackWaitTimeout; resolved > 0 {
+		return resolved
+	}
+	return s.cfg.FeedbackWaitTimeout
+}
+
 // renewLeader claims or extends the leader lease via compare-and-swap on the
 // state ref. It does not sync the dashboard, so it's cheap enough to call as an
 // in-pass heartbeat. held is false when another live lease holder owns it.

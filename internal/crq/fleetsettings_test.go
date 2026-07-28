@@ -43,8 +43,10 @@ func TestFleetDefaultsLayering(t *testing.T) {
 		t.Error("autofix defaults on, as it always has")
 	}
 
-	// A repository with its own override is NOT reached by a fleet default —
-	// which is what the impact preview has to say before someone clicks.
+	// Inheritance is per SETTING. A repository that answers the reviewer
+	// question itself is still paced by the fleet — there is one queue and one
+	// fire slot — so a pacing change reaches it, and a preview that called it
+	// "unaffected" would be understating where the change lands.
 	if _, err := svc.SetReviewers(ctx, "o/opinionated", []string{"codex"}, []string{"codex"}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -52,11 +54,21 @@ func TestFleetDefaultsLayering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if impact.Overridden != 1 {
-		t.Errorf("overridden = %d, want the one repository with its own answer excluded", impact.Overridden)
+	if impact.Repos != 2 || impact.Overridden != 0 {
+		t.Errorf("repos/overridden = %d/%d, want pacing to reach both repositories", impact.Repos, impact.Overridden)
 	}
 	if len(impact.Changes) != 1 {
 		t.Errorf("changes = %v, want the pacing change named", impact.Changes)
+	}
+	// Same for the autofix default: what stops it is a repository's own autofix
+	// switch, and neither repository has one.
+	autofix, err := svc.PreviewFleet(ctx, FleetChange{AutofixDefault: boolptr(false)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if autofix.Repos != 2 || autofix.Overridden != 0 {
+		t.Errorf("repos/overridden = %d/%d, want the autofix default to reach both repositories",
+			autofix.Repos, autofix.Overridden)
 	}
 	// A preview must not write.
 	if v, _ := svc.FleetSettings(ctx); v.Recorded {

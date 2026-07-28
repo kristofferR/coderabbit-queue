@@ -717,21 +717,34 @@ func run(ctx context.Context, args []string) int {
 			MinInterval: cfg.MinInterval,
 			Inflight:    cfg.InflightTimeout,
 			WeeklyLimit: cfg.WeeklyReviewLimit,
-			Bots:        bots,
-			Resolve:     resolve,
-			EnrollFor:   enrollFor,
-			SolverFor:   solverFor,
-			Discoverer:  repoDiscoverer{service},
-			Previewer:   enrollPreviewer{service},
-			Poll:        *poll,
-			Assets:      serve.Assets(),
-			Log:         stderrLogger{},
-			Host:        host,
-			Token:       ghapi.LookupToken(ctx),
-			Observer:    prObserver{service},
-			Coster:      prCoster{service},
-			Actor:       prActor{service},
-			ReadOnly:    *readOnly,
+			// The three above are the startup fallback; this resolves them
+			// against the state the dashboard is rendering, so a fleet pacing or
+			// fair-use save reaches the cards on the next revision rather than on
+			// the next restart. The rule lives in the service, as every other
+			// resolution the dashboard renders does.
+			PacingFor: func(st crq.State) serve.Pacing {
+				c := service.ConfigIn(st, "")
+				return serve.Pacing{
+					MinInterval: c.MinInterval,
+					Inflight:    c.InflightTimeout,
+					WeeklyLimit: c.WeeklyReviewLimit,
+				}
+			},
+			Bots:       bots,
+			Resolve:    resolve,
+			EnrollFor:  enrollFor,
+			SolverFor:  solverFor,
+			Discoverer: repoDiscoverer{service},
+			Previewer:  enrollPreviewer{service},
+			Poll:       *poll,
+			Assets:     serve.Assets(),
+			Log:        stderrLogger{},
+			Host:       host,
+			Token:      ghapi.LookupToken(ctx),
+			Observer:   prObserver{service},
+			Coster:     prCoster{service},
+			Actor:      prActor{service},
+			ReadOnly:   *readOnly,
 			Fleet: serve.FleetConfig{
 				GateRepo:       cfg.GateRepo,
 				StateRef:       cfg.StateRef,
@@ -901,7 +914,7 @@ QUEUE WORKFLOWS
   crq wait [<repo> <pr>]           block until there IS something to do, then say what
   crq loop <repo> <pr>             queue one PR review round, then emit JSON feedback
   crq autoreview                   keep open PRs reviewed through the same queue
-  crq serve                        the live web dashboard (read-only for now)
+  crq serve                        the live web dashboard (--read-only to refuse writes)
   crq status [--line]              show the queue, in-flight review, and quota state
 
 DRIVING A PR REVIEW

@@ -33,11 +33,33 @@ type HostReport struct {
 	// found there, so the one still running refreshed the stopped one's claim on
 	// every pass and the table showed a dead service running for ever.
 	RoleSeen map[string]time.Time `json:"role_seen,omitempty"`
-	// Tools is what this host can run, probed on the PATH the reporting process
-	// had. A daemon reports the service's PATH, which is the one that decides
-	// whether a fix session can start.
+	// Tools is what this host can run, resolved across the roles reporting here
+	// — see RoleTools for why that is not simply the last report.
 	Tools []ToolReport `json:"tools,omitempty"`
-	At    time.Time    `json:"at"`
+	// RoleTools is what each role probed on ITS own PATH, kept apart because the
+	// PATHs differ: the autofix unit adds the selected agent's directory and
+	// serve does not. Merged into one list, the two took turns overwriting each
+	// other and the dashboard alternated between "the fix agent is here" and
+	// "it is missing" while the service that runs sessions never changed.
+	RoleTools map[string][]ToolReport `json:"role_tools,omitempty"`
+	At        time.Time               `json:"at"`
+}
+
+// toolRoleRank orders roles by whose PATH the answer should come from. The
+// autofix service is the one that actually starts fix sessions, so its view of
+// "is the agent reachable" is the operative one; a dashboard that merely
+// renders the answer is the least authoritative.
+func toolRoleRank(role string) int {
+	switch role {
+	case "autofix":
+		return 0
+	case "autoreview":
+		return 1
+	case "serve":
+		return 3
+	default:
+		return 2
+	}
 }
 
 // ToolReport is one executable on one host.
@@ -69,32 +91,50 @@ const HostReportTTL = 30 * time.Minute
 // shared At cannot answer this: the surviving service refreshes it every pass,
 // so a carried-forward role from a service that stopped was renewed for ever
 // and the dashboard reported it running indefinitely.
+//
+// Tool probes merge the same way and for the same reason: they describe the
+// PATH of the service that took them, so they are kept per role and resolved
+// into Tools rather than replaced wholesale by whoever wrote last.
 func (s *State) SetHostReport(r HostReport, now time.Time) {
 	if s.HostReports == nil {
 		s.HostReports = map[string]HostReport{}
 	}
 	now = now.UTC()
 	seen := map[string]time.Time{}
+	tools := map[string][]ToolReport{}
 	if prev, ok := s.HostReports[r.Host]; ok {
 		for role, at := range prev.RoleSeen {
 			seen[role] = at
 		}
-		// A record written before roles were dated (an older binary, or one
-		// whose write dropped the member): its roles are exactly as old as it
-		// is, which is the honest date to expire them from.
+		for role, probed := range prev.RoleTools {
+			tools[role] = probed
+		}
 		for _, role := range prev.Roles {
+			// A record written before roles were dated (an older binary, or one
+			// whose write dropped the member): its roles are exactly as old as it
+			// is, which is the honest date to expire them from.
 			if _, dated := seen[role]; !dated {
 				seen[role] = prev.At
+			}
+			// Likewise for a record written before probes were kept per role:
+			// its one list is the best any of its roles could say, so it stands
+			// in for all of them until each reports again on its own.
+			if _, probed := tools[role]; !probed && len(prev.Tools) > 0 {
+				tools[role] = prev.Tools
 			}
 		}
 	}
 	for _, role := range r.Roles {
 		seen[role] = now
+		if len(r.Tools) > 0 {
+			tools[role] = r.Tools
+		}
 	}
 	roles := make([]string, 0, len(seen))
 	for role, at := range seen {
 		if now.Sub(at) > HostReportTTL {
 			delete(seen, role)
+			delete(tools, role)
 			continue
 		}
 		roles = append(roles, role)
@@ -105,8 +145,51 @@ func (s *State) SetHostReport(r HostReport, now time.Time) {
 		seen = nil
 	}
 	r.RoleSeen = seen
+	r.Tools = resolveTools(tools, roles, r.Tools)
+	if len(tools) == 0 {
+		tools = nil
+	}
+	r.RoleTools = tools
 	r.At = now
 	s.HostReports[r.Host] = r
+}
+
+// resolveTools answers "what can this host run" from the per-role probes, one
+// tool at a time: the highest-ranked role that has an opinion about a tool owns
+// the answer for it. fallback covers a host whose roles have all aged out —
+// there is nobody left to speak for it, so the reporter's own list stands.
+func resolveTools(byRole map[string][]ToolReport, roles []string, fallback []ToolReport) []ToolReport {
+	ranked := append([]string(nil), roles...)
+	sort.SliceStable(ranked, func(i, j int) bool {
+		return toolRoleRank(ranked[i]) < toolRoleRank(ranked[j])
+	})
+	var out []ToolReport
+	claimed := map[string]bool{}
+	for _, role := range ranked {
+		for _, t := range byRole[role] {
+			if claimed[t.Name] {
+				continue
+			}
+			claimed[t.Name] = true
+			out = append(out, t)
+		}
+	}
+	if len(out) == 0 {
+		return fallback
+	}
+	return out
+}
+
+// ToolsReportedBy is what one role probed, or the record's resolved list when
+// that role predates per-role probes. It is what a reporter must compare its
+// own probe against: Tools is resolved across every service on the host, so a
+// reporter whose answer another role outranks would read the difference as a
+// change and rewrite state on every pass.
+func (r HostReport) ToolsReportedBy(role string) []ToolReport {
+	if probed, ok := r.RoleTools[role]; ok {
+		return probed
+	}
+	return r.Tools
 }
 
 // StaleRole reports whether this record still names a role whose own last

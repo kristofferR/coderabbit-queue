@@ -323,10 +323,17 @@ function ReviewerEditor({
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
 
+  // Depend on the reviewer lists' CONTENTS, not on the arrays: every SSE
+  // revision rebuilds the row objects, so the identity dependency reset the
+  // toggles — discarding a half-made selection — whenever anything unrelated in
+  // the queue moved.
+  const runsRev = repo.reviewers.join();
+  const requiredRev = repo.required.join();
   useEffect(() => {
     setRuns(repo.reviewers);
     setRequired(repo.required);
-  }, [repo.repo, repo.reviewers, repo.required]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repo.repo, runsRev, requiredRev]);
 
   // The primary is the one metered reviewer, so its Runs toggle is a budget
   // decision (a private repo on a free plan gets nothing from it) and travels

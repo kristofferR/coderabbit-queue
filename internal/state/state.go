@@ -379,6 +379,12 @@ type AccountQuota struct {
 	// weeks. See firelog.go: it exists to forecast the vendor's WEEKLY fair-use
 	// throttle, which crq can already recognise but never see coming.
 	Fires []time.Time `json:"fires,omitempty"`
+	// FiresFrom is when the log's COVERAGE starts, which is not the same as its
+	// oldest surviving entry: trimming keeps the blob small and would otherwise
+	// keep moving the start forward, telling a quiet fleet its fully observed
+	// week is only a floor. Recorded once and moved only when the entry cap
+	// genuinely discards history the rolling week needs.
+	FiresFrom *time.Time `json:"fires_from,omitempty"`
 
 	// unknown carries members a newer binary wrote inside this record. State's
 	// carrier cannot: it sees "account" as a member it knows and hands the whole

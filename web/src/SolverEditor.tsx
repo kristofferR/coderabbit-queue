@@ -34,43 +34,67 @@ export function SolverEditor({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const server = {
+    model: solver.model ?? "",
+    effort: solver.effort ?? "",
+    prompt: solver.prompt ?? "",
+    attempts: String(solver.max_attempts),
+    forks: solver.forks,
+    authors: (solver.skip_authors ?? []).join(", "),
+  };
+  // Every SSE revision rebuilds this view object, so depending on its IDENTITY
+  // re-ran the reset whenever anything at all moved in the queue — and typing
+  // into the prompt box while a round fired somewhere else lost the edit. The
+  // dependency is the settings' own VALUES: they change when the settings do.
+  const serverRev = JSON.stringify(server);
   useEffect(() => {
-    setModel(solver.model ?? "");
-    setEffort(solver.effort ?? "");
-    setPrompt(solver.prompt ?? "");
-    setAttempts(String(solver.max_attempts));
-    setForks(solver.forks);
-    setAuthors((solver.skip_authors ?? []).join(", "));
-  }, [repo, solver]);
+    setModel(server.model);
+    setEffort(server.effort);
+    setPrompt(server.prompt);
+    setAttempts(server.attempts);
+    setForks(server.forks);
+    setAuthors(server.authors);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repo, serverRev]);
 
-  const dirty =
-    model !== (solver.model ?? "") ||
-    effort !== (solver.effort ?? "") ||
-    prompt !== (solver.prompt ?? "") ||
-    attempts !== String(solver.max_attempts) ||
-    forks !== solver.forks ||
-    authors !== (solver.skip_authors ?? []).join(", ");
+  const changed = {
+    model: model !== server.model,
+    effort: effort !== server.effort,
+    prompt: prompt !== server.prompt,
+    attempts: attempts !== server.attempts,
+    forks: forks !== server.forks,
+    authors: authors !== server.authors,
+  };
+  const dirty = Object.values(changed).some(Boolean);
 
   const save = async (clear = false) => {
     setBusy(true);
     setError(null);
     try {
-      const res = await act("solver", {
-        repo,
-        solver: clear
-          ? { clear: true }
-          : {
-              model,
-              effort,
-              prompt,
-              max_attempts: Number(attempts) || 0,
-              forks,
-              skip_authors: authors
-                .split(",")
-                .map((a) => a.trim())
-                .filter(Boolean),
-            },
-      });
+      // Only what was actually edited. The values shown here are EFFECTIVE
+      // ones, resolved through env, fleet and repository — so posting all six
+      // recorded the inherited ones as this repository's own answer, and a
+      // later fleet change to the attempt count or the fork policy stopped
+      // reaching a repository whose owner had only ever edited its prompt.
+      // The API omits to mean inherit; that is what this preserves.
+      const edited = clear
+        ? { clear: true }
+        : {
+            ...(changed.model ? { model } : {}),
+            ...(changed.effort ? { effort } : {}),
+            ...(changed.prompt ? { prompt } : {}),
+            ...(changed.attempts ? { max_attempts: Number(attempts) || 0 } : {}),
+            ...(changed.forks ? { forks } : {}),
+            ...(changed.authors
+              ? {
+                  skip_authors: authors
+                    .split(",")
+                    .map((a) => a.trim())
+                    .filter(Boolean),
+                }
+              : {}),
+          };
+      const res = await act("solver", { repo, solver: edited });
       onSnapshot?.(res.snapshot);
     } catch (e) {
       setError((e as Error).message);

@@ -184,6 +184,15 @@ func (s *Service) ClearEnrollment(ctx context.Context, repo string) (EnrollmentV
 		if !st.ClearEnrollment(repo) {
 			return ErrNoChange
 		}
+		// Clearing hands the repository back to this host's env, which may well
+		// not list it: a record that said ON becomes an effective OFF without
+		// SetEnrollment ever being called. Pump chooses from Rounds without
+		// rechecking enrollment, so the queued rounds have to go the same way
+		// they do when the switch is thrown explicitly — resolved from the state
+		// the write lands on, not from the one before the clear.
+		if !s.enrollmentOf(*st, repo).Enabled {
+			s.abandonPendingRounds(st, repo)
+		}
 		return nil
 	})
 	if err != nil && !errors.Is(err, ErrNoChange) {

@@ -80,13 +80,24 @@ func toolVersion(ctx context.Context, path string) string {
 	return line
 }
 
-func sameHostReport(a, b HostReport) bool {
-	if a.Version != b.Version || a.Caps != b.Caps || len(a.Tools) != len(b.Tools) {
+// sameHostReport reports whether the stored record already says what this
+// reporter is about to say. The tool comparison is per ROLE: the record's own
+// Tools list is resolved across every service on the host, so comparing against
+// it made a reporter whose PATH another role outranks see a difference on every
+// pass and rewrite state for ever.
+func sameHostReport(prev, next HostReport) bool {
+	if prev.Version != next.Version || prev.Caps != next.Caps {
 		return false
 	}
-	for i := range a.Tools {
-		if a.Tools[i] != b.Tools[i] {
+	for _, role := range next.Roles {
+		stored := prev.ToolsReportedBy(role)
+		if len(stored) != len(next.Tools) {
 			return false
+		}
+		for i := range stored {
+			if stored[i] != next.Tools[i] {
+				return false
+			}
 		}
 	}
 	return true

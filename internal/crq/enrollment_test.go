@@ -207,3 +207,78 @@ func TestDisablingEnrollmentDropsTheQueuedRounds(t *testing.T) {
 		t.Errorf("round = %+v, want a fresh queued round once the repository is back on", round)
 	}
 }
+
+// Clearing a record hands the repository back to this host's env, which need
+// not list it: a record that said ON becomes an effective OFF without
+// SetEnrollment ever being called. Pump asks Rounds, not enrollment, so the
+// queued work has to go the same way it does when the switch is thrown.
+func TestClearingEnrollmentIntoAnExcludingEnvDropsTheQueuedRounds(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	// Nonempty and WITHOUT o/adopted: the record is the only thing enrolling it.
+	cfg.AllowRepos = map[string]bool{"o/listed": true}
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls["o/adopted#3"] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	if _, err := svc.SetEnrollment(ctx, "o/adopted", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Enqueue(ctx, "o/adopted", 3); err != nil {
+		t.Fatal(err)
+	}
+	view, err := svc.ClearEnrollment(ctx, "o/adopted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Enabled {
+		t.Fatalf("view = %+v, want the env's answer, which omits this repository", view)
+	}
+
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("o/adopted", 3); round != nil {
+		t.Errorf("round = %+v, want it archived rather than left fire-eligible", round)
+	}
+	if next := st.NextEligible(svc.clock()); next != nil {
+		t.Errorf("next eligible = %+v, want nothing for a repository nothing enrolls now", next)
+	}
+}
+
+// The converse: clearing a record for a repository this host's env DOES list
+// leaves it enrolled, so its queued work must survive untouched.
+func TestClearingEnrollmentBackIntoEnvKeepsTheQueuedRounds(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/listed": true}
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls["o/listed#5"] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	if _, err := svc.SetEnrollment(ctx, "o/listed", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Enqueue(ctx, "o/listed", 5); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ClearEnrollment(ctx, "o/listed"); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("o/listed", 5); round == nil || round.Phase != PhaseQueued {
+		t.Errorf("round = %+v, want the queued round untouched: env still enrolls this repository", round)
+	}
+}

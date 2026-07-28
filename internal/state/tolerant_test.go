@@ -416,3 +416,46 @@ func TestUnknownRepoOverrideFieldsSurviveARewrite(t *testing.T) {
 		t.Errorf("a member this binary does not know was dropped: %#v", own["future_reviewer_flag"])
 	}
 }
+
+func TestUnknownEnrollmentFieldsSurviveARewrite(t *testing.T) {
+	foreign := `{
+	  "v": 4, "rev": 3, "next_seq": 1,
+	  "enrolled": {
+	    "owner/repo": {
+	      "enabled": false, "reason": "paused for the quarter",
+	      "future_enroll_flag": {"until": "2030-01-01"}
+	    }
+	  },
+	  "account": {"scope": "owner"}
+	}`
+
+	var st State
+	if err := json.Unmarshal([]byte(foreign), &st); err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := st.Enrollment("owner/repo")
+	if !ok || rec.Enabled || rec.Reason != "paused for the quarter" {
+		t.Fatalf("known fields must still decode: %+v", rec)
+	}
+
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	enrolled, _ := back["enrolled"].(map[string]any)
+	own, _ := enrolled["owner/repo"].(map[string]any)
+	if own == nil {
+		t.Fatalf("the enrollment record vanished:\n%s", out)
+	}
+	if own["reason"] != "paused for the quarter" {
+		t.Errorf("reason was not written back: %#v", own)
+	}
+	carried, _ := own["future_enroll_flag"].(map[string]any)
+	if carried == nil || carried["until"] != "2030-01-01" {
+		t.Errorf("a member this binary does not know was dropped: %#v", own["future_enroll_flag"])
+	}
+}
