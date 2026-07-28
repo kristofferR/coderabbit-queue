@@ -216,8 +216,10 @@ func (c *costCache) put(key string, e costEntry) {
 	c.entries[key] = e
 }
 
-// buildPRView assembles the cheap layer from state.
-func buildPRView(st state.State, repo string, pr int, bots []BotName, inflight time.Duration, now time.Time) PRView {
+// buildPRView assembles the cheap layer from state. maxAttempts is the same
+// per-repository budget the overview reads, so the two renderings of one claim
+// cannot disagree about how far along a session is; nil leaves it unsaid.
+func buildPRView(st state.State, repo string, pr int, bots []BotName, inflight time.Duration, now time.Time, maxAttempts func(repo string) int) PRView {
 	v := PRView{Repo: repo, PR: pr, History: []HistoryEntry{}}
 	key := state.Key(repo, pr)
 	v.Title = titleOf(st, repo, pr)
@@ -245,8 +247,14 @@ func buildPRView(st state.State, repo string, pr int, bots []BotName, inflight t
 		// claim whose watcher died is not a running session, and the three views
 		// must not disagree about that.
 		if d, ok := st.Dispatches[key]; ok && d.Live(now) {
+			// Every field the claim carries, because the card renders them: a
+			// page that has the log path and the findings count in hand and
+			// shows neither is the overview's session row with holes in it.
 			s := Session{Key: key, Repo: repo, PR: pr, Head: r.Head, Host: hostOf(d.Host),
-				Attempt: d.Attempts, Since: d.At}
+				Attempt: d.Attempts, Findings: d.Findings, Log: d.Log, Since: d.At}
+			if maxAttempts != nil {
+				s.MaxAttempts = maxAttempts(repo)
+			}
 			if !d.Heartbeat.IsZero() {
 				hb := d.Heartbeat
 				s.Heartbeat = &hb
@@ -300,9 +308,13 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 	st := s.lastState
 	s.mu.RUnlock()
 
-	view := buildPRView(st, repo, pr, s.botsFor(&st)(repo), s.pacing(st).Inflight, s.opts.Now())
+	view := buildPRView(st, repo, pr, s.botsFor(&st)(repo), s.pacing(st).Inflight, s.opts.Now(), s.maxAttempts(st))
 
 	if s.observer != nil {
+		// The round's head is what invalidates a cached entry, so an untracked
+		// pull request has nothing to invalidate one WITH: its key never moves,
+		// and a page reloaded after a push kept being served the previous head's
+		// findings for the whole TTL. No proof of the head, no head-scoped reuse.
 		head := ""
 		if view.Round != nil {
 			head = view.Round.Head
@@ -311,7 +323,7 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("refresh") == "1" {
 			s.observations.put(key, observeEntry{})
 		}
-		if e, ok := s.observations.get(key); ok && (e.err != "" || !e.obs.CheckedAt.IsZero()) {
+		if e, ok := s.observations.get(key); ok && head != "" && (e.err != "" || !e.obs.CheckedAt.IsZero()) {
 			if e.err != "" {
 				view.ObserveError = e.err
 			} else {
@@ -338,15 +350,23 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 	// Priced on the same trip and cached the same way: it costs one more pull
 	// read, which is why the overview does not price every queue row.
 	if s.opts.Coster != nil {
+		// The head GitHub just reported, when the observation above got one.
+		// The five-minute TTL rests entirely on "the diff of a head does not
+		// change", and keyed on a round's head that is empty or superseded that
+		// reasoning does not hold: the page went on quoting the previous diff's
+		// price for five minutes after a push.
 		head := ""
-		if view.Round != nil {
+		switch {
+		case view.Observed != nil:
+			head = view.Observed.Head
+		case view.Round != nil:
 			head = view.Round.Head
 		}
 		key := costKey(repo, pr, head, s.botsFor(&st)(repo), st.Account.Remaining)
 		if r.URL.Query().Get("refresh") == "1" {
 			s.costs.put(key, costEntry{})
 		}
-		if e, ok := s.costs.get(key); ok && (e.err != "" || e.cost != nil) {
+		if e, ok := s.costs.get(key); ok && head != "" && (e.err != "" || e.cost != nil) {
 			view.Cost, view.CostError = e.cost, e.err
 		} else {
 			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)

@@ -174,11 +174,18 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 // settleUntil is when a convergence verdict may be trusted: the newest review
 // plus the configured quiet period. Nil when settling is disabled or nothing has
 // been observed to settle from.
+//
+// The window comes from the configuration this report was built with, which is
+// the state-backed one blocking `crq loop` already settles on. Reading the
+// startup value here let the two forms disagree: an agent on the documented
+// `next` loop returned done before a fleet-lengthened window, or kept waiting
+// through one that had been shortened.
 func (s *Service) settleUntil(feedback FeedbackReport) *time.Time {
-	if s.cfg.SettleWindow <= 0 || feedback.LastEvidenceAt.IsZero() {
+	window := feedback.config.SettleWindow
+	if window <= 0 || feedback.LastEvidenceAt.IsZero() {
 		return nil
 	}
-	at := feedback.LastEvidenceAt.Add(s.cfg.SettleWindow).UTC()
+	at := feedback.LastEvidenceAt.Add(window).UTC()
 	return &at
 }
 

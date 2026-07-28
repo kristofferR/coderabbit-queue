@@ -1238,20 +1238,21 @@ func TestWatchTargetsIncludeRepositoriesEnrolledFromTheDashboard(t *testing.T) {
 // re-enable fork dispatches at precisely the moment the safety policy is
 // unavailable, so the fallback denies them instead.
 func TestForkDispatchFallsBackClosedWhenTheRecordCannotBeRead(t *testing.T) {
+	ctx := context.Background()
 	cfg := firingConfig()
 	cfg.DispatchForks = true // this host's env says yes
 	svc := NewService(cfg, newFakeGitHub(), unreadableStore{NewMemoryStore(cfg)}, nil)
 
 	var fork ghapi.Pull
 	fork.Head.Repo.FullName = "contributor/thing"
-	if svc.mayDispatch(svc.repoCfg("owner/thing"), "owner/thing", fork) {
+	if svc.mayDispatch(svc.repoCfg(ctx, "owner/thing"), "owner/thing", fork) {
 		t.Error("a fork was dispatched on a permissive env value while the shared policy was unreadable")
 	}
 	// Everything else still falls back to the host's configuration: an
 	// unreadable setting must not stop crq fixing its own branches.
 	var own ghapi.Pull
 	own.Head.Repo.FullName = "owner/thing"
-	if !svc.mayDispatch(svc.repoCfg("owner/thing"), "owner/thing", own) {
+	if !svc.mayDispatch(svc.repoCfg(ctx, "owner/thing"), "owner/thing", own) {
 		t.Error("an own-repository pull request must still be dispatchable")
 	}
 }

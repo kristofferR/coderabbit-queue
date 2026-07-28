@@ -155,9 +155,29 @@ func fleetSettable(key string) bool {
 	return ok && !k.PerHost && !k.Identity
 }
 
-// validateEnvValue checks a value against its key's shape, so a setting that
-// would fail to parse is refused at edit time rather than silently falling back
-// to a default on every host at once.
+// positiveOnly names the settings whose CONSUMER applies a recorded value only
+// when it is greater than zero.
+//
+// Shape is not enough for these. "0s" parses, and -1 is an integer, so the
+// generic check above accepted both — and then every daemon fell back to its
+// own startup value while this page went on reporting the saved number as the
+// fleet's. A save that cannot come into force has to fail here instead: the
+// whole point of the settings page is that what it shows is what is running.
+var positiveOnly = map[string]bool{
+	"CRQ_INFLIGHT_TIMEOUT":      true,
+	"CRQ_RL_FALLBACK":           true,
+	"CRQ_AUTOREVIEW_POLL":       true,
+	"CRQ_AUTOREVIEW_MAX_SCAN":   true,
+	"CRQ_LEADER_TTL":            true,
+	"CRQ_FEEDBACK_WAIT_TIMEOUT": true,
+	"CRQ_WATCH_INTERVAL":        true,
+	"CRQ_DISPATCH_MAX_ATTEMPTS": true,
+}
+
+// validateEnvValue checks a value against its key's shape and range, so a
+// setting that would fail to parse — or that would parse and then be ignored by
+// the consumer it is meant for — is refused at edit time rather than silently
+// falling back to a default on every host at once.
 func validateEnvValue(key, value string) error {
 	k, ok := envKeyByName(key)
 	if !ok {
@@ -176,9 +196,19 @@ func validateEnvValue(key, value string) error {
 		if d < 0 {
 			return fmt.Errorf("%s cannot be negative", key)
 		}
+		if d == 0 && positiveOnly[key] {
+			return fmt.Errorf("%s has to be longer than 0s — a zero is ignored, and every host stays on its own value", key)
+		}
 	case "int":
-		if _, err := strconv.Atoi(value); err != nil {
+		n, err := strconv.Atoi(value)
+		if err != nil {
 			return fmt.Errorf("%s: %w", key, err)
+		}
+		if n < 0 {
+			return fmt.Errorf("%s cannot be negative", key)
+		}
+		if n == 0 && positiveOnly[key] {
+			return fmt.Errorf("%s has to be greater than 0 — a zero is ignored, and every host stays on its own value", key)
 		}
 	case "bool":
 		if value != "0" && value != "1" {

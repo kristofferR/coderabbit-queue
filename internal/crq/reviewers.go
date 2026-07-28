@@ -493,8 +493,11 @@ func (c Config) withSolver(sv SolverSettings) Config {
 // dispatches precisely while the shared safety policy is unavailable, so the
 // fallback denies them instead: the cost of being wrong is one contributor pull
 // request left unfixed until the ref reads again.
-func (s *Service) repoCfg(repo string) Config {
-	st, _, err := s.store.Load(context.Background())
+// It takes the caller's context because the read behind it retries: a state ref
+// that has become unreachable would otherwise keep a stopped watcher — or a
+// cancelled session — waiting on a fallback it has already decided to take.
+func (s *Service) repoCfg(ctx context.Context, repo string) Config {
+	st, _, err := s.store.Load(ctx)
 	if err != nil {
 		fallback := s.cfg
 		fallback.DispatchForks = false
@@ -511,9 +514,9 @@ func (s *Service) repoCfg(repo string) Config {
 //
 // A read failure answers with an empty record, which is exactly "nothing
 // recorded" — the same fall-back-to-env choice repoCfg makes, for the same
-// reason.
-func (s *Service) repoSolver(repo string) SolverSettings {
-	st, _, err := s.store.Load(context.Background())
+// reason, and it takes the caller's context for the same reason too.
+func (s *Service) repoSolver(ctx context.Context, repo string) SolverSettings {
+	st, _, err := s.store.Load(ctx)
 	if err != nil {
 		return SolverSettings{}
 	}

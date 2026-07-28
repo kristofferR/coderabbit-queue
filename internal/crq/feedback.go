@@ -902,9 +902,18 @@ func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, he
 			// advance that follows archives this round, and the slot would be
 			// released with the command it was taken for still unanswered. So
 			// record the hold on the slot itself, where it survives the supersede.
-			// Bounded by the in-flight window, the deadline Progress gives up at.
+			// Bounded by the in-flight window, the deadline Progress gives up at
+			// — and read from the SAME resolved configuration Progress uses, not
+			// from the env this process started with. A fleet that lengthened the
+			// timeout would otherwise have the slot released here while the
+			// command was still in flight, and one that shortened it would hold
+			// the fleet for a window nothing is waiting out.
 			if r.FiredAt != nil {
-				until := r.FiredAt.UTC().Add(s.cfg.InflightTimeout)
+				inflight := s.cfg.InflightTimeout
+				if cfg != nil {
+					inflight = cfg.InflightTimeout
+				}
+				until := r.FiredAt.UTC().Add(inflight)
 				if until.After(s.clock()) && (st.FireSlot.HoldUntil == nil || st.FireSlot.HoldUntil.Before(until)) {
 					st.HoldSlotUntil(until)
 					changed = true

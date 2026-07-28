@@ -242,6 +242,21 @@ func (s *Service) Enqueue(ctx context.Context, repo string, pr int) (EnqueueResu
 			result.Reason = "held: " + h.Reason
 			return ErrNoChange
 		}
+		// An EXPLICIT off switch, asked here for the same reason enqueueBatch
+		// asks it: turning a repository off abandons its pending rounds, and a
+		// `crq next` or `crq loop` run against it afterwards recreated one that
+		// Pump — which asks nothing about enrollment — went on to spend a
+		// metered review on. Only a record, never a mere absence from this
+		// host's CRQ_REPOS: a manual run on a repository the fleet does not
+		// scan is the ordinary way this command is used.
+		if rec, ok := st.Enrollment(repo); ok && !rec.Enabled {
+			result.Held = true
+			result.Reason = "the repository is turned off"
+			if rec.Reason != "" {
+				result.Reason += ": " + rec.Reason
+			}
+			return ErrNoChange
+		}
 		r := st.Round(repo, pr)
 		if r != nil && r.Head == head {
 			// A PR reopened after its reviewers changed: the completed round is a
@@ -407,7 +422,7 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 		} else if handled {
 			// The quota-free result is the one Pump exposes to its caller, so
 			// preserve the cleanup hook for the slot result it replaces.
-			if err := s.tidyAfterPump(ctx, res); err != nil {
+			if err := s.tidyAfterPump(ctx, st, res); err != nil {
 				return res, err
 			}
 			return free, nil
@@ -1028,7 +1043,7 @@ func (s *Service) sweepReviewing(ctx context.Context, st State, now time.Time) (
 	// A round completed here is invisible to the caller — Pump goes on to report
 	// whatever it fires next, or idle — so this is the only moment that knows the
 	// PR's trigger comments are spent.
-	if err := s.tidyProgressed(ctx, target.Repo, target.PR); err != nil {
+	if err := s.tidyProgressed(ctx, updated, target.Repo, target.PR); err != nil {
 		return updated, err
 	}
 	return updated, nil

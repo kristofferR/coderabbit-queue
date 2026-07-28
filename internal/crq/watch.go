@@ -396,7 +396,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			var result <-chan dispatchResult
 			if opts.dispatching() && report.Action == string(engine.ActionFix) && autofixOff[NormalizeRepo(repo)] {
 				event.Skipped = "autofix is off for this repository (crq autofix on " + NormalizeRepo(repo) + ")"
-			} else if opts.dispatching() && report.Action == string(engine.ActionFix) && !s.mayDispatch(s.repoCfg(repo), repo, pull) {
+			} else if opts.dispatching() && report.Action == string(engine.ActionFix) && !s.mayDispatch(s.repoCfg(ctx, repo), repo, pull) {
 				event.Skipped = "the head branch is a fork; set CRQ_DISPATCH_FORKS=1 to fix contributor pull requests"
 			} else if opts.dispatching() && report.Action == string(engine.ActionFix) {
 				// Claim here and hand preparation to the pool. Checkout and
@@ -591,7 +591,7 @@ func (s *Service) queueDispatch(
 	// own `--max-attempts` on every ordinary setup: the flag was accepted and
 	// then silently replaced by 3.
 	maxAttempts := opts.MaxAttempts
-	if sv := s.repoSolver(report.Repo); sv.MaxAttempts != nil {
+	if sv := s.repoSolver(ctx, report.Repo); sv.MaxAttempts != nil {
 		maxAttempts = *sv.MaxAttempts
 	}
 	claimed, why, byDesign := s.claimDispatch(ctx, report, token, maxAttempts)
@@ -723,7 +723,7 @@ func (s *Service) dispatchWithStart(
 	// is fixed when the watcher starts and these differ per repository. The
 	// session script reads them; a script from an older install ignores them
 	// and runs exactly as it did.
-	solver := s.repoCfg(report.Repo)
+	solver := s.repoCfg(runCtx, report.Repo)
 	cmd.Env = append(os.Environ(),
 		"CRQ_DISPATCH_REPO="+report.Repo,
 		fmt.Sprintf("CRQ_DISPATCH_PR=%d", report.PR),
@@ -1285,11 +1285,18 @@ func (s *Service) noteSessionDetail(ctx context.Context, report NextReport, toke
 		if r == nil || r.Dispatch == nil || r.Dispatch.Token != token {
 			return ErrNoChange
 		}
-		if r.Dispatch.Log == logPath && r.Dispatch.Findings == findings {
+		mirror := st.Dispatches[QueueKey(report.Repo, report.PR)]
+		if r.Dispatch.Log == logPath && r.Dispatch.Findings == findings &&
+			mirror.Token == token && mirror.Log == logPath && mirror.Findings == findings {
 			return ErrNoChange
 		}
 		r.Dispatch.Log, r.Dispatch.Findings = logPath, findings
 		st.PutRound(*r)
+		// The session list reads the MIRRORED claim, not the round, so the same
+		// write has to reach both. Left to the heartbeat, these fields appeared
+		// a third of a TTL late — and never at all for a session that finished
+		// sooner, which is most of them.
+		st.RememberDispatch(report.Repo, report.PR, *r.Dispatch)
 		return nil
 	})
 	if err != nil && !errors.Is(err, ErrNoChange) && s.log != nil {

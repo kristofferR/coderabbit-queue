@@ -643,7 +643,7 @@ func eventAt(e dialect.BotEvent) time.Time {
 //
 // It is best-effort by design. Deleting a comment is housekeeping, and a
 // housekeeping failure must never break the pass that did the real work.
-func (s *Service) tidyAfterPump(ctx context.Context, res PumpResult) error {
+func (s *Service) tidyAfterPump(ctx context.Context, st State, res PumpResult) error {
 	if res.Repo == "" || res.PR == 0 {
 		return nil
 	}
@@ -666,7 +666,7 @@ func (s *Service) tidyAfterPump(ctx context.Context, res PumpResult) error {
 	default:
 		return nil
 	}
-	return s.tidyProgressed(ctx, res.Repo, res.PR)
+	return s.tidyProgressed(ctx, st, res.Repo, res.PR)
 }
 
 // tidyProgressed runs a tidy pass for one PR whose round just moved, and
@@ -674,8 +674,13 @@ func (s *Service) tidyAfterPump(ctx context.Context, res PumpResult) error {
 // housekeeping failure must never break the pass that did the real work.
 // GitHub throttles are returned so autoreview can sleep through the reset
 // window instead of continuing to spend requests that are expected to fail.
-func (s *Service) tidyProgressed(ctx context.Context, repo string, pr int) error {
-	if !s.cfg.Tidy {
+//
+// The switch is resolved from the snapshot the pump decided on, not from the env
+// this process started with: CRQ_TIDY is offered as a fleet setting, and reading
+// the startup value made saving it in the dashboard change nothing on any daemon
+// while the page reported fleet-wide tidying as on.
+func (s *Service) tidyProgressed(ctx context.Context, st State, repo string, pr int) error {
+	if !s.cfgFor(st, repo).Tidy {
 		return nil
 	}
 	if _, err := s.Tidy(ctx, repo, pr, false); err != nil {

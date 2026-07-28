@@ -302,3 +302,40 @@ func TestFleetReachesRepositoriesThatOverrideOnlyOneHalf(t *testing.T) {
 		t.Errorf("overridden = %d, want only the repository that answers both questions itself", impact.Overridden)
 	}
 }
+
+// A save the fleet will ignore is worse than a refused one: the settings page
+// then reports a value that no daemon is running. Every setting below is read
+// back through a "> 0" guard, so a zero — or a negative that Atoi happily
+// parses — leaves each host on its own startup value while the page says
+// otherwise.
+func TestEnvValidationRejectsValuesTheFleetWouldIgnore(t *testing.T) {
+	for _, tc := range []struct {
+		key, value string
+		wantErr    bool
+	}{
+		{"CRQ_AUTOREVIEW_MAX_SCAN", "-1", true},
+		{"CRQ_AUTOREVIEW_MAX_SCAN", "0", true},
+		{"CRQ_AUTOREVIEW_MAX_SCAN", "200", false},
+		{"CRQ_WATCH_INTERVAL", "0s", true},
+		{"CRQ_WATCH_INTERVAL", "5m", false},
+		{"CRQ_INFLIGHT_TIMEOUT", "0s", true},
+		{"CRQ_DISPATCH_MAX_ATTEMPTS", "0", true},
+		{"CRQ_WEEKLY_LIMIT", "-1", true},
+		// Zero is a stated answer for these two — no pacing, no settling — so
+		// they stay accepted. A blanket "positive only" would take a documented
+		// setting away.
+		{"CRQ_MIN_INTERVAL", "0s", false},
+		{"CRQ_SETTLE", "0s", false},
+		{"CRQ_WEEKLY_LIMIT", "0", false},
+		// Empty is "unset here", which every key allows.
+		{"CRQ_WATCH_INTERVAL", "", false},
+	} {
+		err := validateEnvValue(tc.key, tc.value)
+		if tc.wantErr && err == nil {
+			t.Errorf("%s=%q was accepted; the fleet would ignore it", tc.key, tc.value)
+		}
+		if !tc.wantErr && err != nil {
+			t.Errorf("%s=%q was refused: %v", tc.key, tc.value, err)
+		}
+	}
+}

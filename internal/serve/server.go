@@ -224,17 +224,8 @@ func (s *Server) refresh(ctx context.Context) {
 	s.events.add(diffStates(prev, st, now)...)
 
 	botsFor := s.botsFor(&st)
-	// The attempt budget is per repository, so the session card can say
-	// "attempt 2 of 5" rather than leaving the reader to guess whether that is
-	// nearly the last one.
-	maxAttempts := func(repo string) int {
-		if s.opts.SolverFor == nil {
-			return 0
-		}
-		return s.opts.SolverFor(st, repo).MaxAttempts
-	}
 	pace := s.pacing(st)
-	ov := BuildOverview(st, now, pace.MinInterval, pace.Inflight, botsFor, pace.WeeklyLimit, maxAttempts)
+	ov := BuildOverview(st, now, pace.MinInterval, pace.Inflight, botsFor, pace.WeeklyLimit, s.maxAttempts(st))
 	// Read alongside the snapshot rather than cached: it is a state read the
 	// server has already paid for, and a settings page showing a stale default
 	// is how two people overwrite each other.
@@ -447,6 +438,20 @@ was not compiled into this binary.</p>
 <p><code>cd web &amp;&amp; bun install &amp;&amp; bun run build</code></p>
 <p>then rebuild crq. The assets are embedded from <code>web/dist</code>.</p>
 `
+
+// maxAttempts binds the per-repository fix budget to one loaded state, so the
+// session card can say "attempt 2 of 5" rather than leaving the reader to guess
+// whether that is nearly the last one. Shared by the overview and the PR page:
+// two answers to one question is how the same session reads differently
+// depending on which screen you are on.
+func (s *Server) maxAttempts(st state.State) func(repo string) int {
+	return func(repo string) int {
+		if s.opts.SolverFor == nil {
+			return 0
+		}
+		return s.opts.SolverFor(st, repo).MaxAttempts
+	}
+}
 
 // botsFor binds the reviewer resolver to one loaded state, so a row can ask
 // about its own repository without another state read.

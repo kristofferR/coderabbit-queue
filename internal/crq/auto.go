@@ -90,7 +90,7 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			// stop being needed, so tidying here costs one observation on a PR
 			// crq was already looking at rather than a sweep of the fleet.
 			if err == nil {
-				err = s.tidyAfterPump(ctx, pumped)
+				err = s.tidyAfterPump(ctx, state, pumped)
 			}
 			if err != nil {
 				if _, ok := ghapi.ThrottleWait(err); ok {
@@ -291,10 +291,14 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 	if resolved := s.cfg.WithFleet(state.Fleet).AutoReviewMaxScan; resolved > 0 {
 		maxScan = resolved
 	}
-	targets := s.cfg.Scope
-	byRepo := false
-	if enrolled := s.scanTargets(state); len(enrolled) > 0 {
-		targets, byRepo = enrolled, true
+	// Owner-wide searches only when there is no allow-list at all. An allow-list
+	// with nothing left active in it scans NOTHING: falling back to CRQ_SCOPE
+	// there made every pass walk the organisation's whole open-PR result set for
+	// reviewsRepo to reject each row before the scan counter even advanced.
+	targets, scoped := s.scanTargets(state)
+	byRepo := !scoped
+	if scoped {
+		targets = s.cfg.Scope
 	}
 	var candidates []queueCandidate
 	var titles []queueCandidate
@@ -399,7 +403,18 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 // bot's last review commit differs from the head, or (first-review) the bot has
 // never reviewed and no review-done marker is present. It reads the caller's
 // preloaded state snapshot so a pass doesn't reload git-backed state per candidate.
+//
+// It announces each "yes" to the log, which is what makes an autoreview pass
+// explain the work it queued.
 func (s *Service) needsReview(ctx context.Context, state State, repo string, pr int, incremental bool) (bool, string, error) {
+	return s.reviewNeeded(ctx, state, repo, pr, incremental, s.logEnqueue)
+}
+
+// reviewNeeded is the predicate itself, with the announcement injected. The
+// enrollment preview asks exactly this question about pull requests it is not
+// enqueueing, and an "enqueue …" line from a dialog that wrote nothing is how an
+// estimate reads as an action already taken.
+func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr int, incremental bool, announce func(repo string, pr int, head, reason string)) (bool, string, error) {
 	head, err := s.headShort(ctx, repo, pr)
 	if err != nil {
 		return false, "", err
@@ -413,7 +428,7 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 		if !r.ReviewersChanged {
 			return false, head, nil
 		}
-		s.logEnqueue(repo, pr, head, "reviewer configuration changed while the pr was closed")
+		announce(repo, pr, head, "reviewer configuration changed while the pr was closed")
 		return true, head, nil
 	}
 	reviews, err := s.gh.ListReviews(ctx, repo, pr)
@@ -449,7 +464,7 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 			}
 		}
 		if need {
-			s.logEnqueue(repo, pr, head, "no "+dialect.NormalizeBotName(missing)+" review at head")
+			announce(repo, pr, head, "no "+dialect.NormalizeBotName(missing)+" review at head")
 		}
 		return need, head, nil
 	}
@@ -472,9 +487,12 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 	if strings.Contains(pull.Body, s.cfg.ReviewDoneMarker) {
 		return false, head, nil
 	}
-	s.logEnqueue(repo, pr, head, "never reviewed")
+	announce(repo, pr, head, "never reviewed")
 	return true, head, nil
 }
+
+// noAnnounce is reviewNeeded's announcement for a caller that is only asking.
+func noAnnounce(string, int, string, string) {}
 
 // logEnqueue records one line per autoreview enqueue decision so a runaway is
 // visible in the daemon log (repo#pr, head, and why it was queued).

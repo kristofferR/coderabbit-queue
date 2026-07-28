@@ -33,6 +33,11 @@ export function AddRepo({
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  // A save can succeed and still not be in force everywhere: on a mixed-version
+  // fleet the response names the hosts too old to read the record. Discarding it
+  // here let this screen report a fleet-wide decision that some of the fleet
+  // cannot honour, which is the one thing the warning exists to prevent.
+  const [warning, setWarning] = useState<string | null>(null);
   // The backlog contract: enrolling a repository with a dozen open pull
   // requests becomes a dozen metered reviews on the next pass. Nothing is
   // written until this has been shown and confirmed.
@@ -97,9 +102,11 @@ export function AddRepo({
   const add = async (repo: string) => {
     setBusy(repo);
     setError(null);
+    setWarning(null);
     try {
       const res = await act("enroll", { repo, enabled: true });
       onSnapshot?.(res.snapshot);
+      setWarning(res.warning ? `${repo}: ${res.warning}` : null);
       setPending(null);
       // Reflect it locally too: the listing is cached server-side and would
       // otherwise keep offering an Add button for a repository already added.
@@ -160,6 +167,11 @@ export function AddRepo({
 
         {error && (
           <div className="border-b border-bad-edge bg-bad-bg px-5 py-2 text-[12.5px] text-bad">{error}</div>
+        )}
+        {warning && (
+          <div className="border-b border-warn-edge bg-warn-bg px-5 py-2 text-[12.5px] text-warn">
+            {warning}
+          </div>
         )}
 
         <div className="min-h-0 flex-1 overflow-auto">

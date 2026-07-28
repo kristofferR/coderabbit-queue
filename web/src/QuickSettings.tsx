@@ -31,6 +31,10 @@ export function QuickSettings({
   const [required, setRequired] = useState<string[]>(repo.required);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The Repos page keeps this and so must the shortcut: a save that succeeded
+  // can still name hosts too old to read the record, and closing on it reports a
+  // fleet-wide decision that part of the fleet will go on ignoring.
+  const [warning, setWarning] = useState<string | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -47,6 +51,7 @@ export function QuickSettings({
   const save = async () => {
     setBusy(true);
     setError(null);
+    setWarning(null);
     try {
       const res = await act("reviewers", {
         repo: repo.repo,
@@ -55,6 +60,10 @@ export function QuickSettings({
         primary: primary ? runs.includes(primary.name) : undefined,
       });
       onSnapshot?.(res.snapshot);
+      if (res.warning) {
+        setWarning(res.warning);
+        return; // stay open: the warning is the only place this is said
+      }
       onClose();
     } catch (e) {
       setError((e as Error).message);
@@ -139,6 +148,12 @@ export function QuickSettings({
                 ? `, and reconsider ${repo.active_rounds} round(s) already in flight at their current heads.`
                 : ", taking effect on the next round."}
             </p>
+          )}
+
+          {warning && (
+            <div className="mt-3 rounded-lg border border-warn-edge bg-warn-bg px-3 py-2 text-[12.5px] text-warn">
+              {warning}
+            </div>
           )}
 
           {error && (

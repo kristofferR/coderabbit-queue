@@ -48,8 +48,12 @@ type fakeGitHub struct {
 	refReads    int
 	reviewReads int
 	searchPRs   []ghapi.SearchPR
-	ownerRepos  []ghapi.Repo
-	getComment  func(repo string, id int64) (ghapi.IssueComment, error)
+	// searches counts EachOpenPR calls, which is what says whether a pass went
+	// looking at all — an empty result set and a search never made are the same
+	// enqueue count and very different REST bills.
+	searches   int
+	ownerRepos []ghapi.Repo
+	getComment func(repo string, id int64) (ghapi.IssueComment, error)
 	// now, when set, timestamps posted comments off the same injected clock the
 	// service uses, so a fire's recorded FiredAt tracks the fake wall clock the
 	// replay suite advances. nil falls back to real time (all existing tests).
@@ -275,6 +279,7 @@ func (f *fakeGitHub) ListOwnerRepos(_ context.Context, _ string, _ int) ([]ghapi
 
 func (f *fakeGitHub) EachOpenPR(_ context.Context, _ string, _ bool, fn func(ghapi.SearchPR) (bool, error)) error {
 	f.mu.Lock()
+	f.searches++
 	prs := append([]ghapi.SearchPR(nil), f.searchPRs...)
 	f.mu.Unlock()
 	for _, pr := range prs {

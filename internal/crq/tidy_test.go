@@ -429,7 +429,7 @@ func TestTidyReportsDeletionFailures(t *testing.T) {
 	gh.getComment = func(string, int64) (ghapi.IssueComment, error) {
 		return ghapi.IssueComment{}, throttle
 	}
-	if err := svc.tidyProgressed(ctx, repo, pr); !ghapi.IsThrottled(err) {
+	if err := svc.tidyProgressed(ctx, st, repo, pr); !ghapi.IsThrottled(err) {
 		t.Fatalf("tidyProgressed error = %v, want the pre-delete read throttle", err)
 	}
 	st, _, err = store.Load(ctx)
@@ -836,14 +836,18 @@ func TestTidyAfterPumpSkipsAPumpThatChangedNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := svc.tidyAfterPump(ctx, PumpResult{Action: "waiting", Repo: repo, PR: pr, Reason: "review in progress"}); err != nil {
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.tidyAfterPump(ctx, st, PumpResult{Action: "waiting", Repo: repo, PR: pr, Reason: "review in progress"}); err != nil {
 		t.Fatal(err)
 	}
 	if reads := gh.reviewPolls(); reads != 0 {
 		t.Fatalf("a no-progress pump observed the pr %d time(s); the pump had just read it", reads)
 	}
 	// The same PR, once something actually moved.
-	if err := svc.tidyAfterPump(ctx, PumpResult{Action: "cleared", Repo: repo, PR: pr}); err != nil {
+	if err := svc.tidyAfterPump(ctx, st, PumpResult{Action: "cleared", Repo: repo, PR: pr}); err != nil {
 		t.Fatal(err)
 	}
 	if gh.reviewPolls() == 0 {

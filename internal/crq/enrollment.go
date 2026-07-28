@@ -249,14 +249,20 @@ func (s *Service) reviewsRepo(st State, repo string) bool {
 }
 
 // scanTargets is the list a pass should search: every repository enrolled by
-// env or by record. Empty means "no allow-list anywhere", which is the signal to
-// search CRQ_SCOPE owner-wide instead.
-func (s *Service) scanTargets(st State) []string {
+// env or by record. scoped reports that there is no allow-list ANYWHERE, which
+// is the signal to search CRQ_SCOPE owner-wide instead.
+//
+// The two answers are separate on purpose. An empty list with scoped false is an
+// allow-list whose every entry is switched off, which is not the same thing at
+// all: searching the owner for it walks the organisation's whole open-PR result
+// set only for reviewsRepo to reject every row, spending the shared REST quota
+// on a host that has no eligible repository to find.
+func (s *Service) scanTargets(st State) (targets []string, scoped bool) {
 	// An empty CRQ_REPOS means this host searches CRQ_SCOPE owner-wide. Records
 	// must not narrow that to themselves: enrolling one repository would then
 	// silently stop every other one from being scanned.
 	if len(s.cfg.AllowRepos) == 0 {
-		return nil
+		return nil, true
 	}
 	seen := map[string]bool{}
 	var out []string
@@ -273,7 +279,7 @@ func (s *Service) scanTargets(st State) []string {
 		}
 	}
 	sort.Strings(out)
-	return out
+	return out, false
 }
 
 // EnrollmentIn answers for an already-loaded state, so a caller rendering many
@@ -341,9 +347,10 @@ type EnrollImpact struct {
 	PricesCheckedAt string `json:"prices_checked_at"`
 }
 
-// PreviewEnroll reports what enrolling repo would do. It costs one pull-request
-// read per open pull request, which is why it is a separate call the dialog
-// makes rather than something every repository row carries.
+// PreviewEnroll reports what enrolling repo would do. It costs a head read and
+// a review list per open pull request — the same questions the scan asks —
+// plus a diff read for each one it prices, which is why it is a separate call
+// the dialog makes rather than something every repository row carries.
 func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact, error) {
 	repo = NormalizeRepo(repo)
 	if err := checkRepoShape(repo); err != nil {
@@ -368,6 +375,20 @@ func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact,
 		case cfg.SkipsReview(pr.Body):
 			impact.Skipped["carries the skip marker"]++
 		default:
+			// The scan's own predicate, not just the skip rules. A repository
+			// being re-enabled keeps its completed rounds, and a pull request
+			// reviewed outside crq is answered for at its head — counting either
+			// as newly eligible promised a backlog, and a bill for it, that the
+			// next auto-review pass deduplicates on sight. Incremental, because
+			// that is how the daemon runs unless someone passes --no-incremental.
+			need, _, nerr := s.reviewNeeded(ctx, st, repo, pr.Number, true, noAnnounce)
+			if nerr != nil {
+				return false, nerr
+			}
+			if !need {
+				impact.Skipped["already reviewed at head"]++
+				return false, nil
+			}
 			eligible = append(eligible, pr.Number)
 		}
 		return false, nil

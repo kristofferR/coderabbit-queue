@@ -70,7 +70,10 @@ func TestEnrollmentPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	targets := svc.scanTargets(st)
+	targets, scoped := svc.scanTargets(st)
+	if scoped {
+		t.Error("a host with an allow-list must search by repository, not owner-wide")
+	}
 	want := map[string]bool{"o/allowed": true, "o/added": true}
 	if len(targets) != len(want) {
 		t.Fatalf("scan targets = %v, want exactly %v", targets, want)
@@ -109,8 +112,8 @@ func TestEnrollmentDoesNotNarrowAScopeWideHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if targets := svc.scanTargets(st); len(targets) != 0 {
-		t.Errorf("scan targets = %v, want none so the pass still searches the whole scope", targets)
+	if targets, scoped := svc.scanTargets(st); len(targets) != 0 || !scoped {
+		t.Errorf("scan targets = %v (scoped %v), want none and scope mode so the pass still searches the whole scope", targets, scoped)
 	}
 	// The off direction still works there: the per-PR gate reads the record.
 	if _, err := svc.SetEnrollment(ctx, "o/noisy", false, "too busy"); err != nil {
@@ -280,5 +283,80 @@ func TestClearingEnrollmentBackIntoEnvKeepsTheQueuedRounds(t *testing.T) {
 	}
 	if round := st.Round("o/listed", 5); round == nil || round.Phase != PhaseQueued {
 		t.Errorf("round = %+v, want the queued round untouched: env still enrolls this repository", round)
+	}
+}
+
+// An allow-list with every entry switched off is not the same as no allow-list.
+// Treating both as "search CRQ_SCOPE owner-wide" made every pass walk the whole
+// organisation's open-PR result set for the per-PR gate to reject each row —
+// the shared REST quota spent by a host with nothing left to review.
+func TestAPassWithAnAllowListButNoActiveRepositorySearchesNothing(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.Scope = []string{"o"}
+	cfg.AllowRepos = map[string]bool{"o/listed": true}
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: "o/elsewhere", Number: 1, Title: "t"}}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	if _, err := svc.SetEnrollment(ctx, "o/listed", false, "archived"); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := svc.store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if targets, scoped := svc.scanTargets(st); len(targets) != 0 || scoped {
+		t.Fatalf("scan targets = %v (scoped %v), want none and NOT scope mode", targets, scoped)
+	}
+	if err := svc.AutoReview(ctx, AutoOptions{Once: true, Incremental: true}); err != nil {
+		t.Fatal(err)
+	}
+	if gh.searches != 0 {
+		t.Errorf("searched %d time(s); a host with no eligible repository has nothing to look for", gh.searches)
+	}
+}
+
+// The off switch abandons a repository's pending rounds, and every SCAN path
+// honours it — but Enqueue is the manual path, and Pump asks nothing about
+// enrollment. A `crq next` or `crq loop` run afterwards recreated the round and
+// spent a metered review on a repository somebody had deliberately stopped.
+func TestEnqueueRefusesARepositoryTurnedOff(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls["o/stopped#7"] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	if _, err := svc.SetEnrollment(ctx, "o/stopped", false, "archived"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.Enqueue(ctx, "o/stopped", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Held || !strings.Contains(result.Reason, "archived") {
+		t.Errorf("result = %+v, want it refused with the reason the record carries", result)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("o/stopped", 7); round != nil {
+		t.Errorf("round = %+v, want none: a manual enqueue must not undo the off switch", round)
+	}
+
+	// A repository this host's env simply does not list is NOT turned off. A
+	// manual run against one is the ordinary way `crq next` is used, and
+	// refusing it would break every repository outside the fleet's allow-list.
+	cfg.AllowRepos = map[string]bool{"o/listed": true}
+	gh.pulls["o/unlisted#8"] = pull
+	other := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+	if result, err := other.Enqueue(ctx, "o/unlisted", 8); err != nil || result.Held {
+		t.Errorf("result = %+v, err = %v, want a manual enqueue on an unlisted repository to work", result, err)
 	}
 }
