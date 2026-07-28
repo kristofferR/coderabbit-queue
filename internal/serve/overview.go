@@ -85,13 +85,17 @@ type Counts struct {
 
 // Attention is a problem that will not resolve itself. Ranked, most urgent
 // first; each names its subject so the UI never has to guess a title.
+// Attention is one thing worth acting on. Link points at the page that can act
+// on it: an item that says a host is broken and leaves you to find the host
+// page is a notification, not a control.
 type Attention struct {
-	Kind    string `json:"kind"` // stranded|host|leader|lagging|state
-	Level   string `json:"level"`
-	Subject string `json:"subject,omitempty"`
-	Text    string `json:"text"`
-	Detail  string `json:"detail,omitempty"`
-	Link    string `json:"link,omitempty"`
+	Kind     string `json:"kind"` // stranded|host|leader|lagging|state
+	Level    string `json:"level"`
+	Subject  string `json:"subject,omitempty"`
+	Text     string `json:"text"`
+	Detail   string `json:"detail,omitempty"`
+	Link     string `json:"link,omitempty"`
+	LinkText string `json:"link_text,omitempty"`
 }
 
 // Bot is one reviewer's state on a round: commanded, claimed, or neither.

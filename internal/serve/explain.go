@@ -125,26 +125,30 @@ func headline(st state.State, now time.Time, ov Overview) Headline {
 func attention(st state.State, now time.Time, ov Overview) []Attention {
 	out := []Attention{}
 	if s := stranded(st, now); s != "" {
+		repo, pr := splitKey(s)
 		out = append(out, Attention{Kind: "stranded", Level: "bad", Subject: s,
 			Text:   "Stranded reservation on " + s,
-			Detail: "Cancel the round to release it, or wait for the daemon to normalise."})
+			Detail: "Cancel the round to release it, or wait for the daemon to normalise.",
+			Link:   prLink(repo, pr), LinkText: "Open the pull request"})
 	}
 	for _, h := range ov.Autofix.Hosts {
 		if h.Health == "unhealthy" {
 			out = append(out, Attention{Kind: "host", Level: "bad", Subject: h.Name,
 				Text: fmt.Sprintf("Autofix failing on %s — %s in a row",
 					h.Name, plural(h.Failures, "attempt")),
-				Detail: h.LastError})
+				Detail: h.LastError, Link: "#/setup", LinkText: "Open hosts"})
 		}
 	}
 	if ov.Leader == nil {
 		out = append(out, Attention{Kind: "leader", Level: "warn",
 			Text:   "No daemon holds the leader lease",
-			Detail: "Enqueued work will not fire on its own until one starts."})
+			Detail: "Enqueued work will not fire on its own until one starts.",
+			Link:   "#/setup", LinkText: "Open setup"})
 	} else if ov.Leader.Expired {
 		out = append(out, Attention{Kind: "leader", Level: "warn", Subject: ov.Leader.Host,
 			Text:   "The leader lease has expired",
-			Detail: "The last daemon was " + ov.Leader.Host + "; nothing is driving the queue."})
+			Detail: "The last daemon was " + ov.Leader.Host + "; nothing is driving the queue.",
+			Link:   "#/setup", LinkText: "Open setup"})
 	}
 	// The weekly fair-use threshold does not stop reviews, it slows every one
 	// of them to about one an hour — an ~80% collapse that used to arrive with
@@ -156,7 +160,8 @@ func attention(st state.State, now time.Time, ov Overview) []Attention {
 			level = "bad"
 			text = fmt.Sprintf("Past the weekly fair-use threshold (%d of %d)", fu.Fires, fu.Limit)
 		}
-		out = append(out, Attention{Kind: "fairuse", Level: level, Text: text, Detail: fu.Note})
+		out = append(out, Attention{Kind: "fairuse", Level: level, Text: text, Detail: fu.Note,
+			Link: "#/settings", LinkText: "Fleet settings"})
 	}
 	if st.Warn != "" {
 		out = append(out, Attention{Kind: "state", Level: "warn", Text: st.Warn})
@@ -200,4 +205,13 @@ func joinWords(items []string) string {
 		return items[0] + " and " + items[1]
 	}
 	return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
+}
+
+// prLink is the dashboard's own route for a pull request, so an attention item
+// can point at the page that can act on it rather than only describing it.
+func prLink(repo string, pr int) string {
+	if repo == "" || pr <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("#/pr/%s/%d", repo, pr)
 }

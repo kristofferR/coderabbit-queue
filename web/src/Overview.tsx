@@ -106,10 +106,15 @@ export function OverviewPage({
           }`}
         >
           <Pill tone={a.level === "bad" ? "bad" : "warn"}>Needs attention</Pill>
-          <span>
+          <span className="min-w-0">
             {a.text}
             {a.detail && <span className="ml-2 text-mut">{a.detail}</span>}
           </span>
+          {a.link && (
+            <a href={a.link} className="ml-auto shrink-0 text-[12.5px] font-semibold text-acc hover:underline">
+              {a.link_text ?? "Open"} →
+            </a>
+          )}
         </div>
       ))}
 

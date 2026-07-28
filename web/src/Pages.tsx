@@ -1,4 +1,4 @@
-import type { BotCard, RepoRow, SetupView, SettingsView, Snapshot } from "./api";
+import type { BotCard, HeldRow, RepoRow, SetupView, SettingsView, Snapshot } from "./api";
 import { useEffect, useState } from "react";
 import { act } from "./actions";
 import { Confirm } from "./Confirm";
@@ -28,10 +28,12 @@ const ENROLLMENT: Record<
 export function ReposPage({
   repos,
   bots,
+  held,
   onSnapshot,
 }: {
   repos: RepoRow[];
   bots: BotCard[];
+  held: HeldRow[];
   onSnapshot?: (s: Snapshot) => void;
 }) {
   const now = useNow(5000);
@@ -139,6 +141,14 @@ export function ReposPage({
             by={selected.enroll_by}
             onSnapshot={onSnapshot}
           />
+          <HeldHere
+            key={`${selected.repo}-held`}
+            repo={selected.repo}
+            held={held.filter((h) => h.repo.toLowerCase() === selected.repo.toLowerCase())}
+            elsewhere={held.filter((h) => h.repo.toLowerCase() !== selected.repo.toLowerCase()).length}
+            now={now}
+            onSnapshot={onSnapshot}
+          />
           <ReviewerEditor key={selected.repo} repo={selected} bots={bots} onSnapshot={onSnapshot} />
           <AutofixEditor key={`${selected.repo}-autofix`} repo={selected} now={now} onSnapshot={onSnapshot} />
           {selected.solver && (
@@ -153,6 +163,137 @@ export function ReposPage({
       )}
       <AddRepo open={adding} onClose={() => setAdding(false)} onSnapshot={onSnapshot} />
     </main>
+  );
+}
+
+/**
+ * Holds on this repository, and a way to place one.
+ *
+ * A hold could only be placed from an Overview row, which means from the one
+ * page that shows every repository at once — so the answer to "stop reviewing
+ * this PR while I rework it" was to go and find it in a list. It belongs where
+ * the repository's other decisions are.
+ */
+function HeldHere({
+  repo,
+  held,
+  elsewhere,
+  now,
+  onSnapshot,
+}: {
+  repo: string;
+  held: HeldRow[];
+  elsewhere: number;
+  now: number;
+  onSnapshot?: (s: Snapshot) => void;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [pr, setPr] = useState("");
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = async (kind: "hold" | "unhold", num: number, why = "") => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await act(kind, { repo, pr: num, reason: why });
+      onSnapshot?.(res.snapshot);
+      setAdding(false);
+      setPr("");
+      setReason("");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card
+      title="Held pull requests"
+      count={held.length}
+      end={elsewhere > 0 ? `${elsewhere} held elsewhere` : undefined}
+    >
+      <div className="px-[18px] pb-3.5 pt-1">
+        {held.length === 0 ? (
+          <p className="text-[12.5px] text-faint">
+            Nothing is held here. A hold stops crq enqueuing or firing for one pull request until
+            somebody lifts it; reviews already in flight finish.
+          </p>
+        ) : (
+          <ul className="text-[13px]">
+            {held.map((h) => (
+              <li key={h.key} className="flex items-start gap-2 border-b border-[#EEF0F3] py-1.5 last:border-none">
+                <span className="min-w-0">
+                  <PRLink repo={h.repo} pr={h.pr} />
+                  {h.title && <span className="ml-2 text-[12.5px] text-mut">{h.title}</span>}
+                  <div className="text-[12.5px] text-faint">
+                    “{h.reason}”{h.by && ` — ${h.by}`} {h.at && ago(h.at, now)}
+                  </div>
+                </span>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void run("unhold", h.pr)}
+                  className="ml-auto shrink-0 rounded-lg border border-edge px-2.5 py-0.5 text-[12px] font-semibold text-mut disabled:opacity-45"
+                >
+                  Unhold
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {error && (
+          <div className="mt-2.5 rounded-lg border border-bad-edge bg-bad-bg px-3 py-2 text-[12.5px] text-bad">
+            {error}
+          </div>
+        )}
+
+        {adding ? (
+          <div className="mt-2.5 flex flex-wrap items-center gap-2">
+            <input
+              autoFocus
+              value={pr}
+              inputMode="numeric"
+              placeholder="PR #"
+              onChange={(e) => setPr(e.target.value.replace(/[^0-9]/g, ""))}
+              className="w-20 rounded-lg border border-edge bg-[#FBFBFC] px-2 py-1 font-mono text-[12.5px]"
+            />
+            <input
+              value={reason}
+              placeholder="why — every screen that shows the hold shows this"
+              onChange={(e) => setReason(e.target.value)}
+              className="min-w-[260px] flex-1 rounded-lg border border-edge bg-[#FBFBFC] px-2 py-1 text-[12.5px]"
+            />
+            <button
+              type="button"
+              disabled={busy || !pr || reason.trim() === ""}
+              onClick={() => void run("hold", Number(pr), reason.trim())}
+              className="rounded-lg bg-ink px-3 py-1 text-[12.5px] font-semibold text-white disabled:opacity-45"
+            >
+              Hold it
+            </button>
+            <button
+              type="button"
+              onClick={() => setAdding(false)}
+              className="rounded-lg border border-edge px-3 py-1 text-[12.5px] font-semibold text-mut"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setAdding(true)}
+            className="mt-2.5 rounded-lg border border-edge px-3 py-1 text-[12.5px] font-semibold text-mut"
+          >
+            Hold a pull request…
+          </button>
+        )}
+      </div>
+    </Card>
   );
 }
 

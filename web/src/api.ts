@@ -36,6 +36,10 @@ export type Attention = {
   subject?: string;
   text: string;
   detail?: string;
+  /** Where to go to act on it. An item that only describes a problem is a
+   *  notification; one that points at the page that fixes it is a control. */
+  link?: string;
+  link_text?: string;
 };
 
 export type Bot = {
