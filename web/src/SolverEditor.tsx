@@ -226,17 +226,17 @@ export function SolverEditor({
           </div>
         )}
 
-        <table className="mt-2.5 w-full border-collapse">
+        <table className="config-table mt-2.5 w-full border-collapse">
           <tbody>
             <Row label="Models" source={src("models")}>
               <div className="space-y-1.5">
                 {models.map((model, index) => (
-                  <div key={index} className="flex items-center gap-1.5">
+                  <div key={index} className="flex flex-wrap items-center gap-1.5">
                     <span className="w-4 text-right font-mono text-[11px] text-faint">{index + 1}</span>
                     <select
                       value={model}
                       onChange={(e) => setRankedModel(index, e.target.value)}
-                      className="w-56 rounded-lg border border-edge bg-[#FBFBFC] px-2 py-1 font-mono text-[12.5px]"
+                      className="min-w-[180px] flex-1 rounded-lg border border-edge bg-[#FBFBFC] px-2 py-1 font-mono text-[12.5px]"
                     >
                       {modelChoices.map((choice) => (
                         <option
@@ -278,7 +278,7 @@ export function SolverEditor({
                     )}
                   </div>
                 ))}
-                <div className="flex items-center gap-2 pl-[22px]">
+                <div className="flex flex-wrap items-center gap-2 pl-[22px] max-[600px]:pl-0">
                   <button
                     type="button"
                     disabled={!modelChoices.some((model) => model !== "" && !models.includes(model))}
@@ -342,7 +342,7 @@ export function SolverEditor({
                     <Pill tone="acc">guardrails</Pill>
                   </div>
 
-                  <div className="mt-4 grid grid-cols-[145px_minmax(0,1fr)] gap-x-4 gap-y-4">
+                  <div className="mt-4 grid grid-cols-[145px_minmax(0,1fr)] gap-x-4 gap-y-4 max-[700px]:grid-cols-1 max-[700px]:gap-y-2">
                     <PolicyLabel label="Fix findings" source={src("severities")} />
                     <div>
                       <div className="flex flex-wrap gap-2">
@@ -431,7 +431,7 @@ export function SolverEditor({
                         </button>
                       ))}
                     </div>
-                    <div />
+                    <div className="max-[700px]:hidden" />
                     <div className="flex items-center gap-2 text-[11.5px] text-faint">
                       A clarification preserves the attempt and holds the PR with the agent's question.
                       <Inherit

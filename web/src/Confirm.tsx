@@ -80,13 +80,13 @@ export function Confirm({
   }, []);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-[rgb(27_36_48/0.28)] px-4 pt-[12vh]">
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-[rgb(27_36_48/0.28)] px-4 pt-[12vh] max-[600px]:items-end max-[600px]:px-0 max-[600px]:pt-0">
       <div
         ref={panel}
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className="w-full max-w-[520px] rounded-[10px] border border-edge bg-card p-5 shadow-[0_16px_48px_rgb(27_36_48/0.24)]"
+        className="max-h-[88vh] w-full max-w-[520px] overflow-y-auto rounded-[10px] border border-edge bg-card p-5 shadow-[0_16px_48px_rgb(27_36_48/0.24)] max-[600px]:rounded-b-none max-[600px]:border-x-0 max-[600px]:border-b-0 max-[600px]:p-4"
       >
         <h2 className={`text-[15px] font-[650] ${danger ? "text-bad" : "text-ink"}`}>{title}</h2>
         <div className="mt-2 text-[13px] text-mut">{body}</div>
@@ -116,7 +116,7 @@ export function Confirm({
           </div>
         )}
 
-        <div className="mt-4 flex items-center gap-2.5">
+        <div className="mt-4 flex items-center gap-2.5 max-[420px]:grid max-[420px]:grid-cols-2">
           <button
             type="button"
             disabled={busy || blocked}

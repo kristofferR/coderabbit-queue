@@ -61,14 +61,14 @@ export function SetupPage({
   };
 
   return (
-    <main className="mx-auto max-w-[1120px] px-6 pt-5 pb-16">
+    <main className="mx-auto max-w-[1120px] px-6 pt-5 pb-16 max-[600px]:px-3 max-[600px]:pt-3">
       <h1 className="text-xl font-[650] tracking-tight">Setup</h1>
       <p className="mt-1 max-w-[840px] text-[13.5px] text-mut">
         Everything crq needs to run, and whether this fleet actually has it. This stays useful after
         first run: come here when a host stops fixing, a credential expires, or a machine joins.
       </p>
 
-      <section className="my-3.5 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-5 rounded-[10px] border border-edge bg-card px-5 py-4 shadow-card max-[760px]:grid-cols-1">
+      <section className="my-3.5 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-5 rounded-[10px] border border-edge bg-card px-5 py-4 shadow-card max-[760px]:grid-cols-1 max-[600px]:px-3.5">
         <div>
           <h2 className="text-[15px] font-[650]">
             {setup.attention === 0
@@ -552,7 +552,7 @@ function ReviewBots({ bots, now }: { bots: BotCard[]; now: number }) {
           These run on GitHub, not on your machines. Status comes from answers crq has actually seen,
           so a new bot remains unverified until its first review.
         </p>
-        <div className="grid grid-cols-4 gap-2.5 max-[940px]:grid-cols-2">
+        <div className="grid grid-cols-4 gap-2.5 max-[940px]:grid-cols-2 max-[480px]:grid-cols-1">
           {bots.map((bot) => {
             const tone = bot.status === "working" ? "ok" : bot.status === "silent" ? "bad" : bot.enabled ? "warn" : "mut";
             return (

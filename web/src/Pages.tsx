@@ -52,7 +52,7 @@ export function ReposPage({
   }, [startAdding]);
   const selected = repos.find((r) => r.repo === picked) ?? repos[0];
   return (
-    <main className="mx-auto grid max-w-[1400px] grid-cols-[320px_minmax(0,1fr)] items-start gap-4.5 px-6 pt-4.5 pb-16 max-[1400px]:grid-cols-[minmax(0,1fr)]">
+    <main className="mx-auto grid max-w-[1400px] grid-cols-[320px_minmax(0,1fr)] items-start gap-4.5 px-6 pt-4.5 pb-16 max-[1400px]:grid-cols-[minmax(0,1fr)] max-[600px]:px-3 max-[600px]:pt-3">
       <div>
       <Card
         title="Repositories"
@@ -70,7 +70,7 @@ export function ReposPage({
         {repos.length === 0 ? (
           <Empty>No repository has been seen yet.</Empty>
         ) : (
-          <ul>
+          <ul className="max-[600px]:max-h-[260px] max-[600px]:overflow-y-auto">
             {repos.map((r) => {
               const e = enrollmentLabel(r.enrollment, r.reviewed);
               const on = selected?.repo === r.repo;
@@ -110,9 +110,9 @@ export function ReposPage({
 
       {selected && (
         <div>
-          <div className="mb-3.5 flex flex-wrap items-center gap-3.5 rounded-[10px] border border-edge bg-card px-5 py-4 shadow-card">
+          <div className="mb-3.5 flex flex-wrap items-center gap-3.5 rounded-[10px] border border-edge bg-card px-5 py-4 shadow-card max-[600px]:px-3.5">
             <RepoIcon repo={selected.repo} size={26} />
-            <h1 className="font-mono text-[18px] font-[650] tracking-tight">{selected.repo}</h1>
+            <h1 className="min-w-0 break-all font-mono text-[18px] font-[650] tracking-tight max-[600px]:text-[16px]">{selected.repo}</h1>
             <Pill tone={enrollmentLabel(selected.enrollment, selected.reviewed).tone}>
               {enrollmentLabel(selected.enrollment, selected.reviewed).label}
             </Pill>
@@ -403,7 +403,7 @@ function ReviewerEditor({
           never seen work here is marked — enabling one is allowed, since a bot cannot prove
           itself until it is asked, but an unset-up one just collects trigger comments.
         </p>
-        <table className="w-full border-collapse">
+        <table className="responsive-table w-full border-collapse">
           <thead>
             <tr>
               <Th>Reviewer</Th>
@@ -422,7 +422,7 @@ function ReviewerEditor({
                 never comes. */}
             {[...bots].sort((a, b) => rank(a) - rank(b)).map((b) => (
               <tr key={b.login} className={b.status === "working" ? "" : "opacity-75"}>
-                <Td>
+                <Td primary>
                   <span className="flex items-center gap-2.5">
                     <BotIcon login={b.login} name={b.name} size={20} />
                     <span className="font-[550]">{b.name}</span>
@@ -442,7 +442,7 @@ function ReviewerEditor({
                     )}
                   </span>
                 </Td>
-                <Td className="text-center">
+                <Td label="Runs" className="text-center">
                   <Toggle
                     on={runs.includes(b.name)}
                     label={`Runs ${b.name}`}
@@ -450,14 +450,14 @@ function ReviewerEditor({
                     onClick={() => toggleRuns(b.name)}
                   />
                 </Td>
-                <Td className="text-center">
+                <Td label="Required" className="text-center">
                   <Toggle
                     on={required.includes(b.name)}
                     label={`Requires ${b.name}`}
                     onClick={() => toggleRequired(b.name)}
                   />
                 </Td>
-                <Td className="c-host text-[12.5px] text-faint">
+                <Td label="Role" className="c-host text-[12.5px] text-faint">
                   {b.primary
                     ? primaryOn
                       ? "primary · metered against the shared allowance"
@@ -690,7 +690,7 @@ const STATUS: Record<
 export function BotsPage({ bots }: { bots: BotCard[] }) {
   const now = useNow(5000);
   return (
-    <main className="mx-auto max-w-[1120px] px-6 pt-5 pb-16">
+    <main className="mx-auto max-w-[1120px] px-6 pt-5 pb-16 max-[600px]:px-3 max-[600px]:pt-3">
       <h1 className="text-xl font-[650] tracking-tight">Review bots</h1>
       <p className="mt-1 max-w-[760px] text-[13.5px] text-mut">
         Every reviewer crq knows how to drive. Status is what crq itself recorded — a trigger it
@@ -710,7 +710,7 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
                 b.enabled ? "border-edge" : "border-dashed border-edge"
               }`}
             >
-              <header className="flex items-start gap-3 px-5 pt-4">
+              <header className="flex items-start gap-3 px-5 pt-4 max-[600px]:px-3.5">
                 <BotIcon login={b.login} name={b.name} size={38} />
                 <div className="min-w-0">
                   <h2 className="text-base font-[650]">{b.name}</h2>
@@ -724,7 +724,7 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
                 </span>
               </header>
 
-              <div className="flex-1 px-5 pt-3 text-[13px] text-mut">
+              <div className="flex-1 px-5 pt-3 text-[13px] text-mut max-[600px]:px-3.5">
                 {b.pitch && <p>{b.pitch}</p>}
                 {b.cost && (
                   <p className="mt-2">
@@ -780,7 +780,7 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
                 )}
               </div>
 
-              <footer className="mt-3 flex flex-wrap items-center gap-3 border-t border-[#EEF0F3] px-5 py-2.5 text-[12.5px]">
+              <footer className="mt-3 flex flex-wrap items-center gap-3 border-t border-[#EEF0F3] px-5 py-2.5 text-[12.5px] max-[600px]:px-3.5">
                 {b.site && (
                   <a href={b.site} target="_blank" rel="noreferrer" className="text-acc hover:underline">
                     {b.status === "off" || b.status === "unverified" ? "Sign up ↗" : "Vendor ↗"}
@@ -833,7 +833,7 @@ export function SettingsPage({
 }) {
   const c = settings.config;
   return (
-    <main className="mx-auto max-w-[1120px] px-6 pt-5 pb-16">
+    <main className="mx-auto max-w-[1120px] px-6 pt-5 pb-16 max-[600px]:px-3 max-[600px]:pt-3">
       <h1 className="text-xl font-[650] tracking-tight">Fleet settings</h1>
       <p className="mt-1 max-w-[840px] text-[13.5px] text-mut">
         The defaults every repository inherits. The editable ones live in shared state, so one host's env
@@ -861,7 +861,7 @@ export function SettingsPage({
       </Card>
 
       <Card title="Reviewers" count={c.reviewers.length}>
-        <table className="mt-1.5 w-full border-collapse">
+        <table className="responsive-table mt-1.5 w-full border-collapse">
           <thead>
             <tr>
               <Th>Reviewer</Th>
@@ -874,14 +874,14 @@ export function SettingsPage({
           <tbody>
             {c.reviewers.map((r) => (
               <tr key={r.login} className="hover:bg-[#F7F8FA]">
-                <Td className="font-[550]">{r.name}</Td>
-                <Td>{r.primary ? <Pill tone="warn">primary · metered</Pill> : <Pill tone="ok">co-reviewer · free</Pill>}</Td>
-                <Td>{r.required ? "waits for it" : <span className="text-faint">no</span>}</Td>
-                <Td>
+                <Td primary className="font-[550]">{r.name}</Td>
+                <Td label="Role">{r.primary ? <Pill tone="warn">primary · metered</Pill> : <Pill tone="ok">co-reviewer · free</Pill>}</Td>
+                <Td label="Required">{r.required ? "waits for it" : <span className="text-faint">no</span>}</Td>
+                <Td label="Trigger">
                   {r.trigger || "—"}
                   {r.trigger === "selfheal" && r.grace ? ` · ${r.grace}` : ""}
                 </Td>
-                <Td className="c-host font-mono text-[12.5px] text-mut">{r.command || "—"}</Td>
+                <Td label="Command" className="c-host font-mono text-[12.5px] text-mut">{r.command || "—"}</Td>
               </tr>
             ))}
           </tbody>

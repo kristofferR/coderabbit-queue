@@ -38,8 +38,8 @@ export function Card({
   children: ReactNode;
 }) {
   return (
-    <section className="mb-3.5 rounded-[10px] border border-edge bg-card shadow-card">
-      <header className="flex flex-wrap items-baseline gap-2.5 px-[18px] pt-3">
+    <section className="mb-3.5 min-w-0 overflow-hidden rounded-[10px] border border-edge bg-card shadow-card">
+      <header className="flex flex-wrap items-baseline gap-2.5 px-[18px] pt-3 max-[600px]:px-3.5">
         <h2 className="text-[14.5px] font-[650]">{title}</h2>
         {count !== undefined && <span className="text-[12.5px] text-faint">{count}</span>}
         {end && <span className="ml-auto text-[12.5px] text-faint">{end}</span>}
@@ -211,8 +211,29 @@ export function Th({ children, className = "" }: { children?: ReactNode; classNa
   );
 }
 
-export function Td({ children, className = "" }: { children?: ReactNode; className?: string }) {
-  return <td className={`border-b border-[#EEF0F3] px-[18px] py-2.5 align-top ${className}`}>{children}</td>;
+export function Td({
+  children,
+  className = "",
+  label,
+  primary,
+  actions,
+}: {
+  children?: ReactNode;
+  className?: string;
+  label?: string;
+  primary?: boolean;
+  actions?: boolean;
+}) {
+  return (
+    <td
+      data-label={label}
+      data-primary={primary || undefined}
+      data-actions={actions || undefined}
+      className={`border-b border-[#EEF0F3] px-[18px] py-2.5 align-top ${className}`}
+    >
+      {children}
+    </td>
+  );
 }
 
 /**

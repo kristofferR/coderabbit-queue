@@ -103,7 +103,7 @@ export function FirstRun({ snap }: { snap: Snapshot }) {
   ];
 
   return (
-    <main className="mx-auto max-w-[860px] px-6 pt-8 pb-16">
+    <main className="mx-auto max-w-[860px] px-6 pt-8 pb-16 max-[600px]:px-3 max-[600px]:pt-4">
       <h1 className="text-[26px] font-[680] tracking-tight">Nothing is enrolled yet</h1>
       <p className="mt-2 text-[14.5px] text-mut">
         crq keeps automated reviewers off each other's toes. It runs three kinds of work, and knowing

@@ -121,9 +121,9 @@ export function QuickSettings({
         role="dialog"
         aria-modal="true"
         aria-label={`Reviewers for ${repo.repo}`}
-        className="flex h-full w-[420px] max-w-full flex-col border-l border-edge bg-card shadow-[0_0_48px_rgb(27_36_48/0.18)]"
+        className="flex h-full w-[420px] max-w-full flex-col border-l border-edge bg-card shadow-[0_0_48px_rgb(27_36_48/0.18)] max-[600px]:w-full max-[600px]:border-l-0"
       >
-        <div className="flex items-center gap-2 border-b border-edge px-5 py-3.5">
+        <div className="flex items-center gap-2 border-b border-edge px-5 py-3.5 max-[600px]:px-3.5">
           <h2 className="min-w-0 truncate text-[15px] font-[650]">{repo.repo}</h2>
           <Pill tone={repo.override ? "warn" : "mut"}>
             {repo.override ? "override" : "fleet default"}
@@ -137,7 +137,7 @@ export function QuickSettings({
           </button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-auto px-5 py-3">
+        <div className="min-h-0 flex-1 overflow-auto px-5 py-3 max-[600px]:px-3.5">
           <p className="text-[12.5px] text-faint">
             <b>Runs</b> — the bot reviews this repo. <b>Required</b> — convergence waits for it.
             {repo.override_by && ` Set by ${repo.override_by}.`}
@@ -212,7 +212,7 @@ export function QuickSettings({
           </a>
         </div>
 
-        <div className="flex items-center gap-2.5 border-t border-edge px-5 py-3">
+        <div className="flex flex-wrap items-center gap-2.5 border-t border-edge px-5 py-3 max-[600px]:px-3.5">
           <button
             type="button"
             disabled={!dirty || busy}

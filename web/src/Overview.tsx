@@ -124,7 +124,7 @@ export function OverviewPage({
   const narrowed = q !== "" || filter !== "all";
 
   return (
-    <main className="mx-auto max-w-[1400px] px-6 pt-4.5 pb-16">
+    <main className="mx-auto max-w-[1400px] px-6 pt-4.5 pb-16 max-[600px]:px-3 max-[600px]:pt-3">
       <Banner ov={ov} now={now} />
       {ov.attention.map((a, i) => (
         <div
@@ -156,32 +156,35 @@ export function OverviewPage({
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search repo, PR number or title…"
-          className="w-[300px] rounded-lg border border-edge bg-card px-2.5 py-1.5 text-[13px]"
+          aria-label="Search pull requests"
+          className="w-[300px] rounded-lg border border-edge bg-card px-2.5 py-1.5 text-[13px] max-[600px]:w-full max-[600px]:py-2"
         />
-        {(["all", "in_flight", "queued", "held", "fixing", "attention"] as Filter[]).map((f) => (
-          <button
-            key={f}
-            type="button"
-            onClick={() => setFilter(f)}
-            className={`rounded-full border px-3 py-1 text-[12.5px] font-medium ${
-              filter === f ? "border-ink bg-ink text-white" : "border-edge text-mut hover:bg-[#F7F8FA]"
-            }`}
-          >
-            {FILTER_LABELS[f]}
-          </button>
-        ))}
-        {narrowed && (
-          <button
-            type="button"
-            onClick={() => {
-              setQuery("");
-              setFilter("all");
-            }}
-            className="text-[12.5px] text-acc hover:underline"
-          >
-            Clear
-          </button>
-        )}
+        <div className="flex min-w-0 flex-wrap items-center gap-2 max-[600px]:-mx-3 max-[600px]:w-[calc(100%+1.5rem)] max-[600px]:flex-nowrap max-[600px]:overflow-x-auto max-[600px]:px-3 max-[600px]:pb-1">
+          {(["all", "in_flight", "queued", "held", "fixing", "attention"] as Filter[]).map((f) => (
+            <button
+              key={f}
+              type="button"
+              onClick={() => setFilter(f)}
+              className={`shrink-0 rounded-full border px-3 py-1 text-[12.5px] font-medium max-[600px]:py-1.5 ${
+                filter === f ? "border-ink bg-ink text-white" : "border-edge text-mut hover:bg-[#F7F8FA]"
+              }`}
+            >
+              {FILTER_LABELS[f]}
+            </button>
+          ))}
+          {narrowed && (
+            <button
+              type="button"
+              onClick={() => {
+                setQuery("");
+                setFilter("all");
+              }}
+              className="shrink-0 text-[12.5px] text-acc hover:underline"
+            >
+              Clear
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="grid grid-cols-[minmax(0,1fr)_360px] items-start gap-4 max-[1400px]:grid-cols-[minmax(0,1fr)]">
@@ -190,7 +193,7 @@ export function OverviewPage({
         {inFlight.length === 0 ? (
           <Empty>Nothing is being reviewed right now.</Empty>
         ) : (
-          <table className="mt-1.5 w-full border-collapse">
+          <table className="responsive-table mt-1.5 w-full border-collapse">
             <thead>
               <tr>
                 <Th>Pull request</Th>
@@ -206,7 +209,7 @@ export function OverviewPage({
             <tbody>
               {inFlight.map((r) => (
                 <tr key={r.key} className="group hover:bg-[#F7F8FA]">
-                  <Td>
+                  <Td primary>
                     <div className="flex items-center gap-2 font-[550]">
                       <RepoIcon repo={r.repo} />
                       <PRTitle repo={r.repo} pr={r.pr} title={r.title} />
@@ -214,25 +217,25 @@ export function OverviewPage({
                     </div>
                     {r.next && <div className="mt-1 ml-6 text-[12.5px] text-mut">{r.next}</div>}
                   </Td>
-                  <Td className="text-[13px]">
+                  <Td label="Head" className="text-[13px]">
                     <CommitLink repo={r.repo} sha={r.head} />
                   </Td>
-                  <Td>
+                  <Td label="Phase">
                     <Pill tone={r.phase === "reviewing" ? "ok" : "acc"}>{r.phase}</Pill>
                   </Td>
-                  <Td className="tabular-nums">
+                  <Td label="Fired" className="tabular-nums">
                     {clock(r.fired_at)}
                     <div className="text-[11.5px] text-faint">{ago(r.fired_at, now)}</div>
                   </Td>
-                  <Td className="tabular-nums">
+                  <Td label="Deadline" className="tabular-nums">
                     <b>{countdown(r.deadline, now)}</b>
                     <div className="text-[11.5px] text-faint">{clock(r.deadline)}</div>
                   </Td>
-                  <Td>
+                  <Td label="Reviewers">
                     <BotMarks bots={r.bots} />
                   </Td>
-                  <Td className="c-host font-mono text-[13px] text-mut">{r.host ?? "—"}</Td>
-                  <Td>
+                  <Td label="Host" className="c-host font-mono text-[13px] text-mut">{r.host ?? "—"}</Td>
+                  <Td actions>
                     <RowActions
                       onSettings={() => setSettingsFor(r.repo)}
                       onHold={() => openConfirm({ kind: "hold", repo: r.repo, pr: r.pr })}
@@ -262,7 +265,7 @@ export function OverviewPage({
         {queued.length === 0 ? (
           <Empty>The queue is empty.</Empty>
         ) : (
-          <table className="mt-1.5 w-full border-collapse">
+          <table className="responsive-table mt-1.5 w-full border-collapse">
             <thead>
               <tr>
                 <Th className="w-6">#</Th>
@@ -278,29 +281,29 @@ export function OverviewPage({
             <tbody>
               {queued.map((q) => (
                 <tr key={q.key} className="group hover:bg-[#F7F8FA]">
-                  <Td className="tabular-nums">{q.position ? q.position : <span className="text-faint">—</span>}</Td>
-                  <Td>
+                  <Td label="Position" className="tabular-nums">{q.position ? q.position : <span className="text-faint">—</span>}</Td>
+                  <Td primary>
                     <div className="flex items-center gap-2 font-[550]">
                       <RepoIcon repo={q.repo} />
                       <PRTitle repo={q.repo} pr={q.pr} title={q.title} />
                     </div>
                     {q.next && <div className="mt-1 ml-6 text-[12.5px] text-mut">{q.next}</div>}
                   </Td>
-                  <Td className="text-[13px]">
+                  <Td label="Head" className="text-[13px]">
                     <CommitLink repo={q.repo} sha={q.head} />
                   </Td>
-                  <Td className="tabular-nums">
+                  <Td label="Ready" className="tabular-nums">
                     {q.ready_at ? <b>{countdown(q.ready_at, now)}</b> : q.why ? <span className="text-faint">—</span> : <b>now</b>}
                   </Td>
-                  <Td>
+                  <Td label="Why">
                     <Pill tone={WHY_TONE[q.why ?? ""] ?? "mut"}>
                       {q.why || "next up"}
                       {q.co_only ? " · co-only" : ""}
                     </Pill>
                   </Td>
-                  <Td className="c-att text-right tabular-nums">{q.attempts ?? 0}</Td>
-                  <Td className="c-host font-mono text-[13px] text-mut">{q.host ?? "—"}</Td>
-                  <Td>
+                  <Td label="Attempts" className="c-att text-right tabular-nums">{q.attempts ?? 0}</Td>
+                  <Td label="Host" className="c-host font-mono text-[13px] text-mut">{q.host ?? "—"}</Td>
+                  <Td actions>
                     <RowActions
                       onPrioritize={() => prioritize(q.repo, q.pr)}
                       prioritizing={prioritizing === `${q.repo.toLowerCase()}#${q.pr}`}
@@ -320,7 +323,7 @@ export function OverviewPage({
 
       {ov.held.length > 0 && (
         <Card title="Held" count={countLabel(held.length, ov.counts.held, narrowed)}>
-          <table className="mt-1.5 w-full border-collapse">
+          <table className="responsive-table mt-1.5 w-full border-collapse">
             <thead>
               <tr>
                 <Th>Pull request</Th>
@@ -334,22 +337,22 @@ export function OverviewPage({
             <tbody>
               {held.map((h) => (
                 <tr key={h.key} className="hover:bg-[#F7F8FA]">
-                  <Td>
+                  <Td primary>
                     <div className="flex items-center gap-2 font-[550]">
                       <RepoIcon repo={h.repo} />
                       <PRTitle repo={h.repo} pr={h.pr} title={h.title} />
                     </div>
                   </Td>
-                  <Td className="text-[13px]">
+                  <Td label="Head" className="text-[13px]">
                     <CommitLink repo={h.repo} sha={h.head} />
                   </Td>
-                  <Td className="c-host font-mono text-[13px] text-mut">{h.by || "—"}</Td>
-                  <Td className="tabular-nums">{clock(h.at)}</Td>
-                  <Td>
+                  <Td label="Held by" className="c-host font-mono text-[13px] text-mut">{h.by || "—"}</Td>
+                  <Td label="Since" className="tabular-nums">{clock(h.at)}</Td>
+                  <Td label="Reason">
                     <Pill tone="bad">Held</Pill>
                     {h.reason && <span className="ml-2 text-faint">“{h.reason}”</span>}
                   </Td>
-                  <Td>
+                  <Td actions>
                     <button
                       type="button"
                       onClick={() => openConfirm({ kind: "unhold", repo: h.repo, pr: h.pr })}
@@ -420,7 +423,7 @@ export function OverviewPage({
         {finished.length === 0 ? (
           <Empty>Nothing has finished yet.</Empty>
         ) : (
-          <table className="mt-1.5 w-full border-collapse">
+          <table className="responsive-table mt-1.5 w-full border-collapse">
             <thead>
               <tr>
                 <Th>Pull request</Th>
@@ -432,20 +435,20 @@ export function OverviewPage({
             <tbody>
               {finished.map((d, i) => (
                 <tr key={`${d.key}-${i}`} className="hover:bg-[#F7F8FA]">
-                  <Td>
+                  <Td primary>
                     <div className="flex items-center gap-2 font-[550]">
                       <RepoIcon repo={d.repo} />
                       <PRTitle repo={d.repo} pr={d.pr} title={d.title} />
                     </div>
                   </Td>
-                  <Td className="text-[13px]">
+                  <Td label="Head" className="text-[13px]">
                     <CommitLink repo={d.repo} sha={d.head} />
                   </Td>
-                  <Td>
+                  <Td label="Outcome">
                     <Pill tone={d.outcome === "completed" ? "ok" : "mut"}>{d.outcome}</Pill>
                     {d.note && <span className="ml-2 text-faint">{d.note}</span>}
                   </Td>
-                  <Td className="tabular-nums">{clock(d.at)}</Td>
+                  <Td label="When" className="tabular-nums">{clock(d.at)}</Td>
                 </tr>
               ))}
             </tbody>
@@ -532,21 +535,21 @@ function ActivityFeed({ events, now }: { events: EventItem[]; now: number }) {
   const tone = (level: string) =>
     level === "bad" ? "bad" : level === "warn" ? "warn" : level === "ok" ? "ok" : "acc";
   return (
-    <aside className="sticky top-16">
+    <aside className="sticky top-16 max-[1400px]:static">
       <Card title="Activity" end="live — since this dashboard started">
         {events.length === 0 ? (
           <Empty>Nothing has changed since this dashboard started.</Empty>
         ) : (
           <ol className="px-[18px] pt-1.5 pb-3">
             {events.slice(0, 60).map((e, i) => (
-              <li key={`${e.at}-${i}`} className="flex gap-2.5 border-b border-dashed border-[#EEF0F3] py-1.5 text-[12.5px] last:border-none">
+              <li key={`${e.at}-${i}`} className="flex gap-2.5 border-b border-dashed border-[#EEF0F3] py-1.5 text-[12.5px] last:border-none max-[600px]:grid max-[600px]:grid-cols-[auto_1fr]">
                 <span className="w-[52px] shrink-0 pt-0.5 font-mono text-[11px] text-faint">
                   {clock(e.at)}
                 </span>
                 <span className="shrink-0">
                   <Pill tone={tone(e.level)}>{e.kind}</Pill>
                 </span>
-                <span className="text-mut">
+                <span className="text-mut max-[600px]:col-span-2">
                   {e.repo && e.pr ? (
                     <>
                       <PRLink repo={e.repo} pr={e.pr} /> —{" "}
@@ -584,7 +587,7 @@ function RowActions({
   prioritizing?: boolean;
 }) {
   return (
-    <span className="flex justify-end gap-2.5 whitespace-nowrap opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+    <span className="mobile-actions flex justify-end gap-2.5 whitespace-nowrap opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
       {onPrioritize && (
         <button
           type="button"
@@ -620,16 +623,16 @@ function Banner({ ov, now }: { ov: Overview; now: number }) {
   const blocked = ov.headline.kind === "blocked";
   return (
     <div
-      className={`mb-2.5 grid grid-cols-[1fr_auto_auto_auto] items-center gap-4 rounded-[10px] border px-5 py-3.5 shadow-card max-[1150px]:flex max-[1150px]:flex-wrap ${
+      className={`mb-2.5 grid grid-cols-[1fr_auto_auto_auto] items-center gap-4 rounded-[10px] border px-5 py-3.5 shadow-card max-[1150px]:flex max-[1150px]:flex-wrap max-[600px]:grid max-[600px]:grid-cols-2 max-[600px]:gap-2 max-[600px]:px-3.5 ${
         blocked ? "border-warn-edge bg-gradient-to-br from-[#FDF7EA] to-warn-bg" : "border-edge bg-card"
       }`}
     >
-      <div className="max-[1150px]:basis-full">
+      <div className="max-[1150px]:basis-full max-[600px]:col-span-2">
         <div className="flex flex-wrap items-baseline gap-3">
           <span className={`text-[17px] font-[650] ${blocked ? "text-warn" : "text-ink"}`}>{ov.headline.text}</span>
           {blocked && ov.quota.blocked_until && (
             <>
-              <span className="text-[27px] font-[650] tracking-tight text-warn-fg tabular-nums">
+              <span className="text-[27px] font-[650] tracking-tight text-warn-fg tabular-nums max-[600px]:text-[23px]">
                 {countdown(ov.quota.blocked_until, now)}
               </span>
               <span className="text-faint tabular-nums">reopens {clock(ov.quota.blocked_until)}</span>
@@ -689,7 +692,7 @@ function FairUseTile({ fu }: { fu: Overview["quota"]["fair_use"] }) {
 
 function Tile({ k, children }: { k: string; children: React.ReactNode }) {
   return (
-    <div className="min-w-[104px] rounded-lg border border-edge bg-card px-3.5 py-2">
+    <div className="min-w-[104px] rounded-lg border border-edge bg-card px-3.5 py-2 max-[600px]:min-w-0 max-[600px]:px-3">
       <div className="text-[11px] font-medium tracking-[0.06em] text-faint uppercase">{k}</div>
       <div className="flex items-center gap-2 text-[14.5px] font-semibold">{children}</div>
     </div>

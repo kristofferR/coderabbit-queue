@@ -76,7 +76,7 @@ export function EnvEditor({
         const rows = env.filter((e) => e.group === g);
         return (
           <Card key={g} title={meta.title} end={meta.note}>
-            <table className="w-full border-collapse">
+            <table className="env-table w-full border-collapse">
               <tbody>
                 {rows.map((e) => {
                   const src = SOURCE[e.source] ?? SOURCE.default;
@@ -84,11 +84,11 @@ export function EnvEditor({
                   const open = editing === e.key;
                   return (
                     <tr key={e.key} className="border-b border-[#EEF0F3] align-top last:border-none">
-                      <td className="w-[230px] py-2 pr-3 pl-[18px]">
+                      <td className="env-name w-[230px] py-2 pr-3 pl-[18px]">
                         <div className="text-[13px] font-[550]">{e.label}</div>
                         <div className="font-mono text-[11px] text-faint">{e.key}</div>
                       </td>
-                      <td className="py-2 pr-3">
+                      <td className="env-value py-2 pr-3">
                         {open ? (
                           <div className="flex flex-wrap items-center gap-2">
                             {e.kind === "bool" ? (
@@ -105,7 +105,7 @@ export function EnvEditor({
                                 autoFocus
                                 value={draft}
                                 onChange={(ev) => setDraft(ev.target.value)}
-                                className="w-64 rounded-lg border border-edge bg-[#FBFBFC] px-2 py-1 font-mono text-[12.5px]"
+                                className="w-64 max-w-full rounded-lg border border-edge bg-[#FBFBFC] px-2 py-1 font-mono text-[12.5px]"
                               />
                             )}
                             <button
@@ -140,7 +140,7 @@ export function EnvEditor({
                           </>
                         )}
                       </td>
-                      <td className="w-[150px] py-2 pr-[18px] text-right">
+                      <td className="env-actions w-[150px] py-2 pr-[18px] text-right">
                         <span title={locked ? undefined : src.note}>
                           <Pill tone={locked ? "mut" : src.tone}>
                             {e.identity ? "identity" : e.per_host ? "this host" : e.source}

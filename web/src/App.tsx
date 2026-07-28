@@ -35,19 +35,22 @@ export function App() {
   const pr = prRoute(route);
 
   return (
-    <div className="min-w-[820px]">
-      <header className="sticky top-0 z-10 flex flex-wrap items-center gap-4 border-b border-edge bg-card px-6 py-2.5">
-        <span className="flex items-baseline gap-2.5">
+    <div className="min-w-0">
+      <header className="sticky top-0 z-20 flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-edge bg-card/95 px-6 py-2.5 backdrop-blur max-[600px]:px-3 max-[600px]:py-2">
+        <span className="flex min-w-0 items-baseline gap-2.5">
           <span className="rounded-md bg-ink px-1.5 py-0.5 font-mono text-[13px] font-medium text-white">crq</span>
-          <span className="text-base font-[650] tracking-tight">Code Review Queue</span>
+          <span className="truncate text-base font-[650] tracking-tight">Code Review Queue</span>
         </span>
-        <nav className="ml-2 flex gap-1">
+        <nav
+          aria-label="Primary"
+          className="ml-2 flex gap-1 max-[600px]:order-3 max-[600px]:-mx-3 max-[600px]:w-[calc(100%+1.5rem)] max-[600px]:overflow-x-auto max-[600px]:px-3 max-[600px]:pb-0.5"
+        >
           {NAV.map((n) => (
             <a
               key={n.href}
               href={n.href}
               aria-current={route === n.href || (n.href === "#/repos" && route.startsWith("#/repos/")) ? "page" : undefined}
-              className={`rounded-lg px-3 py-1.5 text-[13.5px] font-medium ${
+              className={`shrink-0 rounded-lg px-3 py-1.5 text-[13.5px] font-medium max-[600px]:py-2 ${
                 route === n.href || (n.href === "#/repos" && route.startsWith("#/repos/"))
                   ? "bg-bg text-ink"
                   : "text-mut hover:bg-bg"
@@ -57,7 +60,7 @@ export function App() {
             </a>
           ))}
         </nav>
-        <span className="ml-auto flex items-center gap-2 text-xs text-mut">
+        <span className="ml-auto flex shrink-0 items-center gap-2 text-xs text-mut">
           <span
             className={`size-2 rounded-full ${
               snap?.stale
@@ -69,20 +72,25 @@ export function App() {
                     : "bg-warn-fg"
             }`}
           />
-          {live === "live" && snap?.stale ? (
-            <>stale · rev {snap.overview.rev}</>
-          ) : live === "live" ? (
-            <>live · rev {snap?.overview.rev ?? "—"}</>
-          ) : live === "connecting" ? (
-            "connecting…"
-          ) : (
-            <>reconnecting… showing state from {ago(snap?.overview.wrote_at, now)}</>
-          )}
+          <span className="max-[600px]:hidden">
+            {live === "live" && snap?.stale ? (
+              <>stale · rev {snap.overview.rev}</>
+            ) : live === "live" ? (
+              <>live · rev {snap?.overview.rev ?? "—"}</>
+            ) : live === "connecting" ? (
+              "connecting…"
+            ) : (
+              <>reconnecting… showing state from {ago(snap?.overview.wrote_at, now)}</>
+            )}
+          </span>
+          <span className="hidden max-[600px]:inline">
+            {snap?.stale ? "stale" : live === "live" ? "live" : live === "connecting" ? "connecting" : "offline"}
+          </span>
         </span>
       </header>
 
       {snap?.stale && (
-        <div className="border-b border-bad-edge bg-bad-bg px-6 py-2 text-[12.5px] text-bad">
+        <div className="border-b border-bad-edge bg-bad-bg px-6 py-2 text-[12.5px] text-bad max-[600px]:px-3">
           <span className="font-mono">crq serve</span> has not been able to read the state ref since{" "}
           {ago(snap.stale.since, now)} — this page is the last state it loaded, and an action taken
           here may already be acting on a queue that has moved. ({snap.stale.error})
@@ -90,7 +98,7 @@ export function App() {
       )}
 
       {live === "reconnecting" && snap && (
-        <div className="border-b border-warn-edge bg-warn-bg px-6 py-2 text-[12.5px] text-warn">
+        <div className="border-b border-warn-edge bg-warn-bg px-6 py-2 text-[12.5px] text-warn max-[600px]:px-3">
           Lost the connection to <span className="font-mono">crq serve</span>. This is the last state it
           sent — countdowns keep ticking against it, so treat times as approximate until it reconnects.
         </div>
@@ -144,7 +152,7 @@ function Loading({ live, error }: { live: Live; error: string | null }) {
     // Saying "Reading the state ref…" here waits on something that is not going
     // to happen, and hides the one sentence that says what to fix.
     return (
-      <main className="mx-auto max-w-[1400px] px-6 py-16">
+      <main className="mx-auto max-w-[1400px] px-6 py-16 max-[600px]:px-3 max-[600px]:py-10">
         <div className="rounded-[10px] border border-bad-edge bg-bad-bg px-5 py-4 text-[13px] text-bad">
           <span className="font-mono">crq serve</span> cannot read the state ref, so there is nothing
           to show yet. It keeps retrying.
@@ -154,7 +162,7 @@ function Loading({ live, error }: { live: Live; error: string | null }) {
     );
   }
   return (
-    <main className="mx-auto max-w-[1400px] px-6 py-16 text-mut">
+    <main className="mx-auto max-w-[1400px] px-6 py-16 text-mut max-[600px]:px-3 max-[600px]:py-10">
       {live === "reconnecting"
         ? "Cannot reach the server. Retrying…"
         : "Reading the state ref…"}

@@ -145,7 +145,7 @@ export function FleetEditor({
           </div>
         )}
 
-        <table className="mt-2.5 w-full border-collapse">
+        <table className="config-table mt-2.5 w-full border-collapse">
           <tbody>
             <Row label="Reviewers" source={source("reviewers")}>
               <div className="flex flex-wrap items-center gap-3">

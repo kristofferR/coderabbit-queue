@@ -112,14 +112,14 @@ export function PRDetailPage({ repo, pr, rev }: { repo: string; pr: number; rev?
 
   if (error) {
     return (
-      <main className="mx-auto max-w-[1180px] px-6 py-16 text-mut">
+      <main className="mx-auto max-w-[1180px] px-6 py-16 text-mut max-[600px]:px-3 max-[600px]:py-10">
         Could not load {repo}#{pr}: {error}
       </main>
     );
   }
   if (!view) {
     return (
-      <main className="mx-auto max-w-[1180px] px-6 py-16 text-mut">Reading state…</main>
+      <main className="mx-auto max-w-[1180px] px-6 py-16 text-mut max-[600px]:px-3 max-[600px]:py-10">Reading state…</main>
     );
   }
 
@@ -143,7 +143,7 @@ export function PRDetailPage({ repo, pr, rev }: { repo: string; pr: number; rev?
   })).filter((g) => g.items.length > 0);
 
   return (
-    <main className="mx-auto max-w-[1180px] px-6 pt-4.5 pb-16">
+    <main className="mx-auto max-w-[1180px] px-6 pt-4.5 pb-16 max-[600px]:px-3 max-[600px]:pt-3">
       <div className="mb-2 text-[12.5px] text-faint">
         <a href="#/" className="text-acc hover:underline">
           Overview
@@ -151,7 +151,7 @@ export function PRDetailPage({ repo, pr, rev }: { repo: string; pr: number; rev?
         / {repo} / #{pr}
       </div>
 
-      <div className="mb-3.5 rounded-[10px] border border-edge bg-card px-5 py-3.5 shadow-card">
+      <div className="mb-3.5 rounded-[10px] border border-edge bg-card px-5 py-3.5 shadow-card max-[600px]:px-3.5">
         <div className="flex flex-wrap items-center gap-3">
           <RepoIcon repo={repo} size={24} />
           <h1 className="text-[18px] font-[650] tracking-tight">
@@ -174,7 +174,7 @@ export function PRDetailPage({ repo, pr, rev }: { repo: string; pr: number; rev?
               {view.observed.converged ? "converged" : `${findings.length} open`}
             </Pill>
           )}
-          <span className="ml-auto flex flex-wrap items-center gap-2">
+          <span className="ml-auto flex flex-wrap items-center gap-2 max-[600px]:ml-0 max-[600px]:basis-full">
             {/* A pull request opened by link was read-only: the two actions
                 that matter existed only as hover buttons on an Overview row,
                 which is not where you are when you have just read its
@@ -355,8 +355,8 @@ export function PRDetailPage({ repo, pr, rev }: { repo: string; pr: number; rev?
                 </p>
               </div>
             ) : (
-              <div className="px-[18px] pb-3">
-                <div className="sticky top-0 z-10 -mx-[18px] mb-2 border-b border-[#EEF0F3] bg-card/95 px-[18px] py-2.5 backdrop-blur">
+              <div className="px-[18px] pb-3 max-[600px]:px-3">
+                <div className="sticky top-[76px] z-10 -mx-[18px] mb-2 border-b border-[#EEF0F3] bg-card/95 px-[18px] py-2.5 backdrop-blur max-[600px]:-mx-3 max-[600px]:px-3">
                   <div className="flex flex-wrap items-center gap-2">
                     <input
                       value={findingQuery}
@@ -562,7 +562,7 @@ function FindingRow({
         type="button"
         onClick={() => setOpen(!open)}
         aria-expanded={open}
-        className="flex w-full items-start gap-3 px-3.5 py-2.5 text-left hover:bg-[#F7F8FA]"
+        className="flex w-full items-start gap-3 px-3.5 py-2.5 text-left hover:bg-[#F7F8FA] max-[600px]:gap-2.5 max-[600px]:px-3"
       >
         <span className="mt-0.5 text-[12px] text-faint" aria-hidden="true">
           {open ? "▾" : "▸"}
@@ -590,8 +590,8 @@ function FindingRow({
         </span>
       </button>
       {content && (
-        <div className="border-t border-[#EEF0F3] bg-[#FBFCFD] px-4 py-3 text-[13px] text-mut">
-          <div className="rounded-lg border border-edge bg-white px-4 py-2.5 text-[13.5px] text-ink">
+        <div className="border-t border-[#EEF0F3] bg-[#FBFCFD] px-4 py-3 text-[13px] text-mut max-[600px]:px-3">
+          <div className="rounded-lg border border-edge bg-white px-4 py-2.5 text-[13.5px] text-ink max-[600px]:px-3">
             <ReviewMarkdown body={content.description || "No detail was captured for this finding."} />
           </div>
           {content.sections.length > 0 && (

@@ -135,16 +135,16 @@ export function AddRepo({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-[rgb(27_36_48/0.28)] px-4 pt-[8vh]">
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-[rgb(27_36_48/0.28)] px-4 pt-[8vh] max-[600px]:px-0 max-[600px]:pt-0">
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Add a repository"
-        className="flex max-h-[80vh] w-full max-w-[720px] flex-col overflow-hidden rounded-[10px] border border-edge bg-card shadow-[0_16px_48px_rgb(27_36_48/0.24)]"
+        className="flex max-h-[80vh] w-full max-w-[720px] flex-col overflow-hidden rounded-[10px] border border-edge bg-card shadow-[0_16px_48px_rgb(27_36_48/0.24)] max-[600px]:h-full max-[600px]:max-h-none max-[600px]:rounded-none max-[600px]:border-0"
       >
-        <div className="flex items-center gap-3 border-b border-edge px-5 py-3.5">
+        <div className="flex flex-wrap items-center gap-3 border-b border-edge px-5 py-3.5 max-[600px]:px-3.5">
           <h2 className="text-[15px] font-[650]">Add a repository</h2>
-          <span className="text-[12.5px] text-faint">
+          <span className="text-[12.5px] text-faint max-[600px]:order-3 max-[600px]:basis-full">
             everything in CRQ_SCOPE, most recently pushed first
           </span>
           <button
@@ -156,7 +156,7 @@ export function AddRepo({
           </button>
         </div>
 
-        <div className="flex items-center gap-2.5 border-b border-edge px-5 py-2.5">
+        <div className="flex items-center gap-2.5 border-b border-edge px-5 py-2.5 max-[600px]:px-3.5">
           <input
             autoFocus
             value={query}
@@ -205,18 +205,18 @@ export function AddRepo({
                 return (
                   <li
                     key={r.repo}
-                    className="flex items-center gap-2.5 border-b border-[#EEF0F3] px-5 py-2 text-[13px] last:border-none"
+                    className="relative flex flex-wrap items-center gap-2.5 border-b border-[#EEF0F3] px-5 py-2 text-[13px] last:border-none max-[600px]:pr-24 max-[600px]:pl-3.5"
                   >
                     <RepoIcon repo={r.repo} />
-                    <span className="font-[550]">{r.repo}</span>
+                    <span className="min-w-0 break-all font-[550]">{r.repo}</span>
                     {r.private && <Pill tone="mut">private</Pill>}
                     {r.archived && <Pill tone="mut">archived</Pill>}
                     {r.fork && <Pill tone="mut">fork</Pill>}
-                    <span className="text-[12px] text-faint">
+                    <span className="basis-full pl-[26px] text-[12px] text-faint">
                       {r.issues > 0 && `${r.issues} open issue/PR${r.issues === 1 ? "" : "s"}`}
                       {r.pushed_at && ` · pushed ${ago(r.pushed_at, now)}`}
                     </span>
-                    <span className="ml-auto">
+                    <span className="ml-auto max-[600px]:absolute max-[600px]:right-3.5">
                       {blocked ? (
                         <span className="text-[12px] text-faint" title="CRQ_EXCLUDE is a per-host kill switch">
                           excluded by env
@@ -275,7 +275,7 @@ export function AddRepo({
           />
         )}
 
-        <p className="border-t border-edge px-5 py-2.5 text-[12px] text-faint">
+        <p className="border-t border-edge px-5 py-2.5 text-[12px] text-faint max-[600px]:px-3.5">
           Adding records the decision in shared state, so every host agrees. Its pull requests are
           picked up on the daemon's next pass, with the fleet's default reviewers — change those on
           the repository's own page.
