@@ -80,7 +80,7 @@ export function App() {
       ) : route === "#/bots" ? (
         <BotsPage bots={snap.bots} />
       ) : route === "#/setup" ? (
-        <SetupPage setup={snap.setup} />
+        <SetupPage setup={snap.setup} bots={snap.bots} repos={snap.repos} />
       ) : route === "#/settings" ? (
         <SettingsPage settings={snap.settings} bots={snap.bots} onSnapshot={setSnap} />
       ) : isFirstRun(snap) ? (

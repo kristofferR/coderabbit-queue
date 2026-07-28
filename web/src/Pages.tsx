@@ -116,6 +116,7 @@ export function ReposPage({
             </span>
             {selected.override && <Pill tone="warn">Override</Pill>}
             {selected.primary_off && <Pill tone="bad">Primary off</Pill>}
+            {selected.solver?.overridden && <Pill tone="warn">Fix settings</Pill>}
             <span className="text-[12.5px] text-faint">
               {selected.active_rounds} active · {selected.queued_rounds} queued
               {selected.override_by && ` · set by ${selected.override_by}`}
@@ -139,6 +140,7 @@ export function ReposPage({
             envConflict={selected.env_conflict}
             reason={selected.enroll_reason}
             by={selected.enroll_by}
+            active={selected.active_rounds}
             onSnapshot={onSnapshot}
           />
           <HeldHere
@@ -762,7 +764,15 @@ const STATUS_TONE: Record<string, "ok" | "warn" | "bad" | "mut"> = {
   unknown: "mut",
 };
 
-export function SetupPage({ setup }: { setup: SetupView }) {
+export function SetupPage({
+  setup,
+  bots,
+  repos,
+}: {
+  setup: SetupView;
+  bots: BotCard[];
+  repos: RepoRow[];
+}) {
   const now = useNow(5000);
   const problems = setup.checks.filter((c) => c.status === "bad" || c.status === "warn").length;
   return (
@@ -788,6 +798,72 @@ export function SetupPage({ setup }: { setup: SetupView }) {
       </div>
 
       {(setup.fleet?.length ?? 0) > 0 && <FleetTools fleet={setup.fleet!} now={now} />}
+
+      <div className="grid grid-cols-2 gap-4 max-[860px]:grid-cols-1">
+        <Card title="Review bots" count={bots.filter((b) => b.enabled).length}>
+          <div className="px-[18px] pb-3.5 pt-1 text-[13px]">
+            {bots.filter((b) => b.enabled).length === 0 ? (
+              <Empty>No reviewer is enabled.</Empty>
+            ) : (
+              <ul>
+                {bots
+                  .filter((b) => b.enabled)
+                  .map((b) => (
+                    <li key={b.login} className="flex items-center gap-2 py-1">
+                      <BotIcon login={b.login} name={b.name} size={18} />
+                      <span className="font-[550]">{b.name}</span>
+                      <span className="ml-auto">
+                        <Pill tone={b.status === "working" ? "ok" : b.status === "silent" ? "bad" : "mut"}>
+                          {b.status === "working"
+                            ? "working"
+                            : b.status === "silent"
+                              ? "never answered"
+                              : "not verified"}
+                        </Pill>
+                      </span>
+                    </li>
+                  ))}
+              </ul>
+            )}
+            <a href="#/bots" className="mt-1.5 inline-block text-[12.5px] text-acc hover:underline">
+              Compare and set them up →
+            </a>
+          </div>
+        </Card>
+
+        <Card title="Repositories" count={repos.filter((r) => r.reviewed).length}>
+          <div className="px-[18px] pb-3.5 pt-1 text-[13px]">
+            {repos.filter((r) => r.reviewed).length === 0 ? (
+              <Empty>Nothing is enrolled.</Empty>
+            ) : (
+              <ul>
+                {repos
+                  .filter((r) => r.reviewed)
+                  .slice(0, 8)
+                  .map((r) => (
+                    <li key={r.repo} className="flex items-center gap-2 py-1">
+                      <RepoIcon repo={r.repo} />
+                      <span>{short(r.repo)}</span>
+                      <span className="ml-auto text-[12px] text-faint">{r.enrollment}</span>
+                    </li>
+                  ))}
+              </ul>
+            )}
+            {/* An env-enrolled repository is one the other hosts may not agree
+                about, which is the whole reason enrollment records exist. */}
+            {repos.filter((r) => r.reviewed && r.enrollment === "env").length > 0 && (
+              <p className="mt-1.5 rounded-lg border border-warn-edge bg-warn-bg px-2.5 py-1.5 text-[12px] text-warn">
+                {repos.filter((r) => r.reviewed && r.enrollment === "env").length} still enrolled by
+                this host's env file — the other hosts decide for themselves.{" "}
+                <code>crq fleet adopt</code> records them for everyone.
+              </p>
+            )}
+            <a href="#/repos" className="mt-1.5 inline-block text-[12.5px] text-acc hover:underline">
+              Manage repositories →
+            </a>
+          </div>
+        </Card>
+      </div>
 
       <Card title="Checks" count={setup.checks.length}>
         <div className="px-[18px] pb-3">

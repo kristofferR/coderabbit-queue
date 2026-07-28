@@ -268,6 +268,7 @@ export function EnrollmentEditor({
   envConflict,
   reason,
   by,
+  active,
   onSnapshot,
 }: {
   repo: string;
@@ -276,6 +277,8 @@ export function EnrollmentEditor({
   envConflict?: boolean;
   reason?: string;
   by?: string;
+  /** Rounds in flight here, so stopping can say what happens to them. */
+  active: number;
   onSnapshot?: (s: Snapshot) => void;
 }) {
   const [confirming, setConfirming] = useState(false);
@@ -357,6 +360,14 @@ export function EnrollmentEditor({
                   >
                     {busy ? "Working…" : "Stop reviewing"}
                   </button>
+                  <span className="basis-full text-[12px] text-faint">
+                    No new rounds are enqueued here.{" "}
+                    {active > 0
+                      ? `The ${active} round(s) already in flight finish — cancel them on their own pages to stop sooner.`
+                      : "Nothing is in flight, so this takes effect immediately."}{" "}
+                    Reviewer, autofix and fix-session settings are kept, so turning it back on
+                    restores them.
+                  </span>
                   <button
                     type="button"
                     onClick={() => setConfirming(false)}
