@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -115,6 +116,24 @@ func TestEnrollmentDoesNotNarrowAScopeWideHost(t *testing.T) {
 	if targets, scoped := svc.scanTargets(st); len(targets) != 0 || !scoped {
 		t.Errorf("scan targets = %v (scoped %v), want none and scope mode so the pass still searches the whole scope", targets, scoped)
 	}
+
+	// It must still WIDEN it. A repository enrolled from outside CRQ_SCOPE is
+	// reported as enrolled by every screen, and no owner-wide search can reach
+	// it — so it has to be named as a target of its own or it is enrolled,
+	// counted, and never enqueued.
+	if _, err := svc.SetEnrollment(ctx, "elsewhere/added", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if st, _, err = svc.store.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	targets, scoped := svc.scanTargets(st)
+	if !scoped {
+		t.Error("an out-of-scope enrollment must not turn the scope search off")
+	}
+	if len(targets) != 1 || targets[0] != "elsewhere/added" {
+		t.Errorf("scan targets = %v, want only the out-of-scope enrollment named", targets)
+	}
 	// The off direction still works there: the per-PR gate reads the record.
 	if _, err := svc.SetEnrollment(ctx, "o/noisy", false, "too busy"); err != nil {
 		t.Fatal(err)
@@ -137,7 +156,7 @@ func TestEnrollmentDoesNotNarrowAScopeWideHost(t *testing.T) {
 // to be skipped silently, and a backlog nothing could be priced for was
 // summarised as having "no per-review cost".
 func TestEnrollSummaryNeverPricesAnUnknownAsFree(t *testing.T) {
-	none := enrollSummary(EnrollImpact{Open: 4, Eligible: 4, Unpriced: 4}, false)
+	none := enrollSummary(EnrollImpact{Open: 4, Eligible: 4, Unpriced: 4})
 	if strings.Contains(none, "no per-review cost") {
 		t.Errorf("summary = %q, want an unpriced backlog reported as unknown", none)
 	}
@@ -146,12 +165,12 @@ func TestEnrollSummaryNeverPricesAnUnknownAsFree(t *testing.T) {
 	}
 	// A partly priced backlog states both: the money it knows about, and how
 	// many pull requests are not in that number.
-	partial := enrollSummary(EnrollImpact{Open: 4, Eligible: 4, Low: 1, High: 2, Unpriced: 2}, false)
+	partial := enrollSummary(EnrollImpact{Open: 4, Eligible: 4, Low: 1, High: 2, Unpriced: 2})
 	if !strings.Contains(partial, "$1.00–$2.00") || !strings.Contains(partial, "2 that could not be priced") {
 		t.Errorf("summary = %q, want the known cost and the unpriced count", partial)
 	}
 	// And a fully priced free backlog still says so.
-	free := enrollSummary(EnrollImpact{Open: 2, Eligible: 2}, false)
+	free := enrollSummary(EnrollImpact{Open: 2, Eligible: 2})
 	if !strings.Contains(free, "no per-review cost") {
 		t.Errorf("summary = %q, want a genuinely free backlog unchanged", free)
 	}
@@ -358,5 +377,50 @@ func TestEnqueueRefusesARepositoryTurnedOff(t *testing.T) {
 	other := NewService(cfg, gh, NewMemoryStore(cfg), nil)
 	if result, err := other.Enqueue(ctx, "o/unlisted", 8); err != nil || result.Held {
 		t.Errorf("result = %+v, err = %v, want a manual enqueue on an unlisted repository to work", result, err)
+	}
+}
+
+// The preview is a dialog somebody is waiting in front of, and each pull
+// request it examines costs a head read and a review list from the same GitHub
+// quota the queue runs on. Unbounded, opening it for a repository with hundreds
+// of open pull requests spent hundreds of requests and left review processing
+// throttled — so the examining stops, and what it stopped short of is reported
+// rather than silently counted as nothing.
+func TestPreviewEnrollBoundsItsPerPullRequestReads(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	const open = maxExamined + 10
+	for i := 1; i <= open; i++ {
+		gh.searchPRs = append(gh.searchPRs, ghapi.SearchPR{Repo: "o/busy", Number: i, Author: "kristofferR"})
+		var pull ghapi.Pull
+		pull.State = "open"
+		pull.Number = i
+		pull.Head.SHA = fmt.Sprintf("%016d", i)
+		gh.pulls[fakeKey("o/busy", i)] = pull
+	}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	impact, err := svc.PreviewEnroll(ctx, "o/busy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if impact.Open != open {
+		t.Errorf("open = %d, want every open pull request still counted (the listing is one search)", impact.Open)
+	}
+	if impact.Eligible > maxExamined {
+		t.Errorf("eligible = %d, want no more than the %d examined", impact.Eligible, maxExamined)
+	}
+	if impact.Unexamined != open-maxExamined {
+		t.Errorf("unexamined = %d, want the %d the bound stopped short of", impact.Unexamined, open-maxExamined)
+	}
+	if !strings.Contains(impact.Summary, "at least") || !strings.Contains(impact.Summary, "not examined") {
+		t.Errorf("summary = %q, want the counts stated as floors", impact.Summary)
+	}
+	// The reads themselves are what the bound exists for: an assertion on the
+	// reported number alone would pass against a preview that read everything
+	// and then truncated its own answer.
+	if got := gh.reviewPolls(); got > maxExamined {
+		t.Errorf("review reads = %d, want at most %d", got, maxExamined)
 	}
 }

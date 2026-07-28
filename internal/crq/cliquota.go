@@ -75,7 +75,12 @@ func (s *Service) RecordCLIQuota(ctx context.Context, report PreflightReport, cl
 		// conservative fallback is right: treating an unreadable window as "not
 		// blocked" is what let the daemon re-fire every couple of minutes against
 		// a limit measured in tens of minutes.
-		fallback := now.Add(cliQuotaFallback(s.cfg.RateLimitFallback))
+		//
+		// The FLEET's window, when one is recorded. CRQ_RL_FALLBACK is a fleet
+		// setting, and reading this host's startup value recorded a shorter block
+		// than the settings page said was in force — resuming metered fires early
+		// against the number the dashboard was showing.
+		fallback := now.Add(cliQuotaFallback(s.fleetCfg(ctx).RateLimitFallback))
 		until = &fallback
 	}
 

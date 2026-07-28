@@ -95,7 +95,13 @@ func sameHostReport(prev, next HostReport) bool {
 			return false
 		}
 		for i := range stored {
-			if stored[i] != next.Tools[i] {
+			// Field by field: a ToolReport carries the members a newer binary
+			// added, and those are not this reporter's to have an opinion about.
+			// Comparing whole values would read a carried member as a difference
+			// and rewrite state on every pass to say the same thing.
+			if stored[i].Name != next.Tools[i].Name ||
+				stored[i].Path != next.Tools[i].Path ||
+				stored[i].Version != next.Tools[i].Version {
 				return false
 			}
 		}

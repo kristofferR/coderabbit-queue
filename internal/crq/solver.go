@@ -86,7 +86,10 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 	if has && own.UpdatedAt != nil {
 		view.By = own.By
 		view.UpdatedAt = own.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z")
-		view.Lagging = st.LaggingWriters(CapsSolver, s.clock().UTC())
+		// The autofix role too, not just the queue's drivers: these settings are
+		// consumed when a fix session STARTS, and the watcher that starts one
+		// holds neither the leader lease nor the fire slot.
+		view.Lagging = st.LaggingRoleWriters(CapsSolver, s.clock().UTC(), "autofix")
 	}
 	return view
 }

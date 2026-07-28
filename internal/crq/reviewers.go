@@ -506,6 +506,22 @@ func (s *Service) repoCfg(ctx context.Context, repo string) Config {
 	return s.cfgFor(st, repo)
 }
 
+// fleetCfg is repoCfg for a caller acting on no particular repository: this
+// host's environment with the fleet record applied and no override on top.
+//
+// A read failure falls back to this host's own configuration for the same
+// reason repoCfg does — the fleet layer refines settings, and refusing to act
+// because the ref could not be read turns a cosmetic outage into a functional
+// one. DispatchForks does not arise here: nothing that asks for the fleet's own
+// answer is deciding whose code to run an agent over.
+func (s *Service) fleetCfg(ctx context.Context) Config {
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return s.cfg
+	}
+	return s.cfgFor(st, "")
+}
+
 // repoSolver is the fix-session RECORD for one repository — the fleet default
 // with the repository's own layered over it — for a caller that has to tell
 // "somebody recorded this" from "this is the built-in default". repoCfg cannot

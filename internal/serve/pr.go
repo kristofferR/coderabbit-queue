@@ -139,6 +139,14 @@ type observeEntry struct {
 
 const observeTTL = 60 * time.Second
 
+// maxCacheEntries bounds each cache. The TTL alone only makes an entry
+// unusable, it never removes one — and every push, reviewer change and
+// allowance change mints a fresh key — so a dashboard left running kept every
+// findings payload and every price it had ever served. The bound is generous
+// enough that ordinary browsing never reaches it and small enough that reaching
+// it costs nothing.
+const maxCacheEntries = 512
+
 func (c *observeCache) get(key string) (observeEntry, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -156,6 +164,36 @@ func (c *observeCache) put(key string, e observeEntry) {
 		c.entries = map[string]observeEntry{}
 	}
 	c.entries[key] = e
+	// Expired entries first: none of them can ever be served again, so dropping
+	// them is free. The bound is the backstop for a burst that outruns the TTL.
+	pruneCache(c.entries, observeTTL, func(e observeEntry) time.Time { return e.fetched })
+}
+
+// pruneCache drops every entry past its TTL, then — if the map is still over
+// the bound — the oldest of what is left, so a cache cannot grow without limit
+// even while every entry in it is live.
+func pruneCache[E any](entries map[string]E, ttl time.Duration, at func(E) time.Time) {
+	now := time.Now()
+	for key, e := range entries {
+		if now.Sub(at(e)) > ttl {
+			delete(entries, key)
+		}
+	}
+	if len(entries) <= maxCacheEntries {
+		return
+	}
+	type aged struct {
+		key string
+		at  time.Time
+	}
+	all := make([]aged, 0, len(entries))
+	for key, e := range entries {
+		all = append(all, aged{key, at(e)})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].at.Before(all[j].at) })
+	for _, a := range all[:len(entries)-maxCacheEntries] {
+		delete(entries, a.key)
+	}
 }
 
 // costKey names everything a price depends on. The head alone is not enough:
@@ -214,6 +252,7 @@ func (c *costCache) put(key string, e costEntry) {
 		c.entries = map[string]costEntry{}
 	}
 	c.entries[key] = e
+	pruneCache(c.entries, costTTL, func(e costEntry) time.Time { return e.fetched })
 }
 
 // buildPRView assembles the cheap layer from state. maxAttempts is the same

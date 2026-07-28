@@ -797,7 +797,13 @@ type Pull struct {
 	Title   string `json:"title"`
 	Body    string `json:"body"`
 	HTMLURL string `json:"html_url"`
-	Head    struct {
+	// User is who opened the pull request. The listing carries it for free, and
+	// the skip-author rules are applied per pull request by every path that acts
+	// on one — so a caller that reads a Pull never has to ask again.
+	User struct {
+		Login string `json:"login"`
+	} `json:"user"`
+	Head struct {
 		SHA string `json:"sha"`
 		Ref string `json:"ref"`
 		// Repo is the head's repository, which differs from the base on a fork

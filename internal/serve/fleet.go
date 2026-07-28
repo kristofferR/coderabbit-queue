@@ -521,18 +521,18 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Tim
 	// posted and what it claimed the right to post. Reading the second as the
 	// first is how a bot nobody has an account for reads as working — crq asks,
 	// records that it asked, and nothing ever answers.
-	// Whether the answer log has anything in it AT ALL. It is written only when
-	// crq observes a round, so on a fleet that has just upgraded it is empty —
-	// and "no answer recorded" then means "not looked yet", not "never
-	// answered". Claiming the second would accuse a working bot of being
-	// unconfigured on the strength of a field introduced five minutes ago.
-	coEvidence := false
+	// Whether the answer log has anything in it AT ALL, for any reviewer. It is
+	// written only when crq observes a round, so on a fleet that has just
+	// upgraded it is empty — and "no answer recorded" then means "not looked
+	// yet", not "never answered". Claiming the second would accuse a working bot
+	// of being unconfigured on the strength of a field introduced five minutes
+	// ago. The primary counts towards it like any other reviewer now that its
+	// answer is recorded rather than inferred from the phase.
+	answerLog := false
 	scan := func(r state.Round) {
 		for login, co := range r.CoBots {
 			if co.AnsweredAt != nil {
-				coEvidence = true
-			}
-			if co.AnsweredAt != nil {
+				answerLog = true
 				note(login, co.AnsweredAt, r.Repo, r.PR)
 			}
 			if at := co.CommandedAt; at != nil {
@@ -541,14 +541,21 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Tim
 				noteAsked(login, co.ClaimedAt)
 			}
 		}
-		// The primary is different: its round holds no per-bot entry, and a
-		// FiredAt is only crq's command going out. A round that COMPLETED is the
-		// evidence, since Completion is what waits for its review.
+		// The primary is different: its round holds no per-bot entry, so the two
+		// facts come from two fields. FiredAt is crq's command going out — what
+		// it ASKED. PrimaryAnsweredAt is what crq observed the primary do.
+		//
+		// The phase cannot stand in for the second. A required set that omits the
+		// primary completes as soon as its co-reviewers answer and the primary
+		// acknowledges the metered command, so reading a completed round as
+		// review evidence labelled a reviewer as working on the strength of its
+		// own acknowledgement.
 		if r.FiredAt != nil && !r.CoOnly {
 			noteAsked(cfg.primaryLogin(), r.FiredAt)
-			if r.Phase == state.PhaseCompleted {
-				note(cfg.primaryLogin(), r.FiredAt, r.Repo, r.PR)
-			}
+		}
+		if r.PrimaryAnsweredAt != nil {
+			answerLog = true
+			note(cfg.primaryLogin(), r.PrimaryAnsweredAt, r.Repo, r.PR)
 		}
 	}
 	for _, r := range st.Rounds {
@@ -585,7 +592,7 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Tim
 			Enabled: on, Required: on && b.Required,
 			LastSeen: seen[key], LastAsked: asked[key], SeenOn: where[key],
 			RepoCount: repoCount[key],
-			Status:    botStatus(on, seen[key], asked[key], now, primary || coEvidence),
+			Status:    botStatus(on, seen[key], asked[key], now, answerLog),
 		}
 		if v, ok := dialect.VendorFor(login); ok {
 			card.Site, card.Docs = v.Site, v.Docs

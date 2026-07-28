@@ -123,6 +123,20 @@ type Round struct {
 	// reviewer must report it again.
 	Dismissed map[string]string `json:"dismissed,omitempty"`
 
+	// PrimaryAnsweredAt is when crq OBSERVED the primary produce head evidence,
+	// the same fact CoBots[login].AnsweredAt records for a co-reviewer.
+	//
+	// It cannot be derived from the phase. A required set that omits the primary
+	// completes as soon as the co-reviewers answer and the primary merely
+	// acknowledges the metered command, so reading a completed round as proof
+	// the primary reviewed labelled a reviewer as working on the strength of its
+	// own acknowledgement. FiredAt is crq's command going out and says even less.
+	//
+	// Not in CoBots despite being the same fact: several fire and completion
+	// rules walk that map as "the co-reviewers", and the primary appearing there
+	// would quietly join them.
+	PrimaryAnsweredAt *time.Time `json:"primary_answered_at,omitempty"`
+
 	// RetryAt is the earliest time this head may fire again (awaiting_retry).
 	RetryAt *time.Time `json:"retry_at,omitempty"`
 
@@ -285,6 +299,18 @@ func (r *Round) NoteCoAnswer(login string, at time.Time) {
 	t := at.UTC()
 	c.AnsweredAt = &t
 	r.setCo(login, c)
+}
+
+// NotePrimaryAnswer records that the primary was OBSERVED producing head
+// evidence, on the same terms NoteCoAnswer sets for a co-reviewer: the FIRST
+// observation wins, since a round is one head and re-stamping it would rewrite
+// state on every sweep.
+func (r *Round) NotePrimaryAnswer(at time.Time) {
+	if r.PrimaryAnsweredAt != nil {
+		return
+	}
+	t := at.UTC()
+	r.PrimaryAnsweredAt = &t
 }
 
 // ClearCoClaim releases login's claim without recording a command.
@@ -641,6 +667,42 @@ func (s *State) LaggingWriters(caps int, now time.Time) []string {
 			continue
 		}
 		out = append(out, host)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// LaggingRoleWriters is LaggingWriters plus every host reporting one of the
+// given roles with an older capability set.
+//
+// The acting set LaggingWriters builds is the leader and the fire-slot owner —
+// the processes that drive a REVIEW. A setting consumed by something else has no
+// entry there: the autofix watcher holds neither lease, so a solver record's
+// lagging list came back empty while an old watcher went on dispatching
+// install-time model, fork and attempt values. A host's self-report is what
+// names it, since it records the binary's capabilities beside the roles running
+// there.
+//
+// Reports are named by machine and writers by process ("host=blue pid=4711
+// run=1a2b"), so a machine lagging in both registers is listed once, under the
+// writer identity that says which process it is.
+func (s *State) LaggingRoleWriters(caps int, now time.Time, roles ...string) []string {
+	out := s.LaggingWriters(caps, now)
+	named := map[string]bool{}
+	for _, writer := range out {
+		named[hostName(writer)] = true
+	}
+	for host, report := range s.HostReports {
+		if named[host] || report.Caps >= caps {
+			continue
+		}
+		for _, role := range roles {
+			if report.RolesFresh([]string{role}, now, HostReportTTL) {
+				named[host] = true
+				out = append(out, host)
+				break
+			}
+		}
 	}
 	sort.Strings(out)
 	return out

@@ -355,7 +355,9 @@ crq repos default REPO                      # back to whatever this host's env s
 `CRQ_EXCLUDE` wins over everything — it is a per-host kill switch. Otherwise a record wins in BOTH
 directions, and `.env_conflict` reports a record that turns off a repository a host's `CRQ_REPOS`
 still lists. `.lagging_hosts` names hosts whose binary predates enrollment records and still decides
-from its own env alone.
+from its own env alone. On a host with no `CRQ_REPOS` at all, a record can only WIDEN what is
+scanned: the whole of `CRQ_SCOPE` is still searched owner-wide, and a repository enrolled from
+outside that scope is searched by name alongside it.
 
 Choose which bots review one project:
 
@@ -439,7 +441,9 @@ idempotent queue entry, so after a push either one may enqueue first and the oth
 Never start a second watcher or post a direct CodeRabbit trigger to "help" the daemon.
 
 Autoreview skips PRs authored by dependabot by default (`CRQ_AUTOREVIEW_SKIP_AUTHORS`,
-comma-separated logins; set empty to include bot PRs). Manual `crq review` ignores this filter.
+comma-separated logins; set empty to include bot PRs). The autofix watcher honours the same list —
+it drives PRs through the mutating `crq next`, so a skipped author is neither reviewed nor fixed.
+Manual `crq review` ignores this filter.
 For an intentionally low-risk PR that already had enough local review, include the hidden
 `<!-- crq:skip-autoreview -->` marker in its body before creation. Fleet autoreview skips it, while
 an explicit `crq loop` still works. Configure or disable the exact marker with

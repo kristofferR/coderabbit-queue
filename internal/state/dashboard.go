@@ -43,9 +43,19 @@ func joinScope(scope []string) string {
 	return strings.Join(scope, ",")
 }
 
-func dashboardLoc(cfg StoreConfig) *time.Location {
-	if cfg.Timezone != "" {
-		if loc, err := time.LoadLocation(cfg.Timezone); err == nil {
+// dashboardLoc is the zone this issue renders its times in.
+//
+// The fleet record is asked first, and this host's CRQ_TZ only stands in for it.
+// The issue is one shared artifact, so "how times are rendered" is a fleet
+// answer by nature: taken from the rendering host's startup environment alone,
+// a timezone saved from the settings page was reported as in force while every
+// sync went on writing the zone of whichever machine happened to run it.
+func dashboardLoc(st State, cfg StoreConfig) *time.Location {
+	for _, name := range []string{st.Fleet.Env["CRQ_TZ"], cfg.Timezone} {
+		if name = strings.TrimSpace(name); name == "" {
+			continue
+		}
+		if loc, err := time.LoadLocation(name); err == nil {
 			return loc
 		}
 	}
@@ -272,7 +282,7 @@ func hostCell(writer string) string {
 // RenderDashboard renders the human-facing dashboard for the current state:
 // rounds by phase instead of v2's queue/fired/awaiting maps.
 func RenderDashboard(st State, cfg StoreConfig) string {
-	loc := dashboardLoc(cfg)
+	loc := dashboardLoc(st, cfg)
 	now := time.Now().UTC()
 	queue := st.Queue(now, cfg.MinInterval)
 	inFlight := inFlightRounds(st)

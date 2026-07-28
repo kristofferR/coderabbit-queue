@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io/fs"
 	"net/http"
 	"strings"
@@ -120,6 +121,16 @@ type Server struct {
 	mu      sync.RWMutex
 	last    Snapshot
 	lastRev int64
+	// loaded says a load has actually produced `last`. Rev cannot answer it: a
+	// state ref that has never been written has revision 0 too, and before the
+	// first load loadErr is nil as well — so both handlers and the SSE stream
+	// took the ZERO snapshot for live state and served collections encoded as
+	// null, which the client reads straight into snap.repos.filter(...).
+	loaded bool
+	// digest fingerprints the last snapshot pushed, so a rebuild that changed
+	// something is broadcast even when the state revision did not move. See
+	// refresh.
+	digest  uint64
 	loadErr error
 	subs    map[chan []byte]struct{}
 	// tools are probed once: LookPath per refresh would be wasted work, and the
@@ -239,10 +250,12 @@ func (s *Server) refresh(ctx context.Context) {
 	}
 	snap := BuildFleet(st, s.opts.Fleet, ov, s.tools, s.opts.Host, now, botsFor, s.opts.EnrollFor, fleet, s.opts.SolverFor, env)
 	snap.Events = s.events.list()
+	digest := snapshotDigest(snap)
 
 	s.mu.Lock()
-	changed := ov.Rev != s.lastRev || s.last.Stale != nil
+	changed := ov.Rev != s.lastRev || s.last.Stale != nil || digest != s.digest || !s.loaded
 	s.last, s.lastRev, s.loadErr, s.lastState = snap, ov.Rev, nil, st
+	s.loaded, s.digest = true, digest
 	subs := make([]chan []byte, 0, len(s.subs))
 	for ch := range s.subs {
 		subs = append(subs, ch)
@@ -250,11 +263,36 @@ func (s *Server) refresh(ctx context.Context) {
 	s.mu.Unlock()
 
 	if !changed && len(subs) > 0 {
-		// Countdowns tick client-side, so an unchanged rev needs no push. Only
-		// the clock moved.
+		// Countdowns tick client-side, so a rebuild that says exactly what the
+		// last one said needs no push. Only the clock moved.
 		return
 	}
 	broadcast(snap, subs)
+}
+
+// snapshotDigest fingerprints everything a browser would paint, with the render
+// clock excluded.
+//
+// The revision alone is not enough to decide whether to push. BuildOverview
+// derives categorical state from `now` — a quota block or slot hold expiring, a
+// leader lease lapsing, a retry coming due, a dispatch claim or host report
+// going dead — and none of that moves Rev. Client-side countdowns cannot remove
+// a finished session or change a blocked headline, so a quiet fleet stayed
+// visibly blocked until an unrelated write or a reload.
+//
+// Overview.Now is excluded precisely because it moves every poll: hashing it
+// would make every rebuild look different and turn this back into an
+// unconditional broadcast. Everything else `now` decides is categorical, so it
+// changes only when the answer does.
+func snapshotDigest(snap Snapshot) uint64 {
+	snap.Overview.Now = time.Time{}
+	payload, err := json.Marshal(snap)
+	if err != nil {
+		return 0
+	}
+	h := fnv.New64a()
+	_, _ = h.Write(payload)
+	return h.Sum64()
 }
 
 // markStale records that the state ref could not be read and tells everyone
@@ -268,7 +306,7 @@ func (s *Server) refresh(ctx context.Context) {
 func (s *Server) markStale(err error) {
 	s.mu.Lock()
 	s.loadErr = err
-	if s.last.Overview.Rev == 0 {
+	if !s.loaded {
 		// Nothing has ever loaded: the handlers already refuse outright, and
 		// there is no snapshot to mark.
 		s.mu.Unlock()
@@ -304,25 +342,32 @@ func broadcast(snap Snapshot, subs []chan []byte) {
 	}
 }
 
-func (s *Server) snapshot() (Snapshot, error) {
+// snapshot is the last snapshot a load produced, whether one has been produced
+// at all, and the error from the most recent read.
+//
+// loaded is what callers must gate on, not Rev and not a nil error. Until the
+// first load returns there is no snapshot and no error either, and the zero
+// value serves collections as null — which the client accepts as live state and
+// immediately iterates.
+func (s *Server) snapshot() (Snapshot, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.last, s.loadErr
+	return s.last, s.loaded, s.loadErr
 }
 
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
-	snap, err := s.snapshot()
-	if snap.Overview.Rev == 0 && err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+	snap, loaded, err := s.snapshot()
+	if !loaded {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": firstLoadError(err)})
 		return
 	}
 	writeJSON(w, http.StatusOK, snap)
 }
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
-	snap, err := s.snapshot()
-	if snap.Overview.Rev == 0 && err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+	snap, loaded, err := s.snapshot()
+	if !loaded {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": firstLoadError(err)})
 		return
 	}
 	ov := snap.Overview
@@ -330,11 +375,23 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ov)
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	snap, err := s.snapshot()
-	body := map[string]any{"rev": snap.Overview.Rev, "ok": err == nil}
+// firstLoadError says why there is nothing to serve yet: the read that failed,
+// or simply that the first one has not finished.
+func firstLoadError(err error) string {
 	if err != nil {
-		body["error"] = err.Error()
+		return err.Error()
+	}
+	return "still reading the state ref"
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	snap, loaded, err := s.snapshot()
+	// Healthy means a load has succeeded AND the latest one did. Reporting ok
+	// before the first read finished would have a health check pass against a
+	// server that has never reached the state ref.
+	body := map[string]any{"rev": snap.Overview.Rev, "ok": loaded && err == nil}
+	if err != nil || !loaded {
+		body["error"] = firstLoadError(err)
 	}
 	writeJSON(w, http.StatusOK, body)
 }
@@ -362,8 +419,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Send the current state immediately so a fresh tab paints without waiting
-	// for the next change.
-	if snap, err := s.snapshot(); err == nil || snap.Overview.Rev != 0 {
+	// for the next change — but only once a load has produced one. A browser
+	// connecting during a slow first read would otherwise be handed the zero
+	// snapshot and take it for live state. The subscription is already in place,
+	// so that tab gets the real one the moment the load lands.
+	if snap, loaded, _ := s.snapshot(); loaded {
 		if payload, err := json.Marshal(snap); err == nil {
 			fmt.Fprintf(w, "data: %s\n\n", payload)
 			flusher.Flush()

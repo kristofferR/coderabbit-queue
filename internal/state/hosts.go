@@ -43,6 +43,11 @@ type HostReport struct {
 	// "it is missing" while the service that runs sessions never changed.
 	RoleTools map[string][]ToolReport `json:"role_tools,omitempty"`
 	At        time.Time               `json:"at"`
+
+	// unknown carries members a newer binary wrote inside this record. State's
+	// carrier cannot: it recognises "host_reports" and hands each report to an
+	// ordinary decoder. See tolerant.go.
+	unknown unknownFields
 }
 
 // toolRoleRank orders roles by whose PATH the answer should come from. The
@@ -69,6 +74,10 @@ type ToolReport struct {
 	Path string `json:"path,omitempty"`
 	// Version is the tool's own, when it will say; some do not.
 	Version string `json:"version,omitempty"`
+
+	// unknown carries members a newer binary wrote inside this record, for the
+	// same reason HostReport does — it is nested deeper still. See tolerant.go.
+	unknown unknownFields
 }
 
 // Found reports whether the tool is reachable at all.

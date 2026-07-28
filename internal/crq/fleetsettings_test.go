@@ -339,3 +339,61 @@ func TestEnvValidationRejectsValuesTheFleetWouldIgnore(t *testing.T) {
 		}
 	}
 }
+
+// Adopting is a report as much as a write, and the CAS behind it deliberately
+// leaves an existing record alone. Saying "adopted" for a value shared state
+// never took is the one way this command can mislead: an operator reads their
+// number back and believes the fleet now runs on it.
+func TestAdoptEnvReportsWhatStateActuallyTook(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost", "CRQ_COBOTS": "",
+		"CRQ_MIN_INTERVAL": "90s", "CRQ_SETTLE": "45s",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	// The fleet has already ruled on both, in each of the two places a setting
+	// can live: the typed field and the generic map.
+	if _, err := svc.SetEnv(ctx, "CRQ_MIN_INTERVAL", "5m", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SetEnv(ctx, "CRQ_SETTLE", "2m", false); err != nil {
+		t.Fatal(err)
+	}
+
+	adopted, err := svc.AdoptEnv(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"CRQ_MIN_INTERVAL", "CRQ_SETTLE"} {
+		got, ok := findAdopted(adopted, key)
+		if !ok {
+			t.Fatalf("%s missing from the report", key)
+		}
+		if got.Skipped == "" {
+			t.Errorf("%s reported as adopted, but state kept its own value", key)
+		}
+	}
+	// And it really did keep them.
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Fleet.MinInterval != "5m0s" || st.Fleet.Env["CRQ_SETTLE"] != "2m" {
+		t.Errorf("fleet = %q / %q, want the recorded values untouched",
+			st.Fleet.MinInterval, st.Fleet.Env["CRQ_SETTLE"])
+	}
+}
+
+func findAdopted(list []AdoptedSetting, key string) (AdoptedSetting, bool) {
+	for _, a := range list {
+		if a.Key == key {
+			return a, true
+		}
+	}
+	return AdoptedSetting{}, false
+}

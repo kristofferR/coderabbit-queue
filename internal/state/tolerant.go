@@ -35,6 +35,8 @@ var (
 	accountFields       = jsonFieldNames(reflect.TypeOf(AccountQuota{}))
 	coBotFields         = jsonFieldNames(reflect.TypeOf(CoBotRound{}))
 	dispatchFields      = jsonFieldNames(reflect.TypeOf(DispatchClaim{}))
+	hostReportFields    = jsonFieldNames(reflect.TypeOf(HostReport{}))
+	toolReportFields    = jsonFieldNames(reflect.TypeOf(ToolReport{}))
 )
 
 // UnmarshalJSON decodes a fire slot and remembers anything it did not recognise.
@@ -278,6 +280,55 @@ func (c *DispatchClaim) UnmarshalJSON(raw []byte) error {
 func (c DispatchClaim) MarshalJSON() ([]byte, error) {
 	type plain DispatchClaim
 	return mergeUnknown(plain(c), c.unknown)
+}
+
+// UnmarshalJSON decodes one host's self-report and remembers anything it did
+// not recognise. Same nesting argument as every record above: "host_reports" is
+// a member this binary knows, so it hands each report to an ordinary decoder
+// and only the report itself can carry a member a newer binary added inside it.
+func (r *HostReport) UnmarshalJSON(raw []byte) error {
+	type plain HostReport
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknown(raw, hostReportFields)
+	if err != nil {
+		return err
+	}
+	*r = HostReport(decoded)
+	r.unknown = unknown
+	return nil
+}
+
+// MarshalJSON writes a host report back with the members it did not recognise intact.
+func (r HostReport) MarshalJSON() ([]byte, error) {
+	type plain HostReport
+	return mergeUnknown(plain(r), r.unknown)
+}
+
+// UnmarshalJSON decodes one tool probe and remembers anything it did not
+// recognise. Nested one level deeper again — inside "tools" and "role_tools" —
+// so neither the report's carrier nor the map around it can speak for it.
+func (t *ToolReport) UnmarshalJSON(raw []byte) error {
+	type plain ToolReport
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknown(raw, toolReportFields)
+	if err != nil {
+		return err
+	}
+	*t = ToolReport(decoded)
+	t.unknown = unknown
+	return nil
+}
+
+// MarshalJSON writes a tool probe back with the members it did not recognise intact.
+func (t ToolReport) MarshalJSON() ([]byte, error) {
+	type plain ToolReport
+	return mergeUnknown(plain(t), t.unknown)
 }
 
 // captureUnknown returns the members of raw that known does not name.

@@ -459,3 +459,58 @@ func TestUnknownEnrollmentFieldsSurviveARewrite(t *testing.T) {
 		t.Errorf("a member this binary does not know was dropped: %#v", own["future_enroll_flag"])
 	}
 }
+
+// A host report is nested twice over: State recognises "host_reports" and hands
+// each record to an ordinary decoder, which in turn hands each tool probe to
+// another. So neither the map nor the report above it can carry a member a
+// newer binary added inside them — only the records themselves can.
+func TestUnknownHostReportFieldsSurviveARewrite(t *testing.T) {
+	foreign := `{
+	  "v": 4, "rev": 3, "next_seq": 1,
+	  "host_reports": {
+	    "atlas": {
+	      "host": "atlas", "version": "1.2.3", "caps": 6,
+	      "roles": ["autofix"],
+	      "tools": [{"name": "claude", "path": "/usr/bin/claude", "future_tool_flag": "sandboxed"}],
+	      "at": "2026-07-26T12:00:00Z",
+	      "future_host_flag": {"gpu": true}
+	    }
+	  },
+	  "account": {"scope": "owner"}
+	}`
+
+	var st State
+	if err := json.Unmarshal([]byte(foreign), &st); err != nil {
+		t.Fatal(err)
+	}
+	rec := st.HostReports["atlas"]
+	if rec.Version != "1.2.3" || rec.Caps != 6 || len(rec.Tools) != 1 || rec.Tools[0].Path != "/usr/bin/claude" {
+		t.Fatalf("known fields must still decode: %+v", rec)
+	}
+
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	reports, _ := back["host_reports"].(map[string]any)
+	atlas, _ := reports["atlas"].(map[string]any)
+	if atlas == nil {
+		t.Fatalf("the host report vanished:\n%s", out)
+	}
+	carried, _ := atlas["future_host_flag"].(map[string]any)
+	if carried == nil || carried["gpu"] != true {
+		t.Errorf("a report member this binary does not know was dropped: %#v", atlas["future_host_flag"])
+	}
+	tools, _ := atlas["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("the tool probes vanished: %#v", atlas["tools"])
+	}
+	tool, _ := tools[0].(map[string]any)
+	if tool["future_tool_flag"] != "sandboxed" {
+		t.Errorf("a tool member this binary does not know was dropped: %#v", tool)
+	}
+}

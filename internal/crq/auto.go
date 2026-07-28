@@ -295,10 +295,14 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 	// with nothing left active in it scans NOTHING: falling back to CRQ_SCOPE
 	// there made every pass walk the organisation's whole open-PR result set for
 	// reviewsRepo to reject each row before the scan counter even advanced.
+	//
+	// A scope-wide host still searches its individually enrolled repositories by
+	// name — scanTargets returns the ones no owner in CRQ_SCOPE covers — so the
+	// two search shapes are mixed in one pass and each target says which it is.
 	targets, scoped := s.scanTargets(state)
-	byRepo := !scoped
+	byRepo := func(target string) bool { return !scoped || strings.Contains(target, "/") }
 	if scoped {
-		targets = s.cfg.Scope
+		targets = append(targets, s.cfg.Scope...)
 	}
 	var candidates []queueCandidate
 	var titles []queueCandidate
@@ -325,7 +329,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 		// Stream results and stop once the post-filter scan budget is spent, so
 		// excluded/gate-repo results can't crowd out in-scope PRs (a fixed pre-filter
 		// limit would never reach them) while we still don't over-fetch pages.
-		err := s.gh.EachOpenPR(ctx, target, byRepo, func(pr ghapi.SearchPR) (bool, error) {
+		err := s.gh.EachOpenPR(ctx, target, byRepo(target), func(pr ghapi.SearchPR) (bool, error) {
 			if scanned >= maxScan {
 				return true, nil
 			}

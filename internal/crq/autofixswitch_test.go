@@ -45,9 +45,12 @@ func TestAutofixIsOnUnlessARepositorySaysOtherwise(t *testing.T) {
 		t.Error("turning one repository off turned another off too")
 	}
 
-	// Back to the default is distinguishable from an explicit on.
-	if cleared, err := svc.ClearAutofixEnabled(ctx, "owner/one"); err != nil || !cleared {
+	// Back to the default is distinguishable from an explicit on, and the answer
+	// it reports is the one the repository ends up with.
+	if setting, cleared, err := svc.ClearAutofixEnabled(ctx, "owner/one"); err != nil || !cleared {
 		t.Fatalf("clear = %v %v, want it to report the setting it removed", cleared, err)
+	} else if !setting.Enabled || !setting.Default {
+		t.Errorf("clear reported %+v, want the resolved default", setting)
 	}
 	st, _, _ = store.Load(ctx)
 	if !st.AutofixEnabled("owner/one") {
@@ -65,7 +68,7 @@ func TestAutofixSwitchRejectsMalformedRepositoryNames(t *testing.T) {
 		if _, err := svc.SetAutofixEnabled(ctx, repo, false, "operator stop"); err == nil {
 			t.Errorf("SetAutofixEnabled(%q) succeeded", repo)
 		}
-		if _, err := svc.ClearAutofixEnabled(ctx, repo); err == nil {
+		if _, _, err := svc.ClearAutofixEnabled(ctx, repo); err == nil {
 			t.Errorf("ClearAutofixEnabled(%q) succeeded", repo)
 		}
 	}

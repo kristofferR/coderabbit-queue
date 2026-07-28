@@ -10,11 +10,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 	"github.com/kristofferR/coderabbit-queue/internal/workspace"
@@ -338,18 +340,29 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			// The fleet's skip marker suppresses review deliberately, to protect
-			// the shared quota. Next is a MUTATING oracle — it enqueues and can
-			// fire — so the marker has to be honoured before calling it, not
-			// after.
+			// The skip rules suppress review deliberately — the marker to protect
+			// the shared quota, the author list to keep crq off pull requests a
+			// repository has said not to touch. Next is a MUTATING oracle: it
+			// enqueues, it can fire, and it can start a fix session that runs an
+			// agent with approvals bypassed. So both are honoured BEFORE calling
+			// it, not after.
 			//
-			// Read through the pass's state, the way autoReviewPass reads it: the
-			// marker is fleet-settable, and a watcher answering from its startup
-			// env fired a PR carrying the marker the fleet had just configured.
-			if s.cfgFor(st, repo).SkipsReview(pull.Body) {
+			// Read through the pass's state, the way autoReviewPass reads them:
+			// both are fleet- and repository-settable, and a watcher answering
+			// from its startup env reviewed pull requests the settings it was
+			// displaying had just excluded.
+			skipCfg := s.cfgFor(st, repo)
+			skipped := ""
+			switch {
+			case skipCfg.SkipsReview(pull.Body):
+				skipped = "fleet auto-review skip marker present"
+			case skipCfg.SkipAuthors[dialect.NormalizeBotName(strings.ToLower(pull.User.Login))]:
+				skipped = "the author is on this repository's skip list"
+			}
+			if skipped != "" {
 				event := WatchEvent{
 					Repo: repo, PR: pull.Number,
-					Action: "skipped", Reason: "fleet auto-review skip marker present",
+					Action: "skipped", Reason: skipped,
 					At: s.clock().UTC(),
 				}
 				if emit != nil {
@@ -582,18 +595,7 @@ func (s *Service) queueDispatch(
 		return false, why, nil, nil
 	}
 	token := randomToken()
-	// Per repository, not per watcher: the attempt budget is a property of the
-	// project being fixed, and one that keeps needing a fourth try should not
-	// have to raise the limit for every other repository the watcher handles.
-	//
-	// A RECORDED value, though — not a merged one. The resolved configuration
-	// always carries a positive default, so reading it here outranked this run's
-	// own `--max-attempts` on every ordinary setup: the flag was accepted and
-	// then silently replaced by 3.
-	maxAttempts := opts.MaxAttempts
-	if sv := s.repoSolver(ctx, report.Repo); sv.MaxAttempts != nil {
-		maxAttempts = *sv.MaxAttempts
-	}
+	maxAttempts := s.recordedMaxAttempts(ctx, report.Repo, opts.MaxAttempts)
 	claimed, why, byDesign := s.claimDispatch(ctx, report, token, maxAttempts)
 	if !claimed {
 		pool.release()
@@ -617,6 +619,39 @@ func (s *Service) queueDispatch(
 		close(result)
 	})
 	return true, "", result, started
+}
+
+// recordedMaxAttempts is the fix-session budget for one repository: whatever
+// shared state RECORDS, falling back to this run's own value.
+//
+// Per repository, not per watcher — the budget is a property of the project
+// being fixed, and one that keeps needing a fourth try should not have to raise
+// the limit for every other repository the watcher handles.
+//
+// RECORDED, not resolved. The merged configuration always carries a positive
+// default, so reading that here outranked this run's own `--max-attempts` on
+// every ordinary setup: the flag was accepted and then silently replaced by 3.
+//
+// Both records are asked. The typed solver record is the per-repository answer;
+// the generic fleet map is where the settings editor saves
+// CRQ_DISPATCH_MAX_ATTEMPTS, and a claim that consulted only the first went on
+// enforcing this host's number while the dashboard reported the fleet's — with
+// no later state read able to change it.
+func (s *Service) recordedMaxAttempts(ctx context.Context, repo string, fallback int) int {
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return fallback
+	}
+	if sv := st.EffectiveSolver(repo); sv.MaxAttempts != nil {
+		return *sv.MaxAttempts
+	}
+	// Positive only, the way every consumer of a fleet setting reads one: a
+	// recorded 0 or a value that will not parse is not a budget, and honouring
+	// it would stop the whole fleet fixing anything.
+	if n, err := strconv.Atoi(strings.TrimSpace(st.Fleet.Env["CRQ_DISPATCH_MAX_ATTEMPTS"])); err == nil && n > 0 {
+		return n
+	}
+	return fallback
 }
 
 type dispatchResult struct {

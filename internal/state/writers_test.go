@@ -116,3 +116,39 @@ func TestReopenKeepsTheAdoptionFloor(t *testing.T) {
 		t.Errorf("LastAttemptAt = %v, want it untouched by a reopen", r.LastAttemptAt)
 	}
 }
+
+// The host that consumes solver settings is the autofix watcher, and it holds
+// neither the leader lease nor the fire slot — so the acting set LaggingWriters
+// builds cannot see it. An old watcher went on dispatching install-time model,
+// fork and attempt values while the repository's page reported nobody lagging.
+func TestLaggingRoleWritersNamesTheAutofixWatcher(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	st := New()
+	st.SetHostReport(HostReport{Host: "atlas", Caps: CapsSolver - 1, Roles: []string{"autofix"}}, now)
+	st.SetHostReport(HostReport{Host: "blue", Caps: CapsSolver, Roles: []string{"autofix"}}, now)
+	// Running something else here, so its older binary is not this setting's
+	// problem: it never starts a fix session.
+	st.SetHostReport(HostReport{Host: "green", Caps: CapsSolver - 1, Roles: []string{"serve"}}, now)
+
+	if got := st.LaggingWriters(CapsSolver, now); len(got) != 0 {
+		t.Fatalf("lagging writers = %v, want none — no host is driving the queue", got)
+	}
+	got := st.LaggingRoleWriters(CapsSolver, now, "autofix")
+	if len(got) != 1 || got[0] != "atlas" {
+		t.Fatalf("lagging = %v, want only the old autofix host", got)
+	}
+
+	// A report that has aged out speaks for nobody: that machine may not be
+	// running a watcher at all any more.
+	if got := st.LaggingRoleWriters(CapsSolver, now.Add(2*HostReportTTL), "autofix"); len(got) != 0 {
+		t.Errorf("lagging = %v, want none once every report is stale", got)
+	}
+
+	// And a machine lagging in BOTH registers is listed once, under the writer
+	// identity that says which process it is.
+	st.Leader = &LeaderLease{Owner: "host=atlas pid=7", ExpiresAt: now.Add(time.Minute)}
+	got = st.LaggingRoleWriters(CapsSolver, now, "autofix")
+	if len(got) != 1 || got[0] != "host=atlas pid=7" {
+		t.Errorf("lagging = %v, want the machine named once", got)
+	}
+}

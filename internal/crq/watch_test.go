@@ -1264,3 +1264,97 @@ type unreadableStore struct{ StateStore }
 func (unreadableStore) Load(context.Context) (State, Revision, error) {
 	return State{}, Revision{}, errors.New("state ref unreadable")
 }
+
+// A solver record that names an author to skip has to reach the watcher too.
+// Next is a MUTATING oracle — it enqueues, it can fire, and it can start a fix
+// session that runs an agent with approvals bypassed — so a watcher that
+// checked only the skip marker reviewed and executed against pull requests the
+// per-repository setting had just excluded.
+func TestWatchHonoursTheSkipAuthorList(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/r": true}
+	gh := newFakeGitHub()
+	var bot ghapi.Pull
+	bot.State = "open"
+	bot.Number = 9
+	bot.Head.SHA = "abcdef1234567890"
+	bot.User.Login = "dependabot[bot]"
+	gh.pulls[fakeKey("o/r", 9)] = bot
+	var human ghapi.Pull
+	human.State = "open"
+	human.Number = 10
+	human.Head.SHA = "beefbeef12345678"
+	human.User.Login = "kristofferR"
+	gh.pulls[fakeKey("o/r", 10)] = human
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	if _, err := svc.SetSolver(ctx, "o/r", SolverChange{SkipAuthors: []string{"dependabot[bot]"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var events []WatchEvent
+	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0), func(event WatchEvent) error {
+		events = append(events, event)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var skipped *WatchEvent
+	for i := range events {
+		if events[i].PR == 9 {
+			skipped = &events[i]
+		}
+	}
+	if skipped == nil || skipped.Action != "skipped" || skipped.Reason == "" {
+		t.Fatalf("events = %#v, want the skipped author explained", events)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Round("o/r", 9) != nil {
+		t.Error("a skipped author's pull request was passed to the mutating Next oracle")
+	}
+	if st.Round("o/r", 10) == nil {
+		t.Error("the rest of the repository must still be watched")
+	}
+}
+
+// The attempt budget is fleet-settable, and the settings editor saves it into
+// the generic fleet map. A claim that consulted only the typed solver record
+// went on enforcing this host's number while the dashboard reported the
+// fleet's — with no later state read able to change it.
+func TestRecordedMaxAttemptsReadsBothRecords(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost", "CRQ_COBOTS": "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	// Nothing recorded: this run's own flag stands, which is the whole reason a
+	// RECORDED value is asked for rather than a resolved one.
+	if got := svc.recordedMaxAttempts(ctx, "o/r", 7); got != 7 {
+		t.Errorf("attempts = %d, want this run's own 7", got)
+	}
+	if _, err := svc.SetEnv(ctx, "CRQ_DISPATCH_MAX_ATTEMPTS", "9", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.recordedMaxAttempts(ctx, "o/r", 7); got != 9 {
+		t.Errorf("attempts = %d, want the fleet's recorded 9", got)
+	}
+	// The per-repository record is more specific and wins outright.
+	if _, err := svc.SetSolver(ctx, "o/r", SolverChange{MaxAttempts: intptr(2)}); err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.recordedMaxAttempts(ctx, "o/r", 7); got != 2 {
+		t.Errorf("attempts = %d, want the repository's 2", got)
+	}
+	if got := svc.recordedMaxAttempts(ctx, "o/other", 7); got != 9 {
+		t.Errorf("attempts = %d, want another repository still on the fleet's 9", got)
+	}
+}

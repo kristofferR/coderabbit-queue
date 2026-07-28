@@ -162,7 +162,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		lagging, err = s.actor.SetReviewers(ctx, req.Repo, req.CoBots, req.Required, req.Primary)
 		if err == nil && len(lagging) > 0 {
 			s.refresh(ctx)
-			snap, _ := s.snapshot()
+			snap, _, _ := s.snapshot()
 			writeJSON(w, http.StatusOK, map[string]any{
 				"snapshot": snap,
 				// hostOf strips the pid/run suffix the state ref keys writers by:
@@ -191,7 +191,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		lagging, err = s.actor.SetEnrollment(ctx, req.Repo, *req.Enabled, req.Reason)
 		if err == nil && len(lagging) > 0 {
 			s.refresh(ctx)
-			snap, _ := s.snapshot()
+			snap, _, _ := s.snapshot()
 			writeJSON(w, http.StatusOK, map[string]any{
 				"snapshot": snap,
 				"warning": "saved, but these hosts run an older binary and decide from their own env alone: " +
@@ -217,7 +217,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.refresh(ctx)
-		snap, _ := s.snapshot()
+		snap, _, _ := s.snapshot()
 		writeJSON(w, http.StatusOK, map[string]any{"snapshot": snap, "impact": impact})
 		return
 	case "env":
@@ -277,7 +277,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	// Re-read immediately rather than waiting for the next poll: the person who
 	// clicked is watching, and a stale answer reads as a failed click.
 	s.refresh(ctx)
-	snap, _ := s.snapshot()
+	snap, _, _ := s.snapshot()
 	writeJSON(w, http.StatusOK, snap)
 }
 

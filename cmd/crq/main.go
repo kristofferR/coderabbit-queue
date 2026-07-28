@@ -395,12 +395,13 @@ func run(ctx context.Context, args []string) int {
 				return 1
 			}
 			if sub == "default" {
-				cleared, cerr := service.ClearAutofixEnabled(ctx, rest[0])
+				setting, cleared, cerr := service.ClearAutofixEnabled(ctx, rest[0])
 				if cerr != nil {
 					fatal(cerr)
 					return 1
 				}
-				printJSON(map[string]any{"repo": crq.NormalizeRepo(rest[0]), "cleared": cleared, "enabled": true, "default": true})
+				printJSON(map[string]any{"repo": setting.Repo, "cleared": cleared,
+					"enabled": setting.Enabled, "default": setting.Default})
 				return 0
 			}
 			setting, serr := service.SetAutofixEnabled(ctx, rest[0], sub == "on", reason)
@@ -1295,7 +1296,7 @@ this stop being reviewed" is a question the fleet should be able to answer itsel
 crq autofix                            (which repositories crq may fix)
 crq autofix off <repo> [--reason "<why>"]
 crq autofix on <repo>
-crq autofix default <repo>             (back to the fleet default, which is on)
+crq autofix default <repo>             (back to the fleet default; on unless the fleet says otherwise)
 
 Install and start unattended autofix: crq watches every open PR and
 starts a fix session for the ones that need one.
@@ -2421,7 +2422,7 @@ func (a prActor) SetAutofix(ctx context.Context, repo string, enabled bool, reas
 }
 
 func (a prActor) ClearAutofix(ctx context.Context, repo string) error {
-	_, err := a.svc.ClearAutofixEnabled(ctx, repo)
+	_, _, err := a.svc.ClearAutofixEnabled(ctx, repo)
 	return err
 }
 

@@ -1008,3 +1008,35 @@ func TestStatusLine(t *testing.T) {
 		}
 	}
 }
+
+// The issue is ONE artifact the whole fleet reads, so how its times are rendered
+// is a fleet answer. Taken from the rendering host's startup environment alone,
+// a timezone saved from the settings page was reported as in force while every
+// sync went on writing the zone of whichever machine happened to run it.
+func TestRenderDashboardPrefersTheFleetTimezone(t *testing.T) {
+	now := time.Now().UTC()
+	r := coolingRound("kristofferr/ha-adjustable-bed", 480, 1, now, 11*time.Minute)
+	st := stateWith(r)
+	st.Fleet.Env = map[string]string{"CRQ_TZ": "Asia/Tokyo"}
+
+	tokyo, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	out := RenderDashboard(st, StoreConfig{Timezone: "Europe/Oslo"})
+	if !strings.Contains(out, fmtStamp(r.RetryAt, tokyo)) {
+		t.Errorf("ready time not rendered in the fleet's zone:\n%s", out)
+	}
+
+	// A zone the fleet records but this binary cannot load falls through to the
+	// host's own rather than silently rendering everything in UTC.
+	oslo, err := time.LoadLocation("Europe/Oslo")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	st.Fleet.Env["CRQ_TZ"] = "Middle/Earth"
+	out = RenderDashboard(st, StoreConfig{Timezone: "Europe/Oslo"})
+	if !strings.Contains(out, fmtStamp(r.RetryAt, oslo)) {
+		t.Errorf("an unloadable fleet zone must fall back to the host's:\n%s", out)
+	}
+}

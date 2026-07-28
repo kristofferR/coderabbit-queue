@@ -2567,15 +2567,21 @@ func (s *Service) sweepParkedClosed(ctx context.Context, st State) (PumpResult, 
 	return res, true, err
 }
 
-// noteCoAnswers records which co-reviewers have actually answered for this
-// head, from an observation crq has already paid for.
+// noteCoAnswers records which reviewers have actually answered for this head,
+// from an observation crq has already paid for.
 //
 // It exists because nothing else in the round says a bot did anything. The
 // trigger bookkeeping — the command crq posted, the claim it took — is all
 // about crq, so a bot with no account behind it looks identical to one working
-// perfectly: crq asks, records that it asked, and nothing answers. This is the
-// only field that can tell those apart, which is what the bot guide's setup
+// perfectly: crq asks, records that it asked, and nothing answers. These are the
+// only fields that can tell those apart, which is what the bot guide's setup
 // status is read from.
+//
+// The primary is recorded here too, by the same generic head-evidence test and
+// for exactly the same reason. Its round carries no per-bot entry, so the only
+// thing left to read it from was the phase — and a required set that omits the
+// primary completes on its co-reviewers' answers while the primary has done
+// nothing but acknowledge the command.
 func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, obs engine.Observation, now time.Time) {
 	if s.cfg.DryRun {
 		return // DryRun writes nothing, bookkeeping included
@@ -2586,7 +2592,8 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 			answered = append(answered, cb.Login)
 		}
 	}
-	if len(answered) == 0 {
+	primary := cfg.Bot != "" && engine.CoReviewedHead(obs, cfg.Bot)
+	if len(answered) == 0 && !primary {
 		return
 	}
 	if _, err := s.store.Update(ctx, func(st *State) error {
@@ -2594,18 +2601,21 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 		if r == nil || !sameRound(r, round) {
 			return ErrNoChange
 		}
-		before := r.CoBots
+		before, beforePrimary := r.CoBots, r.PrimaryAnsweredAt
 		for _, login := range answered {
 			r.NoteCoAnswer(login, now)
 		}
-		if sameCoAnswers(before, r.CoBots) {
+		if primary {
+			r.NotePrimaryAnswer(now)
+		}
+		if sameCoAnswers(before, r.CoBots) && beforePrimary == r.PrimaryAnsweredAt {
 			return ErrNoChange
 		}
 		st.PutRound(*r)
 		return nil
 	}); err != nil && !errors.Is(err, ErrNoChange) && s.log != nil {
 		// Display-only bookkeeping: worth a line, never worth failing a round.
-		s.log.Printf("warning: recording co-reviewer answers for %s#%d: %v", round.Repo, round.PR, err)
+		s.log.Printf("warning: recording reviewer answers for %s#%d: %v", round.Repo, round.PR, err)
 	}
 }
 

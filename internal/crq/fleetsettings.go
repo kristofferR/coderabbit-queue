@@ -494,6 +494,11 @@ type AdoptedSetting struct {
 //
 // Values equal to the default are skipped too: recording them would pin a
 // default that a later crq might improve, and pin it invisibly.
+//
+// So is a value shared state already decides. The CAS below deliberately leaves
+// an existing record alone — it was set on purpose and outranks whatever this
+// machine happens to carry — and reporting that as adopted told an operator
+// their differing value had become the fleet's when state had kept the old one.
 func (s *Service) AdoptEnv(ctx context.Context, dryRun bool) ([]AdoptedSetting, error) {
 	host := s.cfg.Env()
 	defaults, err := BuildConfig(map[string]string{})
@@ -503,6 +508,12 @@ func (s *Service) AdoptEnv(ctx context.Context, dryRun bool) ([]AdoptedSetting, 
 	defaultEnv := map[string]string{}
 	for _, k := range EnvKeys() {
 		defaultEnv[k.Key] = defaultValueOf(defaults, k.Key)
+	}
+	// Read BEFORE the results are built, so what this reports and what the write
+	// below does are decided from one view of the record.
+	current, _, err := s.store.Load(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	var adopted []AdoptedSetting
@@ -521,6 +532,9 @@ func (s *Service) AdoptEnv(ctx context.Context, dryRun bool) ([]AdoptedSetting, 
 		case value == defaultEnv[k.Key]:
 			adopted = append(adopted, AdoptedSetting{Key: k.Key, Value: value,
 				Skipped: "same as the default: recording it would pin today's default invisibly"})
+		case fleetGoverns(current.Fleet, k.Key):
+			adopted = append(adopted, AdoptedSetting{Key: k.Key, Value: value,
+				Skipped: "the fleet already records this setting, and a record outranks one host's value"})
 		default:
 			take[k.Key] = value
 			adopted = append(adopted, AdoptedSetting{Key: k.Key, Value: value})
@@ -531,9 +545,15 @@ func (s *Service) AdoptEnv(ctx context.Context, dryRun bool) ([]AdoptedSetting, 
 	}
 
 	now := s.clock().UTC()
+	// What the write actually landed. The classification above answers from the
+	// record as it was READ, and between that and the CAS a key can gain a
+	// record — or a typed value can fail to parse into its field — leaving a
+	// setting reported as adopted that shared state never took.
+	applied := map[string]bool{}
 	st, err := s.store.Update(ctx, func(st *State) error {
 		fd := st.Fleet
 		changed := false
+		clear(applied) // a CAS conflict runs this closure again
 		set := func(key, value string) {
 			// A record already there was set deliberately and outranks a value
 			// this host happens to carry.
@@ -544,6 +564,7 @@ func (s *Service) AdoptEnv(ctx context.Context, dryRun bool) ([]AdoptedSetting, 
 				return
 			}
 			fd.Env[key] = value
+			applied[key] = true
 			changed = true
 		}
 		for key, value := range take {
@@ -555,22 +576,26 @@ func (s *Service) AdoptEnv(ctx context.Context, dryRun bool) ([]AdoptedSetting, 
 				if !fd.SetCoBots {
 					if logins, err := resolveCoBotLogins(splitCommas(value)); err == nil {
 						fd.CoBots, fd.SetCoBots, changed = logins, true, true
+						applied[key] = true
 					}
 				}
 			case "CRQ_REQUIRED_BOTS":
 				if !fd.SetRequired {
 					if logins, err := resolveRequiredLogins(splitCommas(value), s.cfg.Bot); err == nil {
 						fd.Required, fd.SetRequired, changed = logins, true, true
+						applied[key] = true
 					}
 				}
 			case "CRQ_MIN_INTERVAL":
 				if fd.MinInterval == "" {
 					fd.MinInterval, changed = value, true
+					applied[key] = true
 				}
 			case "CRQ_WEEKLY_LIMIT":
 				if fd.WeeklyLimit == nil {
 					if n, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
 						fd.WeeklyLimit, changed = &n, true
+						applied[key] = true
 					}
 				}
 			default:
@@ -589,7 +614,25 @@ func (s *Service) AdoptEnv(ctx context.Context, dryRun bool) ([]AdoptedSetting, 
 	if err == nil {
 		s.sync(ctx, st)
 	}
+	for i := range adopted {
+		if adopted[i].Skipped == "" && take[adopted[i].Key] != "" && !applied[adopted[i].Key] {
+			adopted[i].Skipped = "shared state kept the value it already had"
+		}
+	}
 	return adopted, nil
+}
+
+// fleetGoverns reports whether the fleet record already decides key, in either
+// of the two places a setting can live: its typed field, or the generic map.
+// Both have to be asked — a value adopted into the typed field is invisible in
+// Env, and reporting it as unrecorded would offer to adopt it again on every
+// run.
+func fleetGoverns(fd FleetDefaults, key string) bool {
+	if _, ok := fleetValueOf(fd, key); ok {
+		return true
+	}
+	_, ok := fd.Env[key]
+	return ok
 }
 
 // defaultValueOf renders what a setting would be with nothing configured, so

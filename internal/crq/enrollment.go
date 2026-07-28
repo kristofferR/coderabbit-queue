@@ -250,7 +250,7 @@ func (s *Service) reviewsRepo(st State, repo string) bool {
 
 // scanTargets is the list a pass should search: every repository enrolled by
 // env or by record. scoped reports that there is no allow-list ANYWHERE, which
-// is the signal to search CRQ_SCOPE owner-wide instead.
+// is the signal to search CRQ_SCOPE owner-wide as WELL as the returned targets.
 //
 // The two answers are separate on purpose. An empty list with scoped false is an
 // allow-list whose every entry is switched off, which is not the same thing at
@@ -261,8 +261,14 @@ func (s *Service) scanTargets(st State) (targets []string, scoped bool) {
 	// An empty CRQ_REPOS means this host searches CRQ_SCOPE owner-wide. Records
 	// must not narrow that to themselves: enrolling one repository would then
 	// silently stop every other one from being scanned.
+	//
+	// They may still WIDEN it. `crq repos add` accepts any well-shaped
+	// repository, and one whose owner is outside CRQ_SCOPE is reported as
+	// enrolled by every screen while no owner-wide search can ever reach it —
+	// enrolled, counted, and never enqueued. Those are named individually
+	// alongside the scope search rather than in place of it.
 	if len(s.cfg.AllowRepos) == 0 {
-		return nil, true
+		return s.enrolledOutsideScope(st), true
 	}
 	seen := map[string]bool{}
 	var out []string
@@ -280,6 +286,31 @@ func (s *Service) scanTargets(st State) (targets []string, scoped bool) {
 	}
 	sort.Strings(out)
 	return out, false
+}
+
+// enrolledOutsideScope names the enabled repositories an owner-wide CRQ_SCOPE
+// search cannot reach, so a scope-wide host searches them by name as well.
+//
+// Only the ones outside the scope: a repository the search already covers would
+// be walked twice, and every pull request it found would be examined against
+// the same scan budget twice over.
+func (s *Service) enrolledOutsideScope(st State) []string {
+	inScope := map[string]bool{}
+	for _, owner := range s.cfg.Scope {
+		if owner = strings.ToLower(strings.TrimSpace(owner)); owner != "" {
+			inScope[owner] = true
+		}
+	}
+	var out []string
+	for _, repo := range st.EnrolledRepos() {
+		owner, _, _ := strings.Cut(NormalizeRepo(repo), "/")
+		if inScope[owner] || !s.reviewsRepo(st, repo) {
+			continue
+		}
+		out = append(out, NormalizeRepo(repo))
+	}
+	sort.Strings(out)
+	return out
 }
 
 // EnrollmentIn answers for an already-loaded state, so a caller rendering many
@@ -342,15 +373,29 @@ type EnrollImpact struct {
 	// are reported rather than dropped:
 	// leaving them out of the total makes an unknown price look like a free one,
 	// which is the one thing this dialog exists to prevent.
-	Unpriced        int    `json:"unpriced,omitempty"`
+	Unpriced int `json:"unpriced,omitempty"`
+	// Unexamined counts the open pull requests this preview stopped short of
+	// reading. Eligible and the cost below are then floors, not answers, and
+	// saying so is the same honesty Unpriced exists for.
+	Unexamined      int    `json:"unexamined,omitempty"`
 	Summary         string `json:"summary"`
 	PricesCheckedAt string `json:"prices_checked_at"`
 }
 
+// maxExamined bounds the per-pull-request reads one preview makes. Every
+// non-skipped pull request costs a head read and a review list, so a repository
+// with hundreds of them would spend hundreds of requests from the same GitHub
+// quota the queue runs on — for a dialog somebody is waiting in front of.
+//
+// The pricing loop below inherits the bound rather than setting its own: it
+// prices what was found eligible, and nothing past this can be.
+const maxExamined = 25
+
 // PreviewEnroll reports what enrolling repo would do. It costs a head read and
-// a review list per open pull request — the same questions the scan asks —
+// a review list per examined pull request — the same questions the scan asks —
 // plus a diff read for each one it prices, which is why it is a separate call
-// the dialog makes rather than something every repository row carries.
+// the dialog makes rather than something every repository row carries, and why
+// the examining is bounded by maxExamined.
 func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact, error) {
 	repo = NormalizeRepo(repo)
 	if err := checkRepoShape(repo); err != nil {
@@ -364,6 +409,7 @@ func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact,
 	impact := EnrollImpact{Repo: repo, Skipped: map[string]int{}, PricesCheckedAt: dialect.PricesCheckedAt}
 
 	var eligible []int
+	examined := 0
 	err = s.gh.EachOpenPR(ctx, repo, true, func(pr ghapi.SearchPR) (bool, error) {
 		if NormalizeRepo(pr.Repo) != repo {
 			return false, nil
@@ -374,7 +420,15 @@ func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact,
 			impact.Skipped["author is skipped"]++
 		case cfg.SkipsReview(pr.Body):
 			impact.Skipped["carries the skip marker"]++
+		case examined >= maxExamined:
+			// Past the bound. The listing already carries the author and body, so
+			// the two rules above stay free and keep being applied — only the
+			// reads stop. Counted rather than guessed either way: calling it
+			// eligible promises a bill crq never checked for, and calling it
+			// skipped hides one.
+			impact.Unexamined++
 		default:
+			examined++
 			// The scan's own predicate, not just the skip rules. A repository
 			// being re-enabled keeps its completed rounds, and a pull request
 			// reviewed outside crq is answered for at its head — counting either
@@ -399,14 +453,9 @@ func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact,
 	impact.Eligible = len(eligible)
 
 	// One read per eligible pull request, for the diff each would be reviewed
-	// at. Bounded, because a dialog that takes a minute to open is a dialog
-	// nobody waits for — and an under-count is reported rather than hidden.
-	const maxPriced = 25
-	priced := eligible
-	if len(priced) > maxPriced {
-		priced = priced[:maxPriced]
-	}
-	for _, pr := range priced {
+	// at. Already bounded by maxExamined above — nothing past it was examined,
+	// so nothing past it can be eligible.
+	for _, pr := range eligible {
 		// costFrom, not Cost: the state is already in hand, and Cost would load
 		// the ref again per pull request — four requests each, 100 across the
 		// bound, for an answer that cannot have changed since the load above.
@@ -434,12 +483,12 @@ func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact,
 			}
 		}
 	}
-	impact.Summary = enrollSummary(impact, len(priced) < len(eligible))
+	impact.Summary = enrollSummary(impact)
 	return impact, nil
 }
 
-func enrollSummary(i EnrollImpact, partial bool) string {
-	if i.Eligible == 0 {
+func enrollSummary(i EnrollImpact) string {
+	if i.Eligible == 0 && i.Unexamined == 0 {
 		return fmt.Sprintf("%d open pull request(s), none of which would be enqueued", i.Open)
 	}
 	// "no per-review cost" is only ever said about a backlog crq actually
@@ -455,13 +504,20 @@ func enrollSummary(i EnrollImpact, partial bool) string {
 	case i.Unpriced > 0:
 		cost = "a cost crq could not read"
 	}
-	out := fmt.Sprintf("would enqueue %d of %d open pull request(s) on the next pass — %s",
-		i.Eligible, i.Open, cost)
+	count := fmt.Sprint(i.Eligible)
+	if i.Unexamined > 0 {
+		count = "at least " + count
+	}
+	out := fmt.Sprintf("would enqueue %s of %d open pull request(s) on the next pass — %s",
+		count, i.Open, cost)
 	if i.Unpriced > 0 && i.High > 0 {
 		out += fmt.Sprintf(", plus %d that could not be priced", i.Unpriced)
 	}
-	if partial {
-		out += ", priced over the first 25"
+	if i.Unexamined > 0 {
+		// Said plainly, because both numbers above are floors once this is set:
+		// a reader who takes them for the whole backlog is being told the wrong
+		// price for the click this dialog is asking them to make.
+		out += fmt.Sprintf("; %d more were not examined", i.Unexamined)
 	}
 	return out
 }

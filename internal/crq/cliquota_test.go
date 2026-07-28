@@ -314,3 +314,40 @@ func TestRecordCLIQuotaClearsAPendingCalibration(t *testing.T) {
 		t.Errorf("a pending calibration must not outlive the block that replaced it: %s", st.Account.CalibAskedAt)
 	}
 }
+
+// The fallback window is a fleet setting, so the block recorded here has to be
+// the one the settings page says is in force. Read from this host's startup
+// value, a fleet-lengthened window recorded the host's shorter one instead —
+// resuming metered fires early, against the number the dashboard was showing.
+func TestRecordCLIQuotaUsesTheFleetFallbackWindow(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	// Built from an env map, because the fleet's generic settings are applied by
+	// re-parsing the configuration crq was built from — which is what a host has.
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "kristofferR/crq-state", "CRQ_HOST": "testhost",
+		"CRQ_SCOPE": "kristofferR", "CRQ_COBOTS": "", "CRQ_RL_FALLBACK": "15m",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	svc.now = func() time.Time { return now }
+
+	if _, err := svc.SetEnv(ctx, "CRQ_RL_FALLBACK", "1h", false); err != nil {
+		t.Fatal(err)
+	}
+	got, rerr := svc.RecordCLIQuota(ctx, blockedReport(t, "soon"), "kristofferR")
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if !got.Applied {
+		t.Fatalf("an unreadable window must still block: %+v", got)
+	}
+	st, _, _ := store.Load(ctx)
+	if st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.Equal(now.Add(time.Hour)) {
+		t.Errorf("BlockedUntil = %v, want the fleet's hour rather than this host's 15 minutes",
+			st.Account.BlockedUntil)
+	}
+}

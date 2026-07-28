@@ -507,6 +507,10 @@ export type EnrollImpact = {
   /** Pull requests whose cost could not be read, so low/high are a floor. The
    *  summary says so — an unknown price must never render as a free one. */
   unpriced?: number;
+  /** Open pull requests the preview stopped short of reading, so eligible and
+   *  low/high are floors too. Bounded on purpose: each one costs GitHub reads
+   *  from the same quota the queue runs on. */
+  unexamined?: number;
   summary: string;
   prices_checked_at: string;
 };

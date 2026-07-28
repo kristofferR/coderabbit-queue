@@ -39,24 +39,32 @@ func (s *Service) SetAutofixEnabled(ctx context.Context, repo string, enabled bo
 	return AutofixSetting{Repo: repo, Enabled: enabled, Reason: reason, By: sw.By, UpdatedAt: sw.UpdatedAt}, nil
 }
 
-// ClearAutofixEnabled returns repo to the default (autofix on), reporting whether a
-// setting was there.
-func (s *Service) ClearAutofixEnabled(ctx context.Context, repo string) (bool, error) {
+// ClearAutofixEnabled returns repo to the fleet default, reporting the setting
+// that results and whether a record was there to remove.
+//
+// The resulting setting is READ BACK rather than assumed. The default is
+// whatever the fleet records, so clearing an explicit "on" under a fleet default
+// of off leaves the repository off — and a caller told "enabled: true" would
+// have the exact opposite of the policy now in force.
+func (s *Service) ClearAutofixEnabled(ctx context.Context, repo string) (AutofixSetting, bool, error) {
 	repo = NormalizeRepo(repo)
 	if !validRepoSlug(repo) {
-		return false, fmt.Errorf("repo must be owner/name")
+		return AutofixSetting{}, false, fmt.Errorf("repo must be owner/name")
 	}
 	cleared := false
-	if _, err := s.store.Update(ctx, func(st *State) error {
+	st, err := s.store.Update(ctx, func(st *State) error {
 		cleared = st.ClearAutofixSwitch(repo)
 		if !cleared {
 			return ErrNoChange
 		}
 		return nil
-	}); err != nil {
-		return false, err
+	})
+	if err != nil {
+		return AutofixSetting{}, false, err
 	}
-	return cleared, nil
+	// The state the write landed on, which is also the state Update hands back
+	// when nothing changed.
+	return AutofixSetting{Repo: repo, Enabled: st.AutofixEnabled(repo), Default: true}, cleared, nil
 }
 
 // AutofixSettings reports the autofix answer for every repository in scope, so the
