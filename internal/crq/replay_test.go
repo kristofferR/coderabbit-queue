@@ -241,6 +241,7 @@ func (f *replayFixture) autoReviewEnqueue(repo string, pr int) bool {
 	if err != nil {
 		f.t.Fatalf("load: %v", err)
 	}
+	fleetRevision := f.svc.fleetCfg(st).FleetRevision
 	need, head, err := f.svc.needsReview(f.ctx, st, repo, pr, true)
 	if err != nil {
 		f.t.Fatalf("needsReview %s#%d: %v", repo, pr, err)
@@ -248,7 +249,7 @@ func (f *replayFixture) autoReviewEnqueue(repo string, pr int) bool {
 	if !need {
 		return false
 	}
-	if err := f.svc.enqueueBatch(f.ctx, []queueCandidate{{Repo: repo, PR: pr, Head: head}}); err != nil {
+	if err := f.svc.enqueueBatch(f.ctx, []queueCandidate{{Repo: repo, PR: pr, Head: head}}, fleetRevision); err != nil {
 		f.t.Fatalf("enqueueBatch %s#%d: %v", repo, pr, err)
 	}
 	return true

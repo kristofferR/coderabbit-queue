@@ -1,4 +1,4 @@
-// Package state defines crq's persisted schema v4: one Round per tracked PR,
+// Package state defines crq's persisted schema v5: one Round per tracked PR,
 // a single global fire slot, and the CodeRabbit account quota. A Round is
 // never deleted, only transitioned (or archived when superseded by a new
 // head) — the invariant that makes "forgot we already requested a review at
@@ -367,10 +367,10 @@ func (l LeaderCapabilityLease) HasCapability(want string) bool {
 	return false
 }
 
-// State is schema v4. It persists as state.json in the existing git state ref;
-// v3 is migrated in place so its live rounds survive the compatibility fence.
+// State is schema v5. It persists as state.json in the existing git state ref;
+// v4 is migrated in place so its live rounds survive the compatibility fence.
 type State struct {
-	Version int   `json:"v"` // 4
+	Version int   `json:"v"` // 5
 	Rev     int64 `json:"rev"`
 	NextSeq int64 `json:"next_seq"`
 
@@ -399,13 +399,6 @@ type State struct {
 	// one. Persisted in the shared state so the whole fleet uses the new issue.
 	CalibrationIssue int `json:"calibration_issue,omitempty"`
 
-	// Holds are the PRs crq must not fire a review for, keyed by "owner/name#pr".
-	//
-	// Holding used to take two commands that could not be one: the skip marker
-	// stops fleet auto-review from enqueueing, `crq cancel` stops the pump, and
-	// between the two a daemon fired anyway. A hold is one fact, in the state
-	// every firing path already reads.
-	Holds map[string]Hold `json:"holds,omitempty"`
 	// Writers records which hosts have written this state and what they can do,
 	// so a feature that only SOME binaries understand can say so instead of
 	// pretending agreement. Sharing a ref stops an old binary erasing a new
@@ -423,6 +416,18 @@ type State struct {
 	// read this ref, so both cannot disagree about it.
 	Repos map[string]RepoReviewers `json:"repos,omitempty"`
 
+	// FleetConfig is the policy every host shares — which repositories are in
+	// scope, who reviews, and the timings the queue paces itself by. Same
+	// argument as Repos above, one level up: hosts that each carry their own
+	// answer diverge silently. See fleet.go.
+	FleetConfig Fleet `json:"fleet,omitempty"`
+	// Holds are the PRs crq must not fire a review for, keyed by "owner/name#pr".
+	//
+	// Holding used to take two commands that could not be one: the skip marker
+	// stops fleet auto-review from enqueueing, `crq cancel` stops the pump, and
+	// between the two a daemon fired anyway. A hold is one fact, in the state
+	// every firing path already reads.
+	Holds map[string]Hold `json:"holds,omitempty"`
 	// Archive keeps recently finished rounds (superseded, closed, cancelled)
 	// for the dashboard and debugging. Bounded by ArchiveMax.
 	Archive []Round `json:"archive,omitempty"`
@@ -476,15 +481,19 @@ func (s State) LeaderHasCapability(want string) bool {
 		s.LeaderCapabilities.HasCapability(want)
 }
 
-const SchemaVersion = 4
+const SchemaVersion = 5
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 1
+const WriterCaps = 3
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
 const CapsRepoOverrides = 1
+
+// CapsFleetPolicy is the capability that makes state-backed fleet policy safe
+// to activate while a process is driving the queue.
+const CapsFleetPolicy = 3
 
 // writerTTL is how long a host counts as still active for capability purposes.
 const writerTTL = 30 * time.Minute
@@ -524,6 +533,39 @@ func (s *State) NoteWriter(host string, caps int, now time.Time) {
 // on this actually honour it?" An old binary loads an unknown field, writes it
 // back untouched, and keeps deciding from its own fleet-wide configuration.
 func (s *State) LaggingWriters(caps int, now time.Time) []string {
+	var out []string
+	for host := range s.actingWriters(now) {
+		if seen, ok := s.Writers[host]; ok && seen.Caps >= caps && now.Sub(seen.At) <= writerTTL {
+			continue
+		}
+		out = append(out, host)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// AdvancedWriters names the hosts driving this queue with a capability HIGHER
+// than caps — the fleet running a newer binary than the caller's.
+//
+// It is the mirror of LaggingWriters, and answers the question an old CLI has to
+// ask before it deletes a recorded setting it cannot interpret: is anyone acting
+// on it? WriterCaps is bumped exactly when a state field starts changing
+// decisions, so a driver announcing more than this binary knows is the one that
+// wrote that setting and owns whatever cleanup dropping it needs.
+func (s *State) AdvancedWriters(caps int, now time.Time) []string {
+	var out []string
+	for host := range s.actingWriters(now) {
+		if seen, ok := s.Writers[host]; ok && seen.Caps > caps && now.Sub(seen.At) <= writerTTL {
+			out = append(out, host)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// actingWriters names the processes DRIVING this queue: holding the leader lease
+// or the fire slot.
+func (s *State) actingWriters(now time.Time) map[string]bool {
 	acting := map[string]bool{}
 	// The leader identifies itself as "host=<name> pid=<n> run=<id>", which is
 	// exactly the process identity capabilities are recorded under — the run
@@ -534,15 +576,7 @@ func (s *State) LaggingWriters(caps int, now time.Time) []string {
 	if slot := s.SlotRound(); slot != nil && slot.ByHost != "" {
 		acting[slot.ByHost] = true
 	}
-	var out []string
-	for host := range acting {
-		if seen, ok := s.Writers[host]; ok && seen.Caps >= caps && now.Sub(seen.At) <= writerTTL {
-			continue
-		}
-		out = append(out, host)
-	}
-	sort.Strings(out)
-	return out
+	return acting
 }
 
 // RepoReviewers overrides which reviewers run on one repository. A nil slice

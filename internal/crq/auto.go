@@ -3,6 +3,7 @@ package crq
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -221,24 +222,35 @@ func (s *Service) renewLeader(ctx context.Context, owner, token string) (State, 
 }
 
 func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, token string) error {
-	targets := s.cfg.Scope
-	byRepo := false
-	if len(s.cfg.AllowRepos) > 0 {
-		targets = make([]string, 0, len(s.cfg.AllowRepos))
-		for repo := range s.cfg.AllowRepos {
-			targets = append(targets, repo)
-		}
-		byRepo = true
-	}
 	// Load the queue snapshot once per pass and reuse it across candidates: a
 	// git-backed Load is GetRef+GetCommit+GetTree+GetBlob, so reloading it per PR
 	// would burn the shared REST quota on a large scan. The heartbeat refreshes it,
 	// and enqueueBatch re-checks Contains under CAS, so a slightly stale snapshot
 	// during collection is safe.
+	//
+	// It is loaded BEFORE the targets are chosen, because the state ref is where
+	// the fleet records which repositories those are. Reading this host's own
+	// list first is what let one machine scan a repository another had excluded.
 	state, _, err := s.store.Load(ctx)
 	if err != nil {
 		return err
 	}
+	cfg := s.fleetCfg(state)
+	// Copied, never sorted in place. Without a fleet `scope` the configuration is
+	// this host's own, so the slice shares its backing array with s.cfg.Scope and
+	// the sort below would silently reorder the operator's configured scan order
+	// — and race any concurrent reader of it. The allow-repository branch already
+	// builds its own.
+	targets := append([]string(nil), cfg.Scope...)
+	byRepo := false
+	if len(cfg.AllowRepos) > 0 {
+		targets = make([]string, 0, len(cfg.AllowRepos))
+		for repo := range cfg.AllowRepos {
+			targets = append(targets, repo)
+		}
+		byRepo = true
+	}
+	sort.Strings(targets) // stable: a pass must not depend on map iteration
 	var candidates []queueCandidate
 	lastBeat := time.Now()
 	for _, target := range targets {
@@ -253,16 +265,16 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 				return true, nil
 			}
 			repo := NormalizeRepo(pr.Repo)
-			if repo == NormalizeRepo(s.cfg.GateRepo) || s.cfg.ExcludeRepos[repo] {
+			if repo == NormalizeRepo(s.cfg.GateRepo) || cfg.ExcludeRepos[repo] {
 				return false, nil
 			}
-			if len(s.cfg.AllowRepos) > 0 && !s.cfg.AllowRepos[repo] {
+			if len(cfg.AllowRepos) > 0 && !cfg.AllowRepos[repo] {
 				return false, nil
 			}
-			if s.cfg.SkipAuthors[dialect.NormalizeBotName(strings.ToLower(pr.Author))] {
+			if cfg.SkipAuthors[dialect.NormalizeBotName(strings.ToLower(pr.Author))] {
 				return false, nil
 			}
-			if s.cfg.SkipsReview(pr.Body) {
+			if cfg.SkipsReview(pr.Body) {
 				return false, nil
 			}
 			scanned++
@@ -302,7 +314,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 		}
 	}
 	// One batched write for the whole pass instead of N (#2).
-	return s.enqueueBatch(ctx, candidates)
+	return s.enqueueBatch(ctx, candidates, cfg.FleetRevision)
 }
 
 // needsReview reports whether an open PR should be enqueued for review, and its

@@ -73,6 +73,7 @@ func newFakeGitHub() *fakeGitHub {
 		issueReactions:  map[string][]ghapi.Reaction{},
 		reactions:       map[int64][]ghapi.Reaction{},
 		reactionErrs:    map[int64]error{},
+		listPullErrs:    map[string]error{},
 		deleteErrs:      map[int64]error{},
 		deleteAfterErrs: map[int64]error{},
 	}
@@ -264,8 +265,12 @@ func (f *fakeGitHub) SearchOpenPRs(context.Context, string, bool, int) ([]ghapi.
 	return nil, nil
 }
 
-func (f *fakeGitHub) EachOpenPR(_ context.Context, _ string, _ bool, fn func(ghapi.SearchPR) (bool, error)) error {
+func (f *fakeGitHub) EachOpenPR(_ context.Context, target string, _ bool, fn func(ghapi.SearchPR) (bool, error)) error {
 	f.mu.Lock()
+	if err := f.listPullErrs[strings.ToLower(target)]; err != nil {
+		f.mu.Unlock()
+		return err
+	}
 	prs := append([]ghapi.SearchPR(nil), f.searchPRs...)
 	f.mu.Unlock()
 	for _, pr := range prs {
@@ -417,7 +422,7 @@ func (s retryNoChangeStore) Update(_ context.Context, mutate func(*State) error)
 	return second, nil
 }
 
-func (retryNoChangeStore) SyncDashboard(context.Context, State) error { return nil }
+func (retryNoChangeStore) SyncDashboard(context.Context, State, StoreConfig) error { return nil }
 
 // adoptionRaceStore loads a queued round with an adoptable command, but every
 // Update simulates another worker already holding the fire slot.
@@ -453,7 +458,7 @@ func (s *adoptionRaceStore) Update(_ context.Context, mutate func(*State) error)
 	return state, nil
 }
 
-func (s *adoptionRaceStore) SyncDashboard(context.Context, State) error { return nil }
+func (s *adoptionRaceStore) SyncDashboard(context.Context, State, StoreConfig) error { return nil }
 
 // --- test helpers ---
 
@@ -622,6 +627,87 @@ func TestAutoReviewScanSkipsConfiguredAuthors(t *testing.T) {
 	}
 }
 
+// Who autoreview skips is fleet policy for the same reason the body marker is:
+// leadership moves between hosts, and a Dependabot PR skipped on the machine
+// that held the lease yesterday must not spend the shared allowance on the one
+// that holds it today.
+func TestAutoReviewScanSkipsTheFleetsAuthors(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:          "o/gate",
+		Scope:             []string{"o"},
+		Host:              "h",
+		Bot:               "coderabbitai[bot]",
+		ReviewCommand:     "@coderabbitai review",
+		LeaderTTL:         time.Minute,
+		AutoReviewMaxScan: 10,
+		SkipAuthors:       authorSet("renovate[bot]"),
+	}
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{
+		{Repo: "o/app", Number: 1, Author: "Dependabot"},
+		{Repo: "o/app", Number: 2, Author: "renovate[bot]"},
+		{Repo: "o/app", Number: 3, Author: "alice"},
+	}
+	for pr := 1; pr <= 3; pr++ {
+		var pull ghapi.Pull
+		pull.State = "open"
+		pull.Head.SHA = "abcdef1234567890"
+		gh.pulls[fakeKey("o/app", pr)] = pull
+	}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("skip-authors", "dependabot[bot]")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	if err := svc.AutoReview(ctx, AutoOptions{Once: true, Incremental: true}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Round("o/app", 1) != nil {
+		t.Fatalf("the fleet's skipped author must never be queued, got %#v", st.Round("o/app", 1))
+	}
+	if st.Round("o/app", 2) == nil {
+		t.Fatal("the fleet's list replaces this host's, so its author is reviewed again")
+	}
+	if st.Round("o/app", 3) == nil {
+		t.Fatalf("a human-authored PR must still be enqueued, got rounds=%#v", st.Rounds)
+	}
+}
+
+// Without a fleet `scope` the pass's configuration is this host's own, so its
+// target list shares the backing array of CRQ_SCOPE. Sorting it in place
+// rewrote the operator's configured scan order under every later reader of it,
+// including a concurrent one.
+func TestAutoReviewScanLeavesTheConfiguredScopeAlone(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo:          "o/gate",
+		Scope:             []string{"zeta-org", "alpha-org"},
+		Host:              "h",
+		Bot:               "coderabbitai[bot]",
+		ReviewCommand:     "@coderabbitai review",
+		LeaderTTL:         time.Minute,
+		AutoReviewMaxScan: 10,
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if err := svc.AutoReview(ctx, AutoOptions{Once: true, Incremental: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(svc.cfg.Scope, ","); got != "zeta-org,alpha-org" {
+		t.Fatalf("Scope = %q, want the configured order untouched", got)
+	}
+}
+
 func TestAutoReviewScanSkipsMarkedPRs(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{
@@ -632,11 +718,11 @@ func TestAutoReviewScanSkipsMarkedPRs(t *testing.T) {
 		ReviewCommand:     "@coderabbitai review",
 		LeaderTTL:         time.Minute,
 		AutoReviewMaxScan: 10,
-		SkipMarker:        "<!-- crq:skip-autoreview -->",
+		SkipMarker:        "<!-- host-marker -->",
 	}
 	gh := newFakeGitHub()
 	gh.searchPRs = []ghapi.SearchPR{
-		{Repo: "o/app", Number: 1, Author: "alice", Body: "Tiny maintenance change.\n\n<!-- crq:skip-autoreview -->"},
+		{Repo: "o/app", Number: 1, Author: "alice", Body: "Tiny maintenance change.\n\n<!-- fleet-marker -->"},
 		{Repo: "o/app", Number: 2, Author: "alice", Body: "Review this change."},
 	}
 	for pr := 1; pr <= 2; pr++ {
@@ -646,6 +732,12 @@ func TestAutoReviewScanSkipsMarkedPRs(t *testing.T) {
 		gh.pulls[fakeKey("o/app", pr)] = pull
 	}
 	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("skip-marker", "<!-- fleet-marker -->")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	svc := NewService(cfg, gh, store, nil)
 
 	if err := svc.AutoReview(ctx, AutoOptions{Once: true, Incremental: true}); err != nil {
@@ -672,7 +764,7 @@ func TestEnqueueBatchAppendsOncePerPR(t *testing.T) {
 		{Repo: "o/b", PR: 2, Head: "bbbbbbbb2"},
 		{Repo: "o/a", PR: 1, Head: "aaaaaaaa1"},
 	}
-	if err := svc.enqueueBatch(ctx, items); err != nil {
+	if err := svc.enqueueBatch(ctx, items, svc.fleetCfg(DefaultState(cfg)).FleetRevision); err != nil {
 		t.Fatal(err)
 	}
 	st, _, _ := svc.store.Load(ctx)
@@ -683,7 +775,7 @@ func TestEnqueueBatchAppendsOncePerPR(t *testing.T) {
 	if queued[0].Seq == queued[1].Seq || queued[0].Seq == 0 {
 		t.Fatalf("expected distinct non-zero seqs, got %d and %d", queued[0].Seq, queued[1].Seq)
 	}
-	if err := svc.enqueueBatch(ctx, items); err != nil {
+	if err := svc.enqueueBatch(ctx, items, svc.fleetCfg(DefaultState(cfg)).FleetRevision); err != nil {
 		t.Fatal(err)
 	}
 	st2, _, _ := svc.store.Load(ctx)
@@ -709,7 +801,7 @@ func TestEnqueueBatchSkipsHeldPRsUnderCAS(t *testing.T) {
 		{Repo: "o/held", PR: 1, Head: "aaaaaaaa1"},
 		{Repo: "o/ready", PR: 2, Head: "bbbbbbbb2"},
 	}
-	if err := svc.enqueueBatch(ctx, items); err != nil {
+	if err := svc.enqueueBatch(ctx, items, svc.fleetCfg(DefaultState(cfg)).FleetRevision); err != nil {
 		t.Fatal(err)
 	}
 	st, _, err := store.Load(ctx)
@@ -721,6 +813,60 @@ func TestEnqueueBatchSkipsHeldPRsUnderCAS(t *testing.T) {
 	}
 	if got := st.Round("o/ready", 2); got == nil || got.Seq != 1 {
 		t.Fatalf("ready PR should receive the first queue position, got %+v", got)
+	}
+}
+
+func TestEnqueueBatchRejectsCandidatesSelectedUnderStaleFleetPolicy(t *testing.T) {
+	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, Host: "h"}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	ctx := context.Background()
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectedRevision := svc.fleetCfg(st).FleetRevision
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("repos", "o/elsewhere")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.enqueueBatch(ctx, []queueCandidate{
+		{Repo: "o/obsolete", PR: 1, Head: "aaaaaaaa1"},
+	}, selectedRevision); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("o/obsolete", 1); round != nil {
+		t.Fatalf("stale fleet discovery enqueued a round: %+v", round)
+	}
+}
+
+func TestEnqueueBatchDoesNotWriteInDryRun(t *testing.T) {
+	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, Host: "h", DryRun: true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	ctx := context.Background()
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.enqueueBatch(ctx, []queueCandidate{
+		{Repo: "o/repo", PR: 1, Head: "aaaaaaaa1"},
+	}, svc.fleetCfg(st).FleetRevision); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("o/repo", 1); round != nil {
+		t.Fatalf("dry-run batch wrote a round: %+v", round)
 	}
 }
 
@@ -2355,6 +2501,144 @@ func TestRefreshQuotaPreservesBlockOnInconclusiveProbe(t *testing.T) {
 	}
 }
 
+func TestRefreshQuotaRejectsAReadingFromAnObsoleteFleetScope(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo: "owner/gate", StateRef: "crq-state-v3", CalibrationPR: 1,
+		CalibrationMarker: "auto-generated reply by CodeRabbit",
+		RateLimitCommand:  "@coderabbitai rate limit",
+		CalibrationTTL:    2 * time.Minute, Scope: []string{"old-owner"},
+	}
+	gh := newFakeGitHub()
+	inner := NewMemoryStore(cfg)
+	store := &hookedStore{StateStore: inner}
+	svc := NewService(cfg, gh, store, nil)
+	store.hook = func() {
+		if _, err := inner.Update(ctx, func(st *State) error {
+			st.SetFleetValue("scope", "new-owner")
+			st.Account = AccountQuota{Scope: "new-owner", Source: "fleet scope changed"}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	updated, err := svc.RefreshQuota(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Account.Scope != "new-owner" || updated.Account.CalibAskedAt != nil || updated.Account.CheckedAt != nil {
+		t.Fatalf("obsolete calibration reading overwrote the new scope reset: %+v", updated.Account)
+	}
+}
+
+// Only the scope says which account a probe answered for. Refusing the write
+// because some unrelated fleet setting moved under the read dropped the block
+// the probe had just found — and Update reports a refused write as success, so
+// the same pump went on to post a metered review inside that window.
+func TestRefreshQuotaRecordsABlockAcrossAnUnrelatedFleetChange(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CalibrationPR = 77
+	cfg.GateRepo = "o/state"
+	cfg.CalibrationTTL = time.Minute
+	gh := newFakeGitHub()
+	inner := NewMemoryStore(cfg)
+	store := &hookedStore{StateStore: inner}
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	svc.now = func() time.Time { return now }
+
+	reply := ghapi.IssueComment{
+		ID:        5,
+		Body:      "auto-generated reply by CodeRabbit\n> **Next review available in:** **45 minutes**",
+		CreatedAt: now.Add(-10 * time.Second), UpdatedAt: now.Add(-10 * time.Second),
+	}
+	reply.User.Login = cfg.Bot
+	gh.comments[fakeKey(cfg.GateRepo, 77)] = []ghapi.IssueComment{reply}
+	store.hook = func() {
+		if _, err := inner.Update(ctx, func(st *State) error {
+			st.SetFleetValue("min-interval", "45m")
+			return nil
+		}); err != nil {
+			t.Error(err)
+		}
+	}
+
+	updated, err := svc.RefreshQuota(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Account.BlockedUntil == nil || !updated.Account.BlockedUntil.After(now.Add(40*time.Minute)) {
+		t.Fatalf("account = %+v, want the probe's block recorded despite the unrelated policy change", updated.Account)
+	}
+}
+
+// The other half of that rule: a reading adopted under the TTL the read started
+// with is exactly what a SHORTENED calibrate-ttl invalidates. Committing it
+// would stamp CheckedAt=now over a reply the new window already calls too old,
+// making it fresh for another full TTL and letting a metered review fire on a
+// calibration the fleet has just asked to be redone.
+func TestRefreshQuotaRejectsAReadingAShortenedTTLMakesStale(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CalibrationPR = 77
+	cfg.GateRepo = "o/state"
+	cfg.CalibrationTTL = 10 * time.Minute
+	gh := newFakeGitHub()
+	inner := NewMemoryStore(cfg)
+	store := &hookedStore{StateStore: inner}
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	svc.now = func() time.Time { return now }
+
+	reply := ghapi.IssueComment{
+		ID:        5,
+		Body:      "auto-generated reply by CodeRabbit\n> **6 reviews** remaining",
+		CreatedAt: now.Add(-5 * time.Minute), UpdatedAt: now.Add(-5 * time.Minute),
+	}
+	reply.User.Login = cfg.Bot
+	gh.comments[fakeKey(cfg.GateRepo, 77)] = []ghapi.IssueComment{reply}
+	store.hook = func() {
+		if _, err := inner.Update(ctx, func(st *State) error {
+			st.SetFleetValue("calibrate-ttl", "1m")
+			return nil
+		}); err != nil {
+			t.Error(err)
+		}
+	}
+
+	updated, err := svc.RefreshQuota(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Account.CheckedAt != nil || updated.Account.Remaining != nil {
+		t.Fatalf("account = %+v, want the stale reading refused rather than stamped fresh", updated.Account)
+	}
+}
+
+func TestRefreshQuotaDoesNotProbeOrWriteInDryRun(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{
+		GateRepo: "owner/gate", CalibrationPR: 1, DryRun: true,
+		CalibrationTTL: 2 * time.Minute, Scope: []string{"owner"},
+	}
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	updated, err := svc.RefreshQuota(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("dry-run calibration posted comments: %v", gh.posted)
+	}
+	if updated.Account.CalibAskedAt != nil || updated.Account.CheckedAt != nil {
+		t.Fatalf("dry-run calibration changed quota state: %+v", updated.Account)
+	}
+}
+
 // TestLoopDegradesToCodexOnlyOnRateLimit: a rate-limited round with Codex
 // activity must return Codex findings promptly — marked deferred — instead of
 // waiting out the CodeRabbit window.
@@ -3102,6 +3386,58 @@ func TestFeedbackRecordsARateLimitNoticeItObserves(t *testing.T) {
 		if strings.HasSuffix(p, ":"+cfg.ReviewCommand) {
 			t.Errorf("a review was requested while the account was blocked: %s", p)
 		}
+	}
+}
+
+// A fleet setting that has nothing to do with the account must not throw away
+// an observed block. Update reports ErrNoChange as success, so refusing the
+// write on a whole-revision mismatch left the caller believing the window had
+// been recorded while the account stayed open — and the next fire went out
+// inside it.
+func TestObservedAccountBlockSurvivesAnUnrelatedFleetChange(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = "a0646f010abcdef0"
+	gh.pulls[fakeKey("o/carrier", 82)] = pull
+
+	notice := time.Now().UTC().Add(-time.Minute)
+	rl := ghapi.IssueComment{ID: 501,
+		Body:      "<!-- rate limited by coderabbit.ai -->\n> ## Review limit reached\n> **Next review available in:** **40 minutes**",
+		CreatedAt: notice, UpdatedAt: notice}
+	rl.User.Login = "coderabbitai[bot]"
+	gh.comments[fakeKey("o/carrier", 82)] = []ghapi.IssueComment{rl}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obs, err := svc.observe(ctx, svc.fleetCfg(st), "o/carrier", 82, nil, nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Somebody changes an unrelated policy while this notice is being read.
+	if _, err := store.Update(ctx, func(w *State) error {
+		w.SetFleetValue("settle", "30s")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.recordObservedBlock(ctx, obs, st, now); err != nil {
+		t.Fatal(err)
+	}
+	after, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Account.BlockedUntil == nil {
+		t.Fatal("the observed block was discarded because an unrelated fleet setting moved")
 	}
 }
 

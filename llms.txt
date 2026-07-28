@@ -211,6 +211,21 @@ convergence never hides a rebuttal you have not answered. Address it or decline 
 reason; the loop clears it once the bot withdraws (or you stop declining and fix it). Ambiguous bot
 replies surface too — crq errs toward showing a possible rebuttal rather than burying it.
 
+Choose which bots review one project:
+
+```bash
+crq reviewers REPO                                    # effective reviewers + budgets
+crq reviewers set REPO --bots codex --required codex  # Codex is the only required co-reviewer
+crq reviewers clear REPO                              # fleet default again
+```
+
+The primary is fleet-wide: an override chooses the CO-reviewers, so CodeRabbit is still triggered
+and still spends account quota even when it is left out of `--required`. Leaving it out means the
+round does not WAIT for it, not that it is never asked.
+
+`budget: account` means the reviewer is serialized against the shared CodeRabbit allowance;
+`budget: none` means it runs immediately. Stored in the shared state ref, so the daemon and agents
+cannot disagree. The primary reviewer is fleet-wide.
 Run the whole thing unattended — crq watches every open PR and starts a fix session for the ones
 that need one:
 
@@ -233,7 +248,7 @@ authenticate.
 crq watch [--no-dispatch] [--once] [--interval 2m] [--concurrency 0] [<repo>...] [-- <cmd>...]
 crq autofix                                  # which repositories crq may fix
 crq autofix off REPO --reason "why"          # stop fixing there; watching continues
-crq autofix on REPO | crq autofix default REPO
+crq autofix on REPO          # or: crq autofix default REPO
 ```
 
 It drives every open PR in `CRQ_REPOS` through the same `crq next` oracle and emits one JSON line

@@ -57,6 +57,14 @@ func run(ctx context.Context, args []string) int {
 		return 0
 	case "doctor":
 		report := doctor(ctx)
+		// The fleet's own view needs the state ref, which needs credentials, so
+		// it is asked for only when the rest of the report says that will work.
+		// A doctor that cannot answer the basics has more urgent things to say.
+		if report.Ready {
+			if diverged := fleetDivergence(ctx); len(diverged) > 0 {
+				report.Recommendations = append(report.Recommendations, diverged...)
+			}
+		}
 		printJSON(report)
 		if report.Ready {
 			return 0
@@ -64,27 +72,6 @@ func run(ctx context.Context, args []string) int {
 		return 1
 	case "preflight":
 		return preflight(ctx, args[1:])
-	case "autofix":
-		// A dry run is documented as a PREVIEW: it writes nothing and reads no
-		// GitHub state. Deciding it here, before the authenticated client is
-		// built, is what lets somebody inspect the setup before finishing it —
-		// otherwise the one command for looking at the plan was itself another
-		// thing to set up first. A real install still goes through the
-		// authenticated path below.
-		if opts, perr := parseAutofixArgs(args[1:]); perr == nil && opts.dryRun {
-			cfg, cerr := crq.LoadConfig()
-			if cerr != nil {
-				fatal(cerr)
-				return 1
-			}
-			plan, ierr := crq.AutofixPlan(cfg, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, true)
-			if ierr != nil {
-				fatal(ierr)
-				return 1
-			}
-			printJSON(plan)
-			return 0
-		}
 	}
 
 	cfg, err := crq.LoadConfig()
@@ -94,6 +81,24 @@ func run(ctx context.Context, args []string) int {
 	}
 	gh, err := ghapi.NewGitHub(ctx)
 	if err != nil {
+		// A dry run is documented as a PREVIEW, so it has to work for somebody
+		// who has not authenticated yet — otherwise the one command for looking
+		// at the plan is itself another thing to set up first. An authenticated
+		// one takes the normal path below, where InstallAutofix builds it from the
+		// same fleet state as the real install (and falls back to this host's
+		// own plan if that state cannot be read). Every other command needs the
+		// token this just failed to find.
+		if args[0] == "autofix" {
+			if opts, perr := parseAutofixArgs(args[1:]); perr == nil && opts.dryRun {
+				plan, ierr := hostOnlyAutofixPlan(cfg, opts)
+				if ierr != nil {
+					fatal(ierr)
+					return 1
+				}
+				printJSON(plan)
+				return 0
+			}
+		}
 		fatal(err)
 		return 1
 	}
@@ -118,7 +123,7 @@ func run(ctx context.Context, args []string) int {
 		if result.CalibrationPR > 0 {
 			fmt.Printf("export CRQ_CAL_PR=%q\n", strconv.Itoa(result.CalibrationPR))
 		}
-		fmt.Printf("export CRQ_SCOPE=%q\n", strings.Join(cfg.Scope, ","))
+		fmt.Printf("export CRQ_SCOPE=%q\n", strings.Join(result.Scope, ","))
 		fmt.Printf("export CRQ_STATE_REF=%q\n", result.StateRef)
 		return 0
 	case "status":
@@ -326,8 +331,19 @@ func run(ctx context.Context, args []string) int {
 			return 1
 		}
 		if err := cfg.RequireState(); err != nil {
-			fatal(err)
-			return 1
+			// Without CRQ_REPO there is no state ref to read, so a preview here
+			// is the host-only one InstallAutofix would otherwise produce.
+			if !opts.dryRun {
+				fatal(err)
+				return 1
+			}
+			plan, ierr := hostOnlyAutofixPlan(cfg, opts)
+			if ierr != nil {
+				fatal(ierr)
+				return 1
+			}
+			printJSON(plan)
+			return 0
 		}
 		plan, ierr := service.InstallAutofix(ctx, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, opts.dryRun)
 		if ierr != nil {
@@ -518,6 +534,68 @@ func run(ctx context.Context, args []string) int {
 		}
 		printJSON(map[string]any{"status": "cancelled", "repo": crq.NormalizeRepo(repo), "pr": pr})
 		return 0
+	case "config":
+		if err := cfg.RequireState(); err != nil {
+			fatal(err)
+			return 1
+		}
+		rest := args[1:]
+		switch {
+		case len(rest) == 0 || rest[0] == "show":
+			// Showing takes no operand either: a trailing token is a misspelled
+			// setting or subcommand, and printing the whole configuration would
+			// report success for an invocation that asked for something else.
+			if len(rest) > 1 {
+				fatal(errors.New("usage: crq config show"))
+				return 1
+			}
+			settings, cerr := service.FleetConfig(ctx)
+			if cerr != nil {
+				fatal(cerr)
+				return 1
+			}
+			printJSON(settings)
+			return 0
+		case rest[0] == "set":
+			if len(rest) != 3 {
+				fatal(errors.New("usage: crq config set <setting> <value>"))
+				return 1
+			}
+			if err := service.SetFleetConfig(ctx, rest[1], rest[2]); err != nil {
+				fatal(err)
+				return 1
+			}
+			printJSON(map[string]any{"setting": rest[1], "value": rest[2], "scope": "fleet"})
+			return 0
+		case rest[0] == "unset":
+			if len(rest) != 2 {
+				fatal(errors.New("usage: crq config unset <setting>"))
+				return 1
+			}
+			dropped, uerr := service.UnsetFleetConfig(ctx, rest[1])
+			if uerr != nil {
+				fatal(uerr)
+				return 1
+			}
+			printJSON(map[string]any{"setting": rest[1], "cleared": dropped})
+			return 0
+		case rest[0] == "seed":
+			// Seeding takes no operand and records every unset fleet key, so a
+			// stray token is a typo for something narrower, not a selector.
+			if len(rest) != 1 {
+				fatal(errors.New("usage: crq config seed"))
+				return 1
+			}
+			seeded, serr := service.SeedFleetConfig(ctx)
+			if serr != nil {
+				fatal(serr)
+				return 1
+			}
+			printJSON(map[string]any{"seeded": seeded})
+			return 0
+		}
+		fatal(fmt.Errorf("unknown config subcommand %q (try: crq config, crq config set|unset <setting> [value], crq config seed)", rest[0]))
+		return 1
 	case "debug":
 		return debug(ctx, service, store, cfg, args[1:])
 	default:
@@ -626,7 +704,7 @@ USAGE
   crq decline <thread-id> [...] --reason "<why>" [--keep-open]
                                    reply on a thread to record why a finding is declined
                                    (resolves it; --keep-open leaves it open)
-  crq autofix install [--agent <path>] [--dry-run] [<repo>...]
+  crq autofix install [--agent <path>] [--agent-args <args>] [--dry-run] [<repo>...]
                                    install and start unattended autofix
   crq autofix [on|off|default <repo>]
                                    which repositories crq may fix (on by default)
@@ -648,6 +726,8 @@ USAGE
                                    keep open PRs reviewed, rate-coordinated
   crq preflight [--type all|committed|uncommitted] [--base <branch>]
                                    local CodeRabbit CLI pre-push review as JSON
+  crq config [set|unset <setting> [value]] | seed
+                                   fleet-wide policy, shared by every host
   crq doctor                       emit JSON readiness report for agents and humans
   crq status [--line]              print the dashboard, or one line for a status bar
   crq cancel [<repo> <pr>]         remove queued/in-flight state for a PR
@@ -798,8 +878,37 @@ replies contesting the decline, crq re-surfaces that reply as its own finding.
 Pass --keep-open to leave it unresolved anyway (an on-the-record disagreement you
 intend to keep working). Thread IDs come from .findings[].thread_id.
 `)
+	case "reviewers":
+		fmt.Print(`crq reviewers <repo>
+crq reviewers set <repo> [--bots <login,...>] [--required <login,...>]
+crq reviewers clear <repo>
+
+Which bots review one project, and what each of them costs.
+
+Without a subcommand it reports the reviewers that will actually run there — the
+fleet default, or this repository's own choice if it has one. Each entry carries
+its budget: "account" is serialized against the shared CodeRabbit allowance,
+"none" runs immediately, outside that queue. Budget is not requiredness: whether
+a round WAITS for a reviewer is --required, whatever the reviewer costs.
+
+  set     --bots chooses the co-reviewers; --required chooses which reviewers
+          gate convergence. Either flag alone updates only its own half. An
+          empty --bots means none here, which is a different answer from not
+          setting it at all; an empty --required is refused, because a round
+          that gates on nobody converges before any reviewer runs.
+  clear   drops the override so the repository follows the fleet again.
+
+The configuration lives in the shared state ref, not in a file the repository
+carries: the daemon has no checkout of the repos it reviews, and a daemon and an
+agent reading different configurations while writing one state ref is a class of
+bug worth not having.
+
+The primary reviewer is fleet-wide. Its markers and command are compiled into the
+classifiers when crq starts, so a per-repo primary would mean per-repo
+classifiers — a much larger change than choosing who else runs.
+`)
 	case "autofix":
-		fmt.Print(`crq autofix install [--agent <path>] [--dry-run] [<repo>...]
+		fmt.Print(`crq autofix install [--agent <path>] [--agent-args <args>] [--dry-run] [<repo>...]
 crq autofix                            (which repositories crq may fix)
 crq autofix off <repo> [--reason "<why>"]
 crq autofix on <repo>
@@ -821,7 +930,9 @@ platform needs to survive a logout, and starts it. --dry-run prints the paths an
 commands without touching anything.
 
 The agent defaults to "claude" on PATH; --agent takes another path to it, or a
-wrapper around it. The installed service runs the agent with Claude Code's own
+wrapper around it. --agent-args passes a shell-style argument string to that
+agent, for example a model or reasoning-effort override. The installed service
+runs the agent with Claude Code's own
 flags (-p, --permission-mode, --output-format), so an agent with a different CLI
 needs its own wrapper script and "crq watch -- <cmd>...", which runs
 whatever argv you give it. --agent must name something runnable; a name that
@@ -919,35 +1030,6 @@ a finding — deleting those would destroy feedback nobody had read yet.
 Set CRQ_TIDY=1 to run it automatically as rounds progress under crq autoreview.
 --dry-run reports what it would remove.
 `)
-	case "reviewers":
-		fmt.Print(`crq reviewers <repo>
-crq reviewers set <repo> [--bots <login,...>] [--required <login,...>]
-crq reviewers clear <repo>
-
-Which bots review one project, and what each of them costs.
-
-Without a subcommand it reports the reviewers that will actually run there — the
-fleet default, or this repository's own choice if it has one. Each entry carries
-its budget: "account" is serialized against the shared CodeRabbit allowance,
-"none" runs immediately, outside that queue. Budget is not requiredness: whether
-a round WAITS for a reviewer is --required, whatever the reviewer costs.
-
-  set     --bots chooses the co-reviewers; --required chooses which reviewers
-          gate convergence. Either flag alone updates only its own half. An
-          empty --bots means none here, which is a different answer from not
-          setting it at all; an empty --required is refused, because a round
-          that gates on nobody converges before any reviewer runs.
-  clear   drops the override so the repository follows the fleet again.
-
-The configuration lives in the shared state ref, not in a file the repository
-carries: the daemon has no checkout of the repos it reviews, and a daemon and an
-agent reading different configurations while writing one state ref is a class of
-bug worth not having.
-
-The primary reviewer is fleet-wide. Its markers and command are compiled into the
-classifiers when crq starts, so a per-repo primary would mean per-repo
-classifiers — a much larger change than choosing who else runs.
-`)
 	case "threads":
 		fmt.Print(`crq threads <repo> <pr>
 
@@ -968,10 +1050,10 @@ Read this, decide, then crq resolve (or crq decline) the ones you have answered.
 Record that you have accounted for a finding that has no review thread, so it
 stops blocking the round.
 
-crq resolve and crq decline both act on a thread. A review-body finding, a
-review-skipped notice or an outside-diff remark has none, so neither command can
-touch it — and a finding that can never be cleared blocks every future round, leaving
-a PR whose current head no review was ever requested for.
+crq resolve and crq decline both act on a thread. Review-body findings,
+review-skipped notices, outside-diff remarks and issue-comment findings have no
+thread, so neither command can act on them. Dismiss one after judging it so it
+does not block the current head's round.
 
 Finding IDs come from .findings[].id. They are content-derived, not GitHub node
 IDs, so the repo and PR are required. A dismissal covers the current head only:
@@ -1035,6 +1117,44 @@ Typical setup:
   crq init
 
 Save the printed exports to ~/.config/crq/env on every machine or agent host.
+`)
+	case "config":
+		fmt.Print(`crq config
+crq config set <setting> <value>
+crq config unset <setting>
+crq config seed
+
+The policy every host shares, kept in the state ref rather than in each
+machine's environment.
+
+Per-host configuration files diverge the moment somebody edits one — a
+repository excluded on the laptop and reviewed by the server, a rate-limit
+window one host respects and another does not — and nothing says so, because
+each host is behaving correctly according to what it can see. These settings
+have one answer for the fleet:
+
+  scope, repos, exclude, required-bots, cobots, feedback-bots,
+  rate-limit-co-degrade, min-interval, inflight-timeout, rate-limit-fallback,
+  calibrate-ttl, settle, skip-marker, skip-authors, and per co-reviewer:
+  cobot-<name>-trigger, cobot-<name>-cmd, cobot-<name>-grace
+
+Three kinds of setting deliberately stay local: where the state lives
+(CRQ_REPO, CRQ_ISSUE, CRQ_STATE_REF — a host cannot read fleet policy until it
+knows where to look), credentials, and what a machine can physically do (which
+fix agent is installed, where its disk is, how many sessions it can take).
+
+A recorded setting wins over the environment variable it replaces, so adopting
+this is one machine at a time: until something is recorded, every host keeps
+using its own. "crq config seed" writes this host's current answers for
+everything the fleet has not decided yet — run it once, on the machine whose
+configuration is the one you mean.
+
+A value this crq cannot read is refused at "set", and one that arrives anyway
+from a newer binary leaves the host on its own value rather than acting on half
+a policy. "crq config unset" drops such a setting from any host — except while a
+newer crq is driving the queue, since that binary is the one that can reconcile
+its removal. "crq doctor" reports both that and any variable still set here that
+the fleet overrides.
 `)
 	case "doctor":
 		fmt.Print(`crq doctor
@@ -1777,12 +1897,46 @@ func configPath() string {
 	return home + "/.config/crq/env"
 }
 
+// fleetDivergence asks the state ref what the fleet's policy is and reports
+// where this host disagrees. Errors are swallowed: doctor is a report, and one
+// that fails because the network was down would be worse than one missing a
+// section.
+func fleetDivergence(ctx context.Context) []string {
+	cfg, err := crq.LoadConfig()
+	if err != nil || cfg.RequireState() != nil {
+		return nil
+	}
+	gh, err := ghapi.NewGitHub(ctx)
+	if err != nil {
+		return nil
+	}
+	store := crq.NewGitStateStore(cfg, gh, nil)
+	diverged, err := crq.NewService(cfg, gh, store, nil).FleetDivergence(ctx)
+	if err != nil {
+		return nil
+	}
+	return diverged
+}
+
 // autofixArgs is `crq autofix install`'s parsed command line.
 type autofixArgs struct {
 	agent     string
 	agentArgs string
 	dryRun    bool
 	repos     []string
+}
+
+// hostOnlyAutofixPlan is the preview for a host that cannot reach fleet state at
+// all: this machine's own answers, labelled so the plan cannot be mistaken for
+// the fleet-backed one an authenticated install would write.
+func hostOnlyAutofixPlan(cfg crq.Config, opts autofixArgs) (crq.AutofixInstall, error) {
+	plan, err := crq.AutofixPlan(cfg, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, true)
+	if err != nil {
+		return crq.AutofixInstall{}, err
+	}
+	plan.PolicySource = "host"
+	plan.Warning = crq.HostOnlyAutofixWarning
+	return plan, nil
 }
 
 // parseAutofixArgs is shared by the pre-authentication dry-run path and the
@@ -1801,7 +1955,7 @@ func parseAutofixArgs(args []string) (autofixArgs, error) {
 		return autofixArgs{}, err
 	}
 	if sub != "install" {
-		return autofixArgs{}, errors.New("usage: crq autofix install [--agent <path>] [--dry-run] [<repo>...]")
+		return autofixArgs{}, errors.New("usage: crq autofix install [--agent <path>] [--agent-args <args>] [--dry-run] [<repo>...]")
 	}
 	return autofixArgs{agent: *agent, agentArgs: *agentArgs, dryRun: *dryRun, repos: fs.Args()}, nil
 }

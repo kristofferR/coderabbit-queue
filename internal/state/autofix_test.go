@@ -23,7 +23,7 @@ func TestAutofixHealthSurfacesAFailingDispatcher(t *testing.T) {
 	if st.Autofix.Unhealthy() {
 		t.Error("one failure must not raise the alarm")
 	}
-	for i := 0; i < AutofixUnhealthyAfter; i++ {
+	for i := 1; i < AutofixUnhealthyAfter; i++ {
 		st.NoteDispatch("cachyos", false, "refusing to fetch into branch", now)
 	}
 	if !st.Autofix.Unhealthy() {

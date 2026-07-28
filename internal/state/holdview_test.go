@@ -101,6 +101,13 @@ func TestCoReviewerRowSaysItIsTheDefaultAndNamesExceptions(t *testing.T) {
 		t.Error("the row does not say the list is a default")
 	}
 
+	// A required-reviewer override does not change the co-reviewer list.
+	st.SetRepoOverride("owner/required-only", RepoReviewers{SetRequired: true, UpdatedAt: &now})
+	body = RenderDashboard(st, cfg)
+	if strings.Contains(body, "owner/required-only") {
+		t.Errorf("the co-reviewer row names an unrelated override:\n%s", body)
+	}
+
 	// Once a repository overrides it, the row names which.
 	st.SetRepoOverride("owner/special", RepoReviewers{SetCoBots: true, UpdatedAt: &now})
 	body = RenderDashboard(st, cfg)
@@ -111,6 +118,13 @@ func TestCoReviewerRowSaysItIsTheDefaultAndNamesExceptions(t *testing.T) {
 		t.Error("the row does not say the named repository overrides the default")
 	}
 
+	// An explicit repository answer still needs a row when the fleet default is empty.
+	withoutDefault := RenderDashboard(st, StoreConfig{})
+	if !strings.Contains(withoutDefault, "**Co-reviewers**") ||
+		!strings.Contains(withoutDefault, "owner/special") {
+		t.Errorf("an override with an empty fleet default is hidden:\n%s", withoutDefault)
+	}
+
 	// Many overrides are truncated rather than allowed to wrap the table.
 	for _, repo := range []string{"owner/a", "owner/b", "owner/c", "owner/d"} {
 		st.SetRepoOverride(repo, RepoReviewers{SetCoBots: true, UpdatedAt: &now})
@@ -118,5 +132,8 @@ func TestCoReviewerRowSaysItIsTheDefaultAndNamesExceptions(t *testing.T) {
 	body = RenderDashboard(st, cfg)
 	if !strings.Contains(body, "+2 more") {
 		t.Errorf("five overrides were not summarised:\n%s", body)
+	}
+	if !strings.Contains(body, "overrides") {
+		t.Errorf("multiple repositories were labelled as one override:\n%s", body)
 	}
 }

@@ -163,6 +163,7 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 	}
 	now := s.clock().UTC()
 	state, err := s.store.Update(ctx, func(st *State) error {
+		base := s.fleetCfg(*st)
 		ov, _ := st.RepoOverride(repo)
 		beforeOverride := ov
 		if coBots != nil {
@@ -178,9 +179,9 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 			return ErrNoChange
 		}
 		ov.UpdatedAt, ov.By = &now, s.cfg.Host
-		before := s.cfg.ForRepo(mustOverride(st, repo))
+		before := base.ForRepo(mustOverride(st, repo))
 		st.SetRepoOverride(repo, ov)
-		s.reopenForChangedReviewers(st, repo, before, s.cfg.ForRepo(ov), open)
+		s.reopenForChangedReviewers(st, repo, before, base.ForRepo(ov), open)
 		return nil
 	})
 	if err != nil {
@@ -204,11 +205,12 @@ func (s *Service) ClearReviewers(ctx context.Context, repo string) (ReviewerView
 		return ReviewerView{}, err
 	}
 	state, err := s.store.Update(ctx, func(st *State) error {
-		before := s.cfg.ForRepo(mustOverride(st, repo))
+		base := s.fleetCfg(*st)
+		before := base.ForRepo(mustOverride(st, repo))
 		if !st.ClearRepoOverride(repo) {
 			return ErrNoChange
 		}
-		s.reopenForChangedReviewers(st, repo, before, s.cfg, open)
+		s.reopenForChangedReviewers(st, repo, before, base, open)
 		return nil
 	})
 	if err != nil && !errors.Is(err, ErrNoChange) {

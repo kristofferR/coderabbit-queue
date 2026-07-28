@@ -76,9 +76,9 @@ func TestLoadRefusesUndecodableCurrentState(t *testing.T) {
 	}
 }
 
-func TestLoadMigratesV3WithoutLosingLiveRounds(t *testing.T) {
+func TestLoadMigratesV4WithoutLosingLiveRounds(t *testing.T) {
 	payload := `{
-		"v":3,
+		"v":4,
 		"rev":7,
 		"next_seq":2,
 		"rounds":{
@@ -102,21 +102,21 @@ func TestLoadMigratesV3WithoutLosingLiveRounds(t *testing.T) {
 		t.Errorf("version = %d, want migrated v%d", st.Version, SchemaVersion)
 	}
 	if round := st.Round("owner/repo", 7); round == nil || round.Head != "abcdef123" {
-		t.Fatalf("live v3 round was lost during migration: %+v", round)
+		t.Fatalf("live v4 round was lost during migration: %+v", round)
 	}
 	encoded, err := json.Marshal(st)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(encoded), "future_top_level") {
-		t.Fatalf("unknown v3 state was lost during migration: %s", encoded)
+		t.Fatalf("unknown v4 state was lost during migration: %s", encoded)
 	}
 }
 
 // An OLDER payload is genuinely obsolete: crq is pre-release, there is no
-// migration, and a v2 state describes a world this binary cannot act on.
+// migration, and a v3 state describes a world this binary cannot act on.
 func TestLoadReinitializesOlderState(t *testing.T) {
-	st, _, err := versionStore(t, `{"v":2,"queue":[{"repo":"owner/repo","pr":7}]}`).Load(context.Background())
+	st, _, err := versionStore(t, `{"v":3,"queue":[{"repo":"owner/repo","pr":7}]}`).Load(context.Background())
 	if err != nil {
 		t.Fatalf("an older schema must reinitialize, got %v", err)
 	}

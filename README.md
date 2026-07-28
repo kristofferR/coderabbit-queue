@@ -397,12 +397,16 @@ crq feedback <repo> <pr>  # current normalized findings as JSON, WITHOUT trigger
 crq threads <repo> <pr>                                     # every unresolved thread, outdated included
 crq resolve <thread-id> [<thread-id>...]                    # resolve addressed review threads
 crq decline <thread-id> [...] --reason "<why>" [--resolve]  # record why a finding is declined
-crq autofix install       # ⭐ unattended: watch every PR and fix what needs fixing
+crq reviewers <repo>      # which bots review this project, and what each costs
+crq reviewers set <repo> [--bots <a,b>] [--required <a,b>] # choose them (either flag alone)
+crq reviewers clear <repo>                                 # back to the fleet default
+crq autofix install         # ⭐ unattended: watch every PR and fix what needs fixing
 crq watch                 #    what autofix runs: drive open PRs through crq next, one JSON
                           #    line each. Fixing is ON by default (--no-dispatch observes only)
 crq autofix               # which repositories crq may fix
 crq autofix off <repo> --reason "<why>"   # stop fixing there; watching and reviewing continue
-crq autofix on <repo> | crq autofix default <repo>
+crq autofix on <repo>                 # enable an explicit override
+crq autofix default <repo>            # return to the fleet default
 crq hold <repo> <pr> --reason "<why>"                       # persistently stop reviews for a PR
 crq unhold <repo> <pr>                                      # resume reviews for a held PR
 crq hold                                                    # list held PRs
@@ -485,13 +489,44 @@ clears it. Ambiguous replies surface too — crq never buries a possible rebutta
 
 Set these in `~/.config/crq/env` (sourced automatically) or as environment variables:
 
+### One configuration for the fleet, not one per machine
+
+These settings belong to the whole fleet and live in the state ref, not in the table below:
+`scope`, `repos`, `exclude`, `required-bots`, `cobots`, `feedback-bots`, `rate-limit-co-degrade`,
+`min-interval`, `inflight-timeout`, `rate-limit-fallback`, `calibrate-ttl`, `settle`,
+`skip-marker`, `skip-authors`, and one family per co-reviewer —
+`cobot-<name>-trigger`, `cobot-<name>-cmd`, `cobot-<name>-grace`.
+
+```bash
+crq config                      # what is in force, and where it came from
+crq config set exclude owner/paused-repo
+crq config unset exclude
+crq config seed                 # adopt this host's current answers as the fleet's
+```
+
+Per-host files diverge the moment somebody edits one — a repository excluded on the laptop and
+reviewed by the server — and nothing says so, because each host is behaving correctly according to
+what it can see. A recorded setting wins over the matching environment variable, so you can adopt
+this one machine at a time, and `crq doctor` names any variable still set locally that the fleet
+overrides.
+
+What stays per host: where the state lives (`CRQ_REPO`, `CRQ_ISSUE`, `CRQ_STATE_REF`), credentials,
+and what the machine can physically do (`CRQ_DISPATCH_CMD`, `CRQ_WORKSPACE`,
+`CRQ_DISPATCH_CONCURRENCY`).
+
+The primary reviewer stays per host too, for a different reason: who it is (`CRQ_BOT`) and the
+wording crq reads it by (`CRQ_REVIEW_CMD` and the completion/rate-limit/review-done/calibration
+markers) are one unit, and they are compiled into the dialect classifiers before any state ref is
+read. Keep them the same on every host — `crq doctor` cannot report a disagreement about them.
+
+
 | Variable | Default | What it does |
 |----------|---------|--------------|
 | `CRQ_REPO` | *(required)* | the gate repo (`owner/name`) holding the state ref, dashboard, calibration PR |
 | `CRQ_ISSUE` | from `init` | dashboard issue number |
 | `CRQ_CAL_PR` | from `init` | calibration PR number |
 | `CRQ_SCOPE` | owner of `CRQ_REPO` | which owners/orgs share this quota (comma-separated) |
-| `CRQ_STATE_REF` | `crq-state-v3` | git ref that stores the typed CAS state. The name is fixed; the schema inside it is v4, and a binary that predates a schema **refuses** the payload rather than erasing it — so upgrade every host together |
+| `CRQ_STATE_REF` | `crq-state-v3` | git ref that stores the typed CAS state. The name is fixed; the schema inside it is v5, and a binary that predates a schema **refuses** the payload rather than erasing it — so upgrade every host together |
 | `CRQ_REPOS` | _(all in scope)_ | `autoreview` allowlist — only these `owner/name` repos (comma-separated) |
 | `CRQ_EXCLUDE` | _(none)_ | denylist — crq never reviews, watches or fixes these `owner/name` repos (comma-separated) |
 | `CRQ_AUTOREVIEW_SKIP_AUTHORS` | `dependabot[bot]` | PR authors `autoreview` never enqueues (comma-separated; case and `[bot]` suffix don't matter) — set to empty to auto-review bot PRs too; manual `crq review` is unaffected |

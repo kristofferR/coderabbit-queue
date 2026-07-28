@@ -55,13 +55,38 @@ func TestAutofixIsOnUnlessARepositorySaysOtherwise(t *testing.T) {
 	}
 }
 
+func TestAutofixSettingsListsTheFleetRepositoryAllowlist(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/host-only": true}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("repos", "owner/fleet-only")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	settings, err := svc.AutofixSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settings) != 1 || settings[0].Repo != "owner/fleet-only" {
+		t.Fatalf("settings = %+v, want the effective fleet repository", settings)
+	}
+}
+
 func TestAutofixSwitchRejectsMalformedRepositoryNames(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	store := NewMemoryStore(cfg)
 	svc := NewService(cfg, newFakeGitHub(), store, nil)
 
-	for _, repo := range []string{"owner", "owner/repo/", "/repo", "owner/repo/extra", "../repo"} {
+	for _, repo := range []string{
+		"owner", "owner/repo/", "/repo", "owner/repo/extra", "../repo",
+		"owner_name/repo", ".owner/repo", "owner--name/repo",
+	} {
 		if _, err := svc.SetAutofixEnabled(ctx, repo, false, "operator stop"); err == nil {
 			t.Errorf("SetAutofixEnabled(%q) succeeded", repo)
 		}

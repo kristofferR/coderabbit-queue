@@ -5,6 +5,12 @@ import (
 	"time"
 )
 
+func TestFleetPolicyCapabilityAdvancesWithNewDecisionKeys(t *testing.T) {
+	if WriterCaps != 3 || CapsFleetPolicy != WriterCaps {
+		t.Fatalf("writer caps = %d, fleet caps = %d; want fleet policy fenced at writer capability 3", WriterCaps, CapsFleetPolicy)
+	}
+}
+
 // Sharing a state ref stops an older binary ERASING a new field. It does not
 // make that binary act on it: it loads the field as unknown JSON, writes it back
 // untouched, and keeps deciding from its own fleet-wide configuration. So the
@@ -90,6 +96,31 @@ func TestLaggingWritersMatchesTheFireSlotOwner(t *testing.T) {
 	st.NoteWriter(writer, CapsRepoOverrides, now)
 	if got := st.LaggingWriters(CapsRepoOverrides, now); len(got) != 0 {
 		t.Errorf("lagging = %v, want none — the process firing IS the capable writer", got)
+	}
+}
+
+// The mirror question: an old binary about to drop a setting it cannot read has
+// to know whether the crq that wrote it is still driving the queue.
+func TestAdvancedWritersNamesTheNewerDriver(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	st := New()
+	st.Leader = &LeaderLease{Owner: "host=new-mac pid=7", ExpiresAt: now.Add(time.Minute)}
+
+	// A leader running this version is not ahead of it.
+	st.NoteWriter("host=new-mac pid=7", WriterCaps, now)
+	if got := st.AdvancedWriters(WriterCaps, now); len(got) != 0 {
+		t.Errorf("advanced = %v, want none for a leader on this version", got)
+	}
+
+	st.NoteWriter("host=new-mac pid=7", WriterCaps+1, now)
+	if got := st.AdvancedWriters(WriterCaps, now); len(got) != 1 || got[0] != "host=new-mac pid=7" {
+		t.Fatalf("advanced = %v, want the newer leader named", got)
+	}
+
+	// And only while it is driving: a stale stamp says nothing about now.
+	st.Leader.ExpiresAt = now
+	if got := st.AdvancedWriters(WriterCaps, now); len(got) != 0 {
+		t.Errorf("advanced = %v, want none once the lease has lapsed", got)
 	}
 }
 

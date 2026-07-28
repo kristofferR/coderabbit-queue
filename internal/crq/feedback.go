@@ -702,7 +702,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			if settledAt.IsZero() {
 				settledAt = s.clock()
 			}
-			if s.cfg.SettleWindow <= 0 || s.clock().Sub(settledAt) >= s.cfg.SettleWindow {
+			if report.config.SettleWindow <= 0 || s.clock().Sub(settledAt) >= report.config.SettleWindow {
 				if report.Converged {
 					s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending, &report.config)
 				}
@@ -864,6 +864,15 @@ func (s *Service) pushWaitDeadline(ctx context.Context, repo string, pr int, hea
 	}
 }
 
+// inflightTimeout is the in-flight window in force: the fleet's when the caller
+// decided from a fleet configuration, this host's when it had none.
+func (s *Service) inflightTimeout(cfg *Config) time.Duration {
+	if cfg != nil {
+		return cfg.InflightTimeout
+	}
+	return s.cfg.InflightTimeout
+}
+
 // completeWaitRound ends the wait by completing the fired/reviewing round. The
 // completed round remains as the "this head was reviewed" dedup marker, so a
 // subsequent enqueue/needsReview at the same head is deduped rather than re-fired.
@@ -898,9 +907,12 @@ func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, he
 			// advance that follows archives this round, and the slot would be
 			// released with the command it was taken for still unanswered. So
 			// record the hold on the slot itself, where it survives the supersede.
-			// Bounded by the in-flight window, the deadline Progress gives up at.
+			// Bounded by the in-flight window, the deadline Progress gives up at —
+			// the FLEET's, revalidated just above, not this host's. A host whose
+			// local value is shorter would otherwise drop the hold while Progress
+			// is still waiting on the command, letting another metered review fire.
 			if r.FiredAt != nil {
-				until := r.FiredAt.UTC().Add(s.cfg.InflightTimeout)
+				until := r.FiredAt.UTC().Add(s.inflightTimeout(cfg))
 				if until.After(s.clock()) && (st.FireSlot.HoldUntil == nil || st.FireSlot.HoldUntil.Before(until)) {
 					st.HoldSlotUntil(until)
 					changed = true
@@ -912,7 +924,7 @@ func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, he
 		if err := r.Complete(); err != nil {
 			return err
 		}
-		releaseSlot(st, QueueKey(repo, pr))
+		releaseSlot(st, QueueKey(repo, pr), r.Token)
 		st.PutRound(*r)
 		changed = true
 		return nil

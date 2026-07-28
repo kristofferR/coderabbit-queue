@@ -100,6 +100,45 @@ func TestFeedbackReturnsObservedAccountBlockPersistenceFailure(t *testing.T) {
 	}
 }
 
+func TestFeedbackUsesTheFleetFallbackForAWindowlessAccountBlock(t *testing.T) {
+	cfg := firingConfig()
+	cfg.RateLimitFallback = 5 * time.Minute
+	now := time.Now().UTC()
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "abcdef1234567890"
+	gh.pulls[fakeKey("o/repo", 3)] = pull
+	notice := ghapi.IssueComment{
+		ID: 17, Body: "You are rate limited by coderabbit.ai. Please wait before requesting another review.",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	notice.User.Login = cfg.Bot
+	gh.comments[fakeKey("o/repo", 3)] = []ghapi.IssueComment{notice}
+
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.SetFleetValue("rate-limit-fallback", "45m")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+
+	if _, err := svc.Feedback(context.Background(), "o/repo", 3); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := now.Add(45 * time.Minute)
+	if st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.Equal(want) {
+		t.Fatalf("blocked until = %v, want fleet fallback %s", st.Account.BlockedUntil, want)
+	}
+}
+
 func TestFeedbackCountsCompletionReplyForFiredHead(t *testing.T) {
 	// A re-review with nothing new to say produces no review object: CodeRabbit
 	// only replies "Review finished" to the command. That reply must satisfy
@@ -2359,6 +2398,45 @@ func TestCompleteWaitRoundHoldsAnUnacknowledgedFireSlot(t *testing.T) {
 	}
 	if st.FireSlot != nil {
 		t.Fatalf("completing the round must release the slot, got %+v", st.FireSlot)
+	}
+}
+
+// The hold is bounded by the in-flight window Progress gives up at, and that
+// window is fleet policy. A host whose own value is shorter would otherwise
+// stamp a hold that lapses while Progress is still waiting on the command,
+// letting the next pull request spend the allowance alongside it.
+func TestHeldFireSlotUsesTheFleetsInflightTimeout(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.InflightTimeout = time.Minute // this host's own, shorter, answer
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	now := time.Now().UTC()
+	repo, pr, head := "o/r", 6, "aaaaaaaa1"
+	seedRound(t, store, cfg, repo, pr, head, PhaseFired, now, 12)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("inflight-timeout", "2h")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fleet := svc.cfgFor(st, repo)
+
+	svc.completeWaitRound(ctx, repo, pr, head, true, &fleet)
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.FireSlot == nil || st.FireSlot.HoldUntil == nil {
+		t.Fatalf("the slot must be held for the unanswered command, got %+v", st.FireSlot)
+	}
+	want := now.Add(2 * time.Hour)
+	if !st.FireSlot.HoldUntil.Equal(want) {
+		t.Fatalf("hold until = %s, want the fleet's window %s", st.FireSlot.HoldUntil, want)
 	}
 }
 

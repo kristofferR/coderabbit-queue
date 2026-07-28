@@ -3,6 +3,7 @@ package crq
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"html"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
 )
 
@@ -143,6 +145,114 @@ func TestInstallAutofixHonoursConfiguredDryRun(t *testing.T) {
 	}
 }
 
+func TestInstallAutofixUsesFleetRepositories(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = nil
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.SetFleetValue("repos", "owner/fleet-repo")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Repos) != 1 || plan.Repos[0] != "owner/fleet-repo" {
+		t.Fatalf("autofix repos = %v, want the fleet repository", plan.Repos)
+	}
+	if plan.PolicySource != "fleet" {
+		t.Fatalf("policy source = %q, want fleet", plan.PolicySource)
+	}
+}
+
+func TestAutofixUnitKeepsHostFallbacksUnderFleetPolicy(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/host-repo": true}
+	cfg.ExcludeRepos = map[string]bool{"owner/host-excluded": true}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.SetFleetValue("repos", "owner/fleet-repo")
+		st.SetFleetValue("exclude", "owner/fleet-excluded")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Repos) != 1 || plan.Repos[0] != "owner/fleet-repo" {
+		t.Fatalf("preview repos = %v, want current fleet policy", plan.Repos)
+	}
+	env := autofixEnvFor(svc.autofixFallbackConfig(nil), plan)
+	if got := env["CRQ_REPOS"]; got != "owner/host-repo" {
+		t.Fatalf("unit CRQ_REPOS = %q, want host fallback", got)
+	}
+	if got := env["CRQ_EXCLUDE"]; got != "owner/host-excluded" {
+		t.Fatalf("unit CRQ_EXCLUDE = %q, want host fallback", got)
+	}
+}
+
+func TestAutofixUnitKeepsExplicitRepositoriesAsHostFallback(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/configured": true}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	plan := AutofixInstall{Repos: []string{"owner/explicit"}}
+
+	env := autofixEnvFor(svc.autofixFallbackConfig(plan.Repos), plan)
+	if got := env["CRQ_REPOS"]; got != "owner/explicit" {
+		t.Fatalf("unit CRQ_REPOS = %q, want explicit install repository", got)
+	}
+}
+
+func TestAutofixWrapperKeepsExplicitRepositoriesAuthoritative(t *testing.T) {
+	got := autofixWrapper("/usr/bin/crq", "'agent' 'prompt'", []string{"owner/explicit", "owner/with space"})
+	if !strings.Contains(got, "watch 'owner/explicit' 'owner/with space' --") {
+		t.Fatalf("wrapper lost explicit repositories:\n%s", got)
+	}
+	if fallback := autofixWrapper("/usr/bin/crq", "'agent' 'prompt'", nil); !strings.Contains(fallback, "watch --") {
+		t.Fatalf("wrapper without explicit repositories does not use runtime fleet policy:\n%s", fallback)
+	}
+}
+
+// A state ref this host cannot read must not turn the documented preview into an
+// error — --dry-run is what somebody runs to inspect the setup before finishing
+// it. The plan says which policy it could see, so it cannot be mistaken for the
+// fleet's; a real install has no such fallback.
+func TestInstallAutofixPreviewsFromTheHostWhenFleetStateIsUnreadable(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/host-repo": true}
+	svc := NewService(cfg, newFakeGitHub(), unreadableStore{NewMemoryStore(cfg)}, nil)
+
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.PolicySource != "host" || plan.Warning == "" {
+		t.Fatalf("plan = %+v, want a labelled host-only preview", plan)
+	}
+	if len(plan.Repos) != 1 || plan.Repos[0] != "owner/host-repo" {
+		t.Fatalf("preview repos = %v, want this host's own", plan.Repos)
+	}
+	if _, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, false); err == nil {
+		t.Fatal("an install wrote a unit from policy it could not check against the fleet's")
+	}
+}
+
+// unreadableStore is a host that cannot reach the state ref: no access to the
+// gate repository, or no network to reach it over.
+type unreadableStore struct{ StateStore }
+
+func (unreadableStore) Load(context.Context) (State, Revision, error) {
+	return State{}, Revision{}, errors.New("state ref unreadable")
+}
+
 // A missing agent must fail loudly at install time. Discovering it at the first
 // dispatch means an autofix watcher that looks installed and fixes nothing.
 func TestInstallAutofixRefusesWithoutAnAgent(t *testing.T) {
@@ -254,7 +364,10 @@ func TestAutofixUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 	cfg.SkipMarker = "<!-- custom-skip -->"
 	cfg.Bot = "custom-reviewer[bot]"
 	cfg.RequiredBots = []string{"custom-reviewer[bot]", "cursor[bot]"}
+	// Named by the operator: it reaches past who reviews, which only an explicit
+	// CRQ_FEEDBACK_BOTS can do — and only an explicit one travels.
 	cfg.FeedbackBots = []string{"custom-reviewer[bot]", "cursor[bot]", "observer[bot]"}
+	cfg.FeedbackBotsExplicit = true
 	cfg.ReviewCommand = "@custom review this"
 	cfg.RateLimitCoDegrade = false
 	cfg.MinInterval = time.Hour
@@ -264,7 +377,8 @@ func TestAutofixUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 	cfg.SettleWindow = 17 * time.Second
 	cfg.CoBots = []CoBotConfig{{
 		Name: "bugbot", Login: "cursor[bot]", Command: "bugbot run now",
-		Trigger: engine.TriggerAlways, Required: true, SelfHealGrace: 4 * time.Minute,
+		Trigger: engine.TriggerAlways, TriggerExplicit: true,
+		Required: true, SelfHealGrace: 4 * time.Minute,
 	}}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 	plan := AutofixInstall{Platform: "linux", Wrapper: "/tmp/crq autofix", LogDir: "/tmp/crq logs"}
@@ -293,6 +407,89 @@ func TestAutofixUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 			t.Errorf("unit does not carry %q:\n%s", want, unit)
 		}
 	}
+}
+
+// An implicit trigger must install as unset. Freezing the resolved mode into the
+// unit makes the service read it as an operator's choice, and the registry
+// default for a bot the fleet later REQUIRES can then never be recomputed — so a
+// required Codex would be waited for and never commanded.
+func TestAutofixEnvInstallsAnImplicitTriggerAsUnset(t *testing.T) {
+	cfg := firingConfig()
+	cfg.CoBots = []CoBotConfig{{
+		Name: "codex", Login: dialect.CodexBotLogin, Command: "@codex review",
+		Trigger: engine.TriggerNever, SelfHealGrace: 10 * time.Minute,
+	}}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	env := svc.autofixEnv(AutofixInstall{})
+	trigger, ok := env["CRQ_COBOT_CODEX_TRIGGER"]
+	if !ok || trigger != "" {
+		t.Fatalf("CRQ_COBOT_CODEX_TRIGGER = %q, present=%t; want an explicit empty value", trigger, ok)
+	}
+	// The installed service reloads from this environment: the mode has to come
+	// back implicit, so requiring the bot still promotes it to always.
+	reloaded := resolveCoBot(env, mustCoReviewer(t, "codex"), true)
+	if reloaded.TriggerExplicit {
+		t.Fatal("reloaded trigger is explicit; the installing host had no such setting")
+	}
+	if reloaded.Trigger != engine.TriggerAlways {
+		t.Fatalf("required codex reloaded with trigger %q, want always", reloaded.Trigger)
+	}
+}
+
+// A derived surfaced set must install as unset, for the same reason as the
+// implicit trigger: written out as a value, the service reads it back as the
+// operator's own list and stops recomputing it, so a co-reviewer the fleet
+// enables later never has its findings surfaced.
+func TestAutofixEnvInstallsDerivedFeedbackBotsAsUnset(t *testing.T) {
+	cfg := firingConfig()
+	cfg.FeedbackBots = []string{cfg.Bot, dialect.CodexBotLogin}
+	cfg.FeedbackBotsExplicit = false
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	env := svc.autofixEnv(AutofixInstall{})
+	bots, ok := env["CRQ_FEEDBACK_BOTS"]
+	if !ok || bots != "" {
+		t.Fatalf("CRQ_FEEDBACK_BOTS = %q, present=%t; want an explicit empty value", bots, ok)
+	}
+}
+
+// The per-bot settings of a co-reviewer this host has switched OFF still travel.
+// They are what a repository override — or a fleet `cobots` change that names
+// the bot without naming its keys — picks the bot up with, and the installing
+// shell's own preview uses them.
+func TestAutofixEnvCarriesDisabledCoBotFallbacks(t *testing.T) {
+	cfg := firingConfig()
+	cfg.CoBots = nil
+	cfg.KnownCoBots = []CoBotConfig{{
+		Name: "bugbot", Login: "cursor[bot]", Command: "bugbot run please",
+		Trigger: engine.TriggerAlways, TriggerExplicit: true,
+		SelfHealGrace: 42 * time.Minute,
+	}}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	env := svc.autofixEnv(AutofixInstall{})
+	if got := env["CRQ_COBOTS"]; got != "" {
+		t.Fatalf("CRQ_COBOTS = %q, want the enabled set to stay empty", got)
+	}
+	for key, want := range map[string]string{
+		"CRQ_COBOT_BUGBOT_CMD":     "bugbot run please",
+		"CRQ_COBOT_BUGBOT_TRIGGER": "always",
+		"CRQ_COBOT_BUGBOT_GRACE":   "42m0s",
+	} {
+		if got := env[key]; got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func mustCoReviewer(t *testing.T, name string) dialect.CoReviewer {
+	t.Helper()
+	co, ok := dialect.CoReviewerByName(name)
+	if !ok {
+		t.Fatalf("unknown co-reviewer %q", name)
+	}
+	return co
 }
 
 func TestAutofixEnvCarriesAnIntentionallyEmptySkipMarker(t *testing.T) {

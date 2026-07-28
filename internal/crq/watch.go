@@ -177,8 +177,36 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 	}
 }
 
+// watchesRepo reports whether the policy in hand still covers this repository,
+// the same two questions the pass asked when it gathered its candidates:
+// `exclude` means "crq does not go here" everywhere, and the fleet's repository
+// list decides the set whenever the pass had to build one. Repositories named on
+// the command line are the operator's own request and outrank the list — but not
+// the exclusion, exactly as at the top of the pass.
+//
+// An emptied list is not "watch everything" here. Unlike autoReviewPass, which
+// falls back to scanning by scope, a pass with no repositories of its own has
+// nothing to watch at all and refuses to run — so a candidate gathered under the
+// old list is one the live policy no longer covers, and treating the empty list
+// as permissive would dispatch a fix for a repository the fleet just dropped.
+func watchesRepo(cfg Config, explicit []string, repo string) bool {
+	key := NormalizeRepo(repo)
+	if cfg.ExcludeRepos[key] {
+		return false
+	}
+	if len(explicit) > 0 {
+		return true
+	}
+	return cfg.AllowRepos[key]
+}
+
 func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispatchPool, emit func(WatchEvent) error) error {
 	var failures []string
+	state, _, err := s.store.Load(ctx)
+	if err != nil {
+		return err
+	}
+	cfg := s.fleetCfg(state)
 	type pendingEvent struct {
 		event  WatchEvent
 		result <-chan dispatchResult
@@ -190,10 +218,10 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	// repository names straight over the fix command, and every dispatch in the
 	// fleet died with "fork/exec kristofferr/coderabbit-queue: no such file or
 	// directory". A caller's slice is the caller's.
-	repos := make([]string, 0, len(opts.Repos)+len(s.cfg.AllowRepos))
+	repos := make([]string, 0, len(opts.Repos)+len(cfg.AllowRepos))
 	repos = append(repos, opts.Repos...)
 	if len(repos) == 0 {
-		for repo := range s.cfg.AllowRepos {
+		for repo := range cfg.AllowRepos {
 			repos = append(repos, repo)
 		}
 		sort.Strings(repos) // stable order: a pass must not depend on map iteration
@@ -213,16 +241,14 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		pull ghapi.Pull
 	}
 	var candidates []candidate
-	gate := NormalizeRepo(s.cfg.GateRepo)
+	gate := NormalizeRepo(cfg.GateRepo)
 	// Which repositories may be FIXED is per repository, read once for the pass.
 	// Watching is unaffected: a repository with autofix off is still observed
 	// and still reviewed, so its feedback arrives for a person to act on.
 	autofixOff := map[string]bool{}
-	if st, _, err := s.store.Load(ctx); err == nil {
-		for _, repo := range repos {
-			if !st.AutofixEnabled(repo) {
-				autofixOff[NormalizeRepo(repo)] = true
-			}
+	for _, repo := range repos {
+		if !state.AutofixEnabled(repo) {
+			autofixOff[NormalizeRepo(repo)] = true
 		}
 	}
 	for _, repo := range repos {
@@ -238,7 +264,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		// it; this one did not, so the single setting that reads like a fleet-wide
 		// opt-out silently covered half of what crq does — reviews stopped and the
 		// watcher carried on, which is not a setting anyone can reason about.
-		if s.cfg.ExcludeRepos[NormalizeRepo(repo)] {
+		if cfg.ExcludeRepos[NormalizeRepo(repo)] {
 			continue
 		}
 		pulls, err := s.gh.ListPulls(ctx, repo, openPullQuery())
@@ -286,10 +312,40 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				return err
 			}
 			// The fleet's skip marker suppresses review deliberately, to protect
-			// the shared quota. Next is a MUTATING oracle — it enqueues and can
-			// fire — so the marker has to be honoured before calling it, not
-			// after.
-			if s.cfg.SkipsReview(pull.Body) {
+			// the shared quota, and its repository lists say where crq goes at
+			// all. Next is a MUTATING oracle — it enqueues and can fire — and it
+			// enforces neither, because it is the manual path: its target is a
+			// request a person made. So both have to be honoured before calling
+			// it, not after.
+			//
+			// The policy is re-read here rather than reused from the top of the
+			// pass. A fleet-wide scan is long, so a marker the fleet adopted — or
+			// a repository it dropped — mid-pass would otherwise spend a metered
+			// review on every candidate still to come in it, gathered under the
+			// policy the pass started with. Rereading costs a conditional GET on
+			// the ETag'd state ref, against a call that already re-observes the
+			// PR.
+			live, _, lerr := s.store.Load(ctx)
+			if lerr != nil {
+				if _, throttled := ghapi.ThrottleWait(lerr); throttled {
+					return lerr
+				}
+				// Next reads the same ref and would fail the same way; treat it
+				// like any other unreadable candidate rather than firing under a
+				// policy crq could not confirm.
+				if s.log != nil {
+					s.log.Printf("watch: %s#%d: %v", repo, pull.Number, lerr)
+				}
+				if opts.Once {
+					failures = append(failures, fmt.Sprintf("%s#%d: %v", repo, pull.Number, lerr))
+				}
+				continue
+			}
+			liveCfg := s.fleetCfg(live)
+			if !watchesRepo(liveCfg, opts.Repos, repo) {
+				continue
+			}
+			if liveCfg.SkipsReview(pull.Body) {
 				event := WatchEvent{
 					Repo: repo, PR: pull.Number,
 					Action: "skipped", Reason: "fleet auto-review skip marker present",
@@ -784,6 +840,10 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 		// claim; a concurrent off or a failed earlier Load must fail closed.
 		if !st.AutofixEnabled(report.Repo) {
 			reason, byDesign = "fix sessions are disabled for this repository", true
+			return ErrNoChange
+		}
+		if s.fleetCfg(*st).ExcludeRepos[NormalizeRepo(report.Repo)] {
+			reason, byDesign = "repository is excluded by fleet policy", true
 			return ErrNoChange
 		}
 		round := st.Round(report.Repo, report.PR)

@@ -81,8 +81,9 @@ func (s *Service) AutofixSettings(ctx context.Context) ([]AutofixSetting, error)
 		}
 		out = append(out, setting)
 	}
-	watched := make([]string, 0, len(s.cfg.AllowRepos))
-	for repo := range s.cfg.AllowRepos {
+	effective := s.fleetCfg(st)
+	watched := make([]string, 0, len(effective.AllowRepos))
+	for repo := range effective.AllowRepos {
 		watched = append(watched, repo)
 	}
 	sort.Strings(watched)
@@ -102,13 +103,55 @@ func (s *Service) AutofixSettings(ctx context.Context) ([]AutofixSetting, error)
 // the hazard is a setting recorded under a name nothing will ever match.
 func validRepoSlug(repo string) bool {
 	owner, name, ok := strings.Cut(repo, "/")
-	if !ok || owner == "" || name == "" {
+	return ok && validOwnerLogin(owner) && validNameSegment(name)
+}
+
+// maxOwnerLogin is GitHub's hard length limit for a user or organisation login.
+const maxOwnerLogin = 39
+
+// validOwnerLogin reports whether login is a GitHub user or organisation login.
+//
+// Stricter than validNameSegment on purpose: a repository NAME may hold
+// underscores and dots and may be long, a login may not, and a login may
+// neither begin nor end with a hyphen nor hold two in a row. Everything this
+// validates is looked up as /users/<login>, so a value outside those rules is
+// one no account can ever have — and recorded for the fleet, a single such
+// entry fails the whole scan on every host at once, which is precisely the
+// mistake worth catching at `crq config set` instead.
+func validOwnerLogin(login string) bool {
+	if login == "" || len(login) > maxOwnerLogin ||
+		strings.HasPrefix(login, "-") || strings.HasSuffix(login, "-") ||
+		strings.Contains(login, "--") {
 		return false
 	}
-	// Same segment rules the workspace package applies to a path: "." and ".."
-	// are not repository names, and a second slash means this is not one either.
-	for _, part := range []string{owner, name} {
-		if part == "." || part == ".." || strings.ContainsAny(part, `/\`) {
+	for _, r := range login {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validNameSegment reports whether part is one segment a GitHub owner or
+// repository name could be.
+//
+// Same segment rules the workspace package applies to a path: "." and ".." are
+// not names. The character class is GitHub's: an owner or repository name is
+// letters, digits, hyphen, underscore and dot, so a segment holding anything
+// else — a space, a slash, a control character — is one no scan result can ever
+// normalize to. Recorded, it reads as a rule covering something while covering
+// nothing at all.
+func validNameSegment(part string) bool {
+	if part == "" || part == "." || part == ".." {
+		return false
+	}
+	for _, r := range part {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
 			return false
 		}
 	}

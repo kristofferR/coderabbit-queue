@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
@@ -63,6 +64,11 @@ type Service struct {
 	// scanOffset rotates the bounded quota-free rescue scan's window so a round
 	// past the first few is not starved forever; in-memory only, same writer.
 	scanOffset int
+	// fleetWarned guards fleetWarnedOf, which remembers the fleet-configuration
+	// complaints already logged. Passes read the fleet policy concurrently with
+	// dispatched sessions, so this one is genuinely shared.
+	fleetWarned   sync.Mutex
+	fleetWarnedOf map[string]bool
 	// now overrides the wall clock for the scheduling DECISIONS in the
 	// pump/enqueue/sweep/wait paths (see clock). nil in production; the replay
 	// suite injects a controllable fake so an incident can be re-enacted
@@ -232,6 +238,11 @@ func (s *Service) Enqueue(ctx context.Context, repo string, pr int) (EnqueueResu
 	result.Head = head
 	state, err := s.store.Update(ctx, func(st *State) error {
 		now := s.clock()
+		if s.fleetCfg(*st).ExcludeRepos[repo] {
+			result.Held = true
+			result.Reason = "repository excluded by fleet policy"
+			return ErrNoChange
+		}
 		if h, held := st.HeldPR(repo, pr); held {
 			// Enqueueing a held PR would queue a round nothing may fire, which
 			// reads on the dashboard as work waiting its turn.
@@ -291,15 +302,22 @@ type queueCandidate struct {
 // dashboard sync, so a large autoreview pass doesn't produce N separate state
 // writes / issue edits. A PR already tracked at the same head is skipped; a
 // stale head is superseded. The DecideFire dedup still backstops at pump time.
-func (s *Service) enqueueBatch(ctx context.Context, items []queueCandidate) error {
-	if len(items) == 0 {
+func (s *Service) enqueueBatch(ctx context.Context, items []queueCandidate, expectedFleetRevision string) error {
+	if len(items) == 0 || s.cfg.DryRun {
 		return nil
 	}
 	state, err := s.store.Update(ctx, func(st *State) error {
 		now := s.clock()
+		cfg := s.fleetCfg(*st)
+		if cfg.FleetRevision != expectedFleetRevision {
+			return ErrNoChange
+		}
 		added := 0
 		for _, it := range items {
 			repo := NormalizeRepo(it.Repo)
+			if cfg.ExcludeRepos[repo] {
+				continue
+			}
 			if _, held := st.HeldPR(repo, it.PR); held {
 				continue
 			}
@@ -573,15 +591,35 @@ func (s *Service) advanceQuotaFree(ctx context.Context, repo string, pr int) (Pu
 // counts here. AcceptAccountBlock still decides whether it replaces the standing
 // window, and never shortens it.
 func (s *Service) recordObservedBlock(ctx context.Context, obs observation, st State, now time.Time) (*State, error) {
-	blk := engine.ObservedAccountBlock(obs.eng, s.cfg.policy(), st.Account, now)
+	cfg := s.fleetCfg(st)
+	blk := engine.ObservedAccountBlock(obs.eng, cfg.policy(), st.Account, now)
 	if blk == nil || s.cfg.DryRun || !observedAccountBlockChanges(st.Account, blk) {
 		return nil, nil
 	}
+	// Update swallows ErrNoChange, so whether the block was recorded has to be
+	// carried out of the mutation rather than read from its error.
+	var recorded *engine.AccountBlock
 	updated, err := s.store.Update(ctx, func(w *State) error {
-		if !observedAccountBlockChanges(w.Account, blk) {
+		recorded = nil
+		current := s.fleetCfg(*w)
+		// Only the SCOPE decides whose account this notice is evidence about.
+		// Any other fleet setting moving between the observation and this write
+		// leaves the notice just as valid, and comparing the whole revision
+		// discarded it — silently, since a returned ErrNoChange reads as a
+		// successful update. The account then stayed open for the rest of a
+		// window the bot had already stated, and the next fire went out inside
+		// it. So the window is recomputed here instead, under the policy that is
+		// current at the moment of the write, against the quota this write lands
+		// on.
+		if !sameFoldedSet(current.Scope, cfg.Scope) {
+			return ErrNoChange
+		}
+		blk := engine.ObservedAccountBlock(obs.eng, current.policy(), w.Account, now)
+		if blk == nil || !observedAccountBlockChanges(w.Account, blk) {
 			return ErrNoChange
 		}
 		applyAccountBlock(w, blk, now)
+		recorded = blk
 		return nil
 	})
 	if err != nil {
@@ -590,14 +628,19 @@ func (s *Service) recordObservedBlock(ctx context.Context, obs observation, st S
 		}
 		return nil, err
 	}
-	// Like every other writer of this window: the dashboard is where an operator
-	// reads whether the account is available, and the decision that follows this
-	// is usually FireNo — which writes nothing further, leaving the issue claiming
-	// a free account for the whole block while state and `crq status` say
-	// otherwise.
-	s.sync(ctx, updated)
-	if s.log != nil {
-		s.log.Printf("account blocked until %s (observed, not tied to a round)", blk.Until.UTC().Format(time.RFC3339))
+	// The state is handed back either way — it is newer than the caller's, and a
+	// window another host recorded in the meantime is one this decision has to
+	// respect. Only the report of a WRITE is conditional.
+	if recorded != nil {
+		// Like every other writer of this window: the dashboard is where an operator
+		// reads whether the account is available, and the decision that follows this
+		// is usually FireNo — which writes nothing further, leaving the issue claiming
+		// a free account for the whole block while state and `crq status` say
+		// otherwise.
+		s.sync(ctx, updated)
+		if s.log != nil {
+			s.log.Printf("account blocked until %s (observed, not tied to a round)", recorded.Until.UTC().Format(time.RFC3339))
+		}
 	}
 	return &updated, nil
 }
@@ -718,13 +761,31 @@ func (s *Service) recordDismissal(ctx context.Context, repo string, pr int, head
 // the rest of the CAS writes rather than beside each evidence source.
 //
 // It returns whether anything was written, and the block that stands either way.
-func (s *Service) applyAccountBlock(ctx context.Context, until time.Time, source string) (bool, *time.Time, error) {
+func (s *Service) applyAccountBlock(
+	ctx context.Context,
+	until time.Time,
+	source string,
+	expected Config,
+	cliOrg string,
+) (bool, *time.Time, error) {
 	now := s.clock()
 	// Update swallows ErrNoChange, so whether anything was written has to be
 	// recorded by the mutation itself. It is assigned on every attempt because a
 	// CAS conflict runs the closure again.
 	applied := false
 	state, err := s.store.Update(ctx, func(st *State) error {
+		current := s.fleetCfg(*st)
+		// Only the SCOPE decides which account this block is evidence about, and
+		// cliOrgMatches asks the sharper form of that question against the policy
+		// the write lands on. Comparing the whole revision instead refused an
+		// explicit, organisation-attributed block because an unrelated setting —
+		// settle, repos, a co-reviewer's command — moved between the read and this
+		// write: the caller was told to run preflight again while the shared quota
+		// stayed open, and the daemon could post a metered review inside the window
+		// the CLI had just reported.
+		if !sameFoldedSet(current.Scope, expected.Scope) || !cliOrgMatches(current, cliOrg) {
+			return errFleetQuotaChanged
+		}
 		if !engine.AcceptAccountBlock(st.Account.BlockedUntil, until) {
 			applied = false
 			return ErrNoChange
@@ -734,7 +795,7 @@ func (s *Service) applyAccountBlock(ctx context.Context, until time.Time, source
 		st.Account.BlockedUntil = &at
 		st.Account.CheckedAt = &now
 		st.Account.Source = source
-		st.Account.Scope = strings.Join(s.cfg.Scope, ",")
+		st.Account.Scope = strings.Join(current.Scope, ",")
 		// A reading from outside the PR says nothing about how many reviews are
 		// left, and a stale count beside a fresh block would read as authoritative.
 		st.Account.Remaining = nil
@@ -824,17 +885,29 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 // where the state it reads is the state the write lands on.
 func (s *Service) applyTransition(st *State, r *Round, tr engine.Transition, now time.Time, cfg Config) error {
 	key := QueueKey(r.Repo, r.PR)
+	// Captured before the transitions below clear it: this round's claim on the
+	// fire slot is what lets it release the slot at the end.
+	token := r.Token
+	// Completion and retry are the policy-dependent outcomes, so both are dropped
+	// when the policy moved under them. The completed round is the "this head was
+	// reviewed" dedup marker, and reopenForChangedReviewers deliberately leaves an
+	// in-flight round alone — it is already going to answer — so a reviewer change
+	// committing between the decision and this write would be answered by neither:
+	// the marker dedupes the head under the set that no longer gates it. A retry
+	// carries a RetryAt and an account block computed from the fleet's fallback
+	// and backoff windows, so a widened window would be persisted at the old,
+	// earlier deadline and let another metered review fire inside it. Dropping is
+	// safe either way: the round keeps the slot and the next pump decides again
+	// under the current policy. The other outcomes record facts — an ack, a closed
+	// PR, a reservation that never posted — that no policy change revises.
 	switch tr.Outcome {
-	case engine.OutComplete:
-		// The completed round is the "this head was reviewed" dedup marker, and
-		// reopenForChangedReviewers deliberately leaves an in-flight round alone —
-		// it is already going to answer. A reviewer change that commits between
-		// the decision and this write would therefore be answered by neither: the
-		// marker dedupes the head under the set that no longer gates it. Drop the
-		// stale transition; the next pump decides again under the new set.
+	case engine.OutComplete, engine.OutRetry:
 		if overrideChanged(st, r.Repo, cfg) {
 			return ErrNoChange
 		}
+	}
+	switch tr.Outcome {
+	case engine.OutComplete:
 		if err := r.Complete(); err != nil {
 			return err
 		}
@@ -855,19 +928,29 @@ func (s *Service) applyTransition(st *State, r *Round, tr engine.Transition, now
 		}
 	case engine.OutAbandon:
 		st.EndRound(r.Repo, r.PR, tr.Reason)
-		releaseSlot(st, key)
+		releaseSlot(st, key, token)
 		return nil
 	default:
 		return nil
 	}
 	st.PutRound(*r)
-	releaseSlot(st, key)
+	releaseSlot(st, key, token)
 	return nil
 }
 
-// releaseSlot clears the fire slot when it points at key.
-func releaseSlot(st *State, key string) {
-	if st.FireSlot != nil && st.FireSlot.Key == key {
+// releaseSlot clears the fire slot when it points at key AND token — the round
+// that took it is the only one that may give it back.
+//
+// The key alone is not enough because the slot outlives the round: a hold left
+// behind for a metered command whose round was superseded belongs to that
+// command, not to the pull request it was posted on. Its replacement round at
+// the same key ending — excluded by fleet policy, cancelled, or abandoned with
+// the PR — would otherwise drop the hold and let a second metered review fire
+// while the first command is still unanswered. Its token is the archived one's,
+// so it releases nothing here. Nobody needs to: the hold is bounded by the
+// in-flight window, and Normalize reaps the slot once it expires.
+func releaseSlot(st *State, key, token string) {
+	if st.FireSlot != nil && st.FireSlot.Key == key && st.FireSlot.Token == token {
 		st.FireSlot = nil
 		st.ClearSlotHold()
 	}
@@ -1006,6 +1089,9 @@ func firedOrEnqueuedAt(r Round) time.Time {
 // is meant to close: SetReviewers commits in between, and the mutation goes on
 // to apply the decision the new configuration would not have made.
 func (s *Service) applyFire(ctx context.Context, cfg Config, round Round, obs engine.Observation, d engine.FireDecision, now time.Time) (PumpResult, error) {
+	if cfg.ExcludeRepos[NormalizeRepo(round.Repo)] {
+		return s.abandonRound(ctx, round, "repository excluded by fleet policy", "skipped")
+	}
 	switch d.Verdict {
 	case engine.FireDrop:
 		return s.abandonRound(ctx, round, "pr closed", "skipped")
@@ -1057,7 +1143,7 @@ func (s *Service) abandonRound(ctx context.Context, round Round, reason, action 
 			return ErrNoChange
 		}
 		st.EndRound(round.Repo, round.PR, reason)
-		releaseSlot(st, QueueKey(round.Repo, round.PR))
+		releaseSlot(st, QueueKey(round.Repo, round.PR), round.Token)
 		ended = true
 		return nil
 	})
@@ -1249,7 +1335,7 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 			if rerr := r.AwaitRetry(now.Add(postFailureBackoff), "failed to post review command: "+err.Error(), now); rerr != nil {
 				return rerr
 			}
-			releaseSlot(st, key)
+			releaseSlot(st, key, token)
 			st.Warn = "failed to post review command: " + err.Error()
 			st.PutRound(*r)
 			return nil
@@ -1532,7 +1618,12 @@ func (s *Service) fireCoReviewWait(ctx context.Context, cfg Config, round Round,
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		changed = false
 		r := st.Round(round.Repo, round.PR)
-		if !sameRound(r, round) || !firable(st, r, now) {
+		// This is the wait's commit point, so the reviewer set that chose it must
+		// still be the configured one. A change committed since the decision has
+		// already reconciled the round while it was queued, and nothing later
+		// undoes this transition: moving it to reviewing with adopted commands
+		// would leave the round waiting on — and crediting — the former set.
+		if !sameRound(r, round) || !firable(st, r, now) || overrideChanged(st, round.Repo, cfg) {
 			return ErrNoChange
 		}
 		deadline := now.Add(s.cfg.FeedbackWaitTimeout)
@@ -1790,7 +1881,7 @@ func (s *Service) fireCoDeferred(ctx context.Context, cfg Config, round Round, d
 // command, or an account that reviews on its own all suppress it (see
 // DecideCoPost) — not a retry counter.
 func (s *Service) selfHealCoReviewers(ctx context.Context, cfg Config, round Round, obs engine.Observation, now time.Time) {
-	if s.cfg.DryRun || round.FiredAt == nil || obs.Head != round.Head {
+	if s.cfg.DryRun || cfg.ExcludeRepos[NormalizeRepo(round.Repo)] || round.FiredAt == nil || obs.Head != round.Head {
 		return
 	}
 	firedAt := round.FiredAt.UTC()
@@ -1843,11 +1934,13 @@ const triggerClaimTTL = 2 * time.Minute
 func (s *Service) Cancel(ctx context.Context, repo string, pr int) error {
 	repo = NormalizeRepo(repo)
 	state, err := s.store.Update(ctx, func(st *State) error {
-		if st.Round(repo, pr) == nil {
+		r := st.Round(repo, pr)
+		if r == nil {
 			return ErrNoChange
 		}
+		token := r.Token
 		st.EndRound(repo, pr, "cancelled")
-		releaseSlot(st, QueueKey(repo, pr))
+		releaseSlot(st, QueueKey(repo, pr), token)
 		return nil
 	})
 	if err != nil {
@@ -1862,7 +1955,7 @@ func (s *Service) Status(ctx context.Context) (State, string, error) {
 	if err != nil {
 		return State{}, "", err
 	}
-	return state, renderDashboard(state, s.cfg), nil
+	return state, renderDashboard(state, s.fleetCfg(state)), nil
 }
 
 func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
@@ -1870,22 +1963,51 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 	if err != nil {
 		return State{}, err
 	}
-	if s.cfg.CalibrationPR <= 0 {
+	if s.cfg.DryRun {
+		return state, nil
+	}
+	cfg := s.fleetCfg(state)
+	if cfg.CalibrationPR <= 0 {
 		return state, nil
 	}
 	now := s.clock()
 	// Honor the freshness shortcut only when the last reading was conclusive. If a
 	// probe is still pending (CalibAskedAt set, no reply yet), keep re-checking so a
 	// late "account blocked" reply isn't ignored for the full TTL.
-	if state.Account.CalibAskedAt == nil && state.Account.CheckedAt != nil && now.Sub(*state.Account.CheckedAt) < s.cfg.CalibrationTTL {
+	if state.Account.CalibAskedAt == nil && state.Account.CheckedAt != nil && now.Sub(*state.Account.CheckedAt) < cfg.CalibrationTTL {
 		return state, nil
 	}
-	quota, err := s.readQuota(ctx, s.calibrationIssue(state), now, state.Account.CalibAskedAt)
+	quota, readAt, err := s.readQuota(ctx, s.calibrationIssue(state), now, state.Account.CalibAskedAt, cfg)
 	if err != nil {
 		return state, err
 	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
-		if st.Account.CalibAskedAt == nil && st.Account.CheckedAt != nil && now.Sub(*st.Account.CheckedAt) < s.cfg.CalibrationTTL {
+		current := s.fleetCfg(*st)
+		// Only the scope invalidates the reading: it says WHICH account the probe
+		// answered for, and a scope that moved under the read already reset the
+		// quota to be recalibrated, so writing the old account's answer over that
+		// reset would state a window for an account crq no longer queues.
+		//
+		// Every other fleet setting leaves the reading true, and refusing it over
+		// one — as a whole-revision comparison did — discarded a still-standing
+		// account block, since Update reports a refused write as success: this
+		// same pump then went on to post a metered review inside the blocked
+		// window it had just been told about.
+		if !sameFoldedSet(current.Scope, cfg.Scope) {
+			return ErrNoChange
+		}
+		currentTTL := current.CalibrationTTL
+		if st.Account.CalibAskedAt == nil && st.Account.CheckedAt != nil && now.Sub(*st.Account.CheckedAt) < currentTTL {
+			return ErrNoChange
+		}
+		// The reading is an existing reply adopted under the TTL the read STARTED
+		// with. A fleet that shortened calibrate-ttl in the meantime has already
+		// declared that reply too old to decide from, and committing it stamps
+		// CheckedAt=now — presenting it as fresh for a whole new window, and
+		// letting a metered review fire on an availability result the shorter
+		// window asks crq to re-establish first. Drop it; the next pass reads
+		// under the TTL that is now current, and probes when nothing qualifies.
+		if !readAt.IsZero() && now.Sub(readAt) >= currentTTL {
 			return ErrNoChange
 		}
 		// A fresh reading replaces the whole quota; carry the account-quota comment
@@ -1981,25 +2103,32 @@ func (s *Service) rotateCalibration(ctx context.Context, oldIssue int) (int, err
 	return issue.Number, nil
 }
 
-func (s *Service) readQuota(ctx context.Context, issue int, now time.Time, pendingAsked *time.Time) (AccountQuota, error) {
-	quota := AccountQuota{Scope: strings.Join(s.cfg.Scope, ","), Source: "calibrate", CheckedAt: &now}
-	cutoff := now.Add(-s.cfg.CalibrationTTL)
-	keepAfter := now.Add(-2 * s.cfg.CalibrationTTL)
+// readQuota reads the account quota off the calibration thread, adopting a reply
+// that is still inside the TTL before spending a probe on a fresh one.
+//
+// It also returns when that adopted reply was written, and the zero time when
+// the reading is the answer to a probe this call posted. Only the caller's write
+// knows the TTL in force when the reading is committed, and an adopted reply
+// accepted under a longer one is exactly what a shortened TTL invalidates.
+func (s *Service) readQuota(ctx context.Context, issue int, now time.Time, pendingAsked *time.Time, cfg Config) (AccountQuota, time.Time, error) {
+	quota := AccountQuota{Scope: strings.Join(cfg.Scope, ","), Source: "calibrate", CheckedAt: &now}
+	cutoff := now.Add(-cfg.CalibrationTTL)
+	keepAfter := now.Add(-2 * cfg.CalibrationTTL)
 	if reply, ok, err := s.latestCalibrationReply(ctx, issue, cutoff); err != nil {
-		return quota, err
+		return quota, time.Time{}, err
 	} else if ok {
 		remaining, reset := dialect.ParseQuota(reply.Body, reply.UpdatedAt)
 		quota.Remaining = remaining
 		quota.BlockedUntil = reset
 		s.pruneCalibration(ctx, issue, keepAfter, 80)
-		return quota, nil
+		return quota, reply.UpdatedAt, nil
 	}
 	// A probe from a previous call is still pending and not yet stale, and no
 	// reply to it was found: keep waiting for its (possibly late) reply instead of
 	// posting another probe every cycle.
 	if pendingAsked != nil && pendingAsked.After(cutoff) {
 		quota.CalibAskedAt = pendingAsked
-		return quota, nil
+		return quota, time.Time{}, nil
 	}
 	asked, err := s.gh.PostIssueComment(ctx, s.cfg.GateRepo, issue, s.cfg.RateLimitCommand)
 	if err != nil {
@@ -2023,19 +2152,19 @@ func (s *Service) readQuota(ctx context.Context, issue int, now time.Time, pendi
 			if s.log != nil {
 				s.log.Printf("calibration probe on #%d failed: %v", issue, err)
 			}
-			return quota, err
+			return quota, time.Time{}, err
 		}
 	}
 	quota.CalibAskedAt = &asked.CreatedAt
 	for i := 0; i < 6; i++ {
 		select {
 		case <-ctx.Done():
-			return quota, ctx.Err()
+			return quota, time.Time{}, ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
 		reply, ok, err := s.latestCalibrationReply(ctx, issue, asked.CreatedAt.Add(-time.Second))
 		if err != nil {
-			return quota, err
+			return quota, time.Time{}, err
 		}
 		if ok {
 			remaining, reset := dialect.ParseQuota(reply.Body, reply.UpdatedAt)
@@ -2043,10 +2172,10 @@ func (s *Service) readQuota(ctx context.Context, issue int, now time.Time, pendi
 			quota.BlockedUntil = reset
 			quota.CalibAskedAt = nil
 			s.pruneCalibration(ctx, issue, keepAfter, 80)
-			return quota, nil
+			return quota, time.Time{}, nil
 		}
 	}
-	return quota, nil
+	return quota, time.Time{}, nil
 }
 
 // pruneCalibration deletes crq's old calibration probe comments and CodeRabbit's
@@ -2185,7 +2314,7 @@ func (s *Service) sync(ctx context.Context, state State) {
 	if s.log == nil || s.cfg.DashboardIssue <= 0 {
 		return
 	}
-	if err := s.store.SyncDashboard(ctx, state); err != nil {
+	if err := s.store.SyncDashboard(ctx, state, s.fleetCfg(state).storeConfig()); err != nil {
 		s.log.Printf("warning: dashboard sync failed: %v", err)
 	}
 }

@@ -272,6 +272,7 @@ func hostCell(writer string) string {
 // RenderDashboard renders the human-facing dashboard for the current state:
 // rounds by phase instead of v2's queue/fired/awaiting maps.
 func RenderDashboard(st State, cfg StoreConfig) string {
+	cfg = cfg.withFleet(st)
 	loc := dashboardLoc(cfg)
 	now := time.Now().UTC()
 	queue := st.Queue(now, cfg.MinInterval)
@@ -331,7 +332,7 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	} else {
 		fmt.Fprintf(&b, "| **CodeRabbit quota** | ✅ not currently blocked |\n")
 	}
-	if cfg.CoReviewers != "" {
+	if cfg.CoReviewers != "" || hasCoReviewerOverrides(st) {
 		fmt.Fprintf(&b, "| **Co-reviewers** | %s |\n", coReviewerCell(st, cfg.CoReviewers))
 	}
 	fmt.Fprintf(&b, "| **Last review fired** | %s |\n", fmtStamp(st.LastFired, loc))
@@ -426,6 +427,7 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 // count is the WHOLE queue, cooling-down rounds included: a state whose only
 // work is not yet fire-eligible is queued, never idle.
 func RenderTitle(st State, cfg StoreConfig) string {
+	cfg = cfg.withFleet(st)
 	now := time.Now().UTC()
 	queue := len(st.Queue(now, cfg.MinInterval))
 	held := len(heldRounds(st))
@@ -483,11 +485,14 @@ func cell(v string) string {
 // labelled, and the repositories that differ are named beside it.
 func coReviewerCell(st State, fleet string) string {
 	overrides := make([]string, 0, len(st.Repos))
-	for repo := range st.Repos {
+	for repo, settings := range st.Repos {
+		if !settings.SetCoBots {
+			continue
+		}
 		overrides = append(overrides, repo)
 	}
 	if len(overrides) == 0 {
-		return fleet + " _(fleet default)_"
+		return dash(fleet) + " _(fleet default)_"
 	}
 	sort.Strings(overrides)
 	// Named, not just counted: "3 repositories differ" sends the reader to the
@@ -498,13 +503,22 @@ func coReviewerCell(st State, fleet string) string {
 	if len(listed) > show {
 		listed, suffix = listed[:show], fmt.Sprintf(" +%d more", len(overrides)-show)
 	}
-	return fmt.Sprintf("%s _(fleet default; %s override%s)_", fleet,
+	return fmt.Sprintf("%s _(fleet default; %s override%s)_", dash(fleet),
 		strings.Join(listed, ", ")+suffix, plural(len(overrides)))
+}
+
+func hasCoReviewerOverrides(st State) bool {
+	for _, settings := range st.Repos {
+		if settings.SetCoBots {
+			return true
+		}
+	}
+	return false
 }
 
 func plural(n int) string {
 	if n == 1 {
-		return "s"
+		return ""
 	}
-	return ""
+	return "s"
 }

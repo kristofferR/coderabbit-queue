@@ -174,11 +174,11 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 // settleUntil is when a convergence verdict may be trusted: the newest review
 // plus the configured quiet period. Nil when settling is disabled or nothing has
 // been observed to settle from.
-func (s *Service) settleUntil(feedback FeedbackReport) *time.Time {
-	if s.cfg.SettleWindow <= 0 || feedback.LastEvidenceAt.IsZero() {
+func settleUntil(feedback FeedbackReport, window time.Duration) *time.Time {
+	if window <= 0 || feedback.LastEvidenceAt.IsZero() {
 		return nil
 	}
-	at := feedback.LastEvidenceAt.Add(s.cfg.SettleWindow).UTC()
+	at := feedback.LastEvidenceAt.Add(window).UTC()
 	return &at
 }
 
@@ -260,7 +260,7 @@ func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextR
 		Deferred:      feedback.CodeRabbitDeferred,
 		DeferredUntil: feedback.DeferredUntil,
 		MinDelay:      s.cfg.PollInterval,
-		SettleUntil:   s.settleUntil(feedback),
+		SettleUntil:   settleUntil(feedback, feedback.config.SettleWindow),
 	}
 	// Only a round that still tracks THIS head may shape the verdict. A stale
 	// fired/reviewing round carries its own phase and deadline, and an elapsed

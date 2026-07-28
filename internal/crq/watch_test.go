@@ -689,7 +689,7 @@ type dashboardCountingStore struct {
 	syncs []State
 }
 
-func (s *dashboardCountingStore) SyncDashboard(_ context.Context, state State) error {
+func (s *dashboardCountingStore) SyncDashboard(_ context.Context, state State, _ StoreConfig) error {
 	s.syncs = append(s.syncs, cloneState(state))
 	return nil
 }
@@ -798,6 +798,35 @@ func TestClaimDispatchRechecksRepositoryAutofixSwitch(t *testing.T) {
 	}
 	if !byDesign {
 		t.Errorf("autofix refusal %q counted as a dispatcher failure", why)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(report.Repo, report.PR); round != nil && round.Dispatch != nil {
+		t.Errorf("refused claim mutated the round: %+v", round)
+	}
+}
+
+func TestClaimDispatchRechecksFleetExclusion(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	report := NextReport{
+		Repo: "owner/thing", PR: 12, Head: "aaaaaaaa1", Action: "fix",
+		Findings: []dialect.Finding{{ID: "f1", Commit: "aaaaaaaa1"}},
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("exclude", report.Repo)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, why, byDesign := svc.claimDispatch(ctx, report, "tok", 3)
+	if ok || !byDesign || !strings.Contains(why, "excluded") {
+		t.Fatalf("claim = %v, %q, %v; want a fleet-exclusion refusal", ok, why, byDesign)
 	}
 	st, _, err := store.Load(ctx)
 	if err != nil {
@@ -1066,14 +1095,20 @@ func dispatchOn() *bool {
 func TestWatchHonoursTheExcludedRepositories(t *testing.T) {
 	cfg := firingConfig()
 	cfg.AllowRepos = map[string]bool{"owner/kept": true, "owner/gone": true}
-	cfg.ExcludeRepos = map[string]bool{"owner/gone": true}
 	gh := newFakeGitHub()
 	for _, repo := range []string{"owner/kept", "owner/gone"} {
 		var pull ghapi.Pull
 		pull.State, pull.Number, pull.Head.SHA = "open", 1, "aaaaaaaa1"
 		gh.pulls[fakeKey(repo, 1)] = pull
 	}
-	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.SetFleetValue("exclude", "owner/gone")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
 
 	var seen []string
 	if err := svc.watchPass(context.Background(), WatchOptions{}, newDispatchPool(0),
@@ -1087,5 +1122,154 @@ func TestWatchHonoursTheExcludedRepositories(t *testing.T) {
 	}
 	if len(seen) == 0 {
 		t.Error("excluding one repository stopped the rest being watched")
+	}
+}
+
+// loadHookedStore runs a hook once, immediately AFTER the first Load returns —
+// the window between a pass reading the fleet policy and acting on the
+// candidates it collected under it.
+type loadHookedStore struct {
+	StateStore
+	hook func()
+}
+
+func (l *loadHookedStore) Load(ctx context.Context) (State, Revision, error) {
+	st, rev, err := l.StateStore.Load(ctx)
+	if l.hook != nil {
+		hook := l.hook
+		l.hook = nil
+		hook()
+	}
+	return st, rev, err
+}
+
+// A fleet-wide scan is long, and `Next` is a mutating oracle that does not
+// enforce the body marker itself. Reusing the policy read at the top of the
+// pass therefore spent a metered review on every candidate still to come after
+// the fleet opted them out.
+func TestWatchRereadsTheSkipMarkerBeforeEachCandidate(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/repo": true}
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", 1, "aaaaaaaa1"
+	pull.Body = "Tiny change.\n\n<!-- fleet-marker -->"
+	gh.pulls[fakeKey("owner/repo", 1)] = pull
+
+	store := NewMemoryStore(cfg)
+	hooked := &loadHookedStore{StateStore: store}
+	svc := NewService(cfg, gh, hooked, nil)
+	hooked.hook = func() {
+		if err := svc.SetFleetConfig(ctx, "skip-marker", "<!-- fleet-marker -->"); err != nil {
+			t.Error(err)
+		}
+	}
+
+	var seen []WatchEvent
+	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0),
+		func(e WatchEvent) error { seen = append(seen, e); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 || seen[0].Action != "skipped" {
+		t.Fatalf("events = %+v, want the marker adopted mid-pass to skip the candidate", seen)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("owner/repo", 1); round != nil {
+		t.Fatalf("round = %+v, want an opted-out PR never queued", round)
+	}
+}
+
+// The candidates are gathered under the policy the pass started with, and `Next`
+// treats its target as a manual request — so a repository the fleet dropped
+// mid-pass still had its PRs enqueued and reviewed by the pass that was already
+// running, in a repository crq no longer watches.
+func TestWatchRereadsTheRepositoryListBeforeEachCandidate(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/repo": true}
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", 1, "aaaaaaaa1"
+	gh.pulls[fakeKey("owner/repo", 1)] = pull
+
+	store := NewMemoryStore(cfg)
+	hooked := &loadHookedStore{StateStore: store}
+	svc := NewService(cfg, gh, hooked, nil)
+	hooked.hook = func() {
+		if err := svc.SetFleetConfig(ctx, "repos", "owner/other"); err != nil {
+			t.Error(err)
+		}
+	}
+
+	var seen []WatchEvent
+	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0),
+		func(e WatchEvent) error { seen = append(seen, e); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 0 {
+		t.Fatalf("events = %+v, want no work in a repository the fleet dropped mid-pass", seen)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("owner/repo", 1); round != nil {
+		t.Fatalf("round = %+v, want an unwatched repository never queued", round)
+	}
+}
+
+// Emptying the list is the same removal. `crq watch` has no scope fallback — a
+// pass with no repositories of its own refuses to run at all — so an emptied
+// list left the candidates of the pass already running as the only repositories
+// crq would ever act on, each one no longer covered by the live policy.
+func TestWatchDropsCandidatesWhenTheRepositoryListIsEmptied(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/repo": true}
+	gh := newFakeGitHub()
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", 1, "aaaaaaaa1"
+	gh.pulls[fakeKey("owner/repo", 1)] = pull
+
+	store := NewMemoryStore(cfg)
+	hooked := &loadHookedStore{StateStore: store}
+	svc := NewService(cfg, gh, hooked, nil)
+	hooked.hook = func() {
+		if err := svc.SetFleetConfig(ctx, "repos", ""); err != nil {
+			t.Error(err)
+		}
+	}
+
+	var seen []WatchEvent
+	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0),
+		func(e WatchEvent) error { seen = append(seen, e); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 0 {
+		t.Fatalf("events = %+v, want no work once the fleet's list is emptied mid-pass", seen)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("owner/repo", 1); round != nil {
+		t.Fatalf("round = %+v, want an unwatched repository never queued", round)
+	}
+}
+
+// A repository named on the command line is the operator's own request and
+// outranks the fleet's list, emptied or not — only the exclusion overrides it.
+func TestWatchesRepoHonoursExplicitTargetsAndExclusion(t *testing.T) {
+	empty := Config{}
+	if !watchesRepo(empty, []string{"owner/repo"}, "owner/repo") {
+		t.Error("an explicitly requested repository must stay watched with no fleet list")
+	}
+	excluded := Config{ExcludeRepos: map[string]bool{"owner/repo": true}}
+	if watchesRepo(excluded, []string{"owner/repo"}, "owner/repo") {
+		t.Error("exclusion outranks an explicit target")
 	}
 }

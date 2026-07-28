@@ -81,13 +81,13 @@ type Revision struct {
 type StateStore interface {
 	Load(context.Context) (State, Revision, error)
 	Update(context.Context, func(*State) error) (State, error)
-	SyncDashboard(context.Context, State) error
+	SyncDashboard(context.Context, State, StoreConfig) error
 }
 
-// GitStateStore persists v4 state as state.json in a git ref, with the same
-// compare-and-swap mechanism as v3 (12 retries on UpdateRef 409/422).
+// GitStateStore persists v5 state as state.json in a git ref, with the same
+// compare-and-swap mechanism as v4 (12 retries on UpdateRef 409/422).
 //
-// V3 is migrated in place; still older payloads are discarded because crq is
+// V4 is migrated in place; still older payloads are discarded because crq is
 // pre-release and they describe a world this binary cannot act on. A NEWER one
 // is refused. The fleet runs mixed binary versions during a rolling deploy, so
 // reinitializing there would mean the first old binary to wake up erases every
@@ -98,6 +98,15 @@ type GitStateStore struct {
 	gh  *gh.GitHub
 	log Logger
 
+	// renderCfg resolves the configuration a dashboard render should use for a
+	// given state, defaulting to this process's own. crq replaces it with one
+	// that applies fleet policy: dashboard.md is rewritten on EVERY state
+	// commit, so rendering it from startup configuration would have each host
+	// write its own reviewer set into the shared file — flapping between
+	// machines, and disagreeing with the gate issue, which SyncDashboard already
+	// renders from the effective policy.
+	renderCfg func(State) StoreConfig
+
 	// syncMu serializes the read-then-write in SyncDashboard, so concurrent
 	// syncs cannot both see a stale gate issue and both write it.
 	syncMu sync.Mutex
@@ -105,6 +114,21 @@ type GitStateStore struct {
 
 func NewGitStateStore(cfg StoreConfig, client *gh.GitHub, log Logger) *GitStateStore {
 	return &GitStateStore{cfg: cfg, gh: client, log: log}
+}
+
+// SetRenderConfig installs the resolver compareAndSwap renders dashboard.md
+// with. It is set once, before the store is used: the state package holds no bot
+// registry, so only crq can turn recorded fleet policy into a rendering
+// configuration.
+func (s *GitStateStore) SetRenderConfig(resolve func(State) StoreConfig) {
+	s.renderCfg = resolve
+}
+
+func (s *GitStateStore) renderConfig(st State) StoreConfig {
+	if s.renderCfg == nil {
+		return s.cfg
+	}
+	return s.renderCfg(st)
 }
 
 func (s *GitStateStore) logf(format string, args ...any) {
@@ -149,9 +173,9 @@ func (s *GitStateStore) Load(ctx context.Context) (State, Revision, error) {
 	if err != nil {
 		return State{}, Revision{}, err
 	}
-	// Peek at the schema version before a full decode. V3 is the one supported
-	// migration: v4 intentionally fences v3 pumping clients from administrative
-	// holds, while preserving every live v3 round during the rollout.
+	// Peek at the schema version before a full decode. V4 is the one supported
+	// migration: v5 intentionally fences v4 pumping clients from fleet policy,
+	// while preserving every live v4 round during the rollout.
 	var probe struct {
 		Version int `json:"v"`
 	}
@@ -228,7 +252,7 @@ func (s *GitStateStore) Update(ctx context.Context, mutate func(*State) error) (
 }
 
 func (s *GitStateStore) compareAndSwap(ctx context.Context, st *State, rev Revision) error {
-	dashboard := RenderDashboard(*st, s.cfg)
+	dashboard := RenderDashboard(*st, s.renderConfig(*st))
 	st.DashboardSHA = hashString(dashboard)
 	stateJSON, err := json.MarshalIndent(*st, "", "  ")
 	if err != nil {
@@ -290,15 +314,15 @@ func (s *GitStateStore) compareAndSwap(ctx context.Context, st *State, rev Revis
 //
 // A read failure is never fatal: fall through and PATCH, which is the old
 // behavior.
-func (s *GitStateStore) SyncDashboard(ctx context.Context, st State) error {
+func (s *GitStateStore) SyncDashboard(ctx context.Context, st State, renderCfg StoreConfig) error {
 	if err := s.cfg.requireDashboard(); err != nil {
 		return err
 	}
-	body, err := IssueBody(st, s.cfg)
+	body, err := IssueBody(st, renderCfg)
 	if err != nil {
 		return err
 	}
-	title := RenderTitle(st, s.cfg)
+	title := RenderTitle(st, renderCfg)
 
 	// Held across read-then-write so two concurrent syncs cannot both observe a
 	// stale issue and both write it.
@@ -356,7 +380,7 @@ func (m *MemoryStore) Update(_ context.Context, mutate func(*State) error) (Stat
 	return st, nil
 }
 
-func (m *MemoryStore) SyncDashboard(context.Context, State) error { return nil }
+func (m *MemoryStore) SyncDashboard(context.Context, State, StoreConfig) error { return nil }
 
 // Clone deep-copies a State via its JSON representation, so a mutate closure
 // can never scribble on the store's retained copy.

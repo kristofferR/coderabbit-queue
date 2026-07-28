@@ -16,6 +16,7 @@ import (
 // Everything here is already computed for the dashboard; this is a second
 // rendering of the same reduced state, not new logic.
 func StatusLine(st State, cfg StoreConfig) string {
+	cfg = cfg.withFleet(st)
 	now := time.Now().UTC()
 	queue := st.Queue(now, cfg.MinInterval)
 	inFlight := inFlightRounds(st)

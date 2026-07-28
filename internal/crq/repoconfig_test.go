@@ -67,6 +67,38 @@ func TestRepoOverrideReachesTheDecision(t *testing.T) {
 	}
 }
 
+func TestClearReviewersComparesAgainstFleetPolicy(t *testing.T) {
+	ctx := context.Background()
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_COBOTS":        "codex",
+		"CRQ_REQUIRED_BOTS": "coderabbitai[bot]",
+	})
+	repo, pr := "owner/repo", 19
+	now := time.Now().UTC()
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetFleetValue("required-bots", "coderabbitai[bot],"+dialect.CodexBotLogin)
+		st.SetRepoOverride(repo, RepoReviewers{
+			Required:    []string{"coderabbitai[bot]"},
+			SetRequired: true,
+			UpdatedAt:   &now,
+		})
+		st.PutRound(Round{Repo: repo, PR: pr, Head: "abcdef123", Phase: PhaseCompleted})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewService(cfg, gh, store, nil).ClearReviewers(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ := store.Load(ctx)
+	if round := st.Round(repo, pr); round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("round = %+v, want clearing to the fleet reviewer set to reopen it", round)
+	}
+}
+
 // The override must be able to ADD a reviewer, not only subtract one. Resolving
 // choices against the fleet's enabled list made "which bots for which project"
 // a one-way filter: with CRQ_COBOTS=codex, asking for bugbot was rejected as
@@ -662,7 +694,7 @@ func TestAReopenedPRPicksUpRequirementsChangedWhileItWasClosed(t *testing.T) {
 	if !need || gotHead != head {
 		t.Fatalf("needsReview = %v %q, want the reopened PR enqueued at %q", need, gotHead, head)
 	}
-	if err := svc.enqueueBatch(ctx, []queueCandidate{{Repo: repo, PR: auto, Head: gotHead}}); err != nil {
+	if err := svc.enqueueBatch(ctx, []queueCandidate{{Repo: repo, PR: auto, Head: gotHead}}, svc.fleetCfg(st).FleetRevision); err != nil {
 		t.Fatal(err)
 	}
 
@@ -833,6 +865,57 @@ func TestCompletionIsRevalidatedInsideItsWrite(t *testing.T) {
 	}
 }
 
+// A retry is policy-dependent too: its RetryAt and account block are computed
+// from the fleet's rate-limit fallback, so a widened window landing in the same
+// decision/write gap would be persisted at the old, earlier deadline — and the
+// account unblocked in time for another metered review the fleet meant to defer.
+func TestRetryIsRevalidatedInsideItsWrite(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	hooked := &hookedStore{StateStore: store}
+	svc := NewService(cfg, newFakeGitHub(), hooked, nil)
+	now := time.Now().UTC()
+	repo, pr, head := "o/r", 14, "aaaaaaaa1"
+	seedRound(t, store, cfg, repo, pr, head, PhaseFired, now, 22)
+
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := svc.cfgFor(st, repo)
+	hooked.hook = func() {
+		if _, err := store.Update(ctx, func(st *State) error {
+			st.SetFleetValue("rate-limit-fallback", "2h")
+			return nil
+		}); err != nil {
+			t.Error(err)
+		}
+	}
+	until := now.Add(15 * time.Minute)
+	retry := engine.Transition{
+		Outcome: engine.OutRetry,
+		Reason:  dialect.ReasonRateLimited,
+		RetryAt: until,
+		Blocked: &engine.AccountBlock{Until: until, CommentID: 99, CommentUpdated: now},
+	}
+	if _, err := hooked.Update(ctx, func(st *State) error {
+		return svc.applyTransition(st, st.Round(repo, pr), retry, now, stale)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := roundPhase(t, store, repo, pr); got != PhaseFired {
+		t.Fatalf("phase = %s, want the stale retry dropped so it is recomputed under the fleet's window", got)
+	}
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Account.BlockedUntil != nil {
+		t.Fatalf("the block computed from the old window must not be recorded, got %v", st.Account.BlockedUntil)
+	}
+}
+
 // Feedback and its completion write have the same decision/write window as
 // Progress. A reviewer override landing in that window must leave the in-flight
 // round open so the next observation can ask the newly required reviewer.
@@ -911,5 +994,76 @@ func TestSelfHealTriggerIsRevalidatedInsideItsClaim(t *testing.T) {
 	}
 	if c := st.Round(repo, pr).Co(dialect.CodexBotLogin); c.ClaimedAt != nil || c.CommandID != 0 {
 		t.Errorf("codex bookkeeping = %+v, want no claim for a removed reviewer", c)
+	}
+}
+
+func TestSelfHealDoesNotTriggerForFleetExcludedRepository(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RequiredBots = []string{cfg.Bot, dialect.CodexBotLogin}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
+	cfg.ExcludeRepos = map[string]bool{"o/r": true}
+	store := NewMemoryStore(cfg)
+	gh := newFakeGitHub()
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	seedRound(t, store, cfg, "o/r", 13, "aaaaaaaa1", PhaseFired, now, 22)
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	svc.selfHealCoReviewers(ctx, cfg, *st.Round("o/r", 13), engine.Observation{
+		Head: "aaaaaaaa1", Open: true,
+	}, now)
+
+	if len(gh.posted) != 0 {
+		t.Fatalf("excluded repository received a co-review trigger: %v", gh.posted)
+	}
+	st, _, err = store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := st.Round("o/r", 13).Co(dialect.CodexBotLogin); c.ClaimedAt != nil || c.CommandID != 0 {
+		t.Fatalf("excluded repository retained a co-review claim: %+v", c)
+	}
+}
+
+// The co-review wait is the one fire verdict with no later reconciliation to
+// undo it: the round is still queued when a reviewer change lands, requeuing a
+// queued round is a no-op, and the stale decision then parks it in reviewing
+// with commands adopted for the reviewer set that no longer gates it.
+func TestCoReviewWaitIsRevalidatedInsideItsWrite(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = codexCoBots(nil)
+	store := NewMemoryStore(cfg)
+	hooked := &hookedStore{StateStore: store}
+	svc := NewService(cfg, newFakeGitHub(), hooked, nil)
+	now := time.Now().UTC()
+	repo, pr, head := "o/r", 12, "aaaaaaaa2"
+	seedRound(t, store, cfg, repo, pr, head, PhaseQueued, now, 0)
+
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := *st.Round(repo, pr)
+	hooked.hook = func() {
+		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+			t.Error(err)
+		}
+	}
+	wait := engine.FireDecision{Verdict: engine.FireCoReviewWait, Reason: "awaiting co-review"}
+	obs := engine.Observation{Open: true, Head: head, HeadAt: now.Add(-time.Minute)}
+	result, err := svc.applyFire(ctx, svc.cfgFor(st, repo), round, obs, wait, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != "lost_race" {
+		t.Errorf("action = %q, want the wait voided by the override that beat its write", result.Action)
+	}
+	if got := roundPhase(t, store, repo, pr); got != PhaseQueued {
+		t.Fatalf("phase = %s, want the round left queued so the new reviewer set decides it", got)
 	}
 }

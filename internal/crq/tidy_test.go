@@ -3,6 +3,7 @@ package crq
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -362,6 +363,59 @@ func TestTidyKeepsATriggerEditedDuringThePass(t *testing.T) {
 	}
 	if got := st.TidiedCommands[QueueKey(repo, pr)]; len(got) != 0 {
 		t.Fatalf("kept comment retained a deletion tombstone: %v", got)
+	}
+}
+
+// The command crq POSTED is the fleet's, so that is the one a trigger comment
+// has to be compared against. Reading this host's own startup configuration
+// instead found no such command, read every spent co-reviewer trigger as edited
+// by hand, and kept them on the PR for ever.
+func TestTidyRecognisesATriggerTheFleetConfigured(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+	repo, pr := "o/r", 27
+	const command = "bugbot run please"
+
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = "bbbbbbbb2"
+	gh.pulls[fakeKey(repo, pr)] = pull
+	gh.commits["bbbbbbbb2"] = commitAt(now.Add(-10 * time.Minute))
+
+	c := ghapi.IssueComment{ID: 100, Body: command,
+		CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now.Add(-2 * time.Hour)}
+	c.User.Login = "kristofferR"
+	gh.comments[fakeKey(repo, pr)] = []ghapi.IssueComment{c}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		// The fleet enables a co-reviewer this host does not run, with a command
+		// only the fleet knows.
+		st.SetFleetValue("cobots", "bugbot")
+		st.SetFleetValue("cobot-bugbot-cmd", command)
+		return completedRound(st, repo, pr, now, func(r *Round) error {
+			if err := r.Fire(0, now.Add(-2*time.Hour)); err != nil {
+				return err
+			}
+			r.RecordPosted("cursor[bot]", c.ID, c.CreatedAt)
+			return nil
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.Tidy(ctx, repo, pr, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kept := range result.Kept {
+		if strings.Contains(kept, "someone edited it") {
+			t.Fatalf("the fleet's own trigger read as an edited comment: %v", result.Kept)
+		}
 	}
 }
 
