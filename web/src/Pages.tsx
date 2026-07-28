@@ -299,6 +299,13 @@ function HeldHere({
   );
 }
 
+// Set-up bots first, then unproven, then ones crq has asked and never heard
+// from — worst last, because that is the order in which they are worth
+// considering.
+function rank(b: BotCard) {
+  return b.status === "working" ? 0 : b.status === "silent" ? 2 : 1;
+}
+
 /** Runs and Required are separate ideas, so they get separate toggles. */
 function ReviewerEditor({
   repo,
@@ -374,7 +381,9 @@ function ReviewerEditor({
         <p className="mb-2.5 text-[12.5px] text-faint">
           <b>Runs</b> — the bot reviews this repo. <b>Required</b> — convergence waits for it.
           Requiring a bot turns Runs on; the required set cannot be empty. Turning the
-          primary off means this repo never spends the shared review allowance.
+          primary off means this repo never spends the shared review allowance. A bot crq has
+          never seen work here is marked — enabling one is allowed, since a bot cannot prove
+          itself until it is asked, but an unset-up one just collects trigger comments.
         </p>
         <table className="w-full border-collapse">
           <thead>
@@ -386,12 +395,33 @@ function ReviewerEditor({
             </tr>
           </thead>
           <tbody>
-            {bots.map((b) => (
-              <tr key={b.login}>
+            {/* Bots crq has actually seen work here come first and are the
+                real options. One it has never seen is offered too — a fresh
+                bot cannot produce evidence until it is enabled, so hiding it
+                would make the first one impossible to turn on — but it is
+                marked, because enabling a bot nobody has an account for means
+                crq posts a trigger on every round and waits for an answer that
+                never comes. */}
+            {[...bots].sort((a, b) => rank(a) - rank(b)).map((b) => (
+              <tr key={b.login} className={b.status === "working" ? "" : "opacity-75"}>
                 <Td>
                   <span className="flex items-center gap-2.5">
                     <BotIcon login={b.login} name={b.name} size={20} />
                     <span className="font-[550]">{b.name}</span>
+                    {b.status !== "working" && (
+                      <a
+                        href="#/bots"
+                        title={
+                          b.status === "silent"
+                            ? "crq has asked it and never seen an answer — most likely not set up"
+                            : "crq has never seen this bot work here"
+                        }
+                      >
+                        <Pill tone={b.status === "silent" ? "bad" : "mut"}>
+                          {b.status === "silent" ? "never answered" : "not set up?"}
+                        </Pill>
+                      </a>
+                    )}
                   </span>
                 </Td>
                 <Td className="text-center">
@@ -1023,6 +1053,14 @@ function FleetTools({ fleet, now }: { fleet: HostTools[]; now: number }) {
           </tbody>
         </table>
         <p className="pt-2 text-[11.5px] text-faint">
+          <b>These are command-line tools, not the review bots.</b> The Codex and CodeRabbit
+          reviewers are GitHub apps and need nothing installed here — a host missing the{" "}
+          <code>codex</code> CLI still gets Codex reviews. Whether a REVIEWER works is on the{" "}
+          <a href="#/bots" className="text-acc hover:underline">
+            Bots
+          </a>{" "}
+          page. What these decide is whether this host can run a fix session or a local preflight.
+          <br />
           Each host probes the PATH its own crq process runs with. A daemon reports the SERVICE's
           PATH, which is the one that decides whether a fix session can start — a tool installed for
           your shell and missing here is exactly the failure that looks fine until it is needed. Fix

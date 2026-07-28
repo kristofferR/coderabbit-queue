@@ -312,10 +312,10 @@ func (s *Service) fleetImpact(st State, next FleetDefaults) FleetImpact {
 		wasCfg, isCfg := s.cfgFor(st, repo), s.cfgFor(after, repo)
 		wasCo := wasCfg.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
 		isCo := isCfg.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
-		// reopenForChangedReviewers requeues on EITHER list changing, so the
-		// count has to ask the same question or it under-reports the very
-		// consequence it exists to warn about.
-		if sameLogins(wasCfg.RequiredBots, isCfg.RequiredBots) && sameLogins(wasCo, isCo) {
+		// The same question reopenForChangedReviewers asks, or the preview
+		// warns about work that will not happen: only ADDING a reviewer
+		// invalidates a finished round, so a narrowing reopens nothing.
+		if !addedReviewers(wasCfg, isCfg, wasCo, isCo) {
 			continue
 		}
 		for _, r := range st.Rounds {

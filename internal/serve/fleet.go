@@ -761,13 +761,16 @@ func LocalTools() []Tool {
 		{"git", "repository mirrors and worktrees for fix sessions", true, nil},
 		{"gh", "GitHub CLI — where the token comes from", true,
 			[]string{"gh auth login", "crq doctor"}},
-		{"claude", "default autofix agent", false,
+		{"claude", "fix agent — writes the fixes. Not a reviewer.", false,
 			[]string{"npm i -g @anthropic-ai/claude-code", "crq autofix install   # point the service at it"}},
-		{"codex", "alternative autofix agent", false,
+		// Named the same as the review bot and completely unrelated to it: the
+		// Codex REVIEWER is a GitHub app and needs nothing installed here. A
+		// host without this CLI reviews perfectly well.
+		{"codex", "fix agent — unrelated to the Codex reviewer, which is a GitHub app", false,
 			[]string{"npm i -g @openai/codex", "crq autofix install --agent \"$(command -v codex)\""}},
-		{"coderabbit", "local preflight review before pushing", false,
+		{"coderabbit", "local preflight before pushing — unrelated to the CodeRabbit reviewer", false,
 			[]string{"curl -fsSL https://cli.coderabbit.ai/install.sh | sh"}},
-		{"macroscope", "second local opinion before pushing", false,
+		{"macroscope", "local preflight before pushing — unrelated to the Macroscope reviewer", false,
 			[]string{"see https://docs.macroscope.com for the CLI"}},
 	}
 	out := make([]Tool, 0, len(want))

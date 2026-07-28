@@ -518,7 +518,13 @@ func parseAllCoBots(env map[string]string) []CoBotConfig {
 func parseCoBots(env map[string]string, requiredBots []string) ([]CoBotConfig, error) {
 	enabled := map[string]bool{}
 	var unknown []string
-	for _, item := range splitList(stringEnvAllowEmpty(env, "CRQ_COBOTS", "codex,bugbot,macroscope")) {
+	// Default to NONE. Enabling every registry co-reviewer meant a fresh install
+	// asked bots the operator had never signed up for — crq posted a trigger
+	// comment on every round, waited out a grace period, and nothing ever
+	// answered. A co-reviewer is opt-in, from the Bots page or CRQ_COBOTS;
+	// anything named in CRQ_REQUIRED_BOTS is still enabled, since requiring a
+	// reviewer crq never asks would hang the round.
+	for _, item := range splitList(stringEnvAllowEmpty(env, "CRQ_COBOTS", "")) {
 		co, ok := dialect.CoReviewerByName(item)
 		if !ok {
 			// Refuse rather than skip: silently dropping a typo disables the

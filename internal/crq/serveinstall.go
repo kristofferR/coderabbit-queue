@@ -13,8 +13,10 @@ import (
 	"strings"
 )
 
-// ServeInstall is the plan for keeping the dashboard running across a logout
-// and a reboot.
+// ServeInstall is the plan for keeping a crq service running across a logout
+// and a reboot. It covers both the dashboard and the review daemon: they are
+// the same shape of thing — one long-running crq subcommand — and the only
+// differences are the unit name and the arguments.
 //
 // Deliberately much thinner than the autofix install beside it. That one bakes
 // the whole fleet configuration into the unit's environment because a fix
@@ -23,6 +25,8 @@ import (
 // unit carries a path and nothing else — and editing ~/.config/crq/env then
 // changes the dashboard by restarting it, not by reinstalling it.
 type ServeInstall struct {
+	// Service is the crq subcommand this unit runs: "serve" or "autoreview".
+	Service  string `json:"service"`
 	Platform string `json:"platform"`
 	Unit     string `json:"unit"`
 	LogDir   string `json:"log_dir"`
@@ -39,6 +43,21 @@ type ServeInstall struct {
 
 // InstallServe writes the service definition for `crq serve` and starts it.
 func (s *Service) InstallServe(ctx context.Context, addr string, readOnly, dryRun bool) (ServeInstall, error) {
+	return s.installUnit(ctx, "serve", addr, readOnly, dryRun)
+}
+
+// InstallAutoReview writes the service definition for `crq autoreview` and
+// starts it — the daemon that finds pull requests needing a review and fires
+// the queue.
+//
+// Which host runs it is a real choice: it takes the leader lease, so the fleet
+// only fires while that machine is awake. A laptop that sleeps is the wrong
+// host for it, and nothing about the queue says so until reviews quietly stop.
+func (s *Service) InstallAutoReview(ctx context.Context, dryRun bool) (ServeInstall, error) {
+	return s.installUnit(ctx, "autoreview", "", false, dryRun)
+}
+
+func (s *Service) installUnit(ctx context.Context, service, addr string, readOnly, dryRun bool) (ServeInstall, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ServeInstall{}, fmt.Errorf("resolving home directory: %w", err)
@@ -50,7 +69,7 @@ func (s *Service) InstallServe(ctx context.Context, addr string, readOnly, dryRu
 	if resolved, err := filepath.EvalSymlinks(self); err == nil {
 		self = resolved
 	}
-	if strings.TrimSpace(addr) == "" {
+	if service == "serve" && strings.TrimSpace(addr) == "" {
 		addr = "127.0.0.1:7777"
 	}
 
@@ -58,6 +77,7 @@ func (s *Service) InstallServe(ctx context.Context, addr string, readOnly, dryRu
 	// opened, so the directory has to exist before the unit does.
 	logDir := filepath.Join(home, ".local", "state", "crq")
 	plan := ServeInstall{
+		Service:  service,
 		Platform: runtime.GOOS,
 		LogDir:   logDir,
 		Binary:   self,
@@ -68,21 +88,21 @@ func (s *Service) InstallServe(ctx context.Context, addr string, readOnly, dryRu
 	}
 	switch runtime.GOOS {
 	case "darwin":
-		plan.Unit = filepath.Join(home, "Library", "LaunchAgents", "no.kristofferr.crq-serve.plist")
+		plan.Unit = filepath.Join(home, "Library", "LaunchAgents", "no.kristofferr.crq-"+service+".plist")
 		plan.Commands = []string{
-			"launchctl bootout gui/$(id -u)/no.kristofferr.crq-serve",
+			"launchctl bootout gui/$(id -u)/no.kristofferr.crq-" + service,
 			"launchctl bootstrap gui/$(id -u) " + plan.Unit,
 		}
 	default:
-		plan.Unit = filepath.Join(home, ".config", "systemd", "user", "crq-serve.service")
+		plan.Unit = filepath.Join(home, ".config", "systemd", "user", "crq-"+service+".service")
 		plan.Commands = []string{
 			"loginctl enable-linger " + os.Getenv("USER"),
 			"systemctl --user daemon-reload",
-			"systemctl --user enable crq-serve",
+			"systemctl --user enable crq-" + service,
 			// restart rather than "enable --now", which does nothing to a unit
 			// that is already running: reinstalling on a different address would
 			// otherwise report success and keep serving the old one.
-			"systemctl --user restart crq-serve",
+			"systemctl --user restart crq-" + service,
 		}
 	}
 	if dryRun {
@@ -130,25 +150,36 @@ func serveCommandArgs(plan ServeInstall) [][]string {
 	if plan.Platform == "darwin" {
 		domain := "gui/" + currentUID()
 		return [][]string{
-			{"launchctl", "bootout", domain + "/no.kristofferr.crq-serve"},
+			{"launchctl", "bootout", domain + "/no.kristofferr.crq-" + plan.Service},
 			{"launchctl", "bootstrap", domain, plan.Unit},
 		}
 	}
 	return [][]string{
 		{"loginctl", "enable-linger", os.Getenv("USER")},
 		{"systemctl", "--user", "daemon-reload"},
-		{"systemctl", "--user", "enable", "crq-serve"},
-		{"systemctl", "--user", "restart", "crq-serve"},
+		{"systemctl", "--user", "enable", "crq-" + plan.Service},
+		{"systemctl", "--user", "restart", "crq-" + plan.Service},
 	}
 }
 
 // serveArgv is the command the service runs.
 func serveArgv(plan ServeInstall) []string {
+	if plan.Service != "serve" {
+		return []string{plan.Binary, plan.Service}
+	}
 	argv := []string{plan.Binary, "serve", "--addr", plan.Addr}
 	if plan.ReadOnly {
 		argv = append(argv, "--read-only")
 	}
 	return argv
+}
+
+// unitDescription is what the service manager and `systemctl status` show.
+func unitDescription(service string) string {
+	if service == "autoreview" {
+		return "crq autoreview (find pull requests needing a review and fire the queue)"
+	}
+	return "crq dashboard (crq serve)"
 }
 
 func serveUnitBody(plan ServeInstall) string {
@@ -180,16 +211,18 @@ func serveUnitBody(plan ServeInstall) string {
 		return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-	<key>Label</key><string>no.kristofferr.crq-serve</string>
+	<key>Label</key><string>no.kristofferr.crq-%s</string>
 	<key>ProgramArguments</key><array>%s</array>
 	<key>EnvironmentVariables</key><dict>
 %s	</dict>
 	<key>RunAtLoad</key><true/>
 	<key>KeepAlive</key><true/>
-	<key>StandardOutPath</key><string>%s/serve.log</string>
-	<key>StandardErrorPath</key><string>%s/serve.err</string>
+	<key>StandardOutPath</key><string>%s/%s.log</string>
+	<key>StandardErrorPath</key><string>%s/%s.err</string>
 </dict></plist>
-`, argv.String(), entries.String(), html.EscapeString(plan.LogDir), html.EscapeString(plan.LogDir))
+`, html.EscapeString(plan.Service), argv.String(), entries.String(),
+			html.EscapeString(plan.LogDir), html.EscapeString(plan.Service),
+			html.EscapeString(plan.LogDir), html.EscapeString(plan.Service))
 	}
 
 	var lines strings.Builder
@@ -201,7 +234,7 @@ func serveUnitBody(plan ServeInstall) string {
 		words = append(words, systemdExecWord(a))
 	}
 	return fmt.Sprintf(`[Unit]
-Description=crq dashboard (crq serve)
+Description=%s
 After=network-online.target
 
 [Service]
@@ -209,10 +242,11 @@ Type=simple
 %sExecStart=%s
 Restart=always
 RestartSec=5
-StandardOutput=append:%s/serve.log
-StandardError=append:%s/serve.err
+StandardOutput=append:%s/%s.log
+StandardError=append:%s/%s.err
 
 [Install]
 WantedBy=default.target
-`, lines.String(), strings.Join(words, " "), plan.LogDir, plan.LogDir)
+`, unitDescription(plan.Service), lines.String(), strings.Join(words, " "),
+		plan.LogDir, plan.Service, plan.LogDir, plan.Service)
 }

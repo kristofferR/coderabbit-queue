@@ -46,8 +46,15 @@ func TestLoadConfigFeedbackBotsIncludeCodexByDefault(t *testing.T) {
 	if has(cfg.RequiredBots, "chatgpt-codex-connector[bot]") {
 		t.Fatalf("Codex must not be a required (convergence-gating) bot, got %#v", cfg.RequiredBots)
 	}
-	if !has(cfg.FeedbackBots, "coderabbitai[bot]") || !has(cfg.FeedbackBots, "chatgpt-codex-connector[bot]") {
-		t.Fatalf("feedback bots should include CodeRabbit and Codex by default, got %#v", cfg.FeedbackBots)
+	// The primary always surfaces its findings. Codex does too once it is
+	// ENABLED — but a co-reviewer is opt-in now, so a default configuration
+	// surfaces the primary alone. Enabling every registry bot by default meant
+	// asking bots the operator had never signed up for.
+	if !has(cfg.FeedbackBots, "coderabbitai[bot]") {
+		t.Fatalf("feedback bots should include the primary, got %#v", cfg.FeedbackBots)
+	}
+	if has(cfg.FeedbackBots, "chatgpt-codex-connector[bot]") {
+		t.Fatalf("a co-reviewer nobody enabled must not surface findings, got %#v", cfg.FeedbackBots)
 	}
 }
 
@@ -302,15 +309,29 @@ func TestLoadConfigCoBotsDefaults(t *testing.T) {
 	for _, key := range []string{"CRQ_REQUIRED_BOTS", "CRQ_FEEDBACK_BOTS", "CRQ_COBOTS", "CRQ_CODEX_CMD"} {
 		t.Setenv(key, "")
 	}
-	os.Unsetenv("CRQ_COBOTS") // "" would disable all; the default is all known
+	os.Unsetenv("CRQ_COBOTS")
 	os.Unsetenv("CRQ_CODEX_CMD")
 
 	cfg, err := LoadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
+	// NONE by default. Enabling every registry co-reviewer meant a fresh
+	// install posted trigger comments for bots the operator had never signed up
+	// for, waited out their grace periods, and got no answer — which looks
+	// exactly like a bot that is set up and slow.
+	if len(cfg.CoBots) != 0 {
+		t.Fatalf("default CoBots = %#v, want none: a co-reviewer is opt-in", cfg.CoBots)
+	}
+
+	// Naming one enables it, with the registry's own defaults.
+	t.Setenv("CRQ_COBOTS", "codex,bugbot,macroscope")
+	cfg, err = LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(cfg.CoBots) != 3 {
-		t.Fatalf("default CoBots = %#v, want codex+bugbot+macroscope", cfg.CoBots)
+		t.Fatalf("CoBots = %#v, want the three that were named", cfg.CoBots)
 	}
 	codex, _ := coBotByName(cfg, "codex")
 	if codex.Trigger != engine.TriggerNever || codex.Command != "@codex review" || codex.Required {
@@ -318,6 +339,7 @@ func TestLoadConfigCoBotsDefaults(t *testing.T) {
 	}
 
 	bugbot, _ := coBotByName(cfg, "bugbot")
+
 	if bugbot.Trigger != engine.TriggerSelfHeal || bugbot.Command != "bugbot run" || bugbot.SelfHealGrace != 10*time.Minute {
 		t.Fatalf("bugbot defaults wrong: %+v", bugbot)
 	}
@@ -416,6 +438,9 @@ func TestLoadConfigRequiredBotsListingEnablesCoBot(t *testing.T) {
 func TestLoadConfigCoBotCmdAliasesAndOverrides(t *testing.T) {
 	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
 	t.Setenv("CRQ_REQUIRED_BOTS", "")
+	// Enabled explicitly: per-bot settings describe HOW a co-reviewer runs, not
+	// whether it does, and a co-reviewer is opt-in.
+	t.Setenv("CRQ_COBOTS", "codex,bugbot,macroscope")
 	t.Setenv("CRQ_CODEX_CMD", "@codex ship it")
 	t.Setenv("CRQ_COBOT_BUGBOT_TRIGGER", "always")
 	t.Setenv("CRQ_COBOT_MACROSCOPE_CMD", "")

@@ -461,6 +461,13 @@ func (s *Service) Pump(ctx context.Context) (PumpResult, error) {
 	if err != nil {
 		return PumpResult{}, err
 	}
+	// Record which co-reviewers have answered, from the observation this pass
+	// already paid for. Done HERE and not only on the reviewing sweep: a round
+	// that never fires — because the account is blocked, or because the primary
+	// does not run here — is observed on this path and nowhere else, so a
+	// co-reviewer could review it every time and crq would never notice. That
+	// is exactly the case that made a working Codex read as "never answered".
+	s.noteCoAnswers(ctx, cfg, *next, obs.eng, now)
 	// Record a rate-limit notice before deciding, whichever round it answered.
 	// A session's push supersedes the round that asked, and the reply used to be
 	// archived unread — so crq believed the account was free and posted the

@@ -740,6 +740,24 @@ func run(ctx context.Context, args []string) int {
 		}
 		return 0
 	case "autoreview", "auto":
+		// `crq autoreview install` makes it a service. WHICH host runs it is a
+		// real choice and not a detail: this daemon takes the leader lease, so
+		// the fleet only fires reviews while that machine is awake. A laptop
+		// that sleeps is the wrong host for it, and nothing about the queue says
+		// so — reviews simply stop arriving.
+		if len(args) > 1 && args[1] == "install" {
+			if err := cfg.RequireState(); err != nil {
+				fatal(err)
+				return 1
+			}
+			plan, ierr := service.InstallAutoReview(ctx, len(args) > 2 && args[2] == "--dry-run")
+			if ierr != nil {
+				fatal(ierr)
+				return 1
+			}
+			printJSON(plan)
+			return 0
+		}
 		fs := flag.NewFlagSet("autoreview", flag.ContinueOnError)
 		fs.SetOutput(os.Stderr)
 		once := fs.Bool("once", false, "run one pass")

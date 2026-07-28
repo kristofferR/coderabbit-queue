@@ -286,6 +286,16 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 	if sameLogins(before.RequiredBots, after.RequiredBots) && sameLogins(beforeCo, afterCo) {
 		return
 	}
+	// Only ADDING a reviewer can invalidate a finished round. A round that
+	// converged did so with the reviewers it had; taking one away leaves it
+	// converged with MORE evidence than the new configuration asks for, and
+	// re-reviewing it buys nothing.
+	//
+	// This is not a nicety. Removing two co-reviewers from a fleet default
+	// proposed reopening seventeen completed rounds — seventeen metered
+	// reviews, against a shared allowance, to reach the answer already on
+	// record. A narrowing must be free.
+	added := addedReviewers(before, after, beforeCo, afterCo)
 	for _, round := range st.Rounds {
 		if NormalizeRepo(round.Repo) != NormalizeRepo(repo) {
 			continue
@@ -300,6 +310,10 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 			}
 			continue
 		case PhaseCompleted:
+			if !added {
+				// Narrowed only: the round's answer still stands.
+				continue
+			}
 		default:
 			continue
 		}
@@ -461,4 +475,21 @@ func resolveBotList(allowed map[string]string, list []string, what string) ([]st
 		out = append(out, login)
 	}
 	return out, nil
+}
+
+// addedReviewers reports whether the new configuration asks for evidence the
+// old one did not — a newly required reviewer, or a newly enabled co-reviewer.
+// A pure removal returns false, which is what makes narrowing free.
+func addedReviewers(before, after Config, beforeCo, afterCo []string) bool {
+	for _, login := range after.RequiredBots {
+		if !containsBot(before.RequiredBots, login) {
+			return true
+		}
+	}
+	for _, login := range afterCo {
+		if !containsBot(beforeCo, login) {
+			return true
+		}
+	}
+	return false
 }
