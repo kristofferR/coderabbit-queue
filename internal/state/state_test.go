@@ -474,4 +474,15 @@ func TestMoveToFrontReordersAndCanBeRepeated(t *testing.T) {
 	if st.MoveToFront("o/r", 99) {
 		t.Fatal("MoveToFront accepted an untracked round")
 	}
+
+	reserved := st.Rounds[Key("o/r", 1)]
+	reserved.Phase = PhaseReserved
+	st.PutRound(reserved)
+	seq := reserved.Seq
+	if st.MoveToFront("o/r", 1) {
+		t.Fatal("MoveToFront accepted a reserved round and changed its identity")
+	}
+	if got := st.Round("o/r", 1); got == nil || got.Seq != seq {
+		t.Fatalf("reserved round = %+v, want sequence %d unchanged", got, seq)
+	}
 }

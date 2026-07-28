@@ -150,6 +150,9 @@ func (c *discoverCache) fill(d Discoverer, now time.Time, flight chan struct{}) 
 // dashboard: nothing else calls it, and a failure here is reported as itself
 // rather than as a broken page.
 func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
+	if !s.allowDashboardRead(w, r) {
+		return
+	}
 	if s.opts.Discoverer == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"error": "this dashboard has no repository discovery configured",
@@ -203,6 +206,9 @@ func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
 // requests becomes a dozen metered reviews on the next pass — so the dialog
 // asks before offering it, in the terms the bill arrives in.
 func (s *Server) handleEnrollPreview(w http.ResponseWriter, r *http.Request) {
+	if !s.allowDashboardRead(w, r) {
+		return
+	}
 	if s.opts.Previewer == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"error": "this dashboard cannot price an enrollment",
@@ -222,4 +228,20 @@ func (s *Server) handleEnrollPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, impact)
+}
+
+// allowDashboardRead protects GETs whose implementation spends authenticated
+// GitHub quota. They are reads to the browser, but not side-effect free for the
+// fleet: a hostile page could otherwise force refreshes without reading the
+// response and starve every queue user.
+func (s *Server) allowDashboardRead(w http.ResponseWriter, r *http.Request) bool {
+	if r.Header.Get("X-CRQ-Dashboard") != "1" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "missing dashboard header"})
+		return false
+	}
+	if err := s.addressedHere(r); err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return false
+	}
+	return true
 }

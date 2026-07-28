@@ -76,6 +76,19 @@ func TestAutofixPlanOrdersTheFleetTheSameWayEveryTime(t *testing.T) {
 	}
 }
 
+func TestAutofixPlanAllowsRepositoriesFromSharedEnrollment(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = nil
+
+	plan, err := AutofixPlan(cfg, fakeAgent(t, "claude"), nil, nil, true, false)
+	if err != nil {
+		t.Fatalf("planning with no legacy CRQ_REPOS: %v", err)
+	}
+	if len(plan.Repos) != 0 {
+		t.Fatalf("static repos = %v, want the watcher to load shared enrollments", plan.Repos)
+	}
+}
+
 // The rename breaks the state and the CLI, but a break in naming stops nothing
 // that is already running: a host that ran the pre-rename installer keeps an
 // enabled crq-drain unit, and installing autofix beside it left two watchers

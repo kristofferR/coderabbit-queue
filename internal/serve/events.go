@@ -198,6 +198,34 @@ func diffStates(prev, next state.State, now time.Time) []Event {
 		out = append(out, Event{At: now, Kind: "settings", Level: "info", Repo: repo,
 			Text: text, Detail: cur.Reason})
 	}
+	if !sameTime(prev.Fleet.UpdatedAt, next.Fleet.UpdatedAt) {
+		text, detail := "Fleet defaults changed", "by "+next.Fleet.By
+		if next.Fleet.UpdatedAt == nil {
+			text, detail = "Fleet defaults cleared", "hosts use their own configuration again"
+		}
+		out = append(out, Event{At: now, Kind: "settings", Level: "info",
+			Text: text, Detail: detail})
+	}
+	for repo, cur := range next.Enrolled {
+		old, had := prev.Enrolled[repo]
+		if had && sameTime(old.UpdatedAt, cur.UpdatedAt) {
+			continue
+		}
+		text := "Repository removed from review"
+		if cur.Enabled {
+			text = "Repository enrolled for review"
+		}
+		out = append(out, Event{At: now, Kind: "settings", Level: "info", Repo: repo,
+			Text: text, Detail: cur.Reason})
+	}
+	for repo, cur := range next.RepoSolver {
+		old, had := prev.RepoSolver[repo]
+		if had && sameTime(old.UpdatedAt, cur.UpdatedAt) {
+			continue
+		}
+		out = append(out, Event{At: now, Kind: "settings", Level: "info", Repo: repo,
+			Text: "Fix-session settings changed", Detail: "by " + cur.By})
+	}
 
 	// Clearing an override is as much a change as setting one — it hands the
 	// repo back to the fleet default, which is rarely what was there before.
@@ -211,6 +239,18 @@ func diffStates(prev, next state.State, now time.Time) []Event {
 		if _, still := next.RepoAutofix[repo]; !still {
 			out = append(out, Event{At: now, Kind: "settings", Level: "info", Repo: repo,
 				Text: "Autofix override cleared — back to the fleet default"})
+		}
+	}
+	for repo := range prev.Enrolled {
+		if _, still := next.Enrolled[repo]; !still {
+			out = append(out, Event{At: now, Kind: "settings", Level: "info", Repo: repo,
+				Text: "Enrollment decision cleared — back to this host's configuration"})
+		}
+	}
+	for repo := range prev.RepoSolver {
+		if _, still := next.RepoSolver[repo]; !still {
+			out = append(out, Event{At: now, Kind: "settings", Level: "info", Repo: repo,
+				Text: "Fix-session settings cleared — back to the fleet default"})
 		}
 	}
 

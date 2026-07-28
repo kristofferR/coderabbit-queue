@@ -189,7 +189,7 @@ func (s *Service) Prioritize(ctx context.Context, repo string, pr int) error {
 	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
 		if !st.MoveToFront(repo, pr) {
-			return fmt.Errorf("%s#%d is not currently tracked", repo, pr)
+			return fmt.Errorf("%s#%d is not currently queued", repo, pr)
 		}
 		return nil
 	})

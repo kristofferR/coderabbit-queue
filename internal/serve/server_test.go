@@ -161,6 +161,31 @@ func TestActionsAreRefusedOnANameThatOnlyResolvesHere(t *testing.T) {
 	}
 }
 
+func TestQuotaHeavyReadsRequireDashboardOriginProof(t *testing.T) {
+	srv := New(&stubLoader{}, Options{Addr: "127.0.0.1:7777", Host: "atlas"})
+
+	for _, tc := range []struct {
+		name   string
+		host   string
+		header string
+		want   bool
+	}{
+		{name: "dashboard", host: "localhost:7777", header: "1", want: true},
+		{name: "cross-site get", host: "localhost:7777", want: false},
+		{name: "dns rebind", host: "attacker.example:7777", header: "1", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/discover?refresh=1", nil)
+			req.Host = tc.host
+			req.Header.Set("X-CRQ-Dashboard", tc.header)
+			if got := srv.allowDashboardRead(rec, req); got != tc.want {
+				t.Fatalf("allowed = %v, want %v (status %d)", got, tc.want, rec.Code)
+			}
+		})
+	}
+}
+
 // Rev alone cannot decide whether to push. BuildOverview derives categorical
 // state from `now` — a quota block expiring, a lease lapsing, a claim going
 // dead — and none of that moves Rev, so a quiet fleet stayed visibly blocked

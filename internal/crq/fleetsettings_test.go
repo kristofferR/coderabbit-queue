@@ -225,6 +225,36 @@ func TestSetEnvClearsTypedFleetSettings(t *testing.T) {
 	}
 }
 
+func TestSetEnvBlankClearsGenericFleetSetting(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost",
+		"CRQ_REVIEW_CMD": "@host review", "CRQ_COBOTS": "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if _, err := svc.SetEnv(ctx, "CRQ_REVIEW_CMD", "@fleet review", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SetEnv(ctx, "CRQ_REVIEW_CMD", "", false); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.Fleet.Env["CRQ_REVIEW_CMD"]; ok {
+		t.Fatalf("fleet env = %v, want the blank value removed", st.Fleet.Env)
+	}
+	if got := svc.cfgFor(st, "owner/repo").ReviewCommand; got != "@host review" {
+		t.Fatalf("review command = %q, want host inheritance restored", got)
+	}
+}
+
 // A fleet default reaches the repositories that follow the fleet, and a
 // repository somebody turned off follows nothing. It has both an enrollment
 // record and completed rounds, so it used to reach the requeue set twice over —

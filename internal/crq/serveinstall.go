@@ -19,12 +19,10 @@ import (
 // the same shape of thing — one long-running crq subcommand — and the only
 // differences are the unit name and the arguments.
 //
-// Deliberately much thinner than the autofix install beside it. That one bakes
-// the whole fleet configuration into the unit's environment because a fix
-// session's behaviour has to be pinned at install time. The dashboard has no
-// such need: it reads the same config file every other command reads, so the
-// unit carries a path and nothing else — and editing ~/.config/crq/env then
-// changes the dashboard by restarting it, not by reinstalling it.
+// Deliberately much thinner than the autofix install beside it. The dashboard
+// reads the same config file every other command reads, so editing that file
+// changes it after a restart. Only CRQ_* overrides from the installing shell
+// are also carried: otherwise those values disappear under a service manager.
 type ServeInstall struct {
 	// Service is the crq subcommand this unit runs: "serve" or "autoreview".
 	Service  string `json:"service"`
@@ -51,6 +49,7 @@ type ServeInstall struct {
 	Started       bool     `json:"started,omitempty"`
 	home          string
 	account       string
+	environment   map[string]string
 }
 
 // InstallServe writes the service definition for `crq serve` and starts it.
@@ -100,6 +99,7 @@ func (s *Service) installUnit(ctx context.Context, service, addr string, allowHo
 		SkipAuthCheck: skipAuth,
 		DryRun:        dryRun,
 		home:          home,
+		environment:   serveEnvironment(),
 	}
 	if current, uerr := osuser.Current(); uerr == nil {
 		plan.account = current.Username
@@ -235,7 +235,11 @@ func serveUnitBody(plan ServeInstall) string {
 	if home == "" {
 		home, _ = os.UserHomeDir()
 	}
-	env := map[string]string{"HOME": home}
+	env := make(map[string]string, len(plan.environment)+3)
+	for key, value := range plan.environment {
+		env[key] = value
+	}
+	env["HOME"] = home
 	if plan.Config != "" {
 		env["CRQ_CONFIG"] = plan.Config
 	}
@@ -301,4 +305,27 @@ StandardError=append:%s/%s.err
 WantedBy=default.target
 `, unitDescription(plan.Service), lines.String(), strings.Join(words, " "),
 		plan.LogDir, plan.Service, plan.LogDir, plan.Service)
+}
+
+// serveEnvironment carries configuration that may have reached the install
+// through its invoking shell. A service manager does not inherit that shell,
+// so pointing at the same config file alone is insufficient.
+func serveEnvironment() map[string]string {
+	env := map[string]string{}
+	for _, entry := range os.Environ() {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if !strings.HasPrefix(key, "CRQ_") {
+			continue
+		}
+		switch key {
+		case "CRQ_CONFIG", "CRQ_DRY_RUN", "CRQ_NO_OPEN",
+			"CRQ_DISPATCH_REPO", "CRQ_DISPATCH_PR", "CRQ_DISPATCH_HEAD", "CRQ_DISPATCH_FINDINGS":
+			continue
+		}
+		env[key] = value
+	}
+	return env
 }

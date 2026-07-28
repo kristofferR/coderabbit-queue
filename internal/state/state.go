@@ -1066,7 +1066,7 @@ func (s *State) PutRound(r Round) {
 // ordinary FIFO order.
 func (s *State) MoveToFront(repo string, pr int) bool {
 	r := s.Round(repo, pr)
-	if r == nil {
+	if r == nil || (r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry) {
 		return false
 	}
 	minSeq := int64(0)

@@ -111,10 +111,6 @@ func AutofixPlan(cfg Config, agent string, agentArgs []string, repos []string, d
 		// records: map order would make two identical installs disagree.
 		repos = sortedRepoList(cfg.AllowRepos)
 	}
-	if len(repos) == 0 {
-		return AutofixInstall{}, fmt.Errorf("no repositories to watch: pass them, or set CRQ_REPOS")
-	}
-
 	// The service writes its output here. systemd refuses to start a unit whose
 	// StandardOutput path cannot be opened (209/STDOUT), so the directory has to
 	// exist before the unit does — a service that will not start is exactly the

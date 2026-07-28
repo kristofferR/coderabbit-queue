@@ -733,6 +733,13 @@ func (s *Service) SetEnv(ctx context.Context, key, value string, unset bool) (Fl
 		view, _, err := s.SetFleetSettings(ctx, change)
 		return view, err
 	}
+	// Validation treats blank as "unset here". Keep storage aligned with that
+	// contract so clearing a generic fleet value restores the host's env value
+	// instead of recording a blank that BuildConfig replaces with a built-in
+	// default.
+	if strings.TrimSpace(value) == "" {
+		unset = true
+	}
 
 	// A generic setting can still change WHO reviews: CRQ_BOT names the primary,
 	// and a per-bot trigger key decides whether a co-reviewer runs at all. That

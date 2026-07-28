@@ -127,6 +127,18 @@ func TestSolverLayering(t *testing.T) {
 	}
 }
 
+func TestAbsentSolverPromptKeepsHostPrompt(t *testing.T) {
+	cfg := firingConfig()
+	cfg.FixPrompt = "standing host instructions"
+
+	if got := cfg.withSolver(SolverSettings{}).FixPrompt; got != cfg.FixPrompt {
+		t.Fatalf("prompt = %q, want host prompt %q when shared state says nothing", got, cfg.FixPrompt)
+	}
+	if got := cfg.withSolver(SolverSettings{Prompt: "fleet instructions"}).FixPrompt; got != "fleet instructions" {
+		t.Fatalf("prompt = %q, want the shared solver prompt", got)
+	}
+}
+
 // The hosts that will ignore a solver setting have to be named wherever it was
 // recorded. Asking only about a repository's own record meant a FLEET model or
 // attempt limit — the one every repository inherits — warned about nobody,

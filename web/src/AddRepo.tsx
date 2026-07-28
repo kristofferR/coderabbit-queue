@@ -53,7 +53,9 @@ export function AddRepo({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/discover${refresh ? "?refresh=1" : ""}`);
+      const res = await fetch(`/api/discover${refresh ? "?refresh=1" : ""}`, {
+        headers: { "X-CRQ-Dashboard": "1" },
+      });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
       setRows(body.repos as Candidate[]);
@@ -93,7 +95,9 @@ export function AddRepo({
   const preview = async (repo: string) => {
     setPending({ repo });
     try {
-      const res = await fetch(`/api/enroll-preview?repo=${encodeURIComponent(repo)}`);
+      const res = await fetch(`/api/enroll-preview?repo=${encodeURIComponent(repo)}`, {
+        headers: { "X-CRQ-Dashboard": "1" },
+      });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
       setPending({ repo, impact: body as EnrollImpact });
