@@ -415,6 +415,8 @@ crq cost <repo> <pr>      # what one more review round there would cost, before 
                           # (CRQ_WEEKLY_LIMIT sets the fair-use threshold the dashboard forecasts)
 
 crq fleet                 # the defaults every repository inherits (env → fleet record → repo override)
+crq fleet adopt           # ⭐ record THIS host's settings for the fleet (--dry-run shows the plan)
+crq fleet env <KEY> [<value>|--clear]   # any single setting, by its environment-variable name
 crq fleet set [--bots <a,b>] [--required <a,b>] [--min-interval <dur>] [--weekly-limit <n>]
               [--autofix-default on|off] [--dry-run]   # --dry-run reports the impact, writes nothing
 

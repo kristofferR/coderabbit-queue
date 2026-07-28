@@ -8,6 +8,7 @@ export type ActionName =
   | "enroll"
   | "fleet"
   | "solver"
+  | "env"
   | "reviewers"
   | "resolve"
   | "decline"
@@ -41,6 +42,9 @@ export type ActionBody = {
   };
   /** Ask what a change would do without making it. */
   preview?: boolean;
+  /** One setting, addressed by its environment-variable name. */
+  key?: string;
+  value?: string;
   /** A fix-session change; an empty repo means the fleet default. */
   solver?: {
     model?: string;

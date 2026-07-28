@@ -214,10 +214,33 @@ type SettingsView struct {
 	Config   FleetConfig `json:"config"`
 	Quota    Quota       `json:"quota"`
 	Plumbing []KV        `json:"plumbing"`
+	// Env is every individual setting with its effective value and the layer
+	// that decided it. This is what makes "I see env all over the dashboard"
+	// actionable rather than just true.
+	Env []EnvSetting `json:"env,omitempty"`
 	// Fleet is the editable half: the defaults recorded for the whole fleet,
 	// with a source per setting so a reader can tell which values changing here
 	// would actually change everywhere, and which are this host's env alone.
 	Fleet *FleetSettings `json:"fleet,omitempty"`
+}
+
+// EnvSetting is one configuration setting as the dashboard shows it.
+type EnvSetting struct {
+	Key   string `json:"key"`
+	Kind  string `json:"kind"`
+	Group string `json:"group"`
+	Label string `json:"label"`
+	Help  string `json:"help"`
+	// PerHost and Identity say WHY a setting is not editable here, which is a
+	// more useful answer than a disabled control with no explanation.
+	PerHost  bool `json:"per_host,omitempty"`
+	Identity bool `json:"identity,omitempty"`
+
+	Value  string `json:"value"`
+	Source string `json:"source"` // fleet | env | default
+	// HostValue is what this machine's own environment says, shown only when a
+	// fleet record is overriding it — otherwise the override is invisible.
+	HostValue string `json:"host_value,omitempty"`
 }
 
 // FleetSettings mirrors crq.FleetView on the wire.
@@ -256,13 +279,13 @@ type KV struct {
 }
 
 // BuildFleet reduces everything the non-overview pages read.
-func BuildFleet(st state.State, cfg FleetConfig, ov Overview, tools []Tool, toolsHost string, now time.Time, botsFor BotsFor, enrollFor EnrollFor, fleet *FleetSettings, solverFor SolverFor) Snapshot {
+func BuildFleet(st state.State, cfg FleetConfig, ov Overview, tools []Tool, toolsHost string, now time.Time, botsFor BotsFor, enrollFor EnrollFor, fleet *FleetSettings, solverFor SolverFor, env []EnvSetting) Snapshot {
 	return Snapshot{
 		Overview: ov,
 		Repos:    repoRows(st, cfg, now, botsFor, enrollFor, solverFor),
 		Bots:     botCards(st, cfg, botsFor(""), now),
 		Setup:    setupView(st, cfg, ov, tools, toolsHost),
-		Settings: SettingsView{Config: cfg, Quota: ov.Quota, Plumbing: plumbing(st, cfg), Fleet: fleet},
+		Settings: SettingsView{Config: cfg, Quota: ov.Quota, Plumbing: plumbing(st, cfg), Fleet: fleet, Env: env},
 	}
 }
 

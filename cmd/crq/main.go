@@ -1105,6 +1105,8 @@ and runs exactly as it did, so reinstalling autofix is what turns them on.
 crq fleet set [--bots <a,b>] [--required <a,b>] [--min-interval <dur>]
               [--weekly-limit <n>] [--autofix-default on|off] [--dry-run]
 crq fleet clear
+crq fleet adopt [--dry-run]            (record THIS host's settings for the fleet)
+crq fleet env <KEY> [<value>|--clear]  (any one setting, by its env name)
 
 The defaults every repository inherits, recorded once for the whole fleet
 instead of in each host's env file.
@@ -1124,6 +1126,19 @@ completed round that never had it, so those rounds are reopened and reviewed
 again — .reopened counts them before you decide.
 
 'clear' drops the whole record and returns every setting to this host's env.
+
+'adopt' is the one to run on a fleet that predates all this. Every answer lives
+in one machine's env file, so the dashboard reports "env" beside all of them —
+true, and useless. Adopting copies those values into the shared record so they
+become the fleet's answer and every host reads the same one. It takes only what
+CAN be fleet-wide: identity (which repository holds the queue) and per-host
+values (paths, this machine's name, the fix agent) are reported as skipped
+rather than silently dropped. Values equal to the default are skipped too —
+recording one would pin today's default, invisibly. --dry-run shows the plan.
+
+'env' reaches any single setting by its environment-variable name, including
+the ones with no flag of their own. It refuses a value that would not parse,
+because a fleet setting fails on every host at once.
 `)
 	case "repos":
 		fmt.Print(`crq repos                              (every repository crq knows about)
@@ -2411,11 +2426,47 @@ func (c prCoster) Cost(ctx context.Context, repo string, pr int) (serve.Cost, er
 // that a per-repo one does not.
 func runFleet(ctx context.Context, service *crq.Service, args []string) int {
 	action, rest := "show", args
-	if len(args) > 0 && (args[0] == "set" || args[0] == "clear") {
+	if len(args) > 0 && (args[0] == "set" || args[0] == "clear" || args[0] == "adopt" || args[0] == "env") {
 		action, rest = args[0], args[1:]
 	}
 	var change crq.FleetChange
 	dryRun := false
+	if action == "env" {
+		// `crq fleet env` reads or writes ONE setting by its environment name,
+		// which is how the settings that have no flag of their own are reached.
+		switch {
+		case len(rest) == 0:
+			fatal(errors.New(`usage: crq fleet env <KEY> [<value>|--clear]`))
+			return 1
+		case len(rest) == 1:
+			key := rest[0]
+			st, err := service.LoadState(ctx)
+			if err != nil {
+				fatal(err)
+				return 1
+			}
+			for _, set := range service.EnvSettings(st) {
+				if set.Key == key {
+					printJSON(set)
+					return 0
+				}
+			}
+			fatal(fmt.Errorf("%s is not a setting crq knows", key))
+			return 1
+		}
+		clear := rest[1] == "--clear"
+		value := ""
+		if !clear {
+			value = strings.Join(rest[1:], " ")
+		}
+		view, err := service.SetEnv(ctx, rest[0], value, clear)
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		printJSON(view)
+		return 0
+	}
 	for i := 0; i < len(rest); i++ {
 		arg := rest[i]
 		value := func() (string, bool) {
@@ -2479,6 +2530,14 @@ func runFleet(ctx context.Context, service *crq.Service, args []string) int {
 	}
 
 	switch action {
+	case "adopt":
+		adopted, err := service.AdoptEnv(ctx, dryRun)
+		if err != nil {
+			fatal(err)
+			return 1
+		}
+		printJSON(adopted)
+		return 0
 	case "clear":
 		change = crq.FleetChange{Clear: true}
 	case "show":
@@ -2709,5 +2768,22 @@ func (a prActor) SetSolver(ctx context.Context, repo string, change serve.Solver
 		return err
 	}
 	_, err := a.svc.SetSolver(ctx, repo, c)
+	return err
+}
+
+func (a prActor) EnvSettings(st crq.State) []serve.EnvSetting {
+	out := []serve.EnvSetting{}
+	for _, s := range a.svc.EnvSettings(st) {
+		out = append(out, serve.EnvSetting{
+			Key: s.Key, Kind: s.Kind, Group: s.Group, Label: s.Label, Help: s.Help,
+			PerHost: s.PerHost, Identity: s.Identity,
+			Value: s.Value, Source: s.Source, HostValue: s.HostValue,
+		})
+	}
+	return out
+}
+
+func (a prActor) SetEnv(ctx context.Context, key, value string, clear bool) error {
+	_, err := a.svc.SetEnv(ctx, key, value, clear)
 	return err
 }

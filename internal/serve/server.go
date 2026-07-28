@@ -193,12 +193,14 @@ func (s *Server) refresh(ctx context.Context) {
 	// server has already paid for, and a settings page showing a stale default
 	// is how two people overwrite each other.
 	var fleet *FleetSettings
+	var env []EnvSetting
 	if s.actor != nil {
 		if f, err := s.actor.Fleet(ctx); err == nil {
 			fleet = f
 		}
+		env = s.actor.EnvSettings(st)
 	}
-	snap := BuildFleet(st, s.opts.Fleet, ov, s.tools, s.opts.Host, now, botsFor, s.opts.EnrollFor, fleet, s.opts.SolverFor)
+	snap := BuildFleet(st, s.opts.Fleet, ov, s.tools, s.opts.Host, now, botsFor, s.opts.EnrollFor, fleet, s.opts.SolverFor, env)
 	snap.Events = s.events.list()
 
 	s.mu.Lock()

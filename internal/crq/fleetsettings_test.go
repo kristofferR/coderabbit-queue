@@ -28,9 +28,12 @@ func TestFleetDefaultsLayering(t *testing.T) {
 	if view.Recorded || view.MinInterval != "1m30s" || view.WeeklyLimit != 60 {
 		t.Fatalf("view = %+v, want the env values with no record", view)
 	}
+	// "default" and "env" are different answers: firingConfig sets none of
+	// these, so nothing here comes from a file and saying "env" would send a
+	// reader looking for a line that does not exist.
 	for key, src := range view.Sources {
-		if src != "env" {
-			t.Errorf("source[%s] = %q, want env before anything is recorded", key, src)
+		if src != "default" {
+			t.Errorf("source[%s] = %q, want default when nothing sets it", key, src)
 		}
 	}
 	if !view.AutofixDefault {
@@ -77,7 +80,7 @@ func TestFleetDefaultsLayering(t *testing.T) {
 		t.Error("a repository with no switch must follow the fleet default, which is now off")
 	}
 	view, _ = svc.FleetSettings(ctx)
-	if view.Sources["min_interval"] != "fleet" || view.Sources["reviewers"] != "env" {
+	if view.Sources["min_interval"] != "fleet" || view.Sources["reviewers"] != "default" {
 		t.Errorf("sources = %v, want only the recorded settings sourced from the fleet", view.Sources)
 	}
 

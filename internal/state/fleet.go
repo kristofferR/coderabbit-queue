@@ -40,6 +40,16 @@ type FleetDefaults struct {
 	// is layered over.
 	Solver SolverSettings `json:"solver,omitempty"`
 
+	// Env is the fleet's answer for any other setting, keyed exactly as the
+	// environment variable is. Kept as raw strings and re-parsed rather than
+	// decoded into fields, so a setting becomes fleet-settable without needing
+	// plumbing of its own — and so the fleet path and the env path cannot end
+	// up disagreeing about what a value means.
+	//
+	// Only settings crq lists as fleet-settable are honoured. A key an older
+	// binary does not recognise round-trips untouched.
+	Env map[string]string `json:"env,omitempty"`
+
 	By        string     `json:"by,omitempty"`
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
 }
@@ -49,7 +59,8 @@ type FleetDefaults struct {
 // would show its env value while the fleet claimed to have an answer.
 func (f FleetDefaults) Empty() bool {
 	return !f.SetCoBots && !f.SetRequired && f.MinInterval == "" &&
-		f.WeeklyLimit == nil && f.AutofixDefault == nil && f.Solver.Empty()
+		f.WeeklyLimit == nil && f.AutofixDefault == nil && f.Solver.Empty() &&
+		len(f.Env) == 0
 }
 
 // AutofixDefaultOn is the answer for a repository with no explicit switch.

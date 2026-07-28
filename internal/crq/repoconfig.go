@@ -437,6 +437,7 @@ func coReviewerNames() map[string]string {
 
 func resolveBotList(allowed map[string]string, list []string, what string) ([]string, error) {
 	out := make([]string, 0, len(list))
+	seen := map[string]bool{}
 	for _, name := range list {
 		name = strings.TrimSpace(name)
 		if name == "" {
@@ -449,6 +450,14 @@ func resolveBotList(allowed map[string]string, list []string, what string) ([]st
 		if !ok {
 			return nil, fmt.Errorf("%s: unknown reviewer %q (known: %s)", what, name, strings.Join(knownLogins(allowed), ", "))
 		}
+		// Both spellings of one bot resolve to one login, so a caller that sent
+		// "codex" and "chatgpt-codex-connector[bot]" named one reviewer, not two.
+		// Storing it twice would render it twice and read as a configuration
+		// mistake nobody made.
+		if seen[dialect.NormalizeBotName(login)] {
+			continue
+		}
+		seen[dialect.NormalizeBotName(login)] = true
 		out = append(out, login)
 	}
 	return out, nil

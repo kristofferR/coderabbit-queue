@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/state"
 )
 
 // Actor performs the mutations the dashboard offers. Every one is a thin mirror
@@ -28,6 +30,11 @@ type Actor interface {
 	// not a nicety — it is how someone finds out that adding a required reviewer
 	// reopens nineteen completed rounds before they click.
 	Fleet(ctx context.Context) (*FleetSettings, error)
+	// EnvSettings is every individual setting with its effective value and the
+	// layer that decided it. Pure: it reads the state it is handed.
+	EnvSettings(st state.State) []EnvSetting
+	// SetEnv records or clears one fleet-wide setting by its env name.
+	SetEnv(ctx context.Context, key, value string, clear bool) error
 	// SetSolver records how one repository's fix sessions run, or with an empty
 	// repo the fleet default every repository inherits.
 	SetSolver(ctx context.Context, repo string, change SolverChange) error
@@ -67,6 +74,9 @@ type actionRequest struct {
 	// Solver carries a fix-session change, raw so its pointer fields keep "not
 	// chosen" distinct from "chosen to be empty".
 	Solver json.RawMessage `json:"solver"`
+	// Key/Value address one setting by its environment-variable name.
+	Key   string `json:"key"`
+	Value string `json:"value"`
 
 	ThreadIDs  []string `json:"thread_ids"`
 	FindingIDs []string `json:"finding_ids"`
@@ -102,7 +112,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	// for every repository that has not overridden them.
 	req.Repo = strings.TrimSpace(req.Repo)
 	action := r.PathValue("action")
-	fleetWide := action == "fleet" || (action == "solver" && req.Repo == "")
+	fleetWide := action == "fleet" || action == "env" || (action == "solver" && req.Repo == "")
 	if !fleetWide && (req.Repo == "" || !strings.Contains(req.Repo, "/")) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo must be owner/name"})
 		return
@@ -210,6 +220,12 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		snap, _ := s.snapshot()
 		writeJSON(w, http.StatusOK, map[string]any{"snapshot": snap, "impact": impact})
 		return
+	case "env":
+		if strings.TrimSpace(req.Key) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no setting named"})
+			return
+		}
+		err = s.actor.SetEnv(ctx, req.Key, req.Value, req.Clear)
 	case "solver":
 		var change SolverChange
 		if err := json.Unmarshal(req.Solver, &change); len(req.Solver) > 0 && err != nil {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -70,16 +71,27 @@ func (s *Service) fleetViewOf(st State) FleetView {
 		Reviewers:      []ReviewerDetail{},
 		Sources:        map[string]string{},
 	}
-	from := func(key string, recorded bool) {
-		if recorded {
+	// "env" and "default" are different answers and the page must not merge
+	// them: telling someone a value comes from their env file, when nothing in
+	// that file mentions it, sends them looking for a line that is not there.
+	host := s.cfg.Env()
+	from := func(key string, recorded bool, envKeys ...string) {
+		switch {
+		case recorded:
 			view.Sources[key] = "fleet"
-			return
+		default:
+			view.Sources[key] = "default"
+			for _, ek := range envKeys {
+				if strings.TrimSpace(host[ek]) != "" {
+					view.Sources[key] = "env"
+					break
+				}
+			}
 		}
-		view.Sources[key] = "env"
 	}
-	from("reviewers", st.Fleet.SetCoBots || st.Fleet.SetRequired)
-	from("min_interval", strings.TrimSpace(st.Fleet.MinInterval) != "")
-	from("weekly_limit", st.Fleet.WeeklyLimit != nil)
+	from("reviewers", st.Fleet.SetCoBots || st.Fleet.SetRequired, "CRQ_COBOTS", "CRQ_REQUIRED_BOTS")
+	from("min_interval", strings.TrimSpace(st.Fleet.MinInterval) != "", "CRQ_MIN_INTERVAL")
+	from("weekly_limit", st.Fleet.WeeklyLimit != nil, "CRQ_WEEKLY_LIMIT")
 	from("autofix_default", st.Fleet.AutofixDefault != nil)
 
 	for _, r := range cfg.Reviewers {
@@ -364,4 +376,257 @@ func shortBots(logins []string) string {
 		out = append(out, dialect.NormalizeBotName(l))
 	}
 	return strings.Join(out, ", ")
+}
+
+// AdoptedSetting is one value moved from this host's environment into the
+// fleet record.
+type AdoptedSetting struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+	// Skipped says why a setting was left alone, when it was.
+	Skipped string `json:"skipped,omitempty"`
+}
+
+// AdoptEnv records this host's settings for the whole fleet.
+//
+// It exists because crq predates the dashboard: a fleet configured before any
+// of this has every answer in one machine's env file, and the dashboard says
+// "env" beside all of them — which is true, and useless. Adopting copies those
+// values into the shared record, so they become the fleet's answer and every
+// host reads the same one.
+//
+// Only settings that CAN be fleet-wide are taken. Identity (which repository
+// holds the queue) and per-host values (paths, this machine's name, the fix
+// agent's binary) are reported as skipped rather than silently dropped, since
+// "why is that one still env" is the obvious next question.
+//
+// Values equal to the default are skipped too: recording them would pin a
+// default that a later crq might improve, and pin it invisibly.
+func (s *Service) AdoptEnv(ctx context.Context, dryRun bool) ([]AdoptedSetting, error) {
+	host := s.cfg.Env()
+	defaults, err := BuildConfig(map[string]string{})
+	if err != nil {
+		return nil, err
+	}
+	defaultEnv := map[string]string{}
+	for _, k := range EnvKeys() {
+		defaultEnv[k.Key] = defaultValueOf(defaults, k.Key)
+	}
+
+	var adopted []AdoptedSetting
+	take := map[string]string{}
+	for _, k := range EnvKeys() {
+		value := strings.TrimSpace(host[k.Key])
+		switch {
+		case k.Identity:
+			adopted = append(adopted, AdoptedSetting{Key: k.Key, Value: value,
+				Skipped: "identity: it says where the queue lives, not how it behaves"})
+		case k.PerHost:
+			adopted = append(adopted, AdoptedSetting{Key: k.Key, Value: value,
+				Skipped: "per-host: recording one machine's answer would break the others"})
+		case value == "":
+			// Nothing set here, so there is nothing of this host's to adopt.
+		case value == defaultEnv[k.Key]:
+			adopted = append(adopted, AdoptedSetting{Key: k.Key, Value: value,
+				Skipped: "same as the default: recording it would pin today's default invisibly"})
+		default:
+			take[k.Key] = value
+			adopted = append(adopted, AdoptedSetting{Key: k.Key, Value: value})
+		}
+	}
+	if dryRun || len(take) == 0 {
+		return adopted, nil
+	}
+
+	now := s.clock().UTC()
+	st, err := s.store.Update(ctx, func(st *State) error {
+		fd := st.Fleet
+		changed := false
+		set := func(key, value string) {
+			// A record already there was set deliberately and outranks a value
+			// this host happens to carry.
+			if fd.Env == nil {
+				fd.Env = map[string]string{}
+			}
+			if _, exists := fd.Env[key]; exists {
+				return
+			}
+			fd.Env[key] = value
+			changed = true
+		}
+		for key, value := range take {
+			// Four settings have a typed home with their own validation and
+			// impact preview. Adopting them into the generic map as well would
+			// give one setting two places to live, one of them shadowed.
+			switch key {
+			case "CRQ_COBOTS":
+				if !fd.SetCoBots {
+					if logins, err := resolveCoBotLogins(splitCommas(value)); err == nil {
+						fd.CoBots, fd.SetCoBots, changed = logins, true, true
+					}
+				}
+			case "CRQ_REQUIRED_BOTS":
+				if !fd.SetRequired {
+					if logins, err := resolveRequiredLogins(splitCommas(value), s.cfg.Bot); err == nil {
+						fd.Required, fd.SetRequired, changed = logins, true, true
+					}
+				}
+			case "CRQ_MIN_INTERVAL":
+				if fd.MinInterval == "" {
+					fd.MinInterval, changed = value, true
+				}
+			case "CRQ_WEEKLY_LIMIT":
+				if fd.WeeklyLimit == nil {
+					if n, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+						fd.WeeklyLimit, changed = &n, true
+					}
+				}
+			default:
+				set(key, value)
+			}
+		}
+		if !changed {
+			return ErrNoChange
+		}
+		st.SetFleetDefaults(fd, s.cfg.Host, now)
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrNoChange) {
+		return nil, err
+	}
+	if err == nil {
+		s.sync(ctx, st)
+	}
+	return adopted, nil
+}
+
+// defaultValueOf renders what a setting would be with nothing configured, so
+// adoption can tell "this host chose this" from "this is just the default".
+func defaultValueOf(defaults Config, key string) string {
+	switch key {
+	case "CRQ_MIN_INTERVAL":
+		return defaults.MinInterval.String()
+	case "CRQ_INFLIGHT_TIMEOUT":
+		return defaults.InflightTimeout.String()
+	case "CRQ_RL_FALLBACK":
+		return defaults.RateLimitFallback.String()
+	case "CRQ_WEEKLY_LIMIT":
+		return fmt.Sprint(defaults.WeeklyReviewLimit)
+	case "CRQ_AUTOREVIEW_POLL":
+		return defaults.AutoReviewPoll.String()
+	case "CRQ_AUTOREVIEW_MAX_SCAN":
+		return fmt.Sprint(defaults.AutoReviewMaxScan)
+	case "CRQ_LEADER_TTL":
+		return defaults.LeaderTTL.String()
+	case "CRQ_BOT":
+		return defaults.Bot
+	case "CRQ_REVIEW_CMD":
+		return defaults.ReviewCommand
+	case "CRQ_SETTLE":
+		return defaults.SettleWindow.String()
+	case "CRQ_FEEDBACK_WAIT_TIMEOUT":
+		return defaults.FeedbackWaitTimeout.String()
+	case "CRQ_WATCH_INTERVAL":
+		return defaults.WatchInterval.String()
+	case "CRQ_DISPATCH_MAX_ATTEMPTS":
+		return fmt.Sprint(defaults.DispatchMaxAttempts)
+	case "CRQ_AUTOREVIEW_SKIP_MARKER":
+		return defaults.SkipMarker
+	}
+	return ""
+}
+
+// SetEnv records or clears one fleet setting.
+func (s *Service) SetEnv(ctx context.Context, key, value string, clear bool) (FleetView, error) {
+	key = strings.TrimSpace(key)
+	if !fleetSettable(key) {
+		if _, known := envKeyByName(key); known {
+			return FleetView{}, fmt.Errorf("%s is not a fleet setting: it belongs to one machine, or says where the queue lives", key)
+		}
+		return FleetView{}, fmt.Errorf("%s is not a setting crq knows", key)
+	}
+	if !clear {
+		if err := validateEnvValue(key, value); err != nil {
+			return FleetView{}, err
+		}
+	}
+	// Keys with a typed home go there, so one setting never lives in two places
+	// with one of them silently shadowed by the other.
+	if typedEnvKey(key) {
+		change := FleetChange{}
+		switch key {
+		case "CRQ_COBOTS":
+			change.CoBots = splitCommas(value)
+			if clear {
+				change.CoBots = nil
+			}
+		case "CRQ_REQUIRED_BOTS":
+			change.Required = splitCommas(value)
+			if clear {
+				change.Required = nil
+			}
+		case "CRQ_MIN_INTERVAL":
+			v := value
+			if clear {
+				v = ""
+			}
+			change.MinInterval = &v
+		case "CRQ_WEEKLY_LIMIT":
+			if clear {
+				// There is no "unset" for a typed pointer through this path, so
+				// clearing means back to the built-in default.
+				n, _ := strconv.Atoi(defaultValueOf(Config{WeeklyReviewLimit: 60}, key))
+				change.WeeklyLimit = &n
+			} else {
+				n, err := strconv.Atoi(strings.TrimSpace(value))
+				if err != nil {
+					return FleetView{}, fmt.Errorf("%s: %w", key, err)
+				}
+				change.WeeklyLimit = &n
+			}
+		}
+		view, _, err := s.SetFleetSettings(ctx, change)
+		return view, err
+	}
+
+	now := s.clock().UTC()
+	st, err := s.store.Update(ctx, func(st *State) error {
+		fd := st.Fleet
+		if clear {
+			if _, ok := fd.Env[key]; !ok {
+				return ErrNoChange
+			}
+			delete(fd.Env, key)
+		} else {
+			if fd.Env == nil {
+				fd.Env = map[string]string{}
+			}
+			if cur, ok := fd.Env[key]; ok && cur == value {
+				return ErrNoChange
+			}
+			fd.Env[key] = value
+		}
+		st.SetFleetDefaults(fd, s.cfg.Host, now)
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrNoChange) {
+		return FleetView{}, err
+	}
+	if err == nil {
+		s.sync(ctx, st)
+	} else if st, _, err = s.store.Load(ctx); err != nil {
+		return FleetView{}, err
+	}
+	return s.fleetViewOf(st), nil
+}
+
+// splitCommas is the list form every reviewer setting uses.
+func splitCommas(value string) []string {
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }

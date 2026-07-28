@@ -360,6 +360,30 @@ func (s *Service) cfgFor(st State, repo string) Config {
 // must never give.
 func (c Config) WithFleet(fd FleetDefaults) Config {
 	out := c
+	// The generic layer first, since the typed fields below are refinements of
+	// the same settings and must win over it. Re-parsing the merged map rather
+	// than patching fields is what keeps one meaning per setting: a duration
+	// string becomes a duration the same way whichever layer supplied it.
+	if len(fd.Env) > 0 && c.env != nil {
+		merged := c.Env()
+		applied := false
+		for key, value := range fd.Env {
+			if !fleetSettable(key) {
+				continue // identity and per-host settings are not the fleet's to set
+			}
+			merged[key] = value
+			applied = true
+		}
+		if applied {
+			if rebuilt, err := BuildConfig(merged); err == nil {
+				// Everything a caller already resolved for THIS process stays:
+				// the rebuild answers for settings, not for which repository or
+				// host is being acted on.
+				rebuilt.WorkDir, rebuilt.OverrideAt = out.WorkDir, out.OverrideAt
+				out = rebuilt
+			}
+		}
+	}
 	if d, err := time.ParseDuration(strings.TrimSpace(fd.MinInterval)); err == nil && fd.MinInterval != "" {
 		out.MinInterval = d
 	}

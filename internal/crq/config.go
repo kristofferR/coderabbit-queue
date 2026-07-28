@@ -138,6 +138,21 @@ type Config struct {
 	// (return their findings promptly, keep CodeRabbit queued for the window)
 	// instead of waiting the block out. CRQ_RL_CO_DEGRADE, default on.
 	RateLimitCoDegrade bool
+
+	// env is the map this configuration was parsed from, so WithFleet can
+	// re-parse it with the fleet's overrides layered on.
+	env map[string]string
+}
+
+// Env is a copy of the environment this configuration was parsed from, for
+// callers that need to show or compare it. A copy, because handing out the map
+// would let a caller change a parsed configuration by mutating its input.
+func (c Config) Env() map[string]string {
+	out := make(map[string]string, len(c.env))
+	for k, v := range c.env {
+		out[k] = v
+	}
+	return out
 }
 
 // ConfigPath is the file crq reads its settings from: CRQ_CONFIG, or
@@ -198,7 +213,17 @@ func LoadConfig() (Config, error) {
 			env[k] = v
 		}
 	}
+	return BuildConfig(env)
+}
 
+// BuildConfig parses one env map into a configuration.
+//
+// Split out of LoadConfig so the SAME parse can be re-run over a merged map:
+// this host's environment with the fleet's recorded overrides layered on top.
+// Re-parsing rather than patching individual fields is what makes any setting
+// fleet-settable without each one needing its own plumbing — and what stops the
+// two paths ever disagreeing about what a value means.
+func BuildConfig(env map[string]string) (Config, error) {
 	host, _ := os.Hostname()
 	bot := stringEnv(env, "CRQ_BOT", "coderabbitai[bot]")
 	requiredBots := listEnv(env, "CRQ_REQUIRED_BOTS", bot)
@@ -282,6 +307,9 @@ func LoadConfig() (Config, error) {
 
 		RateLimitCoDegrade: stringEnv(env, "CRQ_RL_CO_DEGRADE", stringEnv(env, "CRQ_RL_CODEX_DEGRADE", "1")) != "0",
 	}
+	// Kept so a fleet record can be layered over it and the whole thing
+	// re-parsed. Unexported: it is an input, not part of the configuration.
+	cfg.env = env
 	if len(cfg.Scope) == 0 && cfg.GateRepo != "" {
 		cfg.Scope = []string{ownerOf(cfg.GateRepo)}
 	}

@@ -255,11 +255,25 @@ export type FleetSettings = {
   lagging_hosts?: string[];
 };
 
+export type EnvSetting = {
+  key: string;
+  kind: string;
+  group: string;
+  label: string;
+  help: string;
+  per_host?: boolean;
+  identity?: boolean;
+  value: string;
+  source: "fleet" | "env" | "default";
+  host_value?: string;
+};
+
 export type SettingsView = {
   config: FleetConfig;
   quota: Quota;
   plumbing: KV[];
   fleet?: FleetSettings;
+  env?: EnvSetting[];
 };
 
 export type Finding = {

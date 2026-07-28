@@ -2552,3 +2552,10 @@ func sameCoAnswers(before, after map[string]CoBotRound) bool {
 	}
 	return true
 }
+
+// LoadState reads the current state, for callers that need it to resolve a
+// setting without acting on it.
+func (s *Service) LoadState(ctx context.Context) (State, error) {
+	st, _, err := s.store.Load(ctx)
+	return st, err
+}

@@ -1,0 +1,255 @@
+package crq
+
+import (
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// EnvKey describes one setting: what it means, what shape its value has, and —
+// the part that matters — whether it can honestly be recorded for the whole
+// fleet or only ever belongs to one machine.
+//
+// Not every setting is fleet-settable, and pretending otherwise would be worse
+// than not offering it. Three kinds are deliberately excluded:
+//
+//   - IDENTITY. The gate repository, the state ref, the dashboard issue. These
+//     say WHERE the queue lives; a dashboard writing to that ref cannot change
+//     which ref it is without cutting the branch it is sitting on.
+//   - MACHINE. Paths, the host name, the fix agent's binary, the workspace
+//     root. A value that is only true of one filesystem is not a fleet setting,
+//     and recording one would break every other host.
+//   - CREDENTIALS. Never in state: the ref is a git branch on a repository
+//     other people can be given read access to.
+type EnvKey struct {
+	Key  string
+	Kind string // duration | int | bool | text | list
+	// Group orders the settings page: pacing, review, autofix, reporting.
+	Group string
+	Label string
+	Help  string
+	// PerHost marks a setting that stays this machine's. It is still shown —
+	// "why can I not change this here" is a fair question — but not editable.
+	PerHost bool
+	// Identity marks bootstrap settings that must not be edited at all.
+	Identity bool
+}
+
+// envKeys is every setting the dashboard knows about. Anything absent is not
+// offered rather than offered and quietly ignored.
+var envKeys = []EnvKey{
+	{Key: "CRQ_MIN_INTERVAL", Kind: "duration", Group: "pacing", Label: "Minimum interval",
+		Help: "Smallest gap between two metered review fires, fleet-wide."},
+	{Key: "CRQ_INFLIGHT_TIMEOUT", Kind: "duration", Group: "pacing", Label: "In-flight timeout",
+		Help: "How long a fired round waits for any bot response before it is retried."},
+	{Key: "CRQ_RL_FALLBACK", Kind: "duration", Group: "pacing", Label: "Rate-limit fallback",
+		Help: "Block window assumed when the bot's \"available in\" cannot be parsed."},
+	{Key: "CRQ_WEEKLY_LIMIT", Kind: "int", Group: "pacing", Label: "Weekly fair-use limit",
+		Help: "Reviews per rolling week before the vendor throttles: 60 on Pro, 90 on Pro+. 0 counts without forecasting."},
+	{Key: "CRQ_AUTOREVIEW_POLL", Kind: "duration", Group: "pacing", Label: "Auto-review poll",
+		Help: "How often the daemon scans for pull requests needing a review."},
+	{Key: "CRQ_AUTOREVIEW_MAX_SCAN", Kind: "int", Group: "pacing", Label: "Scan budget",
+		Help: "Most pull requests examined per scope per pass, so one large scope cannot starve the others."},
+	{Key: "CRQ_LEADER_TTL", Kind: "duration", Group: "pacing", Label: "Leader lease",
+		Help: "How long a daemon's claim to drive the queue survives without a heartbeat."},
+
+	{Key: "CRQ_BOT", Kind: "text", Group: "review", Label: "Primary reviewer",
+		Help: "The metered reviewer's login. Changing it changes which bot's wording crq reads."},
+	{Key: "CRQ_REVIEW_CMD", Kind: "text", Group: "review", Label: "Review command",
+		Help: "The comment crq posts to ask the primary for a review."},
+	{Key: "CRQ_COBOTS", Kind: "list", Group: "review", Label: "Co-reviewers",
+		Help: "Which co-reviewers run. Editable as toggles above; this is the same setting."},
+	{Key: "CRQ_REQUIRED_BOTS", Kind: "list", Group: "review", Label: "Required reviewers",
+		Help: "Which reviewers convergence waits for."},
+	{Key: "CRQ_FEEDBACK_BOTS", Kind: "list", Group: "review", Label: "Feedback reviewers",
+		Help: "Whose findings are surfaced. Defaults to everyone who reviews; widen it to read a bot without waiting for it."},
+	{Key: "CRQ_SETTLE", Kind: "duration", Group: "review", Label: "Settle window",
+		Help: "How long a converged loop keeps watching, so a trailing review wave is caught by crq rather than by you."},
+	{Key: "CRQ_FEEDBACK_WAIT_TIMEOUT", Kind: "duration", Group: "review", Label: "Feedback wait",
+		Help: "How long crq loop waits for a round before reporting a timeout."},
+	{Key: "CRQ_RL_CO_DEGRADE", Kind: "bool", Group: "review", Label: "Degrade on block",
+		Help: "During a quota block, ask the co-reviewers now and keep the primary queued, instead of waiting the block out."},
+	{Key: "CRQ_AUTOREVIEW_SKIP_AUTHORS", Kind: "list", Group: "review", Label: "Skip authors",
+		Help: "Pull-request authors auto-review never enqueues."},
+	{Key: "CRQ_AUTOREVIEW_SKIP_MARKER", Kind: "text", Group: "review", Label: "Skip marker",
+		Help: "A pull-request body containing this is left alone by fleet auto-review."},
+
+	{Key: "CRQ_WATCH_INTERVAL", Kind: "duration", Group: "autofix", Label: "Watch interval",
+		Help: "How often the watcher looks for pull requests needing a fix session."},
+	{Key: "CRQ_DISPATCH_MAX_ATTEMPTS", Kind: "int", Group: "autofix", Label: "Max attempts",
+		Help: "Fix sessions per head before crq stops trying. Also settable per repository."},
+	{Key: "CRQ_DISPATCH_FORKS", Kind: "bool", Group: "autofix", Label: "Fix fork PRs",
+		Help: "Allow sessions on pull requests from another repository. Off by default."},
+	{Key: "CRQ_DISPATCH_CONCURRENCY", Kind: "int", Group: "autofix", Label: "Concurrency",
+		Help:    "Cap on simultaneous fix sessions. 0 means no cap — fixing spends no quota.",
+		PerHost: true},
+
+	{Key: "CRQ_TZ", Kind: "text", Group: "reporting", Label: "Timezone",
+		Help: "How times are rendered in the GitHub issue dashboard."},
+	{Key: "CRQ_TIDY", Kind: "bool", Group: "reporting", Label: "Tidy trigger comments",
+		Help: "Delete crq's own spent trigger comments as rounds progress. Opt-in while older binaries share the ref."},
+
+	// Shown, never editable here.
+	{Key: "CRQ_REPO", Kind: "text", Group: "identity", Label: "Gate repository",
+		Help: "Holds the state ref and the dashboard issue. Changing it is a re-init, not a setting.", Identity: true},
+	{Key: "CRQ_STATE_REF", Kind: "text", Group: "identity", Label: "State ref",
+		Help: "The git ref this queue lives in. A dashboard writing to it cannot move it.", Identity: true},
+	{Key: "CRQ_ISSUE", Kind: "int", Group: "identity", Label: "Dashboard issue",
+		Help: "The GitHub issue the legacy dashboard is rendered into.", Identity: true},
+	{Key: "CRQ_SCOPE", Kind: "list", Group: "identity", Label: "Scope",
+		Help: "Owners searched for pull requests. Enrollment is per repository — see Repos.", Identity: true},
+	{Key: "CRQ_REPOS", Kind: "list", Group: "identity", Label: "Allow-list (legacy)",
+		Help: "This host's repository list. Enrollment records supersede it — see Repos.", PerHost: true},
+	{Key: "CRQ_EXCLUDE", Kind: "list", Group: "identity", Label: "Exclude (kill switch)",
+		Help: "This host refuses to touch these, whatever shared state says.", PerHost: true},
+	{Key: "CRQ_HOST", Kind: "text", Group: "identity", Label: "Host name",
+		Help: "How this machine identifies itself in the state ref.", PerHost: true},
+	{Key: "CRQ_WORKSPACE", Kind: "text", Group: "identity", Label: "Workspace root",
+		Help: "Where this machine keeps its mirrors and worktrees.", PerHost: true},
+	{Key: "CRQ_DISPATCH_CMD", Kind: "text", Group: "identity", Label: "Fix command",
+		Help: "The session script this machine runs. Written by crq autofix install.", PerHost: true},
+}
+
+// EnvKeys returns the settings catalogue, in display order.
+func EnvKeys() []EnvKey { return append([]EnvKey(nil), envKeys...) }
+
+// envKeyByName indexes the catalogue.
+func envKeyByName(key string) (EnvKey, bool) {
+	for _, k := range envKeys {
+		if k.Key == key {
+			return k, true
+		}
+	}
+	return EnvKey{}, false
+}
+
+// fleetSettable reports whether a key may be recorded for the whole fleet.
+func fleetSettable(key string) bool {
+	k, ok := envKeyByName(key)
+	return ok && !k.PerHost && !k.Identity
+}
+
+// validateEnvValue checks a value against its key's shape, so a setting that
+// would fail to parse is refused at edit time rather than silently falling back
+// to a default on every host at once.
+func validateEnvValue(key, value string) error {
+	k, ok := envKeyByName(key)
+	if !ok {
+		return fmt.Errorf("%s is not a setting crq knows", key)
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil // empty means "unset here", which every key allows
+	}
+	switch k.Kind {
+	case "duration":
+		d, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		if d < 0 {
+			return fmt.Errorf("%s cannot be negative", key)
+		}
+	case "int":
+		if _, err := strconv.Atoi(value); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+	case "bool":
+		if value != "0" && value != "1" {
+			return fmt.Errorf("%s takes 0 or 1", key)
+		}
+	}
+	return nil
+}
+
+// EnvSetting is one setting as the dashboard shows it.
+type EnvSetting struct {
+	EnvKey
+	// Value is what this host will actually use, after the fleet record.
+	Value string `json:"value"`
+	// Source is "fleet" when a record decided it, "env" when this host's file
+	// did, "default" when neither names it.
+	Source string `json:"source"`
+	// HostValue is what this host's own environment says, shown when a fleet
+	// record is overriding it — otherwise the override is invisible.
+	HostValue string `json:"host_value,omitempty"`
+}
+
+// EnvSettings reports every setting with its effective value and source.
+func (s *Service) EnvSettings(st State) []EnvSetting {
+	host := s.cfg.Env()
+	out := make([]EnvSetting, 0, len(envKeys))
+	for _, k := range envKeys {
+		set := EnvSetting{EnvKey: k, Value: strings.TrimSpace(host[k.Key]), Source: "env"}
+		if set.Value == "" {
+			set.Source = "default"
+		}
+		// Four settings have a typed home on the record — with their own
+		// validation and impact preview — so the generic map is not the only
+		// place to look. Missing that made an adopted setting keep reporting
+		// "env", which is the exact mislabel this page exists to remove.
+		if fleet, ok := fleetValueOf(st.Fleet, k.Key); ok {
+			set.HostValue = set.Value
+			set.Value, set.Source = fleet, "fleet"
+		} else if fleet, ok := st.Fleet.Env[k.Key]; ok && fleetSettable(k.Key) {
+			set.HostValue = set.Value
+			set.Value, set.Source = fleet, "fleet"
+		}
+		out = append(out, set)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return groupOrder(out[i].Group) < groupOrder(out[j].Group)
+	})
+	return out
+}
+
+func groupOrder(group string) int {
+	switch group {
+	case "pacing":
+		return 0
+	case "review":
+		return 1
+	case "autofix":
+		return 2
+	case "reporting":
+		return 3
+	default:
+		return 4
+	}
+}
+
+// fleetValueOf renders a recorded setting that lives in a typed field rather
+// than in the generic map.
+func fleetValueOf(fd FleetDefaults, key string) (string, bool) {
+	switch key {
+	case "CRQ_COBOTS":
+		if fd.SetCoBots {
+			return strings.Join(fd.CoBots, ","), true
+		}
+	case "CRQ_REQUIRED_BOTS":
+		if fd.SetRequired {
+			return strings.Join(fd.Required, ","), true
+		}
+	case "CRQ_MIN_INTERVAL":
+		if strings.TrimSpace(fd.MinInterval) != "" {
+			return fd.MinInterval, true
+		}
+	case "CRQ_WEEKLY_LIMIT":
+		if fd.WeeklyLimit != nil {
+			return strconv.Itoa(*fd.WeeklyLimit), true
+		}
+	}
+	return "", false
+}
+
+// SetEnvTyped routes a write to the typed field when the key has one, so a
+// setting never ends up recorded in two places with one of them shadowed.
+func typedEnvKey(key string) bool {
+	switch key {
+	case "CRQ_COBOTS", "CRQ_REQUIRED_BOTS", "CRQ_MIN_INTERVAL", "CRQ_WEEKLY_LIMIT":
+		return true
+	}
+	return false
+}

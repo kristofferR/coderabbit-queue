@@ -7,6 +7,7 @@ import { ago, clock, useNow } from "./time";
 import { AddRepo, EnrollmentEditor } from "./AddRepo";
 import { FleetEditor } from "./FleetEditor";
 import { SolverEditor } from "./SolverEditor";
+import { EnvEditor } from "./EnvEditor";
 
 /* ------------------------------------------------------------------ Repos */
 
@@ -732,6 +733,8 @@ export function SettingsPage({
       {settings.fleet && (
         <FleetEditor fleet={settings.fleet} bots={bots} onSnapshot={onSnapshot} />
       )}
+
+      {settings.env && <EnvEditor env={settings.env} onSnapshot={onSnapshot} />}
 
       <Card title="CodeRabbit account" end="the metered lane's shared quota">
         <div className="flex flex-wrap gap-4 px-[18px] py-3">

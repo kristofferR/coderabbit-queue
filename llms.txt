@@ -321,7 +321,17 @@ crq fleet                                          # effective defaults + where 
 crq fleet set --min-interval 2m --dry-run          # what it WOULD do; writes nothing
 crq fleet set --required coderabbitai,codex        # record it for every host
 crq fleet clear                                    # back to this host's env
+crq fleet adopt [--dry-run]                        # record THIS host's settings for the fleet
+crq fleet env CRQ_SETTLE 120s                      # any single setting, by env name
+crq fleet env CRQ_SETTLE --clear
 ```
+
+`adopt` is for a fleet configured before any of this existed: every answer lives in one machine's
+env file, so the dashboard reports "env" beside all of them — true, and useless. It copies only what
+CAN be fleet-wide. Identity (`CRQ_REPO`, `CRQ_STATE_REF`, `CRQ_ISSUE`, `CRQ_SCOPE`) and per-host
+values (`CRQ_REPOS`, `CRQ_EXCLUDE`, `CRQ_HOST`, `CRQ_WORKSPACE`, `CRQ_DISPATCH_CMD`) are reported as
+skipped rather than silently dropped, and a value equal to the built-in default is skipped too —
+recording one would pin today's default invisibly. Credentials are never written to state at all.
 
 Three layers, least specific first: this host's env, then the fleet record, then a repository's own
 override. `.sources` says per setting which layer the current value came from, so a value reading
