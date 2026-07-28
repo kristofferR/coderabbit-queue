@@ -93,10 +93,11 @@ func (s *Service) costFrom(st State, repo string, pr int, head string, d dialect
 		allowance.Remaining, allowance.RemainingKnown = *st.Account.Remaining, true
 	}
 	// Usage-based billing is only ever learned from the CLI's own guidance, and
-	// crq does not persist it yet — so it stays false, which prices an exhausted
-	// allowance as "waits" rather than "bills". That is the safe direction: it
-	// under-states cost only in a configuration the operator switched on
-	// themselves, and never invents a charge that is not happening.
+	// crq does not persist it yet — so it stays UNKNOWN rather than "off". The
+	// two are not interchangeable: "off" is a claim that an exhausted allowance
+	// costs nothing, and stating it on no evidence would show an account with
+	// overages enabled "no per-review cost" for a backlog it is about to be
+	// billed per reviewed file for. Unknown says so instead of guessing.
 	for _, r := range cfg.Reviewers {
 		est := dialect.EstimateCost(r.Login, cfg.Bot, d, allowance)
 		out.Reviewers = append(out.Reviewers, CostEstimate{

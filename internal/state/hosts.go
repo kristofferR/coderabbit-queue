@@ -126,6 +126,39 @@ func (r HostReport) StaleRole(now time.Time) bool {
 	return false
 }
 
+// RolesFresh reports whether every role in want was last seen within the given
+// age. It is what a caller deciding "nothing changed, skip the write" must ask
+// instead of looking at the record's own At: another service on the same host
+// keeps that fresh, so a reporter that trusted it never refreshed its OWN role
+// and let it age out from under itself — at which point the next writer of any
+// kind prunes the still-running service from the table.
+func (r HostReport) RolesFresh(want []string, now time.Time, within time.Duration) bool {
+	for _, role := range want {
+		at, ok := r.RoleSeen[role]
+		if !ok {
+			// Undated: only the record's own age can speak for it, and only if
+			// the record still lists the role at all.
+			if !r.lists(role) {
+				return false
+			}
+			at = r.At
+		}
+		if now.Sub(at) >= within {
+			return false
+		}
+	}
+	return true
+}
+
+func (r HostReport) lists(role string) bool {
+	for _, have := range r.Roles {
+		if have == role {
+			return true
+		}
+	}
+	return false
+}
+
 // HostReportList is every host's self-report, most recently heard from first.
 func (s *State) HostReportList() []HostReport {
 	out := make([]HostReport, 0, len(s.HostReports))

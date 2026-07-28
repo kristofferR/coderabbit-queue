@@ -310,6 +310,14 @@ func (s *Service) enqueueBatch(ctx context.Context, items []queueCandidate) erro
 			if _, held := st.HeldPR(repo, it.PR); held {
 				continue
 			}
+			// Asked again here, against the state this write lands on, for the
+			// same reason overrideChanged is: the scan decided from a snapshot,
+			// and a repository turned off since then has already had its pending
+			// rounds abandoned. Creating one now would put a metered review back
+			// in the queue after the off switch reported success.
+			if !s.reviewsRepo(*st, repo) {
+				continue
+			}
 			if r := st.Round(repo, it.PR); r != nil {
 				// A title arriving for a round that already exists is still
 				// news: it may have been renamed, or recorded before titles

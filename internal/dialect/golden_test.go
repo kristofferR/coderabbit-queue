@@ -713,10 +713,13 @@ func TestGoldenPricing(t *testing.T) {
 		if e := EstimateCodeRabbit("coderabbitai[bot]", d, Allowance{}); !e.Unknown {
 			t.Errorf("no count = %+v, want Unknown — absent is not exhausted", e)
 		}
-		if e := EstimateCodeRabbit("coderabbitai[bot]", d, Allowance{RemainingKnown: true}); !e.Exact || e.High != 0 {
+		if e := EstimateCodeRabbit("coderabbitai[bot]", d, Allowance{RemainingKnown: true}); !e.Unknown {
+			t.Errorf("exhausted, billing mode unknown = %+v, want Unknown — unknown is not off", e)
+		}
+		if e := EstimateCodeRabbit("coderabbitai[bot]", d, Allowance{RemainingKnown: true, UsageBasedKnown: true}); !e.Exact || e.High != 0 {
 			t.Errorf("exhausted with billing off = %+v, want free (it waits instead)", e)
 		}
-		e := EstimateCodeRabbit("coderabbitai[bot]", d, Allowance{RemainingKnown: true, UsageBasedEnabled: true})
+		e := EstimateCodeRabbit("coderabbitai[bot]", d, Allowance{RemainingKnown: true, UsageBasedKnown: true, UsageBasedEnabled: true})
 		if e.High != 2.0 {
 			t.Errorf("exhausted with billing on = %+v, want up to 8 files x $0.25", e)
 		}

@@ -88,6 +88,12 @@ type Server struct {
 	opts   Options
 	loader Loader
 
+	// refreshMu serializes whole refreshes. The poller and every action handler
+	// call refresh, and without this a poll that started first could finish last
+	// and publish ITS older state over the one an action had just written —
+	// rolling the dashboard back a revision and replaying its events.
+	refreshMu sync.Mutex
+
 	mu      sync.RWMutex
 	last    Snapshot
 	lastRev int64
@@ -175,6 +181,12 @@ func (s *Server) watch(ctx context.Context) {
 }
 
 func (s *Server) refresh(ctx context.Context) {
+	// Held across the load as well as the publish: the event feed is derived
+	// from the previous snapshot, so two refreshes that interleave would each
+	// diff against a state the other is about to replace.
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+
 	st, _, err := s.loader.Load(ctx)
 	if err != nil {
 		s.mu.Lock()

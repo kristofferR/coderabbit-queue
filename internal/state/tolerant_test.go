@@ -301,6 +301,73 @@ func TestUnknownFleetFieldsSurviveARewrite(t *testing.T) {
 	}
 }
 
+// The records that have been recognised the LONGEST are the ones this matters
+// most for: every schema-v4 binary knows "account", "cobots" and "dispatches",
+// so each hands the value to an ordinary decoder and drops whatever a newer
+// binary put inside it — the weekly fire log, a co-reviewer's answer, a
+// session's own detail. Being old is not the same as being closed.
+func TestUnknownMembersOfLongKnownRecordsSurviveARewrite(t *testing.T) {
+	foreign := `{
+	  "v": 4, "rev": 3, "next_seq": 2,
+	  "rounds": {
+	    "owner/repo#1": {
+	      "repo": "owner/repo", "pr": 1, "head": "abcdef123", "seq": 1,
+	      "phase": "reviewing", "enqueued_at": "2026-07-26T12:00:00Z",
+	      "cobots": {
+	        "chatgpt-codex-connector": {
+	          "command_id": 7, "answered_at": "2026-07-26T12:03:00Z",
+	          "future_bot_detail": {"verdict": "clean"}
+	        }
+	      }
+	    }
+	  },
+	  "dispatches": {
+	    "owner/repo#1": {"host": "mac", "attempts": 1, "future_session_detail": "pid=42"}
+	  },
+	  "account": {
+	    "scope": "owner",
+	    "fires": ["2026-07-26T11:00:00Z"],
+	    "future_quota_detail": {"window": "week"}
+	  }
+	}`
+
+	var st State
+	if err := json.Unmarshal([]byte(foreign), &st); err != nil {
+		t.Fatal(err)
+	}
+	round := st.Rounds["owner/repo#1"]
+	if len(st.Account.Fires) != 1 || round.Co(codexCoBotKey).CommandID != 7 {
+		t.Fatalf("known fields must still decode: %+v", st.Account)
+	}
+
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	account, _ := back["account"].(map[string]any)
+	quota, _ := account["future_quota_detail"].(map[string]any)
+	if quota == nil || quota["window"] != "week" {
+		t.Errorf("the account quota dropped a member: %#v", account)
+	}
+	rounds, _ := back["rounds"].(map[string]any)
+	written, _ := rounds["owner/repo#1"].(map[string]any)
+	cobots, _ := written["cobots"].(map[string]any)
+	codex, _ := cobots["chatgpt-codex-connector"].(map[string]any)
+	detail, _ := codex["future_bot_detail"].(map[string]any)
+	if detail == nil || detail["verdict"] != "clean" {
+		t.Errorf("a co-reviewer's entry dropped a member: %#v", codex)
+	}
+	dispatches, _ := back["dispatches"].(map[string]any)
+	claim, _ := dispatches["owner/repo#1"].(map[string]any)
+	if claim == nil || claim["future_session_detail"] != "pid=42" {
+		t.Errorf("a dispatch claim dropped a member: %#v", claim)
+	}
+}
+
 // A repository's reviewer override is nested the same way the fleet record is:
 // State recognises "repos" by name and hands each value to an ordinary decoder,
 // so only the record itself can carry a member a newer binary added inside it.

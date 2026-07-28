@@ -70,6 +70,12 @@ type Allowance struct {
 	// UsageBasedEnabled says pay-as-you-go is on. When it is off, an exhausted
 	// account does not spend money — it stops, which is a different answer.
 	UsageBasedEnabled bool
+	// UsageBasedKnown is false when crq has never learned which of those two it
+	// is. Absent is not "off", for the same reason absent is not "exhausted":
+	// asserting "off" prices an exhausted account at exactly $0.00, and an
+	// account that does have overages on would then be told its backlog is free
+	// and billed per reviewed file for it.
+	UsageBasedKnown bool
 }
 
 // CostEstimate is what one reviewer will cost for one head, in US dollars.
@@ -139,6 +145,9 @@ func EstimateCodeRabbit(login string, d DiffStat, a Allowance) CostEstimate {
 	case a.Remaining > 0:
 		est.Exact = true
 		est.Basis = fmt.Sprintf("included: %d review(s) left in the plan allowance", a.Remaining)
+	case !a.UsageBasedKnown:
+		est.Unknown = true
+		est.Basis = "the allowance is spent and crq has not learned whether usage-based reviews are on, so whether this waits or bills is unknown"
 	case !a.UsageBasedEnabled:
 		est.Exact = true
 		est.Basis = "the allowance is spent and usage-based reviews are off, so this waits for the window rather than costing anything"

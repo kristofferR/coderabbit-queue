@@ -31,6 +31,9 @@ var (
 	fleetFields         = jsonFieldNames(reflect.TypeOf(FleetDefaults{}))
 	solverFields        = jsonFieldNames(reflect.TypeOf(SolverSettings{}))
 	repoReviewersFields = jsonFieldNames(reflect.TypeOf(RepoReviewers{}))
+	accountFields       = jsonFieldNames(reflect.TypeOf(AccountQuota{}))
+	coBotFields         = jsonFieldNames(reflect.TypeOf(CoBotRound{}))
+	dispatchFields      = jsonFieldNames(reflect.TypeOf(DispatchClaim{}))
 )
 
 // UnmarshalJSON decodes a fire slot and remembers anything it did not recognise.
@@ -174,6 +177,81 @@ func (r *RepoReviewers) UnmarshalJSON(raw []byte) error {
 func (r RepoReviewers) MarshalJSON() ([]byte, error) {
 	type plain RepoReviewers
 	return mergeUnknown(plain(r), r.unknown)
+}
+
+// The same nesting argument applies to records that have been recognised for
+// longer, and it is sharper there: "account", "cobots" and "dispatches" are
+// members every schema-v4 binary knows, so an older one hands each to an
+// ordinary decoder and drops whatever a newer binary added INSIDE it — the
+// weekly fire log, a co-reviewer's answer, a session's findings count. The
+// containing map being new is what makes a record safe to leave without one;
+// none of these is new.
+
+// UnmarshalJSON decodes the account quota and remembers anything it did not recognise.
+func (a *AccountQuota) UnmarshalJSON(raw []byte) error {
+	type plain AccountQuota
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknown(raw, accountFields)
+	if err != nil {
+		return err
+	}
+	*a = AccountQuota(decoded)
+	a.unknown = unknown
+	return nil
+}
+
+// MarshalJSON writes the account quota back with the members it did not recognise intact.
+func (a AccountQuota) MarshalJSON() ([]byte, error) {
+	type plain AccountQuota
+	return mergeUnknown(plain(a), a.unknown)
+}
+
+// UnmarshalJSON decodes one co-reviewer's round bookkeeping and remembers
+// anything it did not recognise.
+func (c *CoBotRound) UnmarshalJSON(raw []byte) error {
+	type plain CoBotRound
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknown(raw, coBotFields)
+	if err != nil {
+		return err
+	}
+	*c = CoBotRound(decoded)
+	c.unknown = unknown
+	return nil
+}
+
+// MarshalJSON writes a co-reviewer's bookkeeping back with the members it did not recognise intact.
+func (c CoBotRound) MarshalJSON() ([]byte, error) {
+	type plain CoBotRound
+	return mergeUnknown(plain(c), c.unknown)
+}
+
+// UnmarshalJSON decodes one dispatch claim and remembers anything it did not recognise.
+func (c *DispatchClaim) UnmarshalJSON(raw []byte) error {
+	type plain DispatchClaim
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknown(raw, dispatchFields)
+	if err != nil {
+		return err
+	}
+	*c = DispatchClaim(decoded)
+	c.unknown = unknown
+	return nil
+}
+
+// MarshalJSON writes a dispatch claim back with the members it did not recognise intact.
+func (c DispatchClaim) MarshalJSON() ([]byte, error) {
+	type plain DispatchClaim
+	return mergeUnknown(plain(c), c.unknown)
 }
 
 // captureUnknown returns the members of raw that known does not name.

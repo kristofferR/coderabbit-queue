@@ -43,9 +43,14 @@ func (s *Service) ReportHost(ctx context.Context, roles ...string) {
 		// process's own view: another service on this host may have added a
 		// role since, and treating that as "nothing changed" would leave the
 		// merged record un-refreshed until it aged out.
+		//
+		// Freshness is asked of THIS reporter's own roles, not of the record.
+		// A host running two services has the other one refreshing At on every
+		// pass, so a record-wide check suppressed this write until the role
+		// being reported crossed the TTL — and then whichever service wrote
+		// next pruned a service that never stopped running.
 		if prev, ok := st.HostReports[report.Host]; ok && sameHostReport(prev, report) &&
-			coversRoles(prev.Roles, report.Roles) && !prev.StaleRole(now) &&
-			now.Sub(prev.At) < HostReportTTL/2 {
+			!prev.StaleRole(now) && prev.RolesFresh(report.Roles, now, HostReportTTL/2) {
 			// Nothing changed and the record is still fresh. Rewriting it would
 			// bump the state revision on every pass and make the dashboard's
 			// change feed report a fleet that is constantly doing something.
@@ -73,23 +78,6 @@ func toolVersion(ctx context.Context, path string) string {
 		line = line[:60]
 	}
 	return line
-}
-
-// coversRoles reports whether have already contains every role in want.
-func coversRoles(have, want []string) bool {
-	for _, w := range want {
-		found := false
-		for _, h := range have {
-			if h == w {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-	return true
 }
 
 func sameHostReport(a, b HostReport) bool {

@@ -162,18 +162,26 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 			sameLogins(ov.Required, beforeOverride.Required) {
 			return ErrNoChange
 		}
+		// Resolved from the FLEET-layered configuration, the one cfgFor hands
+		// the queue — not from this host's env. Where the two disagree, the env
+		// answer is the wrong one twice over: it can accept a save that leaves
+		// the effective required set empty (host env requires Codex, the fleet
+		// requires the primary, and turning the primary off passes a check
+		// nothing later applies), and it decides the before/after requeue from
+		// reviewers this repository does not have.
+		base := s.cfg.WithFleet(st.Fleet)
 		// Checked against the RESOLVED configuration rather than the lists as
 		// typed, because the two disagree in exactly the case that matters: the
 		// fleet default requires the primary, so turning it off here empties the
 		// gate without anyone naming an empty list. A round gating on nobody
 		// converges before any reviewer runs, so refuse it at edit time.
-		if len(s.cfg.ForRepo(ov).RequiredBots) == 0 {
+		if len(base.ForRepo(ov).RequiredBots) == 0 {
 			return fmt.Errorf("that would leave %s with no required reviewer, so every round would converge before any bot answers — require a co-reviewer first", repo)
 		}
 		ov.UpdatedAt, ov.By = &now, s.cfg.Host
-		before := s.cfg.ForRepo(mustOverride(st, repo))
+		before := base.ForRepo(mustOverride(st, repo))
 		st.SetRepoOverride(repo, ov)
-		s.reopenForChangedReviewers(st, repo, before, s.cfg.ForRepo(ov), open)
+		s.reopenForChangedReviewers(st, repo, before, base.ForRepo(ov), open)
 		return nil
 	})
 	if err != nil {
@@ -197,11 +205,15 @@ func (s *Service) ClearReviewers(ctx context.Context, repo string) (ReviewerView
 		return ReviewerView{}, err
 	}
 	state, err := s.store.Update(ctx, func(st *State) error {
-		before := s.cfg.ForRepo(mustOverride(st, repo))
+		// Clearing returns the repository to the FLEET default, so that is what
+		// the "after" side has to be — s.cfg is this host's env, which is only
+		// the same thing when the fleet has recorded nothing.
+		base := s.cfg.WithFleet(st.Fleet)
+		before := base.ForRepo(mustOverride(st, repo))
 		if !st.ClearRepoOverride(repo) {
 			return ErrNoChange
 		}
-		s.reopenForChangedReviewers(st, repo, before, s.cfg, open)
+		s.reopenForChangedReviewers(st, repo, before, base, open)
 		return nil
 	})
 	if err != nil && !errors.Is(err, ErrNoChange) {

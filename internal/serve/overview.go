@@ -279,7 +279,10 @@ func inFlight(st state.State, now time.Time, inflight time.Duration, botsFor Bot
 		if r.WaitDeadline != nil {
 			row.Deadline = r.WaitDeadline
 		}
-		if _, fixing := st.Dispatches[key]; fixing {
+		// Live, not merely present: a claim a dead watcher never released stays
+		// in Dispatches, and scheduling already treats it as free. Marking the
+		// row would report a fixer that stopped existing.
+		if d, fixing := st.Dispatches[key]; fixing && d.Live(now) {
 			row.Fixing = true
 		}
 		row.Next = nextForRound(r, row)

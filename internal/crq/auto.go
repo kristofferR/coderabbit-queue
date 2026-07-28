@@ -211,12 +211,24 @@ func (s *Service) releaseLeader(ctx context.Context, token string) error {
 	return nil
 }
 
+// leaderTTL is how long a lease survives without a heartbeat, resolved the way
+// every other fleet setting is: this host's env, then whatever the fleet
+// recorded. A lease length the dashboard displays as the fleet's answer has to
+// be the one the daemon actually renews against — otherwise saving it changes a
+// number on a page and nothing else. Non-positive is ignored, since a recorded
+// 0 would expire every lease the instant it was written.
+func (s *Service) leaderTTL(st State) time.Duration {
+	if resolved := s.cfg.WithFleet(st.Fleet).LeaderTTL; resolved > 0 {
+		return resolved
+	}
+	return s.cfg.LeaderTTL
+}
+
 // renewLeader claims or extends the leader lease via compare-and-swap on the
 // state ref. It does not sync the dashboard, so it's cheap enough to call as an
 // in-pass heartbeat. held is false when another live lease holder owns it.
 func (s *Service) renewLeader(ctx context.Context, owner, token string) (State, bool, error) {
 	now := time.Now().UTC()
-	expires := now.Add(s.cfg.LeaderTTL)
 	held := false
 	state, err := s.store.Update(ctx, func(st *State) error {
 		if st.Leader != nil && st.Leader.ExpiresAt.After(now) && st.Leader.Token != token {
@@ -226,7 +238,7 @@ func (s *Service) renewLeader(ctx context.Context, owner, token string) (State, 
 		st.Leader = &LeaderLease{
 			Owner:        owner,
 			Token:        token,
-			ExpiresAt:    expires,
+			ExpiresAt:    now.Add(s.leaderTTL(*st)),
 			UpdatedAt:    now,
 			Capabilities: []string{leaderCapabilityHolds},
 		}
@@ -319,7 +331,9 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			scanned++
 			// Heartbeat: renew the lease partway through a long pass so a standby
 			// can't steal it mid-scan and cause brief double-leadership (#4).
-			if s.cfg.LeaderTTL > 0 && time.Since(lastBeat) >= s.cfg.LeaderTTL/2 {
+			// Half of the SAME lease length renewLeader writes, so a fleet that
+			// shortens the lease starts beating faster to match.
+			if ttl := s.leaderTTL(state); ttl > 0 && time.Since(lastBeat) >= ttl/2 {
 				st, held, herr := s.renewLeader(ctx, owner, token)
 				if herr != nil {
 					return false, herr

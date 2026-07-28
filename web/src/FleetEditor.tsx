@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { BotCard, FleetSettings, Snapshot } from "./api";
-import { act } from "./actions";
+import { act, type ActionBody } from "./actions";
 import { BotIcon, Card, Pill, Toggle } from "./ui";
 import { Confirm } from "./Confirm";
 
@@ -61,13 +61,21 @@ export function FleetEditor({
     weekly !== String(fleet.weekly_limit) ||
     autofix !== fleet.autofix_default;
 
-  const change = () => ({
-    cobots: runs,
-    required,
-    min_interval: minInterval,
-    weekly_limit: Number(weekly),
-    autofix_default: autofix,
-  });
+  // Only what THIS form actually edited. The wire model makes every field
+  // optional for exactly this reason: posting all five means someone who came
+  // here to change the pacing also re-posts the reviewer lists as they looked
+  // when the page loaded, silently undoing whatever another operator saved in
+  // between. An omitted field is "leave it alone"; an empty list is still sent,
+  // because "explicitly none" is a change like any other.
+  const change = (): NonNullable<ActionBody["fleet"]> => {
+    const c: NonNullable<ActionBody["fleet"]> = {};
+    if (runs.join() !== fleetRuns.join()) c.cobots = runs;
+    if (required.join() !== fleetRequired.join()) c.required = required;
+    if (minInterval !== fleet.min_interval) c.min_interval = minInterval;
+    if (weekly !== String(fleet.weekly_limit)) c.weekly_limit = Number(weekly);
+    if (autofix !== fleet.autofix_default) c.autofix_default = autofix;
+    return c;
+  };
 
   // Ask first. The answer is the confirmation's whole body — there is no
   // generic "are you sure", because the useful question is always "what does

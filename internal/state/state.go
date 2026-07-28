@@ -190,7 +190,7 @@ type CoBotRound struct {
 	CommandID   int64      `json:"command_id,omitempty"`
 	CommandedAt *time.Time `json:"commanded_at,omitempty"`
 	ClaimedAt   *time.Time `json:"claimed_at,omitempty"`
-	// AnsweredAt is when crq last OBSERVED this bot produce head evidence — a
+	// AnsweredAt is when crq FIRST observed this bot produce head evidence — a
 	// review, a clean summary at the SHA, a completed check run.
 	//
 	// The three fields above are all crq's own bookkeeping: what it posted and
@@ -199,10 +199,17 @@ type CoBotRound struct {
 	// an account for reads as working — crq asks, records that it asked, and
 	// nothing ever answers. Only this field is about the bot.
 	AnsweredAt *time.Time `json:"answered_at,omitempty"`
+
+	// unknown carries members a newer binary wrote inside this record. Round's
+	// carrier cannot: it sees "cobots" as a member it knows and hands the map
+	// to the ordinary decoder, which drops anything inside the values. See
+	// tolerant.go.
+	unknown unknownFields
 }
 
 func (c CoBotRound) empty() bool {
-	return c.CommandID == 0 && c.CommandedAt == nil && c.ClaimedAt == nil && c.AnsweredAt == nil
+	return c.CommandID == 0 && c.CommandedAt == nil && c.ClaimedAt == nil && c.AnsweredAt == nil &&
+		len(c.unknown) == 0
 }
 
 // codexCoBotKey is dialect.CodexBotLogin under coBotKey. The literal is
@@ -266,15 +273,16 @@ func (r *Round) ClaimCo(login string, now time.Time) {
 	r.setCo(login, c)
 }
 
-// NoteCoAnswer records that login was OBSERVED producing head evidence. Only
-// moves forward, so a later observation of the same answer does not make an old
-// bot look freshly active.
+// NoteCoAnswer records that login was OBSERVED producing head evidence. The
+// FIRST such observation wins: a round is one head, so the evidence does not
+// change, and re-stamping it with each sweep's clock would both rewrite state
+// on every pass and make a bot that answered days ago read as freshly active.
 func (r *Round) NoteCoAnswer(login string, at time.Time) {
 	c := r.Co(login)
-	t := at.UTC()
-	if c.AnsweredAt != nil && !t.After(*c.AnsweredAt) {
+	if c.AnsweredAt != nil {
 		return
 	}
+	t := at.UTC()
 	c.AnsweredAt = &t
 	r.setCo(login, c)
 }
@@ -297,9 +305,10 @@ func (r *Round) ClearCoClaim(login string) {
 // it there. Overwriting the whole entry therefore erased it on every load, and
 // Codex alone read as a bot that never answers.
 func (r *Round) foldLegacyCodex() {
+	prev := r.Co(codexCoBotKey)
 	r.setCo(codexCoBotKey, CoBotRound{
 		CommandID: r.CodexCommandID, CommandedAt: r.CodexCommandedAt, ClaimedAt: r.CodexClaimedAt,
-		AnsweredAt: r.Co(codexCoBotKey).AnsweredAt,
+		AnsweredAt: prev.AnsweredAt, unknown: prev.unknown,
 	})
 }
 
@@ -370,6 +379,11 @@ type AccountQuota struct {
 	// weeks. See firelog.go: it exists to forecast the vendor's WEEKLY fair-use
 	// throttle, which crq can already recognise but never see coming.
 	Fires []time.Time `json:"fires,omitempty"`
+
+	// unknown carries members a newer binary wrote inside this record. State's
+	// carrier cannot: it sees "account" as a member it knows and hands the whole
+	// object to the ordinary decoder. See tolerant.go.
+	unknown unknownFields
 }
 
 type LeaderLease struct {
@@ -1132,6 +1146,11 @@ type DispatchClaim struct {
 	// one you cannot check on.
 	Findings int    `json:"findings,omitempty"`
 	Log      string `json:"log,omitempty"`
+
+	// unknown carries members a newer binary wrote inside this record. The maps
+	// holding claims are recognised by name, so only the claim itself can carry
+	// one. See tolerant.go.
+	unknown unknownFields
 }
 
 // DispatchHeld reports whether a live claim exists.

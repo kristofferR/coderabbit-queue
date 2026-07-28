@@ -323,7 +323,8 @@ type EnrollImpact struct {
 	Low  float64 `json:"low"`
 	High float64 `json:"high"`
 	// Unpriced counts the pull requests whose cost could not be read — a spent
-	// REST quota, an unreadable diff. They are reported rather than dropped:
+	// REST quota, an unreadable diff, or a reviewer crq has no price for. They
+	// are reported rather than dropped:
 	// leaving them out of the total makes an unknown price look like a free one,
 	// which is the one thing this dialog exists to prevent.
 	Unpriced        int    `json:"unpriced,omitempty"`
@@ -376,10 +377,24 @@ func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact,
 		priced = priced[:maxPriced]
 	}
 	for _, pr := range priced {
-		cost, cerr := s.Cost(ctx, repo, pr)
+		// costFrom, not Cost: the state is already in hand, and Cost would load
+		// the ref again per pull request — four requests each, 100 across the
+		// bound, for an answer that cannot have changed since the load above.
+		pull, cerr := s.gh.GetPull(ctx, repo, pr)
 		if cerr != nil {
 			impact.Unpriced++
 			continue
+		}
+		cost := s.costFrom(st, repo, pr, pull.Head.SHA, dialect.DiffStat{
+			Additions:    pull.Additions,
+			Deletions:    pull.Deletions,
+			ChangedFiles: pull.ChangedFiles,
+		})
+		if len(cost.Unpriced) > 0 {
+			// A reviewer crq cannot price makes this pull request's total a
+			// floor, not an answer. Adding it in would let the sentence below
+			// call an unknown price free, which is what it exists to prevent.
+			impact.Unpriced++
 		}
 		impact.Low += cost.Low
 		impact.High += cost.High

@@ -195,7 +195,7 @@ func (c *costCache) put(key string, e costEntry) {
 }
 
 // buildPRView assembles the cheap layer from state.
-func buildPRView(st state.State, repo string, pr int, bots []BotName, inflight time.Duration) PRView {
+func buildPRView(st state.State, repo string, pr int, bots []BotName, inflight time.Duration, now time.Time) PRView {
 	v := PRView{Repo: repo, PR: pr, History: []HistoryEntry{}}
 	key := state.Key(repo, pr)
 	v.Title = titleOf(st, repo, pr)
@@ -219,7 +219,10 @@ func buildPRView(st state.State, repo string, pr int, bots []BotName, inflight t
 			rv.Dismissed = append(rv.Dismissed, Dismissed{ID: id, Reason: reason})
 		}
 		sort.Slice(rv.Dismissed, func(i, j int) bool { return rv.Dismissed[i].ID < rv.Dismissed[j].ID })
-		if d, ok := st.Dispatches[key]; ok {
+		// Live, for the same reason the overview and the sessions table are: a
+		// claim whose watcher died is not a running session, and the three views
+		// must not disagree about that.
+		if d, ok := st.Dispatches[key]; ok && d.Live(now) {
 			s := Session{Key: key, Repo: repo, PR: pr, Head: r.Head, Host: hostOf(d.Host),
 				Attempt: d.Attempts, Since: d.At}
 			if !d.Heartbeat.IsZero() {
@@ -275,7 +278,7 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 	st := s.lastState
 	s.mu.RUnlock()
 
-	view := buildPRView(st, repo, pr, s.botsFor(&st)(repo), s.opts.Inflight)
+	view := buildPRView(st, repo, pr, s.botsFor(&st)(repo), s.opts.Inflight, s.opts.Now())
 
 	if s.observer != nil {
 		head := ""

@@ -128,7 +128,7 @@ func (s *Service) WaitForAction(ctx context.Context, repo string, pr int) (NextR
 			continue
 		}
 
-		deadline := now.Add(maxStaleFactor * s.cfg.LeaderTTL)
+		deadline := now.Add(maxStaleFactor * s.leaderTTL(st))
 		if report.RecheckAfter != nil && report.RecheckAfter.Before(deadline) {
 			deadline = *report.RecheckAfter
 		}
