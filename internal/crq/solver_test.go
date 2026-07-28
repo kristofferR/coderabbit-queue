@@ -37,6 +37,18 @@ func TestSolverLayering(t *testing.T) {
 	if v, _ := svc.Solver(ctx, "o/plain"); v.Effort != "medium" || v.Sources["effort"] != "fleet" {
 		t.Errorf("view = %+v, want the fleet default applied and named", v)
 	}
+	if fleet, err := svc.FleetSolver(ctx); err != nil || fleet.Effort != "medium" {
+		t.Fatalf("fleet solver = %+v, err %v, want the recorded solver default", fleet, err)
+	}
+
+	// Empty is a stated effort too: it asks the agent to choose, rather than
+	// inheriting a nonempty fleet answer.
+	if _, err := svc.SetSolver(ctx, "o/default-effort", SolverChange{Effort: strptr("")}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := svc.Solver(ctx, "o/default-effort"); v.Effort != "" || v.Sources["effort"] != "repo" {
+		t.Errorf("view = %+v, want the repository's explicit agent default", v)
+	}
 
 	// A repository's own record wins over it, field by field: setting the model
 	// here must not discard the fleet's effort.
@@ -199,26 +211,31 @@ func TestSolverFieldsCanReturnToInheritance(t *testing.T) {
 	svc := NewService(cfg, newFakeGitHub(), store, nil)
 
 	if _, err := svc.SetFleetSolver(ctx, SolverChange{
-		Forks: boolptr(true), SkipAuthors: []string{"dependabot[bot]"},
+		Effort: strptr("high"), Forks: boolptr(true), SkipAuthors: []string{"dependabot[bot]"},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.SetSolver(ctx, "o/repo", SolverChange{
-		Prompt: strptr("this project uses bun"), Forks: boolptr(false), SkipAuthors: []string{},
+		Effort: strptr(""), Prompt: strptr("this project uses bun"),
+		Forks: boolptr(false), SkipAuthors: []string{},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	v, _ := svc.Solver(ctx, "o/repo")
-	if v.Forks || v.Sources["forks"] != "repo" || v.Sources["skip_authors"] != "repo" {
-		t.Fatalf("view = %+v, want both settings held by the repository", v)
+	if v.Effort != "" || v.Sources["effort"] != "repo" ||
+		v.Forks || v.Sources["forks"] != "repo" || v.Sources["skip_authors"] != "repo" {
+		t.Fatalf("view = %+v, want all three settings held by the repository", v)
 	}
 
 	if _, err := svc.SetSolver(ctx, "o/repo", SolverChange{
-		UnsetForks: true, UnsetSkipAuthors: true,
+		UnsetEffort: true, UnsetForks: true, UnsetSkipAuthors: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	v, _ = svc.Solver(ctx, "o/repo")
+	if v.Effort != "high" || v.Sources["effort"] != "fleet" {
+		t.Errorf("effort = %q from %q, want the fleet's answer back", v.Effort, v.Sources["effort"])
+	}
 	if !v.Forks || v.Sources["forks"] != "fleet" {
 		t.Errorf("forks = %v from %q, want the fleet's answer back", v.Forks, v.Sources["forks"])
 	}

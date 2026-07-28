@@ -68,6 +68,31 @@ func TestUnknownRoundFieldsSurviveARewrite(t *testing.T) {
 	}
 }
 
+func TestRenewedDispatchClaimPreservesUnknownFields(t *testing.T) {
+	var round Round
+	if err := json.Unmarshal([]byte(`{
+	  "repo":"owner/repo","pr":1,"head":"abcdef123","phase":"queued",
+	  "dispatch":{
+	    "host":"old","token":"old","at":"2026-07-26T10:00:00Z",
+	    "heartbeat":"2026-07-26T10:00:00Z",
+	    "future_dispatch_policy":{"mode":"audit"}
+	  }
+	}`), &round); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	if ok, why := round.ClaimDispatch("new", "new", now, 3); !ok {
+		t.Fatal(why)
+	}
+	raw, err := json.Marshal(round.Dispatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"future_dispatch_policy":{"mode":"audit"}`) {
+		t.Fatalf("renewed claim dropped its future field: %s", raw)
+	}
+}
+
 func TestSetEnrollmentCarriesUnknownFields(t *testing.T) {
 	var st State
 	if err := json.Unmarshal([]byte(`{

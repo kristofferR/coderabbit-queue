@@ -31,6 +31,30 @@ func TestFleetUnsetInstructionsWinOverValues(t *testing.T) {
 	}
 }
 
+func TestFleetRequiredReviewersResolveAgainstTheEffectivePrimary(t *testing.T) {
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost", "CRQ_COBOTS": "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const current = "replacement-reviewer[bot]"
+	st := DefaultState(cfg)
+	st.Fleet = fleetEnvSet(st.Fleet, "CRQ_BOT", current, false)
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	next, err := svc.applyFleetChange(st, FleetChange{Required: []string{current}})
+	if err != nil {
+		t.Fatalf("current fleet primary was rejected: %v", err)
+	}
+	if got := cfg.WithFleet(next).RequiredBots; len(got) != 1 || !sameBot(got[0], current) {
+		t.Fatalf("required = %v, want the effective primary", got)
+	}
+	if _, err := svc.applyFleetChange(st, FleetChange{Required: []string{cfg.Bot}}); err == nil {
+		t.Fatal("the retired startup primary was accepted")
+	}
+}
+
 // The three layers are the whole feature, so this pins their order and — just
 // as importantly — that an absent fleet setting changes nothing at all. A fleet
 // that never writes a record must behave exactly as it did before the record
@@ -280,6 +304,38 @@ func TestSetEnvPrimaryReopensCompletedRounds(t *testing.T) {
 	}
 	if r := st.Round(repo, pr); r == nil || r.Phase != PhaseQueued {
 		t.Fatalf("round = %#v, want an unrelated setting to leave it exactly as it was", r)
+	}
+}
+
+func TestSetEnvTriggerPolicyReopensCompletedRounds(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost", "CRQ_REPOS": "o/r",
+		"CRQ_COBOTS": "codex", "CRQ_COBOT_CODEX_TRIGGER": "never",
+		"CRQ_COBOT_CODEX_CMD": "@codex review", "CRQ_MIN_INTERVAL": "0s",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, pr, head := "o/r", 5, "bbbbbbbb2"
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	var pull ghapi.Pull
+	pull.State, pull.Head.SHA = "open", head+"cdef1234"
+	gh.pulls[fakeKey(repo, pr)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 12)
+
+	if _, err := svc.SetEnv(ctx, "CRQ_COBOT_CODEX_TRIGGER", "always", false); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(repo, pr); round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("round = %#v, want the trigger policy change to requeue it", round)
 	}
 }
 

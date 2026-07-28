@@ -78,7 +78,8 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 	source("models", own.SetModels || len(own.Models) > 0 || own.Model != "",
 		fleet.SetModels || len(fleet.Models) > 0 || fleet.Model != "")
 	view.Sources["model"] = view.Sources["models"]
-	source("effort", own.Effort != "", fleet.Effort != "")
+	source("effort", own.SetEffort || own.Effort != "",
+		fleet.SetEffort || fleet.Effort != "")
 	source("prompt", own.Prompt != "", fleet.Prompt != "")
 	source("max_attempts", own.MaxAttempts != nil, fleet.MaxAttempts != nil)
 	source("forks", own.Forks != nil, fleet.Forks != nil)
@@ -123,12 +124,11 @@ type SolverChange struct {
 	Forks       *bool    `json:"forks"`
 	SkipAuthors []string `json:"skip_authors"`
 	// Unset* hands ONE setting back to the layer beneath, the same instruction
-	// FleetChange's Unset* fields carry. The others express it in their own
-	// values — an empty model or effort, 0 attempts — but these two cannot:
-	// false is a real fork policy and an empty author list is "skip nobody", so
-	// without this a repository that once set either could only follow the fleet
-	// again by clearing every solver setting it had.
+	// FleetChange's Unset* fields carry. An empty model ranking and an empty
+	// effort both mean "use the agent default", false is a real fork policy, and
+	// an empty author list is "skip nobody", so none can also mean inheritance.
 	UnsetModels      bool `json:"unset_models,omitempty"`
+	UnsetEffort      bool `json:"unset_effort,omitempty"`
 	UnsetForks       bool `json:"unset_forks,omitempty"`
 	UnsetSkipAuthors bool `json:"unset_skip_authors,omitempty"`
 	// Clear drops the whole record, returning every setting to the fleet default.
@@ -230,6 +230,15 @@ func (s *Service) SetFleetSolver(ctx context.Context, change SolverChange) (Solv
 	return st.Fleet.Solver, nil
 }
 
+// FleetSolver reports the recorded fleet-wide solver default.
+func (s *Service) FleetSolver(ctx context.Context) (SolverSettings, error) {
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return SolverSettings{}, err
+	}
+	return st.Fleet.Solver, nil
+}
+
 // applySolverChange folds a change onto a record, validating it.
 func applySolverChange(sv SolverSettings, change SolverChange) (SolverSettings, error) {
 	if change.UnsetModels {
@@ -261,12 +270,14 @@ func applySolverChange(sv SolverSettings, change SolverChange) (SolverSettings, 
 			sv.Models, sv.SetModels, sv.Model = []string{model}, true, model
 		}
 	}
-	if change.Effort != nil {
+	if change.UnsetEffort {
+		sv.Effort, sv.SetEffort = "", false
+	} else if change.Effort != nil {
 		effort := strings.ToLower(strings.TrimSpace(*change.Effort))
 		if effort != "" && !containsString(knownEfforts, effort) {
 			return sv, fmt.Errorf("effort %q is not one of %s", effort, strings.Join(knownEfforts, ", "))
 		}
-		sv.Effort = effort
+		sv.Effort, sv.SetEffort = effort, true
 	}
 	if change.Prompt != nil {
 		prompt := strings.TrimSpace(*change.Prompt)

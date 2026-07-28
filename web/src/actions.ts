@@ -56,11 +56,12 @@ export type ActionBody = {
     forks?: boolean;
     skip_authors?: string[];
     /**
-     * Hand one setting back to the layer beneath. The others express it in
-     * their own values, but `false` is a real fork policy and an empty author
-     * list means "skip nobody", so those two need their own instruction.
+     * Hand one setting back to the layer beneath. Empty models and effort mean
+     * "agent default", `false` is a real fork policy, and an empty author list
+     * means "skip nobody", so those values cannot also mean inheritance.
      */
     unset_models?: boolean;
+    unset_effort?: boolean;
     unset_forks?: boolean;
     unset_skip_authors?: boolean;
     clear?: boolean;

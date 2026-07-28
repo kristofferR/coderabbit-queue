@@ -305,7 +305,7 @@ crq solver REPO                                       # effective settings + whe
 crq solver set REPO --models opus,sonnet,haiku --effort high --attempts 5
 crq solver set REPO --prompt "This project uses bun, never npm."
 crq solver set --fleet --effort medium                # the default every repository inherits
-crq solver set REPO --inherit models,forks,skip-authors
+crq solver set REPO --inherit models,effort,forks,skip-authors
 crq solver clear REPO | crq solver clear --fleet
 ```
 
@@ -315,9 +315,9 @@ failed fix sessions do, and rotate through the ranking. Exhausting a fix-attempt
 increasing cooldown (one hour up to one day), then automatically opens a fresh cycle. If every model
 is parked, crq waits for the earliest reset instead of permanently exhausting the PR.
 
-`--inherit` hands a setting back to the layer beneath. It is required for models, forks and skipped
-authors because an empty model ranking means "use the agent default", `off` is a real fork policy,
-and an empty author list means "skip nobody". Empty `--effort` and `--attempts 0` inherit directly.
+`--inherit` hands a setting back to the layer beneath. It is required for models, effort, forks and
+skipped authors because an empty model ranking or effort means "use the agent default", `off` is a
+real fork policy, and an empty author list means "skip nobody". `--attempts 0` inherits directly.
 
 Three layers again — env, fleet, repository — with `.sources` naming which answered. The AGENT is
 not per repository: it is baked into the session script by `crq autofix install`, because switching

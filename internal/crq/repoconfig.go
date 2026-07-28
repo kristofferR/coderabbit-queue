@@ -417,9 +417,27 @@ func (s *Service) openPRs(ctx context.Context, repo string) (map[int]bool, error
 // the change came from: a per-repo override, a fleet default, or a fleet-wide
 // env setting that happens to name the primary.
 func sameReviewers(before, after Config) bool {
-	free := func(r Reviewer) bool { return !r.Metered() }
 	return sameLogins(before.RequiredBots, after.RequiredBots) &&
-		sameLogins(before.reviewerLogins(free), after.reviewerLogins(free))
+		sameLogins(before.reviewerLogins(func(Reviewer) bool { return true }),
+			after.reviewerLogins(func(Reviewer) bool { return true })) &&
+		sameTriggerPolicies(before.Reviewers, after.Reviewers)
+}
+
+func sameTriggerPolicies(a, b []Reviewer) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	triggers := make(map[string]engine.TriggerMode, len(a))
+	for _, reviewer := range a {
+		triggers[dialect.NormalizeBotName(reviewer.Login)] = reviewer.Trigger
+	}
+	for _, reviewer := range b {
+		trigger, ok := triggers[dialect.NormalizeBotName(reviewer.Login)]
+		if !ok || trigger != reviewer.Trigger {
+			return false
+		}
+	}
+	return true
 }
 
 // sameLogins compares two reviewer lists as sets, since order is presentation.
@@ -502,8 +520,9 @@ func resolveBotList(allowed map[string]string, list []string, what string) ([]st
 }
 
 // addedReviewers reports whether the new configuration asks for evidence the
-// old one did not — a newly required reviewer, or a newly enabled co-reviewer.
-// A pure removal returns false, which is what makes narrowing free.
+// old one did not — a newly required reviewer, a newly enabled co-reviewer, or
+// a trigger policy that newly asks an existing reviewer to run. A pure removal
+// returns false, which is what makes narrowing free.
 func addedReviewers(before, after Config, beforeCo, afterCo []string) bool {
 	for _, login := range after.RequiredBots {
 		if !containsBot(before.RequiredBots, login) {
@@ -515,5 +534,27 @@ func addedReviewers(before, after Config, beforeCo, afterCo []string) bool {
 			return true
 		}
 	}
+	for _, reviewer := range after.Reviewers {
+		if reviewer.Metered() || reviewer.Trigger == engine.TriggerNever {
+			continue
+		}
+		for _, old := range before.Reviewers {
+			if sameBot(old.Login, reviewer.Login) &&
+				triggerPolicyRank(reviewer.Trigger) > triggerPolicyRank(old.Trigger) {
+				return true
+			}
+		}
+	}
 	return false
+}
+
+func triggerPolicyRank(mode engine.TriggerMode) int {
+	switch mode {
+	case engine.TriggerAlways:
+		return 2
+	case engine.TriggerSelfHeal:
+		return 1
+	default:
+		return 0
+	}
 }

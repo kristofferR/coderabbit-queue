@@ -122,7 +122,8 @@ func TestProviderOutageUsesFallbackWithoutSpendingAnAttempt(t *testing.T) {
 	gh := newFakeGitHub()
 	gh.graphQL = noForcePush
 	store := NewMemoryStore(cfg)
-	svc := NewService(cfg, gh, store, nil)
+	switchable := &loadSwitchStore{StateStore: store}
+	svc := NewService(cfg, gh, switchable, nil)
 	if _, err := svc.SetSolver(context.Background(), repo, SolverChange{
 		Models: []string{"opus", "sonnet"},
 	}); err != nil {
@@ -144,10 +145,18 @@ func TestProviderOutageUsesFallbackWithoutSpendingAnAttempt(t *testing.T) {
 	report := NextReport{Repo: repo, PR: 18, Head: sha, Action: "fix"}
 	opts := WatchOptions{Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 5}
 
-	if ok, why, _ := svc.claimDispatchModels(context.Background(), report, "first", 5, []string{"opus", "sonnet"}); !ok {
+	var claimedModel string
+	if ok, why, _, model := svc.claimDispatchModels(context.Background(), report, "first", 5, []string{"opus", "sonnet"}); !ok {
 		t.Fatalf("first claim: %s", why)
+	} else if model != "opus" {
+		t.Fatalf("first claim returned model %q, want opus", model)
+	} else {
+		claimedModel = model
 	}
-	if ok, why := svc.dispatch(context.Background(), opts, report, "first"); ok || !strings.Contains(why, "temporarily unavailable") {
+	// The selected model belongs to the successful claim. A later state-ref
+	// outage must not replace it with this host's startup default.
+	switchable.unreadable = true
+	if ok, why := svc.dispatchWithStart(context.Background(), opts, report, "first", claimedModel, nil); ok || !strings.Contains(why, "temporarily unavailable") {
 		t.Fatalf("provider outage = ok %v reason %q", ok, why)
 	}
 	st, _, err := store.Load(context.Background())
@@ -158,10 +167,14 @@ func TestProviderOutageUsesFallbackWithoutSpendingAnAttempt(t *testing.T) {
 		t.Fatalf("provider outage spent %d attempts, want 0", got)
 	}
 
-	if ok, why, _ := svc.claimDispatchModels(context.Background(), report, "second", 5, []string{"opus", "sonnet"}); !ok {
+	if ok, why, _, model := svc.claimDispatchModels(context.Background(), report, "second", 5, []string{"opus", "sonnet"}); !ok {
 		t.Fatalf("fallback claim: %s", why)
+	} else if model != "sonnet" {
+		t.Fatalf("fallback claim returned model %q, want sonnet", model)
+	} else {
+		claimedModel = model
 	}
-	if ok, why := svc.dispatch(context.Background(), opts, report, "second"); !ok {
+	if ok, why := svc.dispatchWithStart(context.Background(), opts, report, "second", claimedModel, nil); !ok {
 		t.Fatalf("fallback did not run: %s", why)
 	}
 	models, err := os.ReadFile(record)
@@ -1387,6 +1400,18 @@ type unreadableStore struct{ StateStore }
 
 func (unreadableStore) Load(context.Context) (State, Revision, error) {
 	return State{}, Revision{}, errors.New("state ref unreadable")
+}
+
+type loadSwitchStore struct {
+	StateStore
+	unreadable bool
+}
+
+func (s *loadSwitchStore) Load(ctx context.Context) (State, Revision, error) {
+	if s.unreadable {
+		return State{}, Revision{}, errors.New("state ref unreadable")
+	}
+	return s.StateStore.Load(ctx)
 }
 
 // A solver record that names an author to skip has to reach the watcher too.

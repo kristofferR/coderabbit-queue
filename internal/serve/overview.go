@@ -257,6 +257,9 @@ type BotName struct {
 	// its list, because showing it as "off" on every row of every repository is
 	// noise about a decision already made.
 	Required bool
+	Command  string
+	Trigger  string
+	Grace    Dur
 }
 
 // BotsFor answers "which reviewers actually run on this repository". The
@@ -320,7 +323,7 @@ func botMarks(r state.Round, bots []BotName) []Bot {
 		mark := Bot{Login: b.Login, Name: b.Name, Mark: "pending", Primary: b.Primary, Required: b.Required}
 		if b.Primary {
 			// The primary is commanded by the fire itself, not by a co-bot entry.
-			if r.CommandID != 0 || r.FiredAt != nil {
+			if !r.CoOnly && (r.CommandID != 0 || r.FiredAt != nil) {
 				mark.Mark, mark.At = "commanded", r.FiredAt
 			}
 			out = append(out, mark)

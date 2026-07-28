@@ -150,6 +150,23 @@ func TestReasonFlagDetection(t *testing.T) {
 	}
 }
 
+func TestSolverTargetIsUnambiguous(t *testing.T) {
+	if err := validateSolverTarget("owner/repo", true); err == nil {
+		t.Fatal("a repository together with --fleet must be rejected")
+	}
+	for _, target := range []struct {
+		repo  string
+		fleet bool
+	}{
+		{repo: "owner/repo"},
+		{fleet: true},
+	} {
+		if err := validateSolverTarget(target.repo, target.fleet); err != nil {
+			t.Errorf("valid target %+v was rejected: %v", target, err)
+		}
+	}
+}
+
 // parseDismissArgs decides what counts as a finding ID, so a typo must not
 // quietly become one.
 func TestParseDismissArgs(t *testing.T) {

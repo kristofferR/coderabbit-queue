@@ -642,12 +642,9 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Tim
 	for _, b := range fleetBots {
 		key := dialect.NormalizeBotName(b.Login)
 		seenCard[key] = true
-		var from *ReviewerCfg
-		for i := range cfg.Reviewers {
-			if dialect.NormalizeBotName(cfg.Reviewers[i].Login) == key {
-				from = &cfg.Reviewers[i]
-				break
-			}
+		from := &ReviewerCfg{
+			Login: b.Login, Name: b.Name, Primary: b.Primary, Required: b.Required,
+			Metered: b.Primary, Command: b.Command, Trigger: b.Trigger, Grace: b.Grace,
 		}
 		add(b.Login, b.Name, b.Primary, b.Primary, from)
 	}

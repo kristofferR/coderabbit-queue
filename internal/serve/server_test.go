@@ -280,3 +280,36 @@ func TestBotCardsUseTheEffectiveFleetPrimary(t *testing.T) {
 		t.Fatalf("primary card = %q, want the effective fleet primary", primary)
 	}
 }
+
+func TestBotCardsUseEffectiveReviewerMetadata(t *testing.T) {
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	cfg := FleetConfig{Reviewers: []ReviewerCfg{{
+		Login: "cursor[bot]", Name: "bugbot", Command: "old command",
+		Trigger: "never", Grace: Dur(time.Minute),
+	}}}
+	running := []BotName{{
+		Login: "cursor[bot]", Name: "bugbot", Command: "new command",
+		Trigger: "always", Grace: Dur(7 * time.Minute),
+	}}
+	cards := botCards(state.State{}, cfg, running, now)
+	for _, card := range cards {
+		if card.Login != "cursor[bot]" {
+			continue
+		}
+		if card.Command != "new command" || card.Trigger != "always" || card.Grace != Dur(7*time.Minute) {
+			t.Fatalf("card = %+v, want effective state-resolved metadata", card)
+		}
+		return
+	}
+	t.Fatal("no card for the effective reviewer")
+}
+
+func TestCoOnlyRoundLeavesPrimaryPending(t *testing.T) {
+	at := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	marks := botMarks(state.Round{FiredAt: &at, CommandID: 42, CoOnly: true}, []BotName{{
+		Login: "coderabbitai[bot]", Name: "coderabbit", Primary: true,
+	}})
+	if len(marks) != 1 || marks[0].Mark != "pending" {
+		t.Fatalf("marks = %+v, want the uncommanded primary pending", marks)
+	}
+}

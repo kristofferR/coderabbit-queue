@@ -630,7 +630,7 @@ func (s *Service) queueDispatch(
 	if len(models) == 0 && solver.FixModel != "" {
 		models = []string{solver.FixModel}
 	}
-	claimed, why, byDesign := s.claimDispatchModels(ctx, report, token, maxAttempts, models)
+	claimed, why, byDesign, model := s.claimDispatchModels(ctx, report, token, maxAttempts, models)
 	if !claimed {
 		pool.release()
 		// A round another watcher already holds, or one that has spent its
@@ -649,7 +649,7 @@ func (s *Service) queueDispatch(
 	result := make(chan dispatchResult, 1)
 	started := make(chan dispatchResult, 1)
 	pool.run(func() {
-		result <- s.runDispatch(ctx, opts, report, token, started)
+		result <- s.runDispatch(ctx, opts, report, token, model, started)
 		close(result)
 	})
 	return true, "", result, started
@@ -700,9 +700,10 @@ func (s *Service) runDispatch(
 	opts WatchOptions,
 	report NextReport,
 	token string,
+	model string,
 	started chan<- dispatchResult,
 ) dispatchResult {
-	ok, why := s.dispatchWithStart(ctx, opts, report, token, started)
+	ok, why := s.dispatchWithStart(ctx, opts, report, token, model, started)
 	if !ok && s.log != nil {
 		s.log.Printf("watch: %s#%d not fixed: %s", report.Repo, report.PR, why)
 	}
@@ -711,7 +712,8 @@ func (s *Service) runDispatch(
 
 // dispatch checks the claimed round's head out and runs the fix session.
 func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextReport, token string) (bool, string) {
-	return s.dispatchWithStart(ctx, opts, report, token, nil)
+	model, _ := s.claimedDispatchModel(ctx, report, token)
+	return s.dispatchWithStart(ctx, opts, report, token, model, nil)
 }
 
 func (s *Service) dispatchWithStart(
@@ -719,6 +721,7 @@ func (s *Service) dispatchWithStart(
 	opts WatchOptions,
 	report NextReport,
 	token string,
+	model string,
 	started chan<- dispatchResult,
 ) (ok bool, reason string) {
 	// Health means "can this watcher START a session", not whether the agent later
@@ -793,10 +796,6 @@ func (s *Service) dispatchWithStart(
 	// session script reads them; a script from an older install ignores them
 	// and runs exactly as it did.
 	solver := s.repoCfg(runCtx, report.Repo)
-	model := solver.FixModel
-	if claimedModel, found := s.claimedDispatchModel(runCtx, report, token); found {
-		model = claimedModel
-	}
 	cmd.Env = append(os.Environ(),
 		"CRQ_DISPATCH_REPO="+report.Repo,
 		fmt.Sprintf("CRQ_DISPATCH_PR=%d", report.PR),
@@ -944,7 +943,8 @@ func (s *Service) writeFindings(report NextReport) (string, error) {
 // already running for this PR, or a head that has spent its attempt budget —
 // rather than evidence about whether fix sessions can start at all.
 func (s *Service) claimDispatch(ctx context.Context, report NextReport, token string, maxAttempts int) (bool, string, bool) {
-	return s.claimDispatchModels(ctx, report, token, maxAttempts, nil)
+	ok, why, byDesign, _ := s.claimDispatchModels(ctx, report, token, maxAttempts, nil)
+	return ok, why, byDesign
 }
 
 func (s *Service) claimDispatchModels(
@@ -953,9 +953,10 @@ func (s *Service) claimDispatchModels(
 	token string,
 	maxAttempts int,
 	models []string,
-) (bool, string, bool) {
+) (bool, string, bool, string) {
 	reason, byDesign := "", false
 	var seen string
+	var selectedModel string
 	_, err := s.store.Update(ctx, func(st *State) error {
 		// The pass-level snapshot is only an optimization. The switch is an
 		// operator safety gate, so enforce it in the same CAS that grants the
@@ -1051,12 +1052,13 @@ func (s *Service) claimDispatchModels(
 			reason, byDesign = why, true
 			return ErrNoChange
 		}
+		selectedModel = round.Dispatch.Model
 		st.RememberDispatch(report.Repo, report.PR, *round.Dispatch)
 		st.PutRound(*round)
 		return nil
 	})
 	if err != nil {
-		return false, err.Error(), false
+		return false, err.Error(), false, ""
 	}
 	if s.log != nil {
 		outcome := "granted"
@@ -1066,7 +1068,7 @@ func (s *Service) claimDispatchModels(
 		s.log.Printf("dispatch claim %s for %s#%d@%s token=%s: %s",
 			outcome, report.Repo, report.PR, report.Head, token, seen)
 	}
-	return reason == "", reason, byDesign
+	return reason == "", reason, byDesign, selectedModel
 }
 
 // describeDispatchClaim renders what a claim attempt read, for the log line

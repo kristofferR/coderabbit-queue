@@ -422,7 +422,7 @@ crq fleet set [--bots <a,b>] [--required <a,b>] [--min-interval <dur>] [--weekly
 
 crq solver <repo>         # how fix sessions run here (ranked models, effort, attempts, forks, prompt)
 crq solver set <repo> [--models <first,next,...>] [--effort <e>] [--attempts <n>] [--forks on|off] [--prompt <text>]
-crq solver set <repo> --inherit models,forks,skip-authors # hand settings back to the fleet
+crq solver set <repo> --inherit models,effort,forks,skip-authors # hand settings back to the fleet
 crq solver set --fleet [...]                          # the default every repository inherits
 
 crq repos                 # which projects crq reviews, and where each answer comes from

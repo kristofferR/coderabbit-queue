@@ -628,10 +628,16 @@ func run(ctx context.Context, args []string) int {
 			if primary, ok := rc.Primary(); ok {
 				out = append(out, serve.BotName{
 					Login: primary.Login, Name: primary.Name, Primary: true, Required: primary.Required,
+					Command: primary.Command, Trigger: string(primary.Trigger),
+					Grace: serve.Dur(primary.SelfHealGrace),
 				})
 			}
 			for _, co := range rc.FreeRunning() {
-				out = append(out, serve.BotName{Login: co.Login, Name: co.Name, Required: co.Required})
+				out = append(out, serve.BotName{
+					Login: co.Login, Name: co.Name, Required: co.Required,
+					Command: co.Command, Trigger: string(co.Trigger),
+					Grace: serve.Dur(co.SelfHealGrace),
+				})
 			}
 			return out
 		}
@@ -1229,7 +1235,7 @@ every agent rejects differently and none ignores.
 		fmt.Print(`crq solver <repo>
 crq solver set <repo> [--models <first,next,...>] [--effort <e>] [--prompt <text>]
                       [--attempts <n>] [--forks on|off] [--skip-authors <a,b>]
-                      [--inherit models,forks,skip-authors]
+                      [--inherit models,effort,forks,skip-authors]
 crq solver set --fleet [...]           (the default every repository inherits)
 crq solver clear <repo> | crq solver clear --fleet
 
@@ -1250,7 +1256,7 @@ this repository. .sources says which layer answered for each setting.
                   Off by default: a session runs an agent over somebody else's
                   code with approvals bypassed and a write token in reach
   --skip-authors  pull-request authors crq does not enqueue here
-  --inherit       hand models, forks or skip-authors back to the layer beneath
+  --inherit       hand models, effort, forks or skip-authors to the layer beneath
 
 Models are tried in order. A provider/model outage is parked until its reset
 time, the next model is tried, and no attempt is spent. Ordinary failed fixes
@@ -2895,12 +2901,14 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 				switch strings.ToLower(field) {
 				case "models", "model":
 					change.UnsetModels = true
+				case "effort":
+					change.UnsetEffort = true
 				case "forks":
 					change.UnsetForks = true
 				case "skip-authors", "skip_authors":
 					change.UnsetSkipAuthors = true
 				default:
-					fatal(fmt.Errorf("--inherit: %q is not a solver setting that can be unset (models, forks, skip-authors)", field))
+					fatal(fmt.Errorf("--inherit: %q is not a solver setting that can be unset (models, effort, forks, skip-authors)", field))
 					return 1
 				}
 			}
@@ -2916,8 +2924,8 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 			repo = arg
 		}
 	}
-	if !fleet && repo == "" {
-		fatal(errors.New("usage: crq solver [set|clear] <repo> [flags], or --fleet for the default"))
+	if err := validateSolverTarget(repo, fleet); err != nil {
+		fatal(err)
 		return 1
 	}
 	if action == "clear" {
@@ -2926,7 +2934,7 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 
 	if fleet {
 		if action == "show" {
-			view, err := service.FleetSettings(ctx)
+			view, err := service.FleetSolver(ctx)
 			if err != nil {
 				fatal(err)
 				return 1
@@ -2960,12 +2968,23 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 	return 0
 }
 
+func validateSolverTarget(repo string, fleet bool) error {
+	if fleet && repo != "" {
+		return errors.New("a repository and --fleet are mutually exclusive solver targets")
+	}
+	if !fleet && repo == "" {
+		return errors.New("usage: crq solver [set|clear] <repo> [flags], or --fleet for the default")
+	}
+	return nil
+}
+
 func (a prActor) SetSolver(ctx context.Context, repo string, change serve.SolverChange) error {
 	c := crq.SolverChange{
 		Models: change.Models, Model: change.Model, Effort: change.Effort, Prompt: change.Prompt,
 		MaxAttempts: change.MaxAttempts, Forks: change.Forks,
 		SkipAuthors: change.SkipAuthors, Clear: change.Clear,
-		UnsetModels: change.UnsetModels, UnsetForks: change.UnsetForks,
+		UnsetModels: change.UnsetModels, UnsetEffort: change.UnsetEffort,
+		UnsetForks:       change.UnsetForks,
 		UnsetSkipAuthors: change.UnsetSkipAuthors,
 	}
 	// An empty repo means the fleet default, the same convention the CLI's

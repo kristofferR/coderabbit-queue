@@ -89,10 +89,12 @@ export function SolverEditor({
   // values — an empty model, 0 attempts — but "Blocked" is a real fork policy
   // and an empty author list means "skip nobody", so these two can only return
   // to inheritance by asking for it.
-  const inherit = (field: "models" | "forks" | "skip_authors") =>
+  const inherit = (field: "models" | "effort" | "forks" | "skip_authors") =>
     void post(
       field === "models"
         ? { unset_models: true }
+        : field === "effort"
+          ? { unset_effort: true }
         : field === "forks"
           ? { unset_forks: true }
           : { unset_skip_authors: true },
@@ -282,6 +284,11 @@ export function SolverEditor({
                   </option>
                 ))}
               </select>
+              <Inherit
+                shown={src("effort") === "repo"}
+                busy={busy}
+                onClick={() => inherit("effort")}
+              />
             </Row>
             <Row label="Attempts" source={src("max_attempts")}>
               <input

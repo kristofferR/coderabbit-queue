@@ -28,7 +28,10 @@ type SolverSettings struct {
 	Models    []string `json:"models,omitempty"`
 	SetModels bool     `json:"set_models,omitempty"`
 	Model     string   `json:"model,omitempty"`
-	Effort    string   `json:"effort,omitempty"`
+	// SetEffort distinguishes an explicit "agent default" (an empty effort)
+	// from inheritance, just as SetModels does for the model ranking.
+	Effort    string `json:"effort,omitempty"`
+	SetEffort bool   `json:"set_effort,omitempty"`
 	// Prompt is extra instruction appended to the fix prompt, for the standing
 	// context a repository needs every time ("this project uses bun, never npm").
 	Prompt string `json:"prompt,omitempty"`
@@ -61,7 +64,7 @@ type SolverSettings struct {
 // solver setting with it.
 func (s SolverSettings) Empty() bool {
 	return !s.SetModels && len(s.Models) == 0 && s.Model == "" &&
-		s.Effort == "" && s.Prompt == "" &&
+		!s.SetEffort && s.Effort == "" && s.Prompt == "" &&
 		s.MaxAttempts == nil && s.Forks == nil && !s.SetSkipAuthors &&
 		len(s.unknown) == 0
 }
@@ -82,8 +85,9 @@ func (s SolverSettings) Merge(over SolverSettings) SolverSettings {
 		out.SetModels = true
 		out.Model = over.Model
 	}
-	if over.Effort != "" {
+	if over.SetEffort || over.Effort != "" {
 		out.Effort = over.Effort
+		out.SetEffort = true
 	}
 	if over.Prompt != "" {
 		out.Prompt = over.Prompt

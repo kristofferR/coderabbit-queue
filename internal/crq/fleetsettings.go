@@ -245,11 +245,14 @@ func (s *Service) applyFleetChange(st State, change FleetChange) (FleetDefaults,
 		if len(change.Required) == 0 {
 			return fd, errors.New("the required set cannot be empty: a round that gates on nobody converges before any reviewer runs")
 		}
-		resolved, err := resolveRequiredLogins(change.Required, s.cfg.Bot)
+		resolved, err := resolveRequiredLogins(change.Required, s.cfg.WithFleet(fd).Bot)
 		if err != nil {
 			return fd, err
 		}
 		fd.Required, fd.SetRequired = resolved, true
+		if len(s.cfg.WithFleet(fd).RequiredBots) == 0 {
+			return fd, errors.New("the required set resolves to no enabled reviewer")
+		}
 	}
 	switch {
 	case change.UnsetMinInterval:

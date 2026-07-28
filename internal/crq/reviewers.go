@@ -490,7 +490,10 @@ func (c Config) withSolver(sv SolverSettings) Config {
 			out.FixModel = out.FixModels[0]
 		}
 	}
-	out.FixEffort, out.FixPrompt = sv.Effort, sv.Prompt
+	if sv.SetEffort || sv.Effort != "" {
+		out.FixEffort = sv.Effort
+	}
+	out.FixPrompt = sv.Prompt
 	if sv.MaxAttempts != nil {
 		out.DispatchMaxAttempts = *sv.MaxAttempts
 	}

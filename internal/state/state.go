@@ -1384,6 +1384,7 @@ func (r *Round) ClaimDispatchModels(host, token string, now time.Time, maxAttemp
 	lastFailure := ""
 	var attemptResetAt *time.Time
 	exhaustions := 0
+	var unknown unknownFields
 	if r.Dispatch != nil {
 		if r.DispatchHeld(now) {
 			return false, "another watcher is already fixing this round"
@@ -1393,6 +1394,7 @@ func (r *Round) ClaimDispatchModels(host, token string, now time.Time, maxAttemp
 		lastFailure = r.Dispatch.LastFailure
 		attemptResetAt = r.Dispatch.AttemptResetAt
 		exhaustions = r.Dispatch.Exhaustions
+		unknown = r.Dispatch.unknown
 		for model, until := range r.Dispatch.UnavailableModels {
 			if until.After(now) {
 				unavailable[model] = until.UTC()
@@ -1444,6 +1446,7 @@ func (r *Round) ClaimDispatchModels(host, token string, now time.Time, maxAttemp
 		ModelCursor:       (selectedAt + 1) % len(models),
 		UnavailableModels: unavailable, LastFailure: lastFailure,
 		AttemptResetAt: attemptResetAt, Exhaustions: exhaustions,
+		unknown: unknown,
 	}
 	if maxAttempts > 0 && r.Dispatch.Attempts >= maxAttempts {
 		resetAt := now.Add(dispatchAttemptCooldown(exhaustions))
