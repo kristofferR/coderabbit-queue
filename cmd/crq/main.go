@@ -72,37 +72,6 @@ func run(ctx context.Context, args []string) int {
 		return 1
 	case "preflight":
 		return preflight(ctx, args[1:])
-	case "drain":
-		// An authenticated dry run follows the normal path below so its plan is
-		// built from the same fleet state as the real install. Keep a host-only
-		// fallback for somebody who has not configured or authenticated GitHub
-		// yet, but label it so it cannot be mistaken for the fleet-backed plan.
-		if opts, perr := parseDrainArgs(args[1:]); perr == nil && opts.dryRun {
-			cfg, cerr := crq.LoadConfig()
-			if cerr != nil {
-				fatal(cerr)
-				return 1
-			}
-			gh, fleetErr := ghapi.NewGitHub(ctx)
-			if fleetErr == nil {
-				fleetErr = cfg.RequireState()
-			}
-			if fleetErr == nil {
-				store := crq.NewGitStateStore(cfg, gh, stderrLogger{})
-				_, _, fleetErr = store.Load(ctx)
-			}
-			if fleetErr != nil {
-				plan, ierr := crq.DrainPlan(cfg, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, true)
-				if ierr != nil {
-					fatal(ierr)
-					return 1
-				}
-				plan.PolicySource = "host"
-				plan.Warning = "GitHub fleet state is unavailable; this host-only preview may differ from an authenticated install"
-				printJSON(plan)
-				return 0
-			}
-		}
 	}
 
 	cfg, err := crq.LoadConfig()
@@ -112,6 +81,24 @@ func run(ctx context.Context, args []string) int {
 	}
 	gh, err := ghapi.NewGitHub(ctx)
 	if err != nil {
+		// A dry run is documented as a PREVIEW, so it has to work for somebody
+		// who has not authenticated yet — otherwise the one command for looking
+		// at the plan is itself another thing to set up first. An authenticated
+		// one takes the normal path below, where InstallDrain builds it from the
+		// same fleet state as the real install (and falls back to this host's
+		// own plan if that state cannot be read). Every other command needs the
+		// token this just failed to find.
+		if args[0] == "drain" {
+			if opts, perr := parseDrainArgs(args[1:]); perr == nil && opts.dryRun {
+				plan, ierr := hostOnlyDrainPlan(cfg, opts)
+				if ierr != nil {
+					fatal(ierr)
+					return 1
+				}
+				printJSON(plan)
+				return 0
+			}
+		}
 		fatal(err)
 		return 1
 	}
@@ -344,8 +331,19 @@ func run(ctx context.Context, args []string) int {
 			return 1
 		}
 		if err := cfg.RequireState(); err != nil {
-			fatal(err)
-			return 1
+			// Without CRQ_REPO there is no state ref to read, so a preview here
+			// is the host-only one InstallDrain would otherwise produce.
+			if !opts.dryRun {
+				fatal(err)
+				return 1
+			}
+			plan, ierr := hostOnlyDrainPlan(cfg, opts)
+			if ierr != nil {
+				fatal(ierr)
+				return 1
+			}
+			printJSON(plan)
+			return 0
 		}
 		plan, ierr := service.InstallDrain(ctx, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, opts.dryRun)
 		if ierr != nil {
@@ -706,10 +704,6 @@ USAGE
   crq decline <thread-id> [...] --reason "<why>" [--keep-open]
                                    reply on a thread to record why a finding is declined
                                    (resolves it; --keep-open leaves it open)
-  crq reviewers <repo>             which bots review this project (and what each costs)
-  crq reviewers set <repo> [--bots <a,b>] [--required <a,b>]
-                                   choose this project's reviewers (either flag alone)
-  crq reviewers clear <repo>       go back to the fleet default
   crq drain install [--agent <path>] [--dry-run] [<repo>...]
   crq drain [on|off|default <repo>]  which repositories crq may fix (on by default)
                                    install and start the unattended review drain
@@ -1136,10 +1130,10 @@ window one host respects and another does not — and nothing says so, because
 each host is behaving correctly according to what it can see. These settings
 have one answer for the fleet:
 
-  scope, repos, exclude, required-bots, cobots, rate-limit-co-degrade,
-  min-interval, inflight-timeout, rate-limit-fallback, calibrate-ttl, settle,
-  skip-marker, skip-authors, and per co-reviewer: cobot-<name>-trigger,
-  cobot-<name>-cmd, cobot-<name>-grace
+  scope, repos, exclude, required-bots, cobots, feedback-bots,
+  rate-limit-co-degrade, min-interval, inflight-timeout, rate-limit-fallback,
+  calibrate-ttl, settle, skip-marker, skip-authors, and per co-reviewer:
+  cobot-<name>-trigger, cobot-<name>-cmd, cobot-<name>-grace
 
 Three kinds of setting deliberately stay local: where the state lives
 (CRQ_REPO, CRQ_ISSUE, CRQ_STATE_REF — a host cannot read fleet policy until it
@@ -1927,6 +1921,19 @@ type drainArgs struct {
 	agentArgs string
 	dryRun    bool
 	repos     []string
+}
+
+// hostOnlyDrainPlan is the preview for a host that cannot reach fleet state at
+// all: this machine's own answers, labelled so the plan cannot be mistaken for
+// the fleet-backed one an authenticated install would write.
+func hostOnlyDrainPlan(cfg crq.Config, opts drainArgs) (crq.DrainInstall, error) {
+	plan, err := crq.DrainPlan(cfg, opts.agent, crq.SplitArgv(opts.agentArgs), opts.repos, true)
+	if err != nil {
+		return crq.DrainInstall{}, err
+	}
+	plan.PolicySource = "host"
+	plan.Warning = crq.HostOnlyDrainWarning
+	return plan, nil
 }
 
 // parseDrainArgs is shared by the pre-authentication dry-run path and the

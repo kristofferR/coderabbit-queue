@@ -22,6 +22,11 @@ import (
 //go:embed dispatch/fix-prompt.txt
 var fixPrompt string
 
+// HostOnlyDrainWarning labels a preview built from this host's own
+// configuration because fleet state could not be read. Shared so every path
+// that can only offer that answer says the same thing about it.
+const HostOnlyDrainWarning = "GitHub fleet state is unavailable; this host-only preview may differ from an authenticated install"
+
 // DrainInstall describes what an install would do, so --dry-run can print it and
 // the result can be reported.
 type DrainInstall struct {
@@ -56,7 +61,21 @@ func (s *Service) InstallDrain(ctx context.Context, agent string, agentArgs []st
 	effectiveDryRun := dryRun || s.cfg.DryRun
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
-		return DrainInstall{}, err
+		// A dry run is documented as a preview, so a state ref this host cannot
+		// read downgrades it to the host's own plan rather than failing — the
+		// warning is what keeps it from being mistaken for the fleet's. A real
+		// install has no such fallback: writing a unit from policy the fleet may
+		// disagree with is the divergence this whole mechanism exists to end.
+		if !effectiveDryRun {
+			return DrainInstall{}, err
+		}
+		plan, perr := DrainPlan(s.cfg, agent, agentArgs, repos, true)
+		if perr != nil {
+			return DrainInstall{}, perr
+		}
+		plan.PolicySource = "host"
+		plan.Warning = HostOnlyDrainWarning
+		return plan, nil
 	}
 	effective := s.fleetCfg(st)
 	plan, err := DrainPlan(effective, agent, agentArgs, repos, effectiveDryRun)

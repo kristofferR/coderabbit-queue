@@ -3,6 +3,7 @@ package crq
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"html"
 	"os"
 	"os/exec"
@@ -144,6 +145,38 @@ func TestDrainWrapperKeepsExplicitRepositoriesAuthoritative(t *testing.T) {
 	if fallback := drainWrapper("/usr/bin/crq", "'agent' 'prompt'", nil); !strings.Contains(fallback, "watch --") {
 		t.Fatalf("wrapper without explicit repositories does not use runtime fleet policy:\n%s", fallback)
 	}
+}
+
+// A state ref this host cannot read must not turn the documented preview into an
+// error — --dry-run is what somebody runs to inspect the setup before finishing
+// it. The plan says which policy it could see, so it cannot be mistaken for the
+// fleet's; a real install has no such fallback.
+func TestInstallDrainPreviewsFromTheHostWhenFleetStateIsUnreadable(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/host-repo": true}
+	svc := NewService(cfg, newFakeGitHub(), unreadableStore{NewMemoryStore(cfg)}, nil)
+
+	plan, err := svc.InstallDrain(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.PolicySource != "host" || plan.Warning == "" {
+		t.Fatalf("plan = %+v, want a labelled host-only preview", plan)
+	}
+	if len(plan.Repos) != 1 || plan.Repos[0] != "owner/host-repo" {
+		t.Fatalf("preview repos = %v, want this host's own", plan.Repos)
+	}
+	if _, err := svc.InstallDrain(context.Background(), fakeAgent(t, "claude"), nil, nil, false); err == nil {
+		t.Fatal("an install wrote a unit from policy it could not check against the fleet's")
+	}
+}
+
+// unreadableStore is a host that cannot reach the state ref: no access to the
+// gate repository, or no network to reach it over.
+type unreadableStore struct{ StateStore }
+
+func (unreadableStore) Load(context.Context) (State, Revision, error) {
+	return State{}, Revision{}, errors.New("state ref unreadable")
 }
 
 // A missing agent must fail loudly at install time. Discovering it at the first
