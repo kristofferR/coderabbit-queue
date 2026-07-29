@@ -62,11 +62,12 @@ func (l *eventLog) list() []Event {
 	return out
 }
 
-// diffStates reports what changed between two revisions. `prev` being empty
-// (the first poll) yields nothing: a fresh server has no basis to call anything
-// "new", and announcing the entire existing queue as events would be a lie.
+// diffStates reports what changed between two loaded revisions. The server
+// suppresses this call for its first successful load: a fresh process has no
+// basis to call the existing queue "new", while revision zero remains a valid
+// predecessor after that load.
 func diffStates(prev, next state.State, now time.Time) []Event {
-	if prev.Rev == 0 || prev.Rev == next.Rev {
+	if prev.Rev == next.Rev {
 		return nil
 	}
 	var out []Event

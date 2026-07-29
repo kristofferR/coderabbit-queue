@@ -377,7 +377,10 @@ function ReviewerEditor({
     runOperation(
       act("reviewers", {
         repo: repo.repo,
-        cobots: runs.filter((n) => n !== primaryBot?.name),
+        cobots: runs.filter(
+          (name) =>
+            name !== primaryBot?.name && bots.some((bot) => bot.name === name && bot.configurable),
+        ),
         required,
         primary: primaryBot ? primaryOn : undefined,
         clear,
@@ -607,7 +610,7 @@ function AutofixEditor({
                   choice === v ? "bg-ok-bg font-medium text-ok" : "text-mut hover:bg-bg"
                 }`}
               >
-                {v === "default" ? "Default (on)" : v}
+                {v === "default" ? "Fleet default" : v}
               </button>
             ))}
           </span>

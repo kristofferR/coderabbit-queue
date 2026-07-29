@@ -188,15 +188,16 @@ type ToolSeen struct {
 // crq itself recorded — a trigger it posted or a claim it observed — rather
 // than a vendor status we would have to guess at.
 type BotCard struct {
-	Login    string `json:"login"`
-	Name     string `json:"name"`
-	Primary  bool   `json:"primary"`
-	Metered  bool   `json:"metered"`
-	Enabled  bool   `json:"enabled"`
-	Required bool   `json:"required"`
-	Command  string `json:"command,omitempty"`
-	Trigger  string `json:"trigger,omitempty"`
-	Grace    Dur    `json:"grace,omitempty"`
+	Login        string `json:"login"`
+	Name         string `json:"name"`
+	Primary      bool   `json:"primary"`
+	Metered      bool   `json:"metered"`
+	Enabled      bool   `json:"enabled"`
+	Required     bool   `json:"required"`
+	Configurable bool   `json:"configurable"`
+	Command      string `json:"command,omitempty"`
+	Trigger      string `json:"trigger,omitempty"`
+	Grace        Dur    `json:"grace,omitempty"`
 	// LastSeen is when crq observed this bot ANSWER; LastAsked is when crq last
 	// posted its trigger. A bot that has been asked and never answered is the
 	// case worth surfacing, and needs both to state it.
@@ -606,9 +607,10 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Tim
 	add := func(login, name string, primary, metered bool, from *ReviewerCfg) {
 		key := dialect.NormalizeBotName(login)
 		b, on := running[key]
+		_, configurable := dialect.CoReviewerByName(login)
 		card := BotCard{
 			Login: login, Name: name, Primary: primary, Metered: metered,
-			Enabled: on, Required: on && b.Required,
+			Enabled: on, Required: on && b.Required, Configurable: configurable,
 			LastSeen: seen[key], LastAsked: asked[key], SeenOn: where[key],
 			RepoCount: repoCount[key],
 			Status:    botStatus(on, seen[key], asked[key], now, answerLog),

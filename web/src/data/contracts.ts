@@ -245,6 +245,7 @@ export const BotCardSchema = Schema.Struct({
   metered: Schema.Boolean,
   enabled: Schema.Boolean,
   required: Schema.Boolean,
+  configurable: Schema.Boolean,
   command: Optional(Schema.String),
   trigger: Optional(Schema.String),
   grace: Optional(Schema.String),

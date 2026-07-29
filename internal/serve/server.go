@@ -251,8 +251,11 @@ func (s *Server) refresh(ctx context.Context) {
 	// Derive events before the snapshot so the feed it carries is current.
 	s.mu.RLock()
 	prev := s.lastState
+	loaded := s.loaded
 	s.mu.RUnlock()
-	s.events.add(diffStates(prev, st, now)...)
+	if loaded {
+		s.events.add(diffStates(prev, st, now)...)
+	}
 
 	botsFor := s.botsFor(&st)
 	pace := s.pacing(st)

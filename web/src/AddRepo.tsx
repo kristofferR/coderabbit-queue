@@ -8,6 +8,40 @@ import { Card, Empty, Pill, RepoIcon } from "./ui";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./ui/dialog";
 import { useOperation } from "./useOperation";
 
+type EnrollPreview = {
+  impact?: EnrollImpact;
+  error?: string;
+  errorKind?: "preview" | "enroll";
+};
+
+function EnrollImpactCopy({ preview }: { preview: EnrollPreview }) {
+  if (preview.errorKind === "preview") {
+    return (
+      <>
+        Could not work out what this would enqueue. Enabling anyway is still safe — the daemon will
+        pick up whatever is open — but the cost is unknown from here.
+      </>
+    );
+  }
+  if (!preview.impact) {
+    return <>Working out what this would enqueue, and what it would cost…</>;
+  }
+  return (
+    <>
+      <p>{preview.impact.summary}.</p>
+      {Object.entries(preview.impact.skipped ?? {}).map(([why, n]) => (
+        <p key={why} className="mt-1 text-[12.5px] text-faint">
+          {n} skipped — {why}.
+        </p>
+      ))}
+      <p className="mt-2 text-[12px] text-faint">
+        Estimate; published prices last checked {preview.impact.prices_checked_at}. Reviews start on
+        the daemon's next pass, one metered review at a time across the fleet.
+      </p>
+    </>
+  );
+}
+
 /**
  * The repository picker.
  *
@@ -44,12 +78,7 @@ export function AddRepo({
   // The backlog contract: enrolling a repository with a dozen open pull
   // requests becomes a dozen metered reviews on the next pass. Nothing is
   // written until this has been shown and confirmed.
-  const [pending, setPending] = useState<{
-    repo: string;
-    impact?: EnrollImpact;
-    error?: string;
-    errorKind?: "preview" | "enroll";
-  } | null>(null);
+  const [pending, setPending] = useState<(EnrollPreview & { repo: string }) | null>(null);
 
   const load = useCallback(
     (refresh = false) => {
@@ -252,30 +281,7 @@ export function AddRepo({
             confirmLabel={busy ? "Adding…" : "Add it"}
             busy={busy === pending.repo}
             error={pending.error ?? addError}
-            body={
-              pending.errorKind === "preview" ? (
-                <>
-                  Could not work out what this would enqueue. Adding anyway is still safe — the
-                  daemon will pick up whatever is open — but the cost is unknown from here.
-                </>
-              ) : pending.impact ? (
-                <>
-                  <p>{pending.impact.summary}.</p>
-                  {Object.entries(pending.impact.skipped ?? {}).map(([why, n]) => (
-                    <p key={why} className="mt-1 text-[12.5px] text-faint">
-                      {n} skipped — {why}.
-                    </p>
-                  ))}
-                  <p className="mt-2 text-[12px] text-faint">
-                    Estimate; published prices last checked {pending.impact.prices_checked_at}.
-                    Reviews start on the daemon's next pass, one metered review at a time across the
-                    fleet.
-                  </p>
-                </>
-              ) : (
-                <>Working out what this would enqueue, and what it would cost…</>
-              )
-            }
+            body={<EnrollImpactCopy preview={pending} />}
             onConfirm={() => void add(pending.repo)}
             onCancel={() => setPending(null)}
           />
@@ -319,7 +325,9 @@ export function EnrollmentEditor({
   const [confirming, setConfirming] = useState(false);
   const [why, setWhy] = useState("");
   const { run: runOperation, running: busy, error } = useOperation();
+  const { run: runPreview } = useOperation();
   const [warning, setWarning] = useState<string | null>(null);
+  const [enablePreview, setEnablePreview] = useState<EnrollPreview | null>(null);
 
   const run = (body: Parameters<typeof act>[1]) =>
     runOperation(act("enroll", body), {
@@ -327,9 +335,18 @@ export function EnrollmentEditor({
         onSnapshot?.(snapshot);
         setWarning(nextWarning ?? null);
         setConfirming(false);
+        setEnablePreview(null);
         setWhy("");
       },
     });
+
+  const previewEnable = () => {
+    setEnablePreview({});
+    runPreview(enrollmentImpact(repo), {
+      onSuccess: (impact) => setEnablePreview({ impact }),
+      onFailure: (failure) => setEnablePreview({ error: failure.message, errorKind: "preview" }),
+    });
+  };
 
   const excluded = source === "excluded";
   return (
@@ -416,11 +433,11 @@ export function EnrollmentEditor({
             ) : (
               <button
                 type="button"
-                disabled={busy}
-                onClick={() => void run({ repo, enabled: true })}
+                disabled={busy || enablePreview !== null}
+                onClick={() => void previewEnable()}
                 className="rounded-lg bg-ink px-4 py-1.5 text-[13px] font-semibold text-white disabled:opacity-45"
               >
-                {busy ? "Working…" : "Review this repository"}
+                {enablePreview ? "Checking backlog…" : "Review this repository"}
               </button>
             )}
             {source === "state" && (
@@ -436,6 +453,17 @@ export function EnrollmentEditor({
           </div>
         )}
       </div>
+      {enablePreview && (
+        <Confirm
+          title={`Review ${repo}?`}
+          confirmLabel="Review this repository"
+          busy={busy}
+          error={enablePreview.error ?? error}
+          body={<EnrollImpactCopy preview={enablePreview} />}
+          onConfirm={() => void run({ repo, enabled: true })}
+          onCancel={() => setEnablePreview(null)}
+        />
+      )}
     </Card>
   );
 }

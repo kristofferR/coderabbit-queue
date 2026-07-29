@@ -102,12 +102,17 @@ export function SolverEditor({
     );
   };
 
-  const inherit = (field: "severities" | "ask_mode") => {
+  const inherit = (field: "models" | "severities" | "ask_mode") => {
     setWarning(null);
     runOperation(
       act("solver", {
         repo,
-        solver: field === "severities" ? { unset_severities: true } : { unset_ask_mode: true },
+        solver:
+          field === "models"
+            ? { unset_models: true }
+            : field === "severities"
+              ? { unset_severities: true }
+              : { unset_ask_mode: true },
       }),
       {
         onSuccess: ({ snapshot, warning: next }) => {
@@ -180,6 +185,11 @@ export function SolverEditor({
                 onChange={(e) => setModel(e.target.value)}
                 placeholder="the agent's own default"
                 className="w-56 rounded-lg border border-edge bg-[#FBFBFC] px-2 py-1 font-mono text-[12.5px]"
+              />
+              <Inherit
+                shown={src("model") === "repo"}
+                busy={busy || dirty}
+                onClick={() => inherit("models")}
               />
             </Row>
             <Row label="Effort" source={src("effort")}>
@@ -363,7 +373,7 @@ export function solverChange(
   const currentModel = solver.model ?? "";
   if (edited.model !== currentModel) {
     if (edited.model === "") {
-      change.unset_models = true;
+      change.models = [];
     } else {
       const ranking = [edited.model, ...solver.models.slice(1)].filter(Boolean);
       change.models = ranking.filter((model, index) => ranking.indexOf(model) === index);

@@ -60,6 +60,25 @@ func (c *countingCoster) Cost(context.Context, string, int) (Cost, error) {
 	return c.cost, nil
 }
 
+func TestRefreshSuppressesOnlyTheInitialRevisionZeroLoad(t *testing.T) {
+	at := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	loader := &stubLoader{st: state.New()}
+	srv := New(loader, Options{Now: func() time.Time { return at }})
+	srv.refresh(t.Context())
+	if events := srv.events.list(); len(events) != 0 {
+		t.Fatalf("initial load events = %+v, want the existing snapshot suppressed", events)
+	}
+
+	loader.st.Rev = 1
+	loader.st.Enrolled = map[string]state.RepoEnrollment{
+		"o/enrolled": {Enabled: true, By: "atlas", UpdatedAt: &at},
+	}
+	srv.refresh(t.Context())
+	if events := srv.events.list(); !hasEventText(events, "Repository enrolled for review") {
+		t.Fatalf("first mutation events = %+v, want the revision-zero predecessor retained", events)
+	}
+}
+
 // Before the first load returns there is no snapshot — and no error either. The
 // zero Snapshot encodes its collections as null, and the client takes a 200 for
 // live state and iterates them straight away, so the dashboard crashed during
@@ -468,6 +487,24 @@ func TestBotCardsUseEffectiveReviewerMetadata(t *testing.T) {
 		return
 	}
 	t.Fatal("no card for the effective reviewer")
+}
+
+func TestBotCardsDistinguishRegistryReviewersFromCustomGates(t *testing.T) {
+	cfg := FleetConfig{Reviewers: []ReviewerCfg{
+		{Login: "cursor[bot]", Name: "bugbot"},
+		{Login: "sonar[bot]", Name: "sonar", Required: true},
+	}}
+	cards := botCards(state.State{}, cfg, nil, time.Now())
+	got := map[string]bool{}
+	for _, card := range cards {
+		got[card.Login] = card.Configurable
+	}
+	if !got["cursor[bot]"] {
+		t.Error("registry co-reviewer is not marked configurable")
+	}
+	if got["sonar[bot]"] {
+		t.Error("custom required login is marked as a triggerable registry co-reviewer")
+	}
 }
 
 func TestCoOnlyRoundLeavesPrimaryPending(t *testing.T) {

@@ -141,14 +141,17 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 	state, err := s.store.Update(ctx, func(st *State) error {
 		ov, _ := st.RepoOverride(repo)
 		beforeOverride := ov
+		beforeConfig := s.cfgFor(*st, repo)
 		if coBots != nil {
 			ov.CoBots, ov.SetCoBots = setCoBots, true
 		}
 		if required != nil {
 			// Resolve against the fleet primary from the SAME state revision
 			// this override is written to. The process's startup primary may
-			// have been replaced through shared settings.
-			resolved, err := resolveRequiredLogins(required, s.cfgFor(*st, repo).Bot)
+			// have been replaced through shared settings. Existing custom gates
+			// are accepted too: the dashboard has to be able to preserve one
+			// inherited from CRQ_REQUIRED_BOTS while editing a registry bot.
+			resolved, err := resolveRequiredLoginsPreserving(required, beforeConfig.Bot, beforeConfig.RequiredBots)
 			if err != nil {
 				return err
 			}
@@ -163,6 +166,9 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 			sameLogins(ov.CoBots, beforeOverride.CoBots) &&
 			sameLogins(ov.Required, beforeOverride.Required) {
 			return ErrNoChange
+		}
+		if primary != nil && !*primary && claimedTriggerRepo(st, repo) {
+			return errors.New("a review trigger is already being posted; wait for it to finish before turning the primary off")
 		}
 		// Resolved from the FLEET-layered configuration, the one cfgFor hands
 		// the queue — not from this host's env. Where the two disagree, the env
@@ -476,6 +482,26 @@ func resolveRequiredLogins(list []string, primary string) ([]string, error) {
 	allowed := coReviewerNames()
 	if primary != "" {
 		allowed[dialect.NormalizeBotName(primary)] = primary
+	}
+	return resolveBotList(allowed, list, "--required")
+}
+
+// resolveRequiredLoginsPreserving additionally accepts non-registry gates that
+// already exist in the repository's effective configuration. They cannot be
+// added through the per-repository editor, but an unrelated edit must not make
+// an inherited CRQ_REQUIRED_BOTS login impossible to retain.
+func resolveRequiredLoginsPreserving(list []string, primary string, existing []string) ([]string, error) {
+	allowed := coReviewerNames()
+	if primary != "" {
+		allowed[dialect.NormalizeBotName(primary)] = primary
+	}
+	for _, login := range existing {
+		login = strings.TrimSpace(login)
+		if login == "" {
+			continue
+		}
+		allowed[dialect.NormalizeBotName(login)] = login
+		allowed[strings.ToLower(login)] = login
 	}
 	return resolveBotList(allowed, list, "--required")
 }

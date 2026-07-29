@@ -1004,6 +1004,67 @@ func TestTurningThePrimaryOff(t *testing.T) {
 	}
 }
 
+func TestTurningThePrimaryOffRefusesAClaimedTriggerPost(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RequiredBots = []string{cfg.Bot, dialect.CodexBotLogin}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	repo := "o/private"
+	if _, err := store.Update(ctx, func(st *State) error {
+		round, err := st.NewRound(repo, 7, "abcdef123", time.Now())
+		if err != nil {
+			return err
+		}
+		round.Phase = PhaseReserved
+		st.PutRound(*round)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	off := false
+	if _, err := svc.SetReviewers(ctx, repo, nil, nil, &off); err == nil {
+		t.Fatal("turning the primary off succeeded while its trigger was being posted")
+	}
+	view, err := svc.Reviewers(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.PrimaryOff {
+		t.Fatal("the rejected primary-off action still changed the repository override")
+	}
+}
+
+func TestReviewerEditPreservesAnExistingCustomRequiredLogin(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RequiredBots = []string{cfg.Bot, "sonar[bot]"}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	view, err := svc.SetReviewers(
+		ctx,
+		"o/custom-gate",
+		[]string{"codex"},
+		[]string{cfg.Bot, "sonar[bot]"},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, reviewer := range view.Reviewers {
+		if reviewer.Login == "sonar[bot]" && reviewer.Required {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("reviewers = %+v, want the existing custom gate retained", view.Reviewers)
+	}
+}
+
 func TestTurningThePrimaryBackOnReopensCompletedRounds(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()

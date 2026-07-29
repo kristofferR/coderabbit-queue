@@ -71,7 +71,7 @@ describe("settings deltas", () => {
     });
   });
 
-  it("unsets a cleared model and ignores severity ordering", () => {
+  it("selects the agent default with an explicit empty ranking and ignores severity ordering", () => {
     const solver: RepoSolver = {
       overridden: true,
       models: ["gpt-5.6-sol", "gpt-5.6-terra"],
@@ -96,7 +96,7 @@ describe("settings deltas", () => {
         forks: false,
         authors: "",
       }),
-    ).toEqual({ unset_models: true });
+    ).toEqual({ models: [] });
   });
 });
 

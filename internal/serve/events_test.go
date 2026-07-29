@@ -50,6 +50,21 @@ func TestDiffStatesReportsSharedSettingsAndClearEdges(t *testing.T) {
 	}
 }
 
+func TestDiffStatesReportsTheFirstMutationAfterARevisionZeroLoad(t *testing.T) {
+	at := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	prev := state.New()
+	next := prev
+	next.Rev = 1
+	next.Enrolled = map[string]state.RepoEnrollment{
+		"o/enrolled": {Enabled: true, By: "atlas", UpdatedAt: &at},
+	}
+
+	events := diffStates(prev, next, at)
+	if !hasEventText(events, "Repository enrolled for review") {
+		t.Fatalf("events = %+v, want the revision-zero predecessor to produce a diff", events)
+	}
+}
+
 func hasEventText(events []Event, want string) bool {
 	for _, event := range events {
 		if event.Text == want {
