@@ -343,11 +343,13 @@ function ReviewerEditor({
   const [confirming, setConfirming] = useState(false);
   const { run: runOperation, running: busy, error, clearError } = useOperation();
   const [warning, setWarning] = useState<string | null>(null);
+  const serverRuns = repo.reviewers.join();
+  const serverRequired = repo.required.join();
 
   useEffect(() => {
     setRuns(repo.reviewers);
     setRequired(repo.required);
-  }, [repo.reviewers, repo.required]);
+  }, [serverRuns, serverRequired]);
 
   // The primary is the one metered reviewer, so its Runs toggle is a budget
   // decision (a private repo on a free plan gets nothing from it) and travels
@@ -507,8 +509,9 @@ function ReviewerEditor({
           {repo.override && !dirty && (
             <button
               type="button"
+              disabled={busy}
               onClick={() => save(true)}
-              className="ml-auto text-[12.5px] text-acc hover:underline"
+              className="ml-auto text-[12.5px] text-acc hover:underline disabled:opacity-45"
             >
               Reset to fleet default
             </button>

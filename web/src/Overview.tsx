@@ -64,6 +64,8 @@ export function OverviewPage({
   // Which repository's quick settings are open, if any.
   const [settingsFor, setSettingsFor] = useState<string | null>(null);
   const { run: runOperation, running: busy, error, clearError } = useOperation();
+  const [prioritizingKey, setPrioritizingKey] = useState<string | null>(null);
+  const { run: runPrioritize, running: prioritizing, error: prioritizeError } = useOperation();
 
   const run = (reason: string) => {
     if (!pending) return;
@@ -72,6 +74,14 @@ export function OverviewPage({
         onSnapshot?.(snapshot);
         setPending(null);
       },
+    });
+  };
+  const prioritize = (repo: string, pr: number) => {
+    if (prioritizing) return;
+    setPrioritizingKey(`${repo.toLowerCase()}#${pr}`);
+    runPrioritize(act("prioritize", { repo, pr }), {
+      onSuccess: ({ snapshot }) => onSnapshot?.(snapshot),
+      onFinally: () => setPrioritizingKey(null),
     });
   };
   // Filtering is client-side on purpose: the whole snapshot is already here,
@@ -132,6 +142,14 @@ export function OverviewPage({
           )}
         </div>
       ))}
+      {prioritizeError && (
+        <div
+          role="alert"
+          className="mb-3.5 rounded-[10px] border border-bad-edge bg-bad-bg px-4 py-2.5 text-[13px] text-bad"
+        >
+          Could not prioritize the pull request: {prioritizeError}
+        </div>
+      )}
 
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <input
@@ -302,6 +320,11 @@ export function OverviewPage({
                       <Td className="c-host font-mono text-[13px] text-mut">{q.host ?? "—"}</Td>
                       <Td className="c-actions">
                         <RowActions
+                          onPrioritize={() => prioritize(q.repo, q.pr)}
+                          prioritizing={
+                            prioritizing && prioritizingKey === `${q.repo.toLowerCase()}#${q.pr}`
+                          }
+                          prioritizeDisabled={prioritizing}
                           onSettings={() => setSettingsFor(q.repo)}
                           onHold={
                             HOLD_ACTIONS_ENABLED
@@ -431,7 +454,10 @@ export function OverviewPage({
             </div>
           </Card>
 
-          <Card title="Recently finished" count={ov.finished.length}>
+          <Card
+            title="Recently finished"
+            count={countLabel(finished.length, ov.finished.length, narrowed)}
+          >
             {finished.length === 0 ? (
               <Empty>Nothing has finished yet.</Empty>
             ) : (
@@ -603,16 +629,33 @@ function ActivityFeed({ events }: { events: EventItem[] }) {
 
 /** Destructive row actions remain discoverable to touch and keyboard users. */
 function RowActions({
+  onPrioritize,
   onHold,
   onCancel,
   onSettings,
+  prioritizing,
+  prioritizeDisabled,
 }: {
+  onPrioritize?: () => void;
   onHold?: () => void;
   onCancel: () => void;
   onSettings?: () => void;
+  prioritizing?: boolean;
+  prioritizeDisabled?: boolean;
 }) {
   return (
     <span className="flex justify-end gap-1 whitespace-nowrap opacity-70 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+      {onPrioritize && (
+        <button
+          type="button"
+          disabled={prioritizeDisabled}
+          onClick={onPrioritize}
+          title="move to top of review and autofix queues"
+          className="inline-flex h-7 items-center rounded-md px-1.5 text-[12px] text-acc hover:bg-acc-bg disabled:opacity-45"
+        >
+          {prioritizing ? "Moving…" : "↑ Top"}
+        </button>
+      )}
       {onSettings && (
         <button
           type="button"

@@ -48,26 +48,27 @@ export function useOperation() {
     );
 
     void Effect.runPromise(outcome, { signal: controller.signal })
-      .then((result) => {
-        if (controller.signal.aborted) return;
-        if (result.ok) {
-          options.onSuccess?.(result.value);
-        } else {
-          setError(result.failure.message);
-          options.onFailure?.(result.failure);
-        }
-      })
       // Interruption bypasses `Effect.match`; it is expected on replacement or
-      // unmount. Every other defect is surfaced instead of disappearing into
-      // an unhandled Promise or leaving the control stuck in a busy state.
+      // unmount. Catch defects before callbacks run so a callback exception is
+      // not mislabeled as a failed dashboard operation.
       .catch((defect: unknown) => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted) return undefined;
         console.error("Unexpected dashboard operation defect", defect);
         setError(
           defect instanceof Error
             ? `Unexpected dashboard failure: ${defect.message}`
             : "Unexpected dashboard failure",
         );
+        return undefined;
+      })
+      .then((result) => {
+        if (controller.signal.aborted || !result) return;
+        if (result.ok) {
+          options.onSuccess?.(result.value);
+        } else {
+          setError(result.failure.message);
+          options.onFailure?.(result.failure);
+        }
       })
       .finally(() => {
         if (active.current !== controller) return;

@@ -4,6 +4,7 @@ import {
   createRoute,
   createRouter,
   lazyRouteComponent,
+  notFound,
 } from "@tanstack/react-router";
 import { App, NotFound, RouteError } from "./App";
 
@@ -48,14 +49,16 @@ export const prRoute = createRoute({
   path: "/pr/$owner/$name/$pr",
   params: {
     parse: ({ name, owner, pr }) => {
-      const number = Number(pr);
-      return Number.isInteger(number) && number > 0 ? { name, owner, pr: number } : false;
+      return { name, owner, pr: Number(pr) };
     },
     stringify: ({ name, owner, pr }) => ({
       name,
       owner,
       pr: String(pr),
     }),
+  },
+  beforeLoad: ({ params }) => {
+    if (!Number.isInteger(params.pr) || params.pr <= 0) throw notFound();
   },
   component: lazyRouteComponent(() => import("./routes/PRRoute"), "PRRoute"),
 });

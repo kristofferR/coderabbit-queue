@@ -187,6 +187,14 @@ func validateEnvValue(key, value string) error {
 	if value == "" {
 		return nil // empty means "unset here", which every key allows
 	}
+	if key == "CRQ_TZ" {
+		if value == "Local" {
+			return fmt.Errorf("%s must be an IANA timezone name, not Local", key)
+		}
+		if _, err := time.LoadLocation(value); err != nil {
+			return fmt.Errorf("%s is not a valid IANA timezone: %w", key, err)
+		}
+	}
 	switch k.Kind {
 	case "duration":
 		d, err := time.ParseDuration(value)

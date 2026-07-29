@@ -31,7 +31,7 @@ export function FirstRun({ snap }: { snap: Snapshot }) {
   const setup = snap.setup;
   const bots = snap.bots.filter((b) => b.enabled);
   const working = snap.bots.filter((b) => b.status === "working").length;
-  const agent = snap.repos.find((repo) => repo.solver?.agent)?.solver?.agent ?? "";
+  const agent = (setup.fleet ?? []).some((host) => host.agent);
   const hosts = setup.fleet?.length ?? 0;
 
   // The steps are the real ones, in order, each answering itself from live
@@ -74,7 +74,7 @@ export function FirstRun({ snap }: { snap: Snapshot }) {
     },
     {
       title: "An agent to fix what they find",
-      done: agent !== "",
+      done: agent,
       body: (
         <>
           Optional, and the half most people skip: crq can run a coding agent over the findings and

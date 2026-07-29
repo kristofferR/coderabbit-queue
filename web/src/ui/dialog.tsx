@@ -27,10 +27,12 @@ export function DialogOverlay({
 export function DialogContent({
   children,
   className,
+  closeDisabled = false,
   closeLabel = "Close dialog",
   variant = "modal",
   ...props
 }: ComponentProps<typeof DialogPrimitive.Content> & {
+  closeDisabled?: boolean;
   closeLabel?: string;
   variant?: "modal" | "sheet";
 }) {
@@ -53,7 +55,8 @@ export function DialogContent({
         {children}
         <DialogPrimitive.Close
           aria-label={closeLabel}
-          className="absolute top-3 right-3 inline-flex size-7 items-center justify-center rounded-md text-faint hover:bg-bg hover:text-ink"
+          disabled={closeDisabled}
+          className="absolute top-3 right-3 inline-flex size-7 items-center justify-center rounded-md text-faint hover:bg-bg hover:text-ink disabled:pointer-events-none disabled:opacity-45"
         >
           <X aria-hidden className="size-4" />
         </DialogPrimitive.Close>

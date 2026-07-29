@@ -1,6 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import { ExternalLink } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { AutofixLog } from "./AutofixLog";
 import { act } from "./actions";
 import type { Cost as CostView, Finding, PRView } from "./api";
 import { pullRequest } from "./api";
@@ -380,11 +381,9 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
                   {view.round.fixing.heartbeat &&
                     ` · heartbeat ${clock(view.round.fixing.heartbeat)}`}
                 </div>
-                {view.round.fixing.log && (
-                  <div className="mt-1 font-mono text-[11.5px] break-all text-faint">
-                    {view.round.fixing.log}
-                  </div>
-                )}
+                <div className="mt-2">
+                  <AutofixLog repo={repo} pr={pr} />
+                </div>
                 <p className="mt-1.5 text-[11.5px] text-faint">
                   While a session holds this round the queue leaves it alone; the claim is released
                   when the session pushes or exits.

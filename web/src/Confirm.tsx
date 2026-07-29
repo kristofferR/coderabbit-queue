@@ -37,6 +37,8 @@ export function Confirm({
     <Dialog open onOpenChange={(open) => !open && onCancel()}>
       <DialogContent
         className="p-5"
+        closeDisabled={busy}
+        onInteractOutside={(event) => busy && event.preventDefault()}
         onPointerDownOutside={(event) => busy && event.preventDefault()}
         onEscapeKeyDown={(event) => busy && event.preventDefault()}
       >

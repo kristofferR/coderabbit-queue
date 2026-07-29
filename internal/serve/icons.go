@@ -2,6 +2,7 @@ package serve
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
@@ -179,22 +180,13 @@ func (ic *Icons) avatarURL(ctx context.Context, login string) string {
 	if resp.StatusCode != http.StatusOK {
 		return ""
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
+	var user struct {
+		AvatarURL string `json:"avatar_url"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&user); err != nil {
 		return ""
 	}
-	// A tiny scan beats decoding the whole user object for one field.
-	const marker = `"avatar_url":"`
-	i := strings.Index(string(body), marker)
-	if i < 0 {
-		return ""
-	}
-	rest := string(body[i+len(marker):])
-	j := strings.IndexByte(rest, '"')
-	if j < 0 {
-		return ""
-	}
-	return rest[:j]
+	return user.AvatarURL
 }
 
 func (ic *Icons) fetch(ctx context.Context, rawURL string) ([]byte, string, bool) {

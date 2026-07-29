@@ -191,6 +191,8 @@ export const RepoSolverSchema = Schema.Struct({
   effort: Optional(Schema.String),
   prompt: Optional(Schema.String),
   max_attempts: Schema.Number,
+  severities: MutableArray(Schema.String),
+  ask_mode: Schema.String,
   forks: Schema.Boolean,
   skip_authors: MutableArray(Schema.String),
   sources: StringRecord,
@@ -294,6 +296,7 @@ export type HostInfo = Schema.Schema.Type<typeof HostInfoSchema>;
 
 export const HostToolsSchema = Schema.Struct({
   host: Schema.String,
+  agent: Optional(Schema.String),
   version: Optional(Schema.String),
   caps: Optional(Schema.Number),
   roles: Optional(MutableArray(Schema.String)),

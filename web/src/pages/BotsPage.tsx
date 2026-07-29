@@ -103,16 +103,19 @@ export function BotsPage({ bots }: { bots: BotCard[] }) {
 
                 <p className="mt-2.5 text-[12.5px] text-faint">
                   {st.note}
-                  {b.last_seen && b.seen_on && (
-                    <>
-                      {" — last on "}
-                      <PRLink
-                        repo={b.seen_on.split("#")[0]}
-                        pr={Number(b.seen_on.split("#")[1] ?? 0)}
-                      />{" "}
-                      {ago(b.last_seen, now)}
-                    </>
-                  )}
+                  {b.last_seen &&
+                    b.seen_on &&
+                    (() => {
+                      const [repo = "", number = ""] = b.seen_on.split("#");
+                      const pr = Number(number);
+                      if (!repo || !Number.isInteger(pr) || pr <= 0) return null;
+                      return (
+                        <>
+                          {" — last on "}
+                          <PRLink repo={repo} pr={pr} /> {ago(b.last_seen, now)}
+                        </>
+                      );
+                    })()}
                   {b.repo_count > 0 && ` · ${b.repo_count} repo override(s) name it`}
                 </p>
 

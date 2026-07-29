@@ -139,6 +139,24 @@ func TestMalformedIconNamesAreRejectedBeforeFetching(t *testing.T) {
 	}
 }
 
+func TestAvatarURLDecodesOrdinaryJSONFormatting(t *testing.T) {
+	icons := NewIcons("", nil)
+	icons.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`{
+				"login": "review-bot",
+				"avatar_url": "https:\/\/avatars.githubusercontent.com\/u\/42?v=4"
+			}`)),
+			Request: req,
+		}, nil
+	})
+	const want = "https://avatars.githubusercontent.com/u/42?v=4"
+	if got := icons.avatarURL(t.Context(), "review-bot"); got != want {
+		t.Fatalf("avatar URL = %q, want %q", got, want)
+	}
+}
+
 func TestIconRequestsRequireSameOriginFetchMetadata(t *testing.T) {
 	icons := NewIcons("", nil)
 	icons.put("bot:codex", &icon{

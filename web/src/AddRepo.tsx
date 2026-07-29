@@ -40,6 +40,7 @@ export function AddRepo({
   const requested = useRef(false);
   const { run: runRequest, error } = useOperation();
   const { run: runPreview } = useOperation();
+  const { run: runAdd, error: addError, clearError: clearAddError } = useOperation();
   // The backlog contract: enrolling a repository with a dozen open pull
   // requests becomes a dozen metered reviews on the next pass. Nothing is
   // written until this has been shown and confirmed.
@@ -83,6 +84,7 @@ export function AddRepo({
   if (!open) return null;
 
   const preview = (repo: string) => {
+    clearAddError();
     setPending({ repo });
     runPreview(enrollmentImpact(repo), {
       onSuccess: (impact) => setPending({ repo, impact }),
@@ -94,7 +96,7 @@ export function AddRepo({
 
   const add = (repo: string) => {
     setBusy(repo);
-    runRequest(act("enroll", { repo, enabled: true }), {
+    runAdd(act("enroll", { repo, enabled: true }), {
       onSuccess: ({ snapshot }) => {
         onSnapshot?.(snapshot);
         setPending(null);
@@ -242,7 +244,7 @@ export function AddRepo({
             title={`Review ${pending.repo}?`}
             confirmLabel={busy ? "Adding…" : "Add it"}
             busy={busy === pending.repo}
-            error={pending.error}
+            error={pending.error ?? addError}
             body={
               pending.errorKind === "preview" ? (
                 <>

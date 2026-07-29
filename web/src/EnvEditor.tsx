@@ -147,7 +147,13 @@ export function EnvEditor({
                               type="button"
                               onClick={() => {
                                 setEditing(e.key);
-                                setDraft(e.value);
+                                setDraft(
+                                  e.kind === "bool"
+                                    ? ["1", "true", "yes", "on"].includes(e.value.toLowerCase())
+                                      ? "1"
+                                      : "0"
+                                    : e.value,
+                                );
                               }}
                               className="text-acc hover:underline"
                             >

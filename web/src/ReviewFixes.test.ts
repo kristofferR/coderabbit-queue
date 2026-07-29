@@ -33,6 +33,8 @@ describe("settings deltas", () => {
       model_choices: [],
       model: "gpt-5.6-sol",
       max_attempts: 3,
+      severities: ["critical", "major"],
+      ask_mode: "blocked",
       forks: false,
       skip_authors: ["dependabot[bot]"],
       sources: {},
@@ -44,12 +46,16 @@ describe("settings deltas", () => {
         effort: "",
         prompt: "",
         attempts: "4",
+        severities: ["critical"],
+        askMode: "uncertain",
         forks: false,
         authors: "dependabot[bot]",
       }),
     ).toEqual({
       models: ["gpt-5.6-terra", "codex-auto-review"],
       max_attempts: 4,
+      severities: ["critical"],
+      ask_mode: "uncertain",
     });
   });
 });

@@ -1,14 +1,15 @@
 import { Effect } from "effect";
 import type { DashboardError } from "./client";
 import { requestJson } from "./client";
-import type { ActionResult } from "./data/contracts";
-import { ActionResponseSchema } from "./data/contracts";
+import type { ActionResult, FleetImpact } from "./data/contracts";
+import { ActionResponseSchema, FleetImpactResponseSchema } from "./data/contracts";
 
 export type { ActionResult } from "./data/contracts";
 
 export type ActionName =
   | "hold"
   | "unhold"
+  | "prioritize"
   | "cancel"
   | "autofix"
   | "enroll"
@@ -58,8 +59,16 @@ export type ActionBody = {
     effort?: string;
     prompt?: string;
     max_attempts?: number;
+    severities?: string[];
+    ask_mode?: string;
     forks?: boolean;
     skip_authors?: string[];
+    unset_models?: boolean;
+    unset_effort?: boolean;
+    unset_severities?: boolean;
+    unset_ask_mode?: boolean;
+    unset_forks?: boolean;
+    unset_skip_authors?: boolean;
     clear?: boolean;
   };
 };
@@ -74,9 +83,32 @@ export type ActionBody = {
  * header cross-origin without a preflight the server never approves.
  */
 export function act(
+  action: "fleet",
+  body: ActionBody & { preview: true },
+): Effect.Effect<FleetImpact, DashboardError>;
+export function act(
+  action: "fleet",
+  body: ActionBody & { preview?: false | undefined },
+): Effect.Effect<ActionResult, DashboardError>;
+export function act(
+  action: "fleet",
+  body: ActionBody,
+): Effect.Effect<ActionResult | FleetImpact, DashboardError>;
+export function act(
+  action: Exclude<ActionName, "fleet">,
+  body: ActionBody,
+): Effect.Effect<ActionResult, DashboardError>;
+export function act(
   action: ActionName,
   body: ActionBody,
-): Effect.Effect<ActionResult, DashboardError> {
+): Effect.Effect<ActionResult | FleetImpact, DashboardError> {
+  if (action === "fleet" && body.preview === true) {
+    return requestJson(FleetImpactResponseSchema, "/api/action/fleet", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CRQ-Dashboard": "1" },
+      body: JSON.stringify(body),
+    }).pipe(Effect.map(({ impact }) => impact));
+  }
   return requestJson(ActionResponseSchema, `/api/action/${action}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-CRQ-Dashboard": "1" },

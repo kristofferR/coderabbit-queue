@@ -574,6 +574,9 @@ func TestEnvValidationRejectsValuesTheFleetWouldIgnore(t *testing.T) {
 		{"CRQ_MIN_INTERVAL", "0s", false},
 		{"CRQ_SETTLE", "0s", false},
 		{"CRQ_WEEKLY_LIMIT", "0", false},
+		{"CRQ_TZ", "Europe/Oslo", false},
+		{"CRQ_TZ", "Local", true},
+		{"CRQ_TZ", "Europe/Not_A_Real_Place", true},
 		// Empty is "unset here", which every key allows.
 		{"CRQ_WATCH_INTERVAL", "", false},
 	} {

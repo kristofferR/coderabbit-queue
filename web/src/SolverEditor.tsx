@@ -30,13 +30,18 @@ export function SolverEditor({
   const [effort, setEffort] = useState(solver.effort ?? "");
   const [prompt, setPrompt] = useState(solver.prompt ?? "");
   const [attempts, setAttempts] = useState(String(solver.max_attempts));
+  const [severities, setSeverities] = useState(solver.severities);
+  const [askMode, setAskMode] = useState(solver.ask_mode);
   const [forks, setForks] = useState(solver.forks);
   const [authors, setAuthors] = useState((solver.skip_authors ?? []).join(", "));
   const { run: runOperation, running: busy, error } = useOperation();
+  const [warning, setWarning] = useState<string | null>(null);
   const solverModel = solver.model ?? "";
   const solverEffort = solver.effort ?? "";
   const solverPrompt = solver.prompt ?? "";
   const solverAttempts = String(solver.max_attempts);
+  const solverSeverities = solver.severities.join();
+  const solverAskMode = solver.ask_mode;
   const solverAuthors = (solver.skip_authors ?? []).join(", ");
 
   useEffect(() => {
@@ -44,27 +49,71 @@ export function SolverEditor({
     setEffort(solverEffort);
     setPrompt(solverPrompt);
     setAttempts(solverAttempts);
+    setSeverities(solver.severities);
+    setAskMode(solverAskMode);
     setForks(solver.forks);
     setAuthors(solverAuthors);
-  }, [solverModel, solverEffort, solverPrompt, solverAttempts, solver.forks, solverAuthors]);
+  }, [
+    solverModel,
+    solverEffort,
+    solverPrompt,
+    solverAttempts,
+    solverSeverities,
+    solverAskMode,
+    solver.forks,
+    solverAuthors,
+  ]);
 
   const dirty =
     model !== solverModel ||
     effort !== solverEffort ||
     prompt !== solverPrompt ||
     attempts !== solverAttempts ||
+    severities.join() !== solverSeverities ||
+    askMode !== solverAskMode ||
     forks !== solver.forks ||
     authors !== solverAuthors;
 
   const save = (clear = false) => {
+    setWarning(null);
     runOperation(
       act("solver", {
         repo,
         solver: clear
           ? { clear: true }
-          : solverChange(solver, { model, effort, prompt, attempts, forks, authors }),
+          : solverChange(solver, {
+              model,
+              effort,
+              prompt,
+              attempts,
+              severities,
+              askMode,
+              forks,
+              authors,
+            }),
       }),
-      { onSuccess: ({ snapshot }) => onSnapshot?.(snapshot) },
+      {
+        onSuccess: ({ snapshot, warning: next }) => {
+          onSnapshot?.(snapshot);
+          setWarning(next ?? null);
+        },
+      },
+    );
+  };
+
+  const inherit = (field: "severities" | "ask_mode") => {
+    setWarning(null);
+    runOperation(
+      act("solver", {
+        repo,
+        solver: field === "severities" ? { unset_severities: true } : { unset_ask_mode: true },
+      }),
+      {
+        onSuccess: ({ snapshot, warning: next }) => {
+          onSnapshot?.(snapshot);
+          setWarning(next ?? null);
+        },
+      },
     );
   };
 
@@ -159,6 +208,64 @@ export function SolverEditor({
                 fix sessions per head before crq stops trying; 0 inherits
               </span>
             </Row>
+            <Row label="Fix findings" source={src("severities")}>
+              <div className="flex flex-wrap gap-2">
+                {[
+                  ["critical", "Critical"],
+                  ["major", "Major"],
+                  ["potential", "Potential"],
+                  ["minor", "Minor"],
+                  ["unknown", "Unclassified"],
+                ].map(([value, label]) => {
+                  const active = severities.includes(value);
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() =>
+                        setSeverities((current) =>
+                          active
+                            ? current.length > 1
+                              ? current.filter((severity) => severity !== value)
+                              : current
+                            : [...current, value],
+                        )
+                      }
+                      className={`rounded-full border px-3 py-1 text-[12.5px] font-semibold ${
+                        active
+                          ? "border-ink bg-ink text-white"
+                          : "border-edge bg-white text-mut hover:border-edge2"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+              <Inherit
+                shown={src("severities") === "repo"}
+                busy={busy || dirty}
+                onClick={() => inherit("severities")}
+              />
+            </Row>
+            <Row label="Ask me" source={src("ask_mode")}>
+              <select
+                aria-label="When autofix asks for clarification"
+                value={askMode}
+                onChange={(event) => setAskMode(event.target.value)}
+                className="rounded-lg border border-edge bg-[#FBFBFC] px-2 py-1 text-[12.5px]"
+              >
+                <option value="blocked">only when blocked</option>
+                <option value="uncertain">when confidence is low</option>
+                <option value="ambiguous">at first ambiguity</option>
+              </select>
+              <Inherit
+                shown={src("ask_mode") === "repo"}
+                busy={busy || dirty}
+                onClick={() => inherit("ask_mode")}
+              />
+            </Row>
             <Row label="Fork PRs" source={src("forks")}>
               <button
                 type="button"
@@ -195,6 +302,11 @@ export function SolverEditor({
           </tbody>
         </table>
 
+        {warning && (
+          <div className="mt-3 rounded-lg border border-warn-edge bg-warn-bg px-3 py-2 text-[12.5px] text-warn">
+            {warning}
+          </div>
+        )}
         {error && (
           <div className="mt-3 rounded-lg border border-bad-edge bg-bad-bg px-3 py-2 text-[12.5px] text-bad">
             {error}
@@ -240,6 +352,8 @@ export function solverChange(
     effort: string;
     prompt: string;
     attempts: string;
+    severities: string[];
+    askMode: string;
     forks: boolean;
     authors: string;
   },
@@ -255,6 +369,10 @@ export function solverChange(
   if (edited.attempts !== String(solver.max_attempts)) {
     change.max_attempts = Number(edited.attempts) || 0;
   }
+  if (edited.severities.join() !== solver.severities.join()) {
+    change.severities = edited.severities;
+  }
+  if (edited.askMode !== solver.ask_mode) change.ask_mode = edited.askMode;
   if (edited.forks !== solver.forks) change.forks = edited.forks;
   const currentAuthors = (solver.skip_authors ?? []).join(", ");
   if (edited.authors !== currentAuthors) {
@@ -264,6 +382,20 @@ export function solverChange(
       .filter(Boolean);
   }
   return change;
+}
+
+function Inherit({ shown, busy, onClick }: { shown: boolean; busy: boolean; onClick: () => void }) {
+  if (!shown) return null;
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={onClick}
+      className="ml-2 text-[11.5px] text-acc hover:underline disabled:opacity-45"
+    >
+      Use fleet default
+    </button>
+  );
 }
 
 function Row({
