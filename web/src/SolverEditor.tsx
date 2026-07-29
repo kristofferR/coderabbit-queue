@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { act } from "./actions";
+import { type ActionBody, act } from "./actions";
 import type { RepoSolver, Snapshot } from "./api";
 import { Card, Pill } from "./ui";
 import { useOperation } from "./useOperation";
@@ -62,17 +62,7 @@ export function SolverEditor({
         repo,
         solver: clear
           ? { clear: true }
-          : {
-              model,
-              effort,
-              prompt,
-              max_attempts: Number(attempts) || 0,
-              forks,
-              skip_authors: authors
-                .split(",")
-                .map((a) => a.trim())
-                .filter(Boolean),
-            },
+          : solverChange(solver, { model, effort, prompt, attempts, forks, authors }),
       }),
       { onSuccess: ({ snapshot }) => onSnapshot?.(snapshot) },
     );
@@ -241,6 +231,39 @@ export function SolverEditor({
       </div>
     </Card>
   );
+}
+
+export function solverChange(
+  solver: RepoSolver,
+  edited: {
+    model: string;
+    effort: string;
+    prompt: string;
+    attempts: string;
+    forks: boolean;
+    authors: string;
+  },
+): NonNullable<ActionBody["solver"]> {
+  const change: NonNullable<ActionBody["solver"]> = {};
+  const currentModel = solver.model ?? "";
+  if (edited.model !== currentModel) {
+    const ranking = [edited.model, ...solver.models.slice(1)].filter(Boolean);
+    change.models = ranking.filter((model, index) => ranking.indexOf(model) === index);
+  }
+  if (edited.effort !== (solver.effort ?? "")) change.effort = edited.effort;
+  if (edited.prompt !== (solver.prompt ?? "")) change.prompt = edited.prompt;
+  if (edited.attempts !== String(solver.max_attempts)) {
+    change.max_attempts = Number(edited.attempts) || 0;
+  }
+  if (edited.forks !== solver.forks) change.forks = edited.forks;
+  const currentAuthors = (solver.skip_authors ?? []).join(", ");
+  if (edited.authors !== currentAuthors) {
+    change.skip_authors = edited.authors
+      .split(",")
+      .map((author) => author.trim())
+      .filter(Boolean);
+  }
+  return change;
 }
 
 function Row({

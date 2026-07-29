@@ -1,10 +1,15 @@
-import { Effect, Fiber } from "effect";
+import { Effect, Fiber, Schema } from "effect";
 import { decodeFrame, streamDisconnected } from "../client";
 import type { Snapshot } from "./contracts";
 import { SnapshotSchema } from "./contracts";
 
 /** Connection state, so the UI can say "stale" instead of quietly lying. */
-export type Live = "connecting" | "live" | "reconnecting";
+export type Live =
+  | { status: "connecting" }
+  | { status: "live" }
+  | { status: "reconnecting"; error?: string };
+
+const UnavailableSchema = Schema.Struct({ error: Schema.String });
 
 /**
  * Subscribes to whole snapshots. The server pushes only when the state ref's
@@ -25,7 +30,6 @@ export function subscribe(
         return yield* Effect.callback<never, ReturnType<typeof streamDisconnected>>((resume) => {
           source.onopen = () => {
             resetDelay();
-            onLive("live");
           };
           source.onmessage = (event) => {
             const frame = Effect.runSync(
@@ -40,14 +44,34 @@ export function subscribe(
             // snapshot remains more useful than tearing down the stream.
             if (frame) {
               onData(frame);
-              onLive("live");
+              onLive(
+                frame.stale
+                  ? { status: "reconnecting", error: frame.stale.error }
+                  : { status: "live" },
+              );
             }
           };
+          const unavailable = (event: MessageEvent) => {
+            const frame = Effect.runSync(
+              decodeFrame(UnavailableSchema, event.data).pipe(
+                Effect.match({
+                  onFailure: () => undefined,
+                  onSuccess: (decoded) => decoded,
+                }),
+              ),
+            );
+            onLive({
+              status: "reconnecting",
+              error: frame?.error ?? "The shared state ref is unavailable",
+            });
+          };
+          source.addEventListener("unavailable", unavailable);
           source.onerror = () => {
-            onLive("reconnecting");
+            onLive({ status: "reconnecting", error: "Lost the connection to crq serve" });
             resume(Effect.fail(streamDisconnected()));
           };
           return Effect.sync(() => {
+            source.removeEventListener("unavailable", unavailable);
             source.onopen = null;
             source.onmessage = null;
             source.onerror = null;
@@ -57,7 +81,7 @@ export function subscribe(
     );
 
   const program = Effect.gen(function* () {
-    onLive("connecting");
+    onLive({ status: "connecting" });
     let delay = 1000;
     while (true) {
       yield* connection(() => {

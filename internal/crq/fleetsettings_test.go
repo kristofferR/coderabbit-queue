@@ -700,6 +700,38 @@ func TestAdoptEnvAppliesPrimaryBeforeRequiredBotsInOneWrite(t *testing.T) {
 	}
 }
 
+func TestAdoptEnvReopensCompletedRoundsForNewReviewers(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":          "owner/gate",
+		"CRQ_HOST":          "testhost",
+		"CRQ_REPOS":         "o/r",
+		"CRQ_COBOTS":        "codex",
+		"CRQ_REQUIRED_BOTS": "coderabbitai,codex",
+		"CRQ_MIN_INTERVAL":  "0s",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, pr, head := "o/r", 7, "dddddddd4"
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 14)
+
+	if _, err := svc.AdoptEnv(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(repo, pr); round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("round = %#v, want adoption of a required reviewer to requeue it", round)
+	}
+}
+
 func findAdopted(list []AdoptedSetting, key string) (AdoptedSetting, bool) {
 	for _, a := range list {
 		if a.Key == key {

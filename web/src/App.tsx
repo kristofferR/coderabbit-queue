@@ -74,30 +74,30 @@ function DashboardShell() {
 
           <span
             title={
-              live === "live"
+              live.status === "live"
                 ? `Live, revision ${snapshot?.overview.rev ?? "unknown"}`
-                : live === "connecting"
+                : live.status === "connecting"
                   ? "Connecting to the dashboard server"
-                  : `Reconnecting; last state ${ago(snapshot?.overview.wrote_at, now)}`
+                  : `${live.error ?? "Reconnecting"}; last state ${ago(snapshot?.overview.wrote_at, now)}`
             }
             className={`ml-auto flex items-center gap-2 rounded-full border px-2.5 py-1 font-mono text-[10.5px] ${
-              live === "live"
+              live.status === "live"
                 ? "border-[#68D99B]/30 bg-[#68D99B]/10 text-[#A7EDC5]"
                 : "border-white/15 bg-white/5 text-white/60"
             }`}
           >
             <span
               className={`size-2 rounded-full ${
-                live === "live"
+                live.status === "live"
                   ? "bg-[#68D99B] shadow-[0_0_0_3px_rgb(104_217_155/0.12)]"
-                  : live === "connecting"
+                  : live.status === "connecting"
                     ? "animate-pulse bg-white/35"
                     : "bg-[#F3B66A]"
               }`}
             />
-            {live === "live" ? (
+            {live.status === "live" ? (
               <>LIVE · REV {snapshot?.overview.rev ?? "—"}</>
-            ) : live === "connecting" ? (
+            ) : live.status === "connecting" ? (
               "CONNECTING…"
             ) : (
               <>STALE · {ago(snapshot?.overview.wrote_at, now)}</>
@@ -106,18 +106,21 @@ function DashboardShell() {
         </div>
       </header>
 
-      {live === "reconnecting" && snapshot && (
+      {live.status === "reconnecting" && snapshot && (
         <div
           role="status"
           className="border-b border-warn-edge bg-warn-bg px-4 py-2 text-[12.5px] text-warn sm:px-6"
         >
-          Lost the connection to <span className="font-mono">crq serve</span>. This is the last
-          state it sent — countdowns keep ticking against it, so treat times as approximate until it
-          reconnects.
+          {snapshot.stale
+            ? `The shared state ref is unavailable: ${snapshot.stale.error}.`
+            : "Lost the connection to crq serve."}{" "}
+          This is the last state loaded; actions are disabled until it becomes current again.
         </div>
       )}
 
-      <Outlet />
+      <div inert={live.status === "live" ? undefined : true}>
+        <Outlet />
+      </div>
     </div>
   );
 }

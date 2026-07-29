@@ -16,13 +16,15 @@ import type { Snapshot } from "./api";
  */
 export function isFirstRun(snap: Snapshot): boolean {
   const enrolled = snap.repos.filter((r) => r.reviewed).length;
+  const config = snap.settings.config;
+  const scopeWide = (config.scope?.length ?? 0) > 0 && (config.allow_repos?.length ?? 0) === 0;
   const anyWork =
     snap.overview.counts.in_flight +
       snap.overview.counts.queued +
       snap.overview.counts.held +
       snap.overview.counts.fixing >
     0;
-  return enrolled === 0 && !anyWork && snap.overview.finished.length === 0;
+  return !scopeWide && enrolled === 0 && !anyWork && snap.overview.finished.length === 0;
 }
 
 export function FirstRun({ snap }: { snap: Snapshot }) {

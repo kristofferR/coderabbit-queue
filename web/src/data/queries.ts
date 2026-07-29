@@ -17,11 +17,11 @@ export const pullRequest = (repo: string, pr: number, refresh = false) =>
   requestJson(PRViewSchema, `/api/pr/${repo}/${pr}${refresh ? "?refresh=1" : ""}`);
 
 export const fleetImpact = (fleet: {
-  cobots: string[];
-  required: string[];
-  min_interval: string;
-  weekly_limit: number;
-  autofix_default: boolean;
+  cobots?: string[];
+  required?: string[];
+  min_interval?: string;
+  weekly_limit?: number;
+  autofix_default?: boolean;
 }) =>
   requestJson(FleetImpactResponseSchema, "/api/action/fleet", {
     method: "POST",

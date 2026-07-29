@@ -580,6 +580,15 @@ func (s *Service) AdoptEnv(ctx context.Context, dryRun bool) ([]AdoptedSetting, 
 		return adopted, nil
 	}
 
+	// Adoption can change the effective reviewers through either their typed
+	// fields or a generic setting such as CRQ_BOT or a trigger policy. Fetch
+	// the live PR set before the write; the CAS closure cannot ask GitHub.
+	preview, _ := adoptFleetEnv(current.Fleet, take, s.cfg, nil)
+	open, err := s.openPRsForReviewerChange(ctx, current, preview)
+	if err != nil {
+		return nil, err
+	}
+
 	now := s.clock().UTC()
 	// What the write actually landed. The classification above answers from the
 	// record as it was READ, and between that and the CAS a key can gain a
@@ -587,71 +596,19 @@ func (s *Service) AdoptEnv(ctx context.Context, dryRun bool) ([]AdoptedSetting, 
 	// setting reported as adopted that shared state never took.
 	applied := map[string]bool{}
 	st, err := s.store.Update(ctx, func(st *State) error {
-		fd := st.Fleet
-		fd.Env = maps.Clone(st.Fleet.Env)
-		changed := false
 		clear(applied) // a CAS conflict runs this closure again
-		set := func(key, value string) {
-			// A record already there was set deliberately and outranks a value
-			// this host happens to carry.
-			if fd.Env == nil {
-				fd.Env = map[string]string{}
-			}
-			if _, exists := fd.Env[key]; exists {
-				return
-			}
-			fd.Env[key] = value
-			applied[key] = true
-			changed = true
+		before := map[string]Config{}
+		for _, repo := range s.reposFollowingFleet(*st) {
+			before[repo] = s.cfgFor(*st, repo)
 		}
-		// Required-reviewer aliases are resolved against the effective primary.
-		// Apply a newly adopted primary first instead of letting map iteration
-		// decide which primary CRQ_REQUIRED_BOTS sees.
-		if value, ok := take["CRQ_BOT"]; ok {
-			set("CRQ_BOT", value)
-		}
-		for key, value := range take {
-			if key == "CRQ_BOT" {
-				continue
-			}
-			// Four settings have a typed home with their own validation and
-			// impact preview. Adopting them into the generic map as well would
-			// give one setting two places to live, one of them shadowed.
-			switch key {
-			case "CRQ_COBOTS":
-				if !fd.SetCoBots {
-					if logins, err := resolveCoBotLogins(splitCommas(value)); err == nil {
-						fd.CoBots, fd.SetCoBots, changed = logins, true, true
-						applied[key] = true
-					}
-				}
-			case "CRQ_REQUIRED_BOTS":
-				if !fd.SetRequired {
-					if logins, err := resolveRequiredLogins(splitCommas(value), s.cfg.WithFleet(fd).Bot); err == nil {
-						fd.Required, fd.SetRequired, changed = logins, true, true
-						applied[key] = true
-					}
-				}
-			case "CRQ_MIN_INTERVAL":
-				if fd.MinInterval == "" {
-					fd.MinInterval, changed = value, true
-					applied[key] = true
-				}
-			case "CRQ_WEEKLY_LIMIT":
-				if fd.WeeklyLimit == nil {
-					if n, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
-						fd.WeeklyLimit, changed = &n, true
-						applied[key] = true
-					}
-				}
-			default:
-				set(key, value)
-			}
-		}
+		fd, changed := adoptFleetEnv(st.Fleet, take, s.cfg, applied)
 		if !changed {
 			return ErrNoChange
 		}
 		st.SetFleetDefaults(fd, s.cfg.Host, now)
+		for repo, was := range before {
+			s.reopenForChangedReviewers(st, repo, was, s.cfgFor(*st, repo), open[repo])
+		}
 		return nil
 	})
 	if err != nil && !errors.Is(err, ErrNoChange) {
@@ -666,6 +623,77 @@ func (s *Service) AdoptEnv(ctx context.Context, dryRun bool) ([]AdoptedSetting, 
 		}
 	}
 	return adopted, nil
+}
+
+// adoptFleetEnv folds the settings this host offered onto a fleet record.
+// Keeping preview and CAS application on one path makes the open-PR prefetch
+// describe the reviewer change that can actually land.
+func adoptFleetEnv(fd FleetDefaults, take map[string]string, cfg Config, applied map[string]bool) (FleetDefaults, bool) {
+	fd.Env = maps.Clone(fd.Env)
+	changed := false
+	record := func(key string) {
+		if applied != nil {
+			applied[key] = true
+		}
+		changed = true
+	}
+	set := func(key, value string) {
+		// A record already there was set deliberately and outranks a value this
+		// host happens to carry.
+		if fd.Env == nil {
+			fd.Env = map[string]string{}
+		}
+		if _, exists := fd.Env[key]; exists {
+			return
+		}
+		fd.Env[key] = value
+		record(key)
+	}
+
+	// Required-reviewer aliases are resolved against the effective primary.
+	// Apply a newly adopted primary first instead of letting map iteration
+	// decide which primary CRQ_REQUIRED_BOTS sees.
+	if value, ok := take["CRQ_BOT"]; ok {
+		set("CRQ_BOT", value)
+	}
+	for key, value := range take {
+		if key == "CRQ_BOT" {
+			continue
+		}
+		// Four settings have a typed home. Recording them in Env as well would
+		// give one setting two places to live, one of them shadowed.
+		switch key {
+		case "CRQ_COBOTS":
+			if !fd.SetCoBots {
+				if logins, err := resolveCoBotLogins(splitCommas(value)); err == nil {
+					fd.CoBots, fd.SetCoBots = logins, true
+					record(key)
+				}
+			}
+		case "CRQ_REQUIRED_BOTS":
+			if !fd.SetRequired {
+				if logins, err := resolveRequiredLogins(splitCommas(value), cfg.WithFleet(fd).Bot); err == nil {
+					fd.Required, fd.SetRequired = logins, true
+					record(key)
+				}
+			}
+		case "CRQ_MIN_INTERVAL":
+			if fd.MinInterval == "" {
+				fd.MinInterval = value
+				record(key)
+			}
+		case "CRQ_WEEKLY_LIMIT":
+			if fd.WeeklyLimit == nil {
+				if n, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+					fd.WeeklyLimit = &n
+					record(key)
+				}
+			}
+		default:
+			set(key, value)
+		}
+	}
+	return fd, changed
 }
 
 // fleetGoverns reports whether the fleet record already decides key, in either

@@ -51,6 +51,7 @@ export function FleetEditor({
     setMinInterval(fleet.min_interval);
     setWeekly(String(fleet.weekly_limit));
     setAutofix(fleet.autofix_default);
+    setImpact(null);
   }, [
     fleetRunsKey,
     fleetRequiredKey,
@@ -66,13 +67,14 @@ export function FleetEditor({
     weekly !== String(fleet.weekly_limit) ||
     autofix !== fleet.autofix_default;
 
-  const change = () => ({
-    cobots: runs,
-    required,
-    min_interval: minInterval,
-    weekly_limit: Number(weekly),
-    autofix_default: autofix,
-  });
+  const change = () =>
+    fleetChange(fleet, fleetRuns, fleetRequired, {
+      runs,
+      required,
+      minInterval,
+      weekly,
+      autofix,
+    });
 
   // Ask first. The answer is the confirmation's whole body — there is no
   // generic "are you sure", because the useful question is always "what does
@@ -306,6 +308,33 @@ export function FleetEditor({
       )}
     </Card>
   );
+}
+
+export function fleetChange(
+  fleet: FleetSettings,
+  fleetRuns: string[],
+  fleetRequired: string[],
+  edited: {
+    runs: string[];
+    required: string[];
+    minInterval: string;
+    weekly: string;
+    autofix: boolean;
+  },
+) {
+  const change: {
+    cobots?: string[];
+    required?: string[];
+    min_interval?: string;
+    weekly_limit?: number;
+    autofix_default?: boolean;
+  } = {};
+  if (!sameMembers(edited.runs, fleetRuns)) change.cobots = edited.runs;
+  if (!sameMembers(edited.required, fleetRequired)) change.required = edited.required;
+  if (edited.minInterval !== fleet.min_interval) change.min_interval = edited.minInterval;
+  if (edited.weekly !== String(fleet.weekly_limit)) change.weekly_limit = Number(edited.weekly);
+  if (edited.autofix !== fleet.autofix_default) change.autofix_default = edited.autofix;
+  return change;
 }
 
 function Row({ label, source, children }: { label: string; source: string; children: ReactNode }) {

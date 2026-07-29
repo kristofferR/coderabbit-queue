@@ -185,6 +185,8 @@ export type Overview = Schema.Schema.Type<typeof OverviewSchema>;
 export const RepoSolverSchema = Schema.Struct({
   overridden: Schema.Boolean,
   agent: Optional(Schema.String),
+  models: MutableArray(Schema.String),
+  model_choices: MutableArray(Schema.String),
   model: Optional(Schema.String),
   effort: Optional(Schema.String),
   prompt: Optional(Schema.String),
@@ -525,6 +527,12 @@ export const SnapshotSchema = Schema.Struct({
   setup: SetupViewSchema,
   settings: SettingsViewSchema,
   events: MutableArray(EventSchema),
+  stale: Optional(
+    Schema.Struct({
+      error: Schema.String,
+      since: Schema.String,
+    }),
+  ),
 });
 export type Snapshot = Schema.Schema.Type<typeof SnapshotSchema>;
 
@@ -550,6 +558,7 @@ export type Candidate = Schema.Schema.Type<typeof CandidateSchema>;
 
 export const DiscoverResponseSchema = Schema.Struct({
   repos: MutableArray(CandidateSchema),
+  truncated: Optional(MutableArray(Schema.String)),
 });
 
 export const EnrollImpactSchema = Schema.Struct({

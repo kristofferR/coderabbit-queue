@@ -53,6 +53,7 @@ export type ActionBody = {
   value?: string;
   /** A fix-session change; an empty repo means the fleet default. */
   solver?: {
+    models?: string[];
     model?: string;
     effort?: string;
     prompt?: string;

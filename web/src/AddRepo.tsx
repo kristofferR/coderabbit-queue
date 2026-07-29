@@ -32,6 +32,8 @@ export function AddRepo({
 }) {
   const now = useNow(30000);
   const [rows, setRows] = useState<Candidate[] | null>(null);
+  const [truncated, setTruncated] = useState<string[]>([]);
+  const [manualRepo, setManualRepo] = useState("");
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
@@ -52,7 +54,10 @@ export function AddRepo({
     (refresh = false) => {
       setLoading(true);
       runRequest(discover(refresh), {
-        onSuccess: ({ repos }) => setRows(repos),
+        onSuccess: ({ repos, truncated: bounded }) => {
+          setRows(repos);
+          setTruncated(bounded ?? []);
+        },
         onFinally: () => setLoading(false),
       });
     },
@@ -146,6 +151,30 @@ export function AddRepo({
         {error && (
           <div className="border-b border-bad-edge bg-bad-bg px-5 py-2 text-[12.5px] text-bad">
             {error}
+          </div>
+        )}
+
+        {truncated.length > 0 && (
+          <div className="border-b border-warn-edge bg-warn-bg px-5 py-2.5 text-[12.5px] text-warn">
+            GitHub capped discovery for {truncated.join(", ")}. Enter a missing repository by its
+            full owner/name:
+            <div className="mt-2 flex gap-2">
+              <input
+                aria-label="Repository owner and name"
+                value={manualRepo}
+                onChange={(event) => setManualRepo(event.target.value)}
+                placeholder="owner/repository"
+                className="min-w-0 flex-1 rounded-lg border border-warn-edge bg-white px-2.5 py-1 text-ink"
+              />
+              <button
+                type="button"
+                disabled={manualRepo.trim() === ""}
+                onClick={() => void preview(manualRepo.trim())}
+                className="rounded-lg bg-ink px-3 py-1 font-semibold text-white disabled:opacity-45"
+              >
+                Add by name
+              </button>
+            </div>
           </div>
         )}
 
