@@ -588,7 +588,7 @@ const SchemaVersion = 5
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 7
+const WriterCaps = 8
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
@@ -617,10 +617,12 @@ const CapsEnrollment = 3
 // simply not applied there.
 const CapsFleetDefaults = 4
 
-// CapsSolver is the capability that makes solver settings safe to act on. A
-// host below it runs every fix session with its own install-time settings, so a
-// per-repository model or attempt limit recorded here is simply not applied.
-const CapsSolver = 6
+// CapsSolver is the capability that makes every solver setting safe to act on.
+// A host below it either runs every fix session with its own install-time
+// settings or cannot distinguish an explicitly empty repository prompt from
+// inheritance, so the dashboard must name it before claiming the saved answer
+// applies fleet-wide.
+const CapsSolver = 8
 
 // CapsDispatchClarification is the capability that makes a head-scoped
 // clarification marker terminal for autofix dispatch. Older watchers preserve

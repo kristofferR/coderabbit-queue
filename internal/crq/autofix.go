@@ -417,7 +417,7 @@ func (s *Service) autofixEnv(plan AutofixInstall) map[string]string {
 		"CRQ_FIX_PROMPT_FILE":       plan.Prompt,
 		"CRQ_BOT":                   s.cfg.Bot,
 		"CRQ_REQUIRED_BOTS":         strings.Join(s.cfg.RequiredBots, ","),
-		"CRQ_FEEDBACK_BOTS":         strings.Join(s.cfg.FeedbackBots, ","),
+		"CRQ_FEEDBACK_BOTS":         "",
 		"CRQ_REVIEW_CMD":            s.cfg.ReviewCommand,
 		"CRQ_RATELIMIT_CMD":         s.cfg.RateLimitCommand,
 		"CRQ_RL_MARKER":             s.cfg.RateLimitMarker,
@@ -439,6 +439,9 @@ func (s *Service) autofixEnv(plan AutofixInstall) map[string]string {
 		"CRQ_RL_FALLBACK":   s.cfg.RateLimitFallback.String(),
 		"PATH":              autofixPath(plan),
 	}
+	if s.cfg.FeedbackBotsExplicit {
+		env["CRQ_FEEDBACK_BOTS"] = strings.Join(s.cfg.FeedbackBots, ",")
+	}
 	if s.cfg.RateLimitCoDegrade {
 		env["CRQ_RL_CO_DEGRADE"] = "1"
 	} else {
@@ -449,7 +452,10 @@ func (s *Service) autofixEnv(plan AutofixInstall) map[string]string {
 		coNames = append(coNames, co.Name)
 		prefix := "CRQ_COBOT_" + strings.ToUpper(co.Name)
 		env[prefix+"_CMD"] = co.Command
-		env[prefix+"_TRIGGER"] = string(co.Trigger)
+		env[prefix+"_TRIGGER"] = ""
+		if co.TriggerExplicit {
+			env[prefix+"_TRIGGER"] = string(co.Trigger)
+		}
 		env[prefix+"_REQUIRED"] = strconv.FormatBool(co.Required)
 		env[prefix+"_GRACE"] = co.SelfHealGrace.String()
 	}

@@ -377,7 +377,7 @@ type queueCandidate struct {
 // writes / issue edits. A PR already tracked at the same head is skipped; a
 // stale head is superseded. The DecideFire dedup still backstops at pump time.
 func (s *Service) enqueueBatch(ctx context.Context, items []queueCandidate) error {
-	if len(items) == 0 {
+	if len(items) == 0 || s.cfg.DryRun {
 		return nil
 	}
 	state, err := s.store.Update(ctx, func(st *State) error {

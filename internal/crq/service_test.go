@@ -758,6 +758,24 @@ func TestEnqueueBatchAppendsOncePerPR(t *testing.T) {
 	}
 }
 
+func TestEnqueueBatchDryRunDoesNotWrite(t *testing.T) {
+	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, Host: "h", DryRun: true}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	if err := svc.enqueueBatch(context.Background(), []queueCandidate{{
+		Repo: "o/a", PR: 1, Head: "aaaaaaaa1",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := svc.store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("o/a", 1); round != nil {
+		t.Fatalf("dry-run enqueue persisted a round: %+v", round)
+	}
+}
+
 func TestEnqueueBatchSkipsHeldPRsUnderCAS(t *testing.T) {
 	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, Host: "h"}
 	store := NewMemoryStore(cfg)

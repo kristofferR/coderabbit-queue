@@ -268,6 +268,7 @@ func TestAutofixUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 	cfg.Bot = "custom-reviewer[bot]"
 	cfg.RequiredBots = []string{"custom-reviewer[bot]", "cursor[bot]"}
 	cfg.FeedbackBots = []string{"custom-reviewer[bot]", "cursor[bot]", "observer[bot]"}
+	cfg.FeedbackBotsExplicit = true
 	cfg.ReviewCommand = "@custom review this"
 	cfg.RateLimitCoDegrade = false
 	cfg.MinInterval = time.Hour
@@ -277,7 +278,8 @@ func TestAutofixUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 	cfg.SettleWindow = 17 * time.Second
 	cfg.CoBots = []CoBotConfig{{
 		Name: "bugbot", Login: "cursor[bot]", Command: "bugbot run now",
-		Trigger: engine.TriggerAlways, Required: true, SelfHealGrace: 4 * time.Minute,
+		Trigger: engine.TriggerAlways, TriggerExplicit: true,
+		Required: true, SelfHealGrace: 4 * time.Minute,
 	}}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 	plan := AutofixInstall{Platform: "linux", Binary: "/tmp/crq autofix", LogDir: "/tmp/crq logs"}
@@ -305,6 +307,43 @@ func TestAutofixUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 		if !strings.Contains(unit, want) {
 			t.Errorf("unit does not carry %q:\n%s", want, unit)
 		}
+	}
+}
+
+func TestAutofixEnvKeepsDerivedReviewerSettingsDynamic(t *testing.T) {
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":          "owner/gate",
+		"CRQ_HOST":          "installer",
+		"CRQ_COBOTS":        "codex",
+		"CRQ_REQUIRED_BOTS": "coderabbitai",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	env := svc.autofixEnv(AutofixInstall{})
+
+	if got := env["CRQ_FEEDBACK_BOTS"]; got != "" {
+		t.Fatalf("derived feedback bots were frozen into the unit as %q", got)
+	}
+	if got := env["CRQ_COBOT_CODEX_TRIGGER"]; got != "" {
+		t.Fatalf("implicit Codex trigger was frozen into the unit as %q", got)
+	}
+
+	// A later fleet change can make Codex required. Restarting from the unit
+	// must then re-derive both visibility and the required `always` trigger.
+	env["CRQ_REQUIRED_BOTS"] = "coderabbitai,chatgpt-codex-connector[bot]"
+	reloaded, err := BuildConfig(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.FeedbackBotsExplicit ||
+		!hasLogin(reloaded.FeedbackBots, "chatgpt-codex-connector[bot]") {
+		t.Fatalf("feedback bots stayed frozen after restart: %v", reloaded.FeedbackBots)
+	}
+	if len(reloaded.CoBots) != 1 || reloaded.CoBots[0].Trigger != engine.TriggerAlways ||
+		reloaded.CoBots[0].TriggerExplicit {
+		t.Fatalf("Codex trigger did not follow requiredness after restart: %+v", reloaded.CoBots)
 	}
 }
 

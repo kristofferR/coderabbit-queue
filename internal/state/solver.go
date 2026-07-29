@@ -34,7 +34,9 @@ type SolverSettings struct {
 	SetEffort bool   `json:"set_effort,omitempty"`
 	// Prompt is extra instruction appended to the fix prompt, for the standing
 	// context a repository needs every time ("this project uses bun, never npm").
-	Prompt string `json:"prompt,omitempty"`
+	// SetPrompt distinguishes an explicit empty prompt from inheritance.
+	Prompt    string `json:"prompt,omitempty"`
+	SetPrompt bool   `json:"set_prompt,omitempty"`
 	// MaxAttempts bounds fix sessions per head, so a fix that keeps not working
 	// stops. Nil inherits.
 	MaxAttempts *int `json:"max_attempts,omitempty"`
@@ -72,7 +74,7 @@ type SolverSettings struct {
 // solver setting with it.
 func (s SolverSettings) Empty() bool {
 	return !s.SetModels && len(s.Models) == 0 && s.Model == "" &&
-		!s.SetEffort && s.Effort == "" && s.Prompt == "" &&
+		!s.SetEffort && s.Effort == "" && !s.SetPrompt && s.Prompt == "" &&
 		s.MaxAttempts == nil && !s.SetSeverities && len(s.Severities) == 0 &&
 		!s.SetAskMode && s.AskMode == "" &&
 		s.Forks == nil && !s.SetSkipAuthors &&
@@ -99,8 +101,9 @@ func (s SolverSettings) Merge(over SolverSettings) SolverSettings {
 		out.Effort = over.Effort
 		out.SetEffort = true
 	}
-	if over.Prompt != "" {
+	if over.SetPrompt || over.Prompt != "" {
 		out.Prompt = over.Prompt
+		out.SetPrompt = true
 	}
 	if over.MaxAttempts != nil {
 		out.MaxAttempts = over.MaxAttempts

@@ -173,6 +173,74 @@ func TestFleetDefaultsLayering(t *testing.T) {
 	}
 }
 
+func TestFleetViewRecognizesExplicitEmptyEnvironmentOverrides(t *testing.T) {
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":   "owner/gate",
+		"CRQ_HOST":   "testhost",
+		"CRQ_COBOTS": "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil).
+		FleetSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := view.Sources["reviewers"]; got != "env" {
+		t.Fatalf("reviewer source = %q, want env for a present empty override", got)
+	}
+}
+
+func TestSetEnvNormalizesStoredValues(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate",
+		"CRQ_HOST": "testhost",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if _, err := svc.SetEnv(ctx, "CRQ_INFLIGHT_TIMEOUT", " 5m ", false); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Fleet.Env["CRQ_INFLIGHT_TIMEOUT"]; got != "5m" {
+		t.Fatalf("stored timeout = %q, want normalized value", got)
+	}
+	if got := svc.cfgFor(st, "o/repo").InflightTimeout; got != 5*time.Minute {
+		t.Fatalf("effective timeout = %s, want 5m", got)
+	}
+}
+
+func TestDashboardReviewerSummaryUsesFleetState(t *testing.T) {
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":   "owner/gate",
+		"CRQ_HOST":   "testhost",
+		"CRQ_COBOTS": "codex",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := DefaultState(cfg)
+	st.Fleet.CoBots = []string{"cursor[bot]"}
+	st.Fleet.SetCoBots = true
+
+	body := renderDashboard(st, cfg)
+	if !strings.Contains(body, "| **Co-reviewers** | bugbot") {
+		t.Fatalf("dashboard did not render the fleet's reviewer set:\n%s", body)
+	}
+	if strings.Contains(body, "| **Co-reviewers** | codex") {
+		t.Fatalf("dashboard rendered the host's stale startup reviewers:\n%s", body)
+	}
+}
+
 // Unsetting a fleet setting has to actually unset it. The typed fields — the
 // two lists and the weekly limit — are the ones where "leave this alone" and
 // "the fleet has no answer" look identical in JSON, so this is where a clear

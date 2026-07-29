@@ -110,6 +110,14 @@ func TestCoReviewerRowSaysItIsTheDefaultAndNamesExceptions(t *testing.T) {
 	if !strings.Contains(body, "override") {
 		t.Error("the row does not say the named repository overrides the default")
 	}
+	st.SetRepoOverride("owner/primary-only", RepoReviewers{PrimaryOff: true, UpdatedAt: &now})
+	st.SetRepoOverride("owner/required-only", RepoReviewers{SetRequired: true, UpdatedAt: &now})
+	body = RenderDashboard(st, cfg)
+	for _, repo := range []string{"owner/primary-only", "owner/required-only"} {
+		if strings.Contains(body, repo) {
+			t.Errorf("the co-reviewer row names unrelated override %q:\n%s", repo, body)
+		}
+	}
 
 	// Many overrides are truncated rather than allowed to wrap the table.
 	for _, repo := range []string{"owner/a", "owner/b", "owner/c", "owner/d"} {

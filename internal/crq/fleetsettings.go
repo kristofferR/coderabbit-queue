@@ -87,7 +87,7 @@ func (s *Service) fleetViewOf(st State) FleetView {
 		default:
 			view.Sources[key] = "default"
 			for _, ek := range envKeys {
-				if strings.TrimSpace(host[ek]) != "" {
+				if _, ok := host[ek]; ok {
 					view.Sources[key] = "env"
 					break
 				}
@@ -810,6 +810,7 @@ func (s *Service) SetEnv(ctx context.Context, key, value string, unset bool) (Fl
 	// deliberately distinguish a present empty value (skip nobody, disable the
 	// marker or command), so only --clear may remove those records.
 	envKey, _ := envKeyByName(key)
+	value = strings.TrimSpace(value)
 	if strings.TrimSpace(value) == "" && !envKey.AllowEmpty {
 		unset = true
 	}

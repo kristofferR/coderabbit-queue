@@ -84,8 +84,11 @@ func (c Config) storeConfig() StoreConfig {
 		Timezone:       c.Timezone,
 		Scope:          c.Scope,
 		CoReviewers:    c.coReviewerSummary(),
-		Host:           c.WriterID(),
-		MinInterval:    c.MinInterval,
+		ResolveCoReviewers: func(fleet FleetDefaults) string {
+			return c.WithFleet(fleet).coReviewerSummary()
+		},
+		Host:        c.WriterID(),
+		MinInterval: c.MinInterval,
 	}
 }
 

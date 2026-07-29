@@ -360,8 +360,12 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	} else {
 		fmt.Fprintf(&b, "| **CodeRabbit quota** | ✅ not currently blocked |\n")
 	}
-	if cfg.CoReviewers != "" {
-		fmt.Fprintf(&b, "| **Co-reviewers** | %s |\n", coReviewerCell(st, cfg.CoReviewers))
+	coReviewers := cfg.CoReviewers
+	if cfg.ResolveCoReviewers != nil {
+		coReviewers = cfg.ResolveCoReviewers(st.Fleet)
+	}
+	if coReviewers != "" {
+		fmt.Fprintf(&b, "| **Co-reviewers** | %s |\n", coReviewerCell(st, coReviewers))
 	}
 	fmt.Fprintf(&b, "| **Last review fired** | %s |\n", fmtStamp(st.LastFired, loc))
 	if st.Autofix.Unhealthy() {
@@ -512,7 +516,10 @@ func cell(v string) string {
 // labelled, and the repositories that differ are named beside it.
 func coReviewerCell(st State, fleet string) string {
 	overrides := make([]string, 0, len(st.Repos))
-	for repo := range st.Repos {
+	for repo, override := range st.Repos {
+		if !override.SetCoBots {
+			continue
+		}
 		overrides = append(overrides, repo)
 	}
 	if len(overrides) == 0 {

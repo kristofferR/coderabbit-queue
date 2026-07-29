@@ -87,7 +87,7 @@ func (s *Service) solverViewOf(st State, repo string) SolverView {
 	view.Sources["model"] = view.Sources["models"]
 	source("effort", own.SetEffort || own.Effort != "",
 		fleet.SetEffort || fleet.Effort != "")
-	source("prompt", own.Prompt != "", fleet.Prompt != "")
+	source("prompt", own.SetPrompt || own.Prompt != "", fleet.SetPrompt || fleet.Prompt != "")
 	source("max_attempts", own.MaxAttempts != nil, fleet.MaxAttempts != nil)
 	source("severities", own.SetSeverities || len(own.Severities) > 0,
 		fleet.SetSeverities || len(fleet.Severities) > 0)
@@ -329,7 +329,7 @@ func applySolverChange(sv SolverSettings, change SolverChange) (SolverSettings, 
 		if len(prompt) > 4000 {
 			return sv, errors.New("extra instructions are limited to 4000 characters — they are appended to every fix session")
 		}
-		sv.Prompt = prompt
+		sv.Prompt, sv.SetPrompt = prompt, true
 	}
 	if change.MaxAttempts != nil {
 		n := *change.MaxAttempts

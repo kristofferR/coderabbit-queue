@@ -159,6 +159,32 @@ func TestAbsentSolverPromptKeepsHostPrompt(t *testing.T) {
 	}
 }
 
+func TestExplicitEmptyRepoPromptOverridesFleetPrompt(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if _, err := svc.SetFleetSolver(ctx, SolverChange{Prompt: strptr("fleet instructions")}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := svc.SetSolver(ctx, "o/repo", SolverChange{Prompt: strptr("")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Prompt != "" || view.Sources["prompt"] != "repo" {
+		t.Fatalf("prompt = %q from %q, want an explicit empty repository prompt",
+			view.Prompt, view.Sources["prompt"])
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.cfgFor(st, "o/repo").FixPrompt; got != "" {
+		t.Fatalf("fix session prompt = %q, want repository to clear the fleet prompt", got)
+	}
+}
+
 // The hosts that will ignore a solver setting have to be named wherever it was
 // recorded. Asking only about a repository's own record meant a FLEET model or
 // attempt limit — the one every repository inherits — warned about nobody,

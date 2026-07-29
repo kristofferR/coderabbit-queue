@@ -43,6 +43,10 @@ type StoreConfig struct {
 	// bots ("" hides the dashboard row, keeping co-bot-less dashboards
 	// byte-identical).
 	CoReviewers string
+	// ResolveCoReviewers applies the current fleet record before rendering.
+	// The state package owns persistence but not reviewer registry policy, so
+	// crq supplies this resolver while static callers may keep CoReviewers.
+	ResolveCoReviewers func(FleetDefaults) string
 	// Host names this process in the state it writes, so the fleet can tell which
 	// binaries are driving and what they understand (see State.NoteWriter).
 	Host string
