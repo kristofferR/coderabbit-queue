@@ -177,18 +177,8 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		var lagging []string
 		lagging, err = s.actor.SetReviewers(ctx, req.Repo, req.CoBots, req.Required, req.Primary)
 		if err == nil && len(lagging) > 0 {
-			snap, refreshErr := s.refreshedSnapshot(ctx)
-			if refreshErr != nil {
-				writeJSON(w, http.StatusBadGateway, map[string]string{"error": refreshErr.Error()})
-				return
-			}
-			writeJSON(w, http.StatusOK, map[string]any{
-				"snapshot": snap,
-				// hostOf strips the pid/run suffix the state ref keys writers by:
-				// what the reader needs is the machine to upgrade.
-				"warning": "saved, but these hosts run an older binary and will ignore it: " +
-					strings.Join(hostsOf(lagging), ", "),
-			})
+			s.writeActionSnapshot(w, ctx, "saved, but these hosts run an older binary and will ignore it: "+
+				strings.Join(hostsOf(lagging), ", "))
 			return
 		}
 	case "enroll":
@@ -209,16 +199,8 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		var lagging []string
 		lagging, err = s.actor.SetEnrollment(ctx, req.Repo, *req.Enabled, req.Reason)
 		if err == nil && len(lagging) > 0 {
-			snap, refreshErr := s.refreshedSnapshot(ctx)
-			if refreshErr != nil {
-				writeJSON(w, http.StatusBadGateway, map[string]string{"error": refreshErr.Error()})
-				return
-			}
-			writeJSON(w, http.StatusOK, map[string]any{
-				"snapshot": snap,
-				"warning": "saved, but these hosts run an older binary and decide from their own env alone: " +
-					strings.Join(hostsOf(lagging), ", "),
-			})
+			s.writeActionSnapshot(w, ctx, "saved, but these hosts run an older binary and decide from their own env alone: "+
+				strings.Join(hostsOf(lagging), ", "))
 			return
 		}
 	case "fleet":
@@ -238,12 +220,12 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"impact": impact})
 			return
 		}
-		snap, refreshErr := s.refreshedSnapshot(ctx)
-		if refreshErr != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": refreshErr.Error()})
-			return
+		snap, warning := s.actionSnapshot(ctx)
+		response := map[string]any{"snapshot": snap, "impact": impact}
+		if warning != "" {
+			response["warning"] = warning
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"snapshot": snap, "impact": impact})
+		writeJSON(w, http.StatusOK, response)
 		return
 	case "env":
 		if strings.TrimSpace(req.Key) == "" {
@@ -305,19 +287,41 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 
 	// Re-read immediately rather than waiting for the next poll: the person who
 	// clicked is watching, and a stale answer reads as a failed click.
-	snap, refreshErr := s.refreshedSnapshot(ctx)
-	if refreshErr != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": refreshErr.Error()})
+	s.writeActionSnapshot(w, ctx, "")
+}
+
+// writeActionSnapshot reports a completed mutation even if its confirming read
+// failed. Repeating a non-idempotent action such as decline could otherwise
+// post duplicate replies. The previous snapshot remains useful while the next
+// poll retries the read, and the warning tells the client it may be stale.
+func (s *Server) writeActionSnapshot(w http.ResponseWriter, ctx context.Context, warning string) {
+	snap, refreshWarning := s.actionSnapshot(ctx)
+	if refreshWarning != "" {
+		if warning != "" {
+			warning += " "
+		}
+		warning += refreshWarning
+	}
+	if warning == "" {
+		writeJSON(w, http.StatusOK, snap)
 		return
 	}
-	writeJSON(w, http.StatusOK, snap)
+	writeJSON(w, http.StatusOK, map[string]any{"snapshot": snap, "warning": warning})
+}
+
+func (s *Server) actionSnapshot(ctx context.Context) (Snapshot, string) {
+	snap, err := s.refreshedSnapshot(ctx)
+	if err == nil {
+		return snap, ""
+	}
+	return snap, err.Error()
 }
 
 func (s *Server) refreshedSnapshot(ctx context.Context) (Snapshot, error) {
 	s.refresh(ctx)
 	snap, loaded, err := s.snapshot()
 	if err != nil {
-		return Snapshot{}, fmt.Errorf("action succeeded, but refreshing state failed: %w", err)
+		return snap, fmt.Errorf("action succeeded, but refreshing state failed: %w", err)
 	}
 	if !loaded {
 		return Snapshot{}, errors.New("action succeeded, but refreshing state produced no snapshot")

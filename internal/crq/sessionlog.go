@@ -32,9 +32,17 @@ func (s *Service) TailSessionLog(ctx context.Context, repo, path string, maxByte
 	if err != nil {
 		return SessionLogTail{}, err
 	}
+	dir, err = filepath.EvalSymlinks(dir)
+	if err != nil {
+		return SessionLogTail{}, fmt.Errorf("resolving session log directory: %w", err)
+	}
 	path, err = filepath.Abs(strings.TrimSpace(path))
 	if err != nil {
 		return SessionLogTail{}, err
+	}
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		return SessionLogTail{}, fmt.Errorf("resolving session log path: %w", err)
 	}
 	rel, err := filepath.Rel(dir, path)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {

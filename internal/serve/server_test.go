@@ -93,6 +93,23 @@ func TestRefreshedSnapshotReportsALoadFailureAfterAnAction(t *testing.T) {
 	}
 }
 
+func TestActionSnapshotKeepsThePreviousViewWhenRefreshFails(t *testing.T) {
+	loader := &stubLoader{st: state.New()}
+	srv := New(loader, Options{Now: func() time.Time { return time.Unix(0, 0).UTC() }})
+	if _, err := srv.refreshedSnapshot(t.Context()); err != nil {
+		t.Fatalf("initial refresh: %v", err)
+	}
+
+	loader.err = errors.New("state ref unavailable")
+	snap, warning := srv.actionSnapshot(t.Context())
+	if warning == "" || !strings.Contains(warning, "action succeeded") {
+		t.Fatalf("warning = %q, want a completed-action warning", warning)
+	}
+	if snap.Overview.Now.IsZero() {
+		t.Fatal("action response lost the last usable snapshot")
+	}
+}
+
 // Before the first load returns there is no snapshot — and no error either. The
 // zero Snapshot encodes its collections as null, and the client takes a 200 for
 // live state and iterates them straight away, so the dashboard crashed during

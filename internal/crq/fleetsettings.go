@@ -94,9 +94,17 @@ func (s *Service) fleetViewOf(st State) FleetView {
 			}
 		}
 	}
-	from("reviewers", st.Fleet.SetCoBots || st.Fleet.SetRequired, "CRQ_COBOTS", "CRQ_REQUIRED_BOTS")
-	from("min_interval", strings.TrimSpace(st.Fleet.MinInterval) != "", "CRQ_MIN_INTERVAL")
-	from("weekly_limit", st.Fleet.WeeklyLimit != nil, "CRQ_WEEKLY_LIMIT")
+	recorded := func(keys ...string) bool {
+		for _, key := range keys {
+			if fleetGoverns(st.Fleet, key) {
+				return true
+			}
+		}
+		return false
+	}
+	from("reviewers", recorded("CRQ_BOT", "CRQ_COBOTS", "CRQ_REQUIRED_BOTS"), "CRQ_COBOTS", "CRQ_REQUIRED_BOTS")
+	from("min_interval", recorded("CRQ_MIN_INTERVAL"), "CRQ_MIN_INTERVAL")
+	from("weekly_limit", recorded("CRQ_WEEKLY_LIMIT"), "CRQ_WEEKLY_LIMIT")
 	from("autofix_default", st.Fleet.AutofixDefault != nil)
 
 	for _, r := range cfg.Reviewers {
@@ -560,6 +568,7 @@ func (s *Service) AdoptEnv(ctx context.Context, dryRun bool) ([]AdoptedSetting, 
 	take := map[string]string{}
 	for _, k := range EnvKeys() {
 		value := strings.TrimSpace(host[k.Key])
+		invalid := validateEnvValue(k.Key, value)
 		switch {
 		case k.Identity:
 			adopted = append(adopted, AdoptedSetting{Key: k.Key, Value: value,
@@ -569,6 +578,9 @@ func (s *Service) AdoptEnv(ctx context.Context, dryRun bool) ([]AdoptedSetting, 
 				Skipped: "per-host: recording one machine's answer would break the others"})
 		case value == "":
 			// Nothing set here, so there is nothing of this host's to adopt.
+		case invalid != nil:
+			adopted = append(adopted, AdoptedSetting{Key: k.Key, Value: value,
+				Skipped: "invalid: " + invalid.Error()})
 		case value == defaultEnv[k.Key]:
 			adopted = append(adopted, AdoptedSetting{Key: k.Key, Value: value,
 				Skipped: "same as the default: recording it would pin today's default invisibly"})

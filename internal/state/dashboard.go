@@ -540,7 +540,7 @@ func coReviewerCell(st State, fleet string) string {
 
 func plural(n int) string {
 	if n == 1 {
-		return "s"
+		return ""
 	}
-	return ""
+	return "s"
 }

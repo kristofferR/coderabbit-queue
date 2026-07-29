@@ -758,6 +758,38 @@ func TestAdoptEnvReportsWhatStateActuallyTook(t *testing.T) {
 	}
 }
 
+func TestAdoptEnvSkipsMalformedValues(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost", "CRQ_COBOTS": "",
+		"CRQ_MIN_INTERVAL": "not-a-duration",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	adopted, err := svc.AdoptEnv(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setting, ok := findAdopted(adopted, "CRQ_MIN_INTERVAL")
+	if !ok || !strings.Contains(setting.Skipped, "invalid") {
+		t.Fatalf("adoption = %+v, want malformed interval skipped", setting)
+	}
+}
+
+func TestFleetViewNamesGenericFleetValuesAsFleet(t *testing.T) {
+	cfg := firingConfig()
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	st := State{}
+	st.Fleet.Env = map[string]string{"CRQ_MIN_INTERVAL": "2m"}
+
+	if got := svc.fleetViewOf(st).Sources["min_interval"]; got != "fleet" {
+		t.Fatalf("min interval source = %q, want generic fleet record", got)
+	}
+}
+
 func TestAdoptEnvResolvesRequiredBotsAgainstTheFleetPrimary(t *testing.T) {
 	ctx := context.Background()
 	cfg, err := BuildConfig(map[string]string{

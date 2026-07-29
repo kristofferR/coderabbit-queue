@@ -104,18 +104,23 @@ func TestCoReviewerRowSaysItIsTheDefaultAndNamesExceptions(t *testing.T) {
 	// Once a repository overrides it, the row names which.
 	st.SetRepoOverride("owner/special", RepoReviewers{SetCoBots: true, UpdatedAt: &now})
 	body = RenderDashboard(st, cfg)
-	if !strings.Contains(body, "owner/special") {
-		t.Errorf("the row does not name the repository that differs:\n%s", body)
+	row := dashboardRow(body, "Co-reviewers")
+	if !strings.Contains(row, "owner/special") {
+		t.Errorf("the row does not name the repository that differs:\n%s", row)
 	}
-	if !strings.Contains(body, "override") {
+	if !strings.Contains(row, "override") {
 		t.Error("the row does not say the named repository overrides the default")
+	}
+	if !strings.Contains(row, "owner/special override)") {
+		t.Errorf("one override has the wrong label: %s", row)
 	}
 	st.SetRepoOverride("owner/primary-only", RepoReviewers{PrimaryOff: true, UpdatedAt: &now})
 	st.SetRepoOverride("owner/required-only", RepoReviewers{SetRequired: true, UpdatedAt: &now})
 	body = RenderDashboard(st, cfg)
+	row = dashboardRow(body, "Co-reviewers")
 	for _, repo := range []string{"owner/primary-only", "owner/required-only"} {
-		if strings.Contains(body, repo) {
-			t.Errorf("the co-reviewer row names unrelated override %q:\n%s", repo, body)
+		if strings.Contains(row, repo) {
+			t.Errorf("the co-reviewer row names unrelated override %q:\n%s", repo, row)
 		}
 	}
 
@@ -124,7 +129,18 @@ func TestCoReviewerRowSaysItIsTheDefaultAndNamesExceptions(t *testing.T) {
 		st.SetRepoOverride(repo, RepoReviewers{SetCoBots: true, UpdatedAt: &now})
 	}
 	body = RenderDashboard(st, cfg)
-	if !strings.Contains(body, "+2 more") {
-		t.Errorf("five overrides were not summarised:\n%s", body)
+	row = dashboardRow(body, "Co-reviewers")
+	if !strings.Contains(row, "+2 more") {
+		t.Errorf("five overrides were not summarised:\n%s", row)
 	}
+}
+
+func dashboardRow(body, label string) string {
+	prefix := "| **" + label + "** |"
+	for _, row := range strings.Split(body, "\n") {
+		if strings.HasPrefix(row, prefix) {
+			return row
+		}
+	}
+	return ""
 }

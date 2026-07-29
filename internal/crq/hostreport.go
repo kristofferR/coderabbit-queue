@@ -131,9 +131,6 @@ func toolVersion(ctx context.Context, path string) string {
 // it made a reporter whose PATH another role outranks see a difference on every
 // pass and rewrite state for ever.
 func sameHostReport(prev, next HostReport) bool {
-	if prev.Version != next.Version || prev.Caps != next.Caps {
-		return false
-	}
 	// Only when this reporter has an answer: a service that runs no fix sessions
 	// says nothing about the agent, and the record keeps what the autofix service
 	// on this host said — so its silence is not a difference to write out.
@@ -141,6 +138,9 @@ func sameHostReport(prev, next HostReport) bool {
 		return false
 	}
 	for _, role := range next.Roles {
+		if prev.CapsFor(role) != next.Caps {
+			return false
+		}
 		stored := prev.ToolsReportedBy(role)
 		if len(stored) != len(next.Tools) {
 			return false

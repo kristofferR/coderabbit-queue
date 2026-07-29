@@ -600,6 +600,11 @@ func run(ctx context.Context, args []string) int {
 		if err := fs.Parse(serveArgs); err != nil {
 			return 1
 		}
+		if strings.TrimSpace(*addr) == "" {
+			// net/http treats an empty address as :http. Keep an accidentally
+			// expanded-empty shell variable on the documented loopback listener.
+			*addr = "127.0.0.1:7777"
+		}
 		if !install && (*dryRun || *skipAuth) {
 			fatal(errors.New("--dry-run and --skip-auth-check apply to `crq serve install` only"))
 			return 1
@@ -2956,12 +2961,14 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 					change.UnsetSeverities = true
 				case "ask", "ask-mode", "ask_mode":
 					change.UnsetAskMode = true
+				case "prompt":
+					change.UnsetPrompt = true
 				case "forks":
 					change.UnsetForks = true
 				case "skip-authors", "skip_authors":
 					change.UnsetSkipAuthors = true
 				default:
-					fatal(fmt.Errorf("--inherit: %q is not a solver setting that can be unset (models, effort, severities, ask, forks, skip-authors)", field))
+					fatal(fmt.Errorf("--inherit: %q is not a solver setting that can be unset (models, effort, prompt, severities, ask, forks, skip-authors)", field))
 					return 1
 				}
 			}
@@ -3042,7 +3049,7 @@ func (a prActor) SetSolver(ctx context.Context, repo string, change serve.Solver
 		Severities: change.Severities, AskMode: change.AskMode,
 		SkipAuthors: change.SkipAuthors, Clear: change.Clear,
 		UnsetModels: change.UnsetModels, UnsetEffort: change.UnsetEffort,
-		UnsetSeverities: change.UnsetSeverities, UnsetAskMode: change.UnsetAskMode,
+		UnsetPrompt: change.UnsetPrompt, UnsetSeverities: change.UnsetSeverities, UnsetAskMode: change.UnsetAskMode,
 		UnsetForks:       change.UnsetForks,
 		UnsetSkipAuthors: change.UnsetSkipAuthors,
 	}
