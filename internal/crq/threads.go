@@ -36,6 +36,11 @@ type OpenThread struct {
 //
 // This is the read that closes that loop: list, decide, `crq resolve`.
 func (s *Service) OpenThreads(ctx context.Context, repo string, pr int) ([]OpenThread, error) {
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cfg := s.cfgFor(st, repo)
 	threads, err := s.reviewThreads(ctx, repo, pr)
 	if err != nil {
 		return nil, err
@@ -51,7 +56,7 @@ func (s *Service) OpenThreads(ctx context.Context, repo string, pr int) ([]OpenT
 			// Only when the author is actually a reviewer bot. The command
 			// promises every unresolved thread, humans included, and labelling
 			// "alice" as a bot makes the output plainly wrong.
-			isBot := isReviewerBot(s.cfg, first.Author.Login)
+			isBot := isReviewerBot(cfg, first.Author.Login)
 			if isBot {
 				open.Bot = dialect.NormalizeBotName(first.Author.Login)
 			} else {

@@ -92,6 +92,17 @@ func TestLoadMigratesV4WithoutLosingLiveRounds(t *testing.T) {
 			}
 		},
 		"account":{"scope":"owner"},
+		"fleet":{
+			"scope":"owner,friend",
+			"repos":"owner/repo,friend/private",
+			"exclude":"owner/paused",
+			"required-bots":"coderabbitai[bot],cursor[bot]",
+			"cobots":"bugbot,codex",
+			"min-interval":" 2m ",
+			"inflight-timeout":"10m",
+			"cobot-bugbot-trigger":"always",
+			"future-policy":"keep"
+		},
 		"future_top_level":{"keep":true}
 	}`
 	st, _, err := versionStore(t, payload).Load(context.Background())
@@ -104,12 +115,28 @@ func TestLoadMigratesV4WithoutLosingLiveRounds(t *testing.T) {
 	if round := st.Round("owner/repo", 7); round == nil || round.Head != "abcdef123" {
 		t.Fatalf("live v4 round was lost during migration: %+v", round)
 	}
+	if !st.Fleet.SetRequired || strings.Join(st.Fleet.Required, ",") != "coderabbitai[bot],cursor[bot]" {
+		t.Errorf("required = %v (set %v), want migrated v4 policy", st.Fleet.Required, st.Fleet.SetRequired)
+	}
+	if !st.Fleet.SetCoBots || strings.Join(st.Fleet.CoBots, ",") != "bugbot,codex" {
+		t.Errorf("cobots = %v (set %v), want migrated v4 policy", st.Fleet.CoBots, st.Fleet.SetCoBots)
+	}
+	if st.Fleet.MinInterval != "2m" || st.Fleet.Env["CRQ_SCOPE"] != "owner,friend" ||
+		st.Fleet.Env["CRQ_REPOS"] != "owner/repo,friend/private" ||
+		st.Fleet.Env["CRQ_EXCLUDE"] != "owner/paused" ||
+		st.Fleet.Env["CRQ_INFLIGHT_TIMEOUT"] != "10m" ||
+		st.Fleet.Env["CRQ_COBOT_BUGBOT_TRIGGER"] != "always" {
+		t.Errorf("fleet defaults were not migrated completely: %+v", st.Fleet)
+	}
 	encoded, err := json.Marshal(st)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(encoded), "future_top_level") {
 		t.Fatalf("unknown v4 state was lost during migration: %s", encoded)
+	}
+	if !strings.Contains(string(encoded), "future-policy") {
+		t.Fatalf("unknown v4 fleet policy was lost during migration: %s", encoded)
 	}
 }
 

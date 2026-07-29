@@ -2957,12 +2957,12 @@ func runSolver(ctx context.Context, service *crq.Service, args []string) int {
 					change.UnsetModels = true
 				case "effort":
 					change.UnsetEffort = true
+				case "prompt":
+					change.UnsetPrompt = true
 				case "severities":
 					change.UnsetSeverities = true
 				case "ask", "ask-mode", "ask_mode":
 					change.UnsetAskMode = true
-				case "prompt":
-					change.UnsetPrompt = true
 				case "forks":
 					change.UnsetForks = true
 				case "skip-authors", "skip_authors":

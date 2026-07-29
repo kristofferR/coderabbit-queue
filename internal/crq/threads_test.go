@@ -89,6 +89,40 @@ func TestOpenThreadsNamesAConfiguredFeedbackBot(t *testing.T) {
 	}
 }
 
+func TestOpenThreadsUsesFleetConfiguredFeedbackBots(t *testing.T) {
+	gh := newFakeGitHub()
+	gh.graphQL = func(query string, _ map[string]any, out any) error {
+		if !strings.Contains(query, "reviewThreads") {
+			return nil
+		}
+		return json.Unmarshal([]byte(`{"repository":{"pullRequest":{"reviewThreads":{
+		  "pageInfo":{"hasNextPage":false,"endCursor":""},
+		  "nodes":[{"id":"T_fleet","isResolved":false,"isOutdated":false,"path":"a.go","line":1,
+		    "comments":{"totalCount":1,"nodes":[{"body":"### Fleet finding","author":{"login":"reviewdog[bot]"}}]}}]
+		}}}}`), out)
+	}
+	cfg, err := BuildConfig(map[string]string{"CRQ_REPO": "o/gate", "CRQ_ISSUE": "1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.Fleet.Env = map[string]string{"CRQ_FEEDBACK_BOTS": "reviewdog[bot]"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	threads, err := svc.OpenThreads(context.Background(), "o/r", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(threads) != 1 || threads[0].Bot != "reviewdog" || threads[0].Author != "" {
+		t.Fatalf("thread = %+v, want the fleet-configured reviewer named as a bot", threads)
+	}
+}
+
 // The command promises every unresolved thread, so it also gets humans'. Copying
 // the author into `bot` made the output say `"bot":"alice"`.
 func TestOpenThreadsDoesNotCallAPersonABot(t *testing.T) {

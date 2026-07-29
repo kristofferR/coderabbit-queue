@@ -728,37 +728,123 @@ func fleetGoverns(fd FleetDefaults, key string) bool {
 // defaultValueOf renders what a setting would be with nothing configured, so
 // adoption can tell "this host chose this" from "this is just the default".
 func defaultValueOf(defaults Config, key string) string {
+	return configValueOf(defaults, key)
+}
+
+// configValueOf renders a parsed configuration back into the dashboard's
+// setting vocabulary. The dashboard must show the effective default too:
+// absence in the raw environment is not an empty value (notably for booleans
+// whose default is on).
+func configValueOf(cfg Config, key string) string {
 	switch key {
 	case "CRQ_MIN_INTERVAL":
-		return defaults.MinInterval.String()
+		return cfg.MinInterval.String()
 	case "CRQ_INFLIGHT_TIMEOUT":
-		return defaults.InflightTimeout.String()
+		return cfg.InflightTimeout.String()
 	case "CRQ_RL_FALLBACK":
-		return defaults.RateLimitFallback.String()
+		return cfg.RateLimitFallback.String()
 	case "CRQ_WEEKLY_LIMIT":
-		return fmt.Sprint(defaults.WeeklyReviewLimit)
+		return fmt.Sprint(cfg.WeeklyReviewLimit)
 	case "CRQ_AUTOREVIEW_POLL":
-		return defaults.AutoReviewPoll.String()
+		return cfg.AutoReviewPoll.String()
 	case "CRQ_AUTOREVIEW_MAX_SCAN":
-		return fmt.Sprint(defaults.AutoReviewMaxScan)
+		return fmt.Sprint(cfg.AutoReviewMaxScan)
 	case "CRQ_LEADER_TTL":
-		return defaults.LeaderTTL.String()
+		return cfg.LeaderTTL.String()
 	case "CRQ_BOT":
-		return defaults.Bot
+		return cfg.Bot
 	case "CRQ_REVIEW_CMD":
-		return defaults.ReviewCommand
+		return cfg.ReviewCommand
+	case "CRQ_COBOTS":
+		names := make([]string, 0, len(cfg.CoBots))
+		for _, bot := range cfg.CoBots {
+			names = append(names, bot.Name)
+		}
+		return strings.Join(names, ",")
+	case "CRQ_REQUIRED_BOTS":
+		return strings.Join(cfg.RequiredBots, ",")
+	case "CRQ_FEEDBACK_BOTS":
+		return strings.Join(cfg.FeedbackBots, ",")
 	case "CRQ_SETTLE":
-		return defaults.SettleWindow.String()
+		return cfg.SettleWindow.String()
 	case "CRQ_FEEDBACK_WAIT_TIMEOUT":
-		return defaults.FeedbackWaitTimeout.String()
+		return cfg.FeedbackWaitTimeout.String()
+	case "CRQ_RL_CO_DEGRADE":
+		return boolString(cfg.RateLimitCoDegrade)
+	case "CRQ_AUTOREVIEW_SKIP_AUTHORS":
+		return strings.Join(sortedTrueKeys(cfg.SkipAuthors), ",")
 	case "CRQ_WATCH_INTERVAL":
-		return defaults.WatchInterval.String()
+		return cfg.WatchInterval.String()
 	case "CRQ_DISPATCH_MAX_ATTEMPTS":
-		return fmt.Sprint(defaults.DispatchMaxAttempts)
+		return fmt.Sprint(cfg.DispatchMaxAttempts)
+	case "CRQ_DISPATCH_FORKS":
+		return boolString(cfg.DispatchForks)
+	case "CRQ_DISPATCH_CONCURRENCY":
+		return fmt.Sprint(cfg.DispatchConcurrency)
 	case "CRQ_AUTOREVIEW_SKIP_MARKER":
-		return defaults.SkipMarker
+		return cfg.SkipMarker
+	case "CRQ_TZ":
+		return cfg.Timezone
+	case "CRQ_TIDY":
+		return boolString(cfg.Tidy)
+	case "CRQ_REPO":
+		return cfg.GateRepo
+	case "CRQ_STATE_REF":
+		return cfg.StateRef
+	case "CRQ_ISSUE":
+		return fmt.Sprint(cfg.DashboardIssue)
+	case "CRQ_SCOPE":
+		return strings.Join(cfg.Scope, ",")
+	case "CRQ_REPOS":
+		return strings.Join(sortedTrueKeys(cfg.AllowRepos), ",")
+	case "CRQ_EXCLUDE":
+		return strings.Join(sortedTrueKeys(cfg.ExcludeRepos), ",")
+	case "CRQ_HOST":
+		return cfg.Host
+	case "CRQ_WORKSPACE":
+		return cfg.WorkspaceRoot
+	case "CRQ_DISPATCH_CMD":
+		return strings.Join(cfg.DispatchCommand, " ")
+	}
+	for _, known := range dialect.KnownCoReviewers() {
+		prefix := "CRQ_COBOT_" + strings.ToUpper(known.Name) + "_"
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		bot, _ := cfg.knownCoBot(known.Name)
+		switch strings.TrimPrefix(key, prefix) {
+		case "REQUIRED":
+			return boolString(bot.Required)
+		case "TRIGGER":
+			if bot.TriggerExplicit {
+				return string(bot.Trigger)
+			}
+			return ""
+		case "GRACE":
+			return bot.SelfHealGrace.String()
+		case "CMD":
+			return bot.Command
+		}
 	}
 	return ""
+}
+
+func boolString(value bool) string {
+	if value {
+		return "1"
+	}
+	return "0"
+}
+
+func sortedTrueKeys(values map[string]bool) []string {
+	out := make([]string, 0, len(values))
+	for value, on := range values {
+		if on {
+			out = append(out, value)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // SetEnv records or clears one fleet setting.

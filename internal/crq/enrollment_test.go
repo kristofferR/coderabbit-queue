@@ -353,6 +353,32 @@ func TestDisablingEnrollmentRefusesAnArchivedTriggerClaim(t *testing.T) {
 	}
 }
 
+func TestExpiredArchivedTriggerClaimDoesNotBlockEnrollment(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/stopped": true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	now := time.Now().UTC()
+	svc.now = func() time.Time { return now }
+	if _, err := store.Update(ctx, func(st *State) error {
+		round, err := st.NewRound("o/stopped", 7, "abcdef123", now.Add(-triggerClaimTTL-time.Minute))
+		if err != nil {
+			return err
+		}
+		round.ClaimCo("cursor[bot]", now.Add(-triggerClaimTTL-time.Second))
+		st.PutRound(*round)
+		_, err = st.Supersede("o/stopped", 7, "fedcba987", now.Add(-time.Minute))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.SetEnrollment(ctx, "o/stopped", false, "stop reviewing this"); err != nil {
+		t.Fatalf("expired archived trigger claim still blocked enrollment: %v", err)
+	}
+}
+
 func TestArchivedTriggerClaimClearsWhenItsPostFinishes(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()

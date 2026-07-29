@@ -368,7 +368,7 @@ func (c Config) WithFleet(fd FleetDefaults) Config {
 		merged := c.Env()
 		applied := false
 		for key, value := range fd.Env {
-			if !fleetSettable(key) {
+			if !fleetReadable(key) {
 				continue // identity and per-host settings are not the fleet's to set
 			}
 			merged[key] = value

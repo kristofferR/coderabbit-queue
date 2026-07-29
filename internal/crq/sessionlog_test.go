@@ -31,19 +31,18 @@ func TestTailSessionLogIsBoundedToTheRepoWorkspace(t *testing.T) {
 		t.Fatalf("tail = %+v", tail)
 	}
 	outside := filepath.Join(cfg.WorkspaceRoot, "secret")
-	if err := os.WriteFile(outside, []byte("secret\n"), 0o600); err != nil {
+	if err := os.WriteFile(outside, []byte("credential"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.TailSessionLog(context.Background(), "o/r", outside, 100); err == nil ||
 		!strings.Contains(err.Error(), "outside") {
 		t.Fatalf("outside path error = %v", err)
 	}
-	link := filepath.Join(dir, "linked-secret.log")
+	link := filepath.Join(dir, "linked.log")
 	if err := os.Symlink(outside, link); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.TailSessionLog(context.Background(), "o/r", link, 100); err == nil ||
-		!strings.Contains(err.Error(), "outside") {
-		t.Fatalf("symlink path error = %v", err)
+	if _, err := svc.TailSessionLog(context.Background(), "o/r", link, 100); err == nil {
+		t.Fatal("a session log symlink escaping the repository workspace was opened")
 	}
 }

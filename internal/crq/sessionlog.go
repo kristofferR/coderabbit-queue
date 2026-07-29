@@ -51,7 +51,15 @@ func (s *Service) TailSessionLog(ctx context.Context, repo, path string, maxByte
 	if maxBytes <= 0 || maxBytes > 1<<20 {
 		maxBytes = 128 << 10
 	}
-	file, err := os.Open(path)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return SessionLogTail{}, fmt.Errorf("opening session log directory: %w", err)
+	}
+	defer root.Close()
+	// os.Root resolves each component relative to the opened directory and
+	// refuses symlinks that escape it. Unlike EvalSymlinks followed by os.Open,
+	// this keeps the containment check and open in one race-safe operation.
+	file, err := root.Open(rel)
 	if err != nil {
 		return SessionLogTail{}, fmt.Errorf("opening session log: %w", err)
 	}

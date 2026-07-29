@@ -56,6 +56,64 @@ func TestFleetRequiredReviewersResolveAgainstTheEffectivePrimary(t *testing.T) {
 	}
 }
 
+func TestMigratedFleetScopeAndRepoPolicyStillApplies(t *testing.T) {
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":    "owner/gate",
+		"CRQ_SCOPE":   "local",
+		"CRQ_REPOS":   "local/repo",
+		"CRQ_EXCLUDE": "local/paused",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective := cfg.WithFleet(FleetDefaults{Env: map[string]string{
+		"CRQ_SCOPE":   "owner,friend",
+		"CRQ_REPOS":   "owner/repo,friend/private",
+		"CRQ_EXCLUDE": "owner/paused",
+	}})
+	if strings.Join(effective.Scope, ",") != "owner,friend" ||
+		!effective.AllowRepos["owner/repo"] || !effective.AllowRepos["friend/private"] ||
+		!effective.ExcludeRepos["owner/paused"] {
+		t.Fatalf("migrated v4 fleet policy was not applied: %+v", effective)
+	}
+}
+
+func TestEnvSettingsRenderEffectiveDefaults(t *testing.T) {
+	cfg, err := BuildConfig(map[string]string{"CRQ_REPO": "owner/gate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := (&Service{cfg: cfg}).EnvSettings(State{})
+	for _, setting := range settings {
+		if setting.Key != "CRQ_RL_CO_DEGRADE" {
+			continue
+		}
+		if setting.Value != "1" || setting.Source != "default" {
+			t.Fatalf("degrade setting = %+v, want the effective on-by-default value", setting)
+		}
+		return
+	}
+	t.Fatal("CRQ_RL_CO_DEGRADE was not listed")
+}
+
+func TestFleetViewRecognizesGenericFleetProvenance(t *testing.T) {
+	cfg, err := BuildConfig(map[string]string{"CRQ_REPO": "owner/gate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := &Service{cfg: cfg}
+	view := svc.fleetViewOf(State{Fleet: FleetDefaults{Env: map[string]string{
+		"CRQ_MIN_INTERVAL": "4m",
+		"CRQ_WEEKLY_LIMIT": "90",
+		"CRQ_COBOTS":       "codex",
+	}}})
+	for _, key := range []string{"min_interval", "weekly_limit", "reviewers"} {
+		if view.Sources[key] != "fleet" {
+			t.Errorf("source[%s] = %q, want fleet for a generic fleet record", key, view.Sources[key])
+		}
+	}
+}
+
 // The three layers are the whole feature, so this pins their order and — just
 // as importantly — that an absent fleet setting changes nothing at all. A fleet
 // that never writes a record must behave exactly as it did before the record
@@ -706,6 +764,33 @@ func TestEnvValidationRejectsValuesTheFleetWouldIgnore(t *testing.T) {
 		if !tc.wantErr && err != nil {
 			t.Errorf("%s=%q was refused: %v", tc.key, tc.value, err)
 		}
+	}
+}
+
+func TestAdoptEnvSkipsInvalidValues(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_INFLIGHT_TIMEOUT": "not-a-duration",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	adopted, err := svc.AdoptEnv(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := findAdopted(adopted, "CRQ_INFLIGHT_TIMEOUT")
+	if !ok || !strings.Contains(got.Skipped, "invalid") {
+		t.Fatalf("invalid setting report = %+v, want an explicit skip", got)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, recorded := st.Fleet.Env["CRQ_INFLIGHT_TIMEOUT"]; recorded {
+		t.Fatal("invalid environment value was persisted into fleet state")
 	}
 }
 

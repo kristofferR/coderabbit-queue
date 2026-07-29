@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
+	"github.com/kristofferR/coderabbit-queue/internal/engine"
 )
 
 // CostEstimate is one reviewer's price for one head, as JSON the dashboard and
@@ -115,6 +116,17 @@ func (s *Service) costWith(st State, repo string, pr int, head string, d dialect
 	// billed per reviewed file for. Unknown says so instead of guessing.
 	for _, r := range cfg.Reviewers {
 		est := dialect.EstimateCost(r.Login, cfg.Bot, d, allowance)
+		// A non-primary reviewer that crq does not always command may review
+		// automatically, or may not participate in this round at all. Its
+		// published price is therefore an upper bound, never a guaranteed
+		// minimum.
+		if !r.Metered() && r.Trigger != engine.TriggerAlways {
+			est.Low = 0
+			if est.High > 0 {
+				est.Exact = false
+			}
+			est.Basis = "may not participate; " + est.Basis
+		}
 		out.Reviewers = append(out.Reviewers, CostEstimate{
 			Bot: est.Bot, Low: est.Low, High: est.High,
 			Exact: est.Exact, Unknown: est.Unknown, Basis: est.Basis,

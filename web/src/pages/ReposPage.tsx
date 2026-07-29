@@ -560,11 +560,7 @@ function ReviewerEditor({
                 <>
                   {" "}
                   <b>{newlyOn.join(", ")}</b> {newlyOn.length === 1 ? "is" : "are"} newly enabled
-                  and may be triggered on{" "}
-                  {repo.active_rounds > 0
-                    ? `${repo.active_rounds} active round(s)`
-                    : "the next round"}{" "}
-                  at their current heads.
+                  and may be triggered on current open heads as soon as this is saved.
                 </>
               )}
               {retiredOn.length > 0 && (

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
@@ -121,7 +122,7 @@ func (s *Service) SetEnrollment(ctx context.Context, repo string, enabled bool, 
 		if cur, ok := st.Enrollment(repo); ok && cur.Enabled == enabled && cur.Reason == reason {
 			return ErrNoChange
 		}
-		if !enabled && claimedTriggerRepo(st, repo) {
+		if !enabled && claimedTriggerRepo(st, repo, now) {
 			return errors.New("a review trigger is already being posted; wait for it to finish before turning the repository off")
 		}
 		// Edited, not rebuilt. A record carries the members a NEWER binary wrote
@@ -150,7 +151,7 @@ func (s *Service) SetEnrollment(ctx context.Context, repo string, enabled bool, 
 	return s.enrollmentOf(st, repo), nil
 }
 
-func claimedTriggerRepo(st *State, repo string) bool {
+func claimedTriggerRepo(st *State, repo string, now time.Time) bool {
 	for _, round := range st.Rounds {
 		if NormalizeRepo(round.Repo) == repo && triggerPostClaimed(&round) {
 			return true
@@ -158,7 +159,19 @@ func claimedTriggerRepo(st *State, repo string) bool {
 	}
 	for i := range st.Archive {
 		round := &st.Archive[i]
-		if NormalizeRepo(round.Repo) == repo && triggerPostClaimed(round) {
+		if NormalizeRepo(round.Repo) == repo && archivedTriggerPostClaimed(round, now) {
+			return true
+		}
+	}
+	return false
+}
+
+// An archived round has no live queue owner left to clear a crashed poster's
+// claim. Keep the network-race guard for one lease, then let administrative
+// changes proceed instead of treating the tombstone as an eternal post.
+func archivedTriggerPostClaimed(round *Round, now time.Time) bool {
+	for _, co := range round.CoBots {
+		if co.ClaimedAt != nil && now.Before(co.ClaimedAt.UTC().Add(triggerClaimTTL)) {
 			return true
 		}
 	}
@@ -207,6 +220,7 @@ func (s *Service) ClearEnrollment(ctx context.Context, repo string) (EnrollmentV
 	if err := checkRepoShape(repo); err != nil {
 		return EnrollmentView{}, err
 	}
+	now := s.clock().UTC()
 	st, err := s.store.Update(ctx, func(st *State) error {
 		if !st.ClearEnrollment(repo) {
 			return ErrNoChange
@@ -218,7 +232,7 @@ func (s *Service) ClearEnrollment(ctx context.Context, repo string) (EnrollmentV
 		// they do when the switch is thrown explicitly — resolved from the state
 		// the write lands on, not from the one before the clear.
 		if !s.enrollmentOf(*st, repo).Enabled {
-			if claimedTriggerRepo(st, repo) {
+			if claimedTriggerRepo(st, repo, now) {
 				return errors.New("a review trigger is already being posted; wait for it to finish before turning the repository off")
 			}
 			s.abandonPendingRounds(st, repo)

@@ -167,7 +167,7 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 			sameLogins(ov.Required, beforeOverride.Required) {
 			return ErrNoChange
 		}
-		if primary != nil && !*primary && claimedTriggerRepo(st, repo) {
+		if primary != nil && !*primary && claimedTriggerRepo(st, repo, now) {
 			return errors.New("a review trigger is already being posted; wait for it to finish before turning the primary off")
 		}
 		// Resolved from the FLEET-layered configuration, the one cfgFor hands

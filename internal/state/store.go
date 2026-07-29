@@ -187,6 +187,12 @@ func (s *GitStateStore) Load(ctx context.Context) (State, Revision, error) {
 		s.logf("state ref %s holds schema v%d (want v%d) — reinitializing to a fresh state (no migration; crq is pre-release)", s.cfg.StateRef, probe.Version, SchemaVersion)
 		return s.fresh(), rev, nil
 	}
+	if probe.Version == SchemaVersion-1 {
+		raw, err = migrateV4State(raw)
+		if err != nil {
+			return State{}, Revision{}, s.refuse("holds a v4 fleet policy this binary cannot migrate", err)
+		}
+	}
 	var st State
 	if err := json.Unmarshal(raw, &st); err != nil {
 		// The version says this binary should understand or migrate it and it

@@ -454,6 +454,40 @@ func TestAPrimarysAnswerStaysWithThePrimaryThatGaveIt(t *testing.T) {
 	}
 }
 
+func TestAPrimaryAskStaysWithThePrimaryItAddressed(t *testing.T) {
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	asked := now.Add(-time.Hour)
+	st := state.State{Rounds: map[string]state.Round{
+		"o/repo#1": {
+			Repo: "o/repo", PR: 1, Head: "abcdef123", Phase: state.PhaseReviewing,
+			FiredAt: &asked, CommandID: 42,
+			PostedCommands: []state.PostedCommand{{ID: 42, Bot: "coderabbitai[bot]", At: asked}},
+		},
+	}}
+	cfg := FleetConfig{Reviewers: []ReviewerCfg{
+		{Login: "macroscope[bot]", Name: "macroscope", Primary: true, Metered: true},
+		{Login: "coderabbitai[bot]", Name: "coderabbit", Metered: true},
+	}}
+	running := []BotName{{Login: "macroscope[bot]", Name: "macroscope", Primary: true}}
+
+	cards := botCards(st, cfg, func(string) []BotName { return running }, now)
+	var current, retired BotCard
+	for _, card := range cards {
+		switch card.Login {
+		case "macroscope[bot]":
+			current = card
+		case "coderabbitai[bot]":
+			retired = card
+		}
+	}
+	if current.LastAsked != nil {
+		t.Errorf("new primary was credited with the retired primary's request: %+v", current)
+	}
+	if retired.LastAsked == nil || !retired.LastAsked.Equal(asked) {
+		t.Errorf("retired primary lost the request addressed to it: %+v", retired)
+	}
+}
+
 func TestBotCardsUseTheEffectiveFleetPrimary(t *testing.T) {
 	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
 	cfg := FleetConfig{Reviewers: []ReviewerCfg{

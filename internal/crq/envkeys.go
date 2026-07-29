@@ -162,6 +162,23 @@ func fleetSettable(key string) bool {
 	return ok && !k.PerHost && !k.Identity
 }
 
+// fleetReadable includes the three policies v4 stored in shared state but v5
+// no longer lets an operator write there. Migration must keep honoring the
+// recorded answer until it is deliberately removed; SetEnv still uses the
+// narrower fleetSettable predicate, so no new shared identity/per-host value
+// can be created.
+func fleetReadable(key string) bool {
+	if fleetSettable(key) {
+		return true
+	}
+	switch key {
+	case "CRQ_SCOPE", "CRQ_REPOS", "CRQ_EXCLUDE":
+		return true
+	default:
+		return false
+	}
+}
+
 // positiveOnly names the settings whose CONSUMER applies a recorded value only
 // when it is greater than zero.
 //
@@ -258,23 +275,24 @@ type EnvSetting struct {
 // EnvSettings reports every setting with its effective value and source.
 func (s *Service) EnvSettings(st State) []EnvSetting {
 	host := s.cfg.Env()
+	effective := s.cfg.WithFleet(st.Fleet)
 	keys := EnvKeys()
 	out := make([]EnvSetting, 0, len(keys))
 	for _, k := range keys {
-		set := EnvSetting{EnvKey: k, Value: strings.TrimSpace(host[k.Key]), Source: "env"}
-		if set.Value == "" {
-			set.Source = "default"
+		hostValue, present := host[k.Key]
+		set := EnvSetting{EnvKey: k, Value: configValueOf(effective, k.Key), Source: "default"}
+		if present {
+			set.Source = "env"
 		}
 		// Four settings have a typed home on the record — with their own
 		// validation and impact preview — so the generic map is not the only
 		// place to look. Missing that made an adopted setting keep reporting
 		// "env", which is the exact mislabel this page exists to remove.
 		if fleet, ok := fleetValueOf(st.Fleet, k.Key); ok {
-			set.HostValue = set.Value
-			set.Value, set.Source = fleet, "fleet"
-		} else if fleet, ok := st.Fleet.Env[k.Key]; ok && fleetSettable(k.Key) {
-			set.HostValue = set.Value
-			set.Value, set.Source = fleet, "fleet"
+			_ = fleet // Value comes from the parsed effective configuration.
+			set.HostValue, set.Source = strings.TrimSpace(hostValue), "fleet"
+		} else if _, ok := st.Fleet.Env[k.Key]; ok && fleetReadable(k.Key) {
+			set.HostValue, set.Source = strings.TrimSpace(hostValue), "fleet"
 		}
 		out = append(out, set)
 	}

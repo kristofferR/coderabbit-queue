@@ -562,7 +562,14 @@ func botCards(st state.State, cfg FleetConfig, botsFor BotsFor, now time.Time) [
 		// review evidence labelled a reviewer as working on the strength of its
 		// own acknowledgement.
 		if r.FiredAt != nil && !r.CoOnly {
-			noteAsked(effectivePrimary, r.FiredAt)
+			by := effectivePrimary
+			for _, posted := range r.PostedCommands {
+				if posted.ID == r.CommandID && posted.Bot != "" {
+					by = posted.Bot
+					break
+				}
+			}
+			noteAsked(by, r.FiredAt)
 		}
 		if r.PrimaryAnsweredAt != nil {
 			answerLog = true

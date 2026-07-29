@@ -130,8 +130,8 @@ func TestCoReviewerRowSaysItIsTheDefaultAndNamesExceptions(t *testing.T) {
 	}
 	body = RenderDashboard(st, cfg)
 	row = dashboardRow(body, "Co-reviewers")
-	if !strings.Contains(row, "+2 more") {
-		t.Errorf("five overrides were not summarised:\n%s", row)
+	if !strings.Contains(row, "+2 more") || !strings.Contains(row, "overrides") {
+		t.Errorf("five overrides were not labelled and summarised:\n%s", row)
 	}
 }
 

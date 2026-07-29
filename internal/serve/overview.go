@@ -402,6 +402,16 @@ func autofixView(st state.State, now time.Time, maxAttempts func(repo string) in
 		if r, ok := st.Rounds[key]; ok {
 			s.Head = r.Head
 		}
+		// A session can push and supersede its round while its top-level claim
+		// intentionally stays live to finish thread cleanup. The archived claim
+		// still names the checkout/head that session owns.
+		for i := len(st.Archive) - 1; i >= 0; i-- {
+			r := st.Archive[i]
+			if state.Key(r.Repo, r.PR) == key && r.Dispatch != nil && r.Dispatch.Token == d.Token {
+				s.Head = r.Head
+				break
+			}
+		}
 		if !d.Heartbeat.IsZero() {
 			hb := d.Heartbeat
 			s.Heartbeat = &hb

@@ -707,8 +707,9 @@ func TestListCheckRunsRidesETagCache(t *testing.T) {
 // only PUBLIC repositories whoever asks. A personal account is the ordinary
 // case for the private workflow, so the picker showed a partial list — or an
 // empty one — while claiming to show everything in scope. Only the
-// authenticated-user endpoint answers for the token's own private repositories.
-func TestListOwnerReposUsesTheAuthenticatedEndpointForItsOwnAccount(t *testing.T) {
+// authenticated-user endpoint answers for private repositories owned by the
+// token and for private repositories it collaborates on under another user.
+func TestListOwnerReposUsesTheAuthenticatedEndpointForPersonalAccounts(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "t")
 	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -719,10 +720,16 @@ func TestListOwnerReposUsesTheAuthenticatedEndpointForItsOwnAccount(t *testing.T
 			_, _ = w.Write([]byte(`{"type":"User"}`))
 		case "/user/repos":
 			paths = append(paths, r.URL.String())
-			_, _ = w.Write([]byte(`[{"full_name":"alice/private","private":true}]`))
+			_, _ = w.Write([]byte(`[
+				{"full_name":"alice/private","private":true},
+				{"full_name":"bob/private","private":true}
+			]`))
 		case "/users/bob/repos":
 			paths = append(paths, r.URL.String())
-			_, _ = w.Write([]byte(`[{"full_name":"bob/public"}]`))
+			_, _ = w.Write([]byte(`[
+				{"full_name":"bob/public"},
+				{"full_name":"bob/private","private":false}
+			]`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -737,22 +744,31 @@ func TestListOwnerReposUsesTheAuthenticatedEndpointForItsOwnAccount(t *testing.T
 	if len(own) != 1 || own[0].FullName != "alice/private" || !own[0].Private {
 		t.Fatalf("repos = %+v, want the token's own private repository", own)
 	}
-	if len(paths) != 1 || !strings.Contains(paths[0], "affiliation=owner") ||
+	if len(paths) != 1 || !strings.Contains(paths[0], "affiliation=owner,collaborator") ||
 		!strings.Contains(paths[0], "per_page=100") {
 		t.Fatalf("requested %q, want the authenticated endpoint with both query halves intact", paths)
 	}
 
-	// Somebody else's account is still read the public way: /user/repos cannot
-	// answer for an owner that is not the token.
+	// Another personal owner is filtered from the authenticated list, which
+	// includes private repositories on which the viewer collaborates.
 	other, err := g.ListOwnerRepos(context.Background(), "bob", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(other) != 1 || other[0].FullName != "bob/public" {
-		t.Fatalf("repos = %+v, want another user's public list", other)
+	if len(other) != 2 {
+		t.Fatalf("repos = %+v, want the public and private collaborator repositories", other)
 	}
-	if len(paths) != 2 || !strings.HasPrefix(paths[1], "/users/bob/repos?per_page=100") {
-		t.Fatalf("requested %q, want the public endpoint for another owner", paths)
+	byName := map[string]Repo{}
+	for _, repo := range other {
+		byName[repo.FullName] = repo
+	}
+	if !byName["bob/private"].Private || byName["bob/public"].Private {
+		t.Fatalf("repos = %+v, want deduplicated public plus authenticated-private metadata", other)
+	}
+	if len(paths) != 3 ||
+		!strings.HasPrefix(paths[1], "/users/bob/repos?per_page=100") ||
+		!strings.HasPrefix(paths[2], "/user/repos?affiliation=owner,collaborator") {
+		t.Fatalf("requested %q, want both public and authenticated endpoints for another personal owner", paths)
 	}
 }
 

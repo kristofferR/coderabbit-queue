@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1331,21 +1332,45 @@ func (g *GitHub) ListOwnerRepos(ctx context.Context, owner string, limit int) ([
 	if err != nil {
 		return nil, err
 	}
-	base := "/users/" + owner + "/repos"
-	switch {
-	case qualifier == "org:":
-		base = "/orgs/" + owner + "/repos"
-	case strings.EqualFold(owner, viewer):
-		// /users/{owner}/repos lists only what is PUBLIC, whoever is asking. A
-		// personal account is the ordinary case for the paid private workflow, so
-		// the picker showed an empty list — or a partial one — while claiming to
-		// show everything in scope. The authenticated-user endpoint is the only
-		// one that answers for the token's own private repositories.
-		base = "/user/repos?affiliation=owner"
-	}
 	if limit <= 0 {
 		limit = 200
 	}
+	if qualifier == "org:" {
+		return g.listRepos(ctx, "/orgs/"+owner+"/repos", "", limit)
+	}
+	if strings.EqualFold(owner, viewer) {
+		return g.listRepos(ctx, "/user/repos?affiliation=owner,collaborator", owner, limit)
+	}
+	public, err := g.listRepos(ctx, "/users/"+owner+"/repos", "", limit)
+	if err != nil {
+		return nil, err
+	}
+	if viewer == "" {
+		return public, nil
+	}
+	// Another personal owner needs both views. The public endpoint includes
+	// repositories where the viewer has no affiliation; the authenticated list
+	// adds private repositories on which the viewer collaborates.
+	private, err := g.listRepos(ctx, "/user/repos?affiliation=owner,collaborator", owner, limit)
+	if err != nil {
+		return nil, err
+	}
+	byName := make(map[string]Repo, len(public)+len(private))
+	for _, repo := range append(public, private...) {
+		byName[strings.ToLower(repo.FullName)] = repo
+	}
+	out := make([]Repo, 0, len(byName))
+	for _, repo := range byName {
+		out = append(out, repo)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].PushedAt.After(out[j].PushedAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (g *GitHub) listRepos(ctx context.Context, base, filterOwner string, limit int) ([]Repo, error) {
 	out := make([]Repo, 0, limit)
 	for page := 1; len(out) < limit && page <= 10; page++ {
 		var batch []Repo
@@ -1357,7 +1382,14 @@ func (g *GitHub) ListOwnerRepos(ctx context.Context, owner string, limit int) ([
 		if err := g.request(ctx, http.MethodGet, path, nil, &batch); err != nil {
 			return nil, err
 		}
-		out = append(out, batch...)
+		for _, repo := range batch {
+			if filterOwner == "" || strings.EqualFold(ownerOfRepo(repo.FullName), filterOwner) {
+				out = append(out, repo)
+			}
+			if len(out) == limit {
+				break
+			}
+		}
 		if len(batch) < 100 {
 			break
 		}
@@ -1366,4 +1398,9 @@ func (g *GitHub) ListOwnerRepos(ctx context.Context, owner string, limit int) ([
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+func ownerOfRepo(fullName string) string {
+	owner, _, _ := strings.Cut(fullName, "/")
+	return owner
 }
