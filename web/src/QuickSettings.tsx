@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { act } from "./actions";
 import type { BotCard, RepoRow, Snapshot } from "./api";
 import { BotIcon, Pill, Toggle } from "./ui";
@@ -34,6 +34,13 @@ export function QuickSettings({
   const [runs, setRuns] = useState<string[]>(repo.reviewers);
   const [required, setRequired] = useState<string[]>(repo.required);
   const { run: runOperation, running: busy, error } = useOperation();
+  const serverRuns = repo.reviewers.join();
+  const serverRequired = repo.required.join();
+
+  useEffect(() => {
+    setRuns(repo.reviewers);
+    setRequired(repo.required);
+  }, [serverRuns, serverRequired]);
 
   const primary = bots.find((b) => b.primary);
   const dirty = !sameMembers(runs, repo.reviewers) || !sameMembers(required, repo.required);
@@ -41,8 +48,9 @@ export function QuickSettings({
   const configurableNames = new Set(bots.filter((bot) => bot.configurable).map((bot) => bot.name));
   const retiredOn = [
     ...new Set(
-      [...runs, ...required].filter(
-        (name) => name !== primary?.name && !configurableNames.has(name),
+      runs.filter(
+        (name) =>
+          name !== primary?.name && !configurableNames.has(name) && !required.includes(name),
       ),
     ),
   ];
@@ -52,7 +60,7 @@ export function QuickSettings({
       act("reviewers", {
         repo: repo.repo,
         cobots: runs.filter((name) => name !== primary?.name && configurableNames.has(name)),
-        required: required.filter((name) => name === primary?.name || configurableNames.has(name)),
+        required,
         primary: primary ? runs.includes(primary.name) : undefined,
       }),
       {

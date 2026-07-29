@@ -363,8 +363,9 @@ function ReviewerEditor({
   const configurableNames = new Set(bots.filter((bot) => bot.configurable).map((bot) => bot.name));
   const retiredOn = [
     ...new Set(
-      [...runs, ...required].filter(
-        (name) => name !== primaryBot?.name && !configurableNames.has(name),
+      runs.filter(
+        (name) =>
+          name !== primaryBot?.name && !configurableNames.has(name) && !required.includes(name),
       ),
     ),
   ];
@@ -386,9 +387,7 @@ function ReviewerEditor({
       act("reviewers", {
         repo: repo.repo,
         cobots: runs.filter((name) => name !== primaryBot?.name && configurableNames.has(name)),
-        required: required.filter(
-          (name) => name === primaryBot?.name || configurableNames.has(name),
-        ),
+        required,
         primary: primaryBot ? primaryOn : undefined,
         clear,
       }),
