@@ -3,7 +3,7 @@ import { ExternalLink } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AutofixLog } from "./AutofixLog";
 import { act } from "./actions";
-import type { Cost as CostView, Finding, PRView } from "./api";
+import type { Cost as CostView, Finding, PRView, Snapshot } from "./api";
 import { pullRequest } from "./api";
 import { Confirm } from "./Confirm";
 import { useDashboard } from "./DashboardState";
@@ -34,6 +34,10 @@ export function mergeLivePRState(current: PRView | null, next: PRView): PRView {
   };
 }
 
+export function isNewLiveSnapshot(previous: Snapshot | null, next: Snapshot | null): boolean {
+  return next !== null && next !== previous;
+}
+
 export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
   const { snapshot } = useDashboard();
   const now = useNow();
@@ -56,7 +60,7 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
   // other.
   const [pending, setPending] = useState<"hold" | "cancel" | null>(null);
   const { run: runRoundOperation, running: acting, error: roundErr } = useOperation();
-  const liveCursor = useRef({ key: `${repo}#${pr}`, rev: snapshot?.overview.rev });
+  const liveCursor = useRef({ key: `${repo}#${pr}`, snapshot });
 
   const runRound = (kind: "hold" | "unhold" | "cancel", reason = "") =>
     runRoundOperation(act(kind, { repo, pr, reason }), {
@@ -104,21 +108,23 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
     load();
   }, [load]);
 
-  // SSE revisions update only the cheap persisted-state layer. Findings and
+  // SSE snapshots update only the cheap persisted-state layer. Findings and
   // pricing stay attached to their observed head until a refresh or head move.
+  // A frame can legitimately change without advancing the state revision:
+  // time-derived state such as an expired dispatch claim is part of the
+  // snapshot digest too, so identity — not rev — is the live cursor here.
   useEffect(() => {
     const key = `${repo}#${pr}`;
-    const rev = snapshot?.overview.rev;
     if (liveCursor.current.key !== key) {
-      liveCursor.current = { key, rev };
+      liveCursor.current = { key, snapshot };
       return;
     }
-    if (rev === undefined || rev === liveCursor.current.rev) return;
-    liveCursor.current.rev = rev;
+    if (!isNewLiveSnapshot(liveCursor.current.snapshot, snapshot)) return;
+    liveCursor.current.snapshot = snapshot;
     runLiveState(pullRequest(repo, pr, false, true), {
       onSuccess: (next) => setView((current) => mergeLivePRState(current, next)),
     });
-  }, [pr, repo, runLiveState, snapshot?.overview.rev]);
+  }, [pr, repo, runLiveState, snapshot]);
 
   if (error && !view) {
     return (

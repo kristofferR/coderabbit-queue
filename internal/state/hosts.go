@@ -2,6 +2,7 @@ package state
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -53,6 +54,10 @@ type HostReport struct {
 	// advertised the newest capabilities while an old `autofix` watcher went on
 	// ignoring the very setting LaggingRoleWriters was then told it honoured.
 	RoleCaps map[string]int `json:"role_caps,omitempty"`
+	// RoleVersions is the crq version behind each role. A host can be halfway
+	// through an upgrade, so the record-wide Version alone cannot say whether
+	// this particular reporter has changed.
+	RoleVersions map[string]string `json:"role_versions,omitempty"`
 	// Agent is the fix agent this host is installed to run, by name ("claude",
 	// "codex"). Reported rather than inferred, and for the same reason the tool
 	// probes are: it is chosen per machine at install time and exported to the
@@ -149,6 +154,8 @@ func (s *State) SetHostReport(r HostReport, now time.Time) {
 	seen := map[string]time.Time{}
 	tools := map[string][]ToolReport{}
 	caps := map[string]int{}
+	versions := map[string]string{}
+	reportedVersion := r.Version
 	if prev, ok := s.HostReports[r.Host]; ok {
 		for role, at := range prev.RoleSeen {
 			seen[role] = at
@@ -158,6 +165,9 @@ func (s *State) SetHostReport(r HostReport, now time.Time) {
 		}
 		for role, c := range prev.RoleCaps {
 			caps[role] = c
+		}
+		for role, version := range prev.RoleVersions {
+			versions[role] = version
 		}
 		for _, role := range prev.Roles {
 			// A record written before roles were dated (an older binary, or one
@@ -177,6 +187,9 @@ func (s *State) SetHostReport(r HostReport, now time.Time) {
 			if _, known := caps[role]; !known {
 				caps[role] = prev.Caps
 			}
+			if _, known := versions[role]; !known {
+				versions[role] = prev.Version
+			}
 		}
 		agentAuthoritative := false
 		for _, role := range r.Roles {
@@ -193,6 +206,7 @@ func (s *State) SetHostReport(r HostReport, now time.Time) {
 	for _, role := range r.Roles {
 		seen[role] = now
 		caps[role] = r.Caps
+		versions[role] = reportedVersion
 		if len(r.Tools) > 0 {
 			tools[role] = mergeTools(tools[role], r.Tools)
 		}
@@ -203,6 +217,7 @@ func (s *State) SetHostReport(r HostReport, now time.Time) {
 			delete(seen, role)
 			delete(tools, role)
 			delete(caps, role)
+			delete(versions, role)
 			continue
 		}
 		roles = append(roles, role)
@@ -222,8 +237,55 @@ func (s *State) SetHostReport(r HostReport, now time.Time) {
 		caps = nil
 	}
 	r.RoleCaps = caps
+	if len(versions) == 0 {
+		versions = nil
+	}
+	r.RoleVersions = versions
+	r.Version = newestHostVersion(versions, reportedVersion)
 	r.At = now
 	s.HostReports[r.Host] = r
+}
+
+// VersionFor is the crq version behind role. Records written before versions
+// were kept per role fall back to the record-wide answer.
+func (r HostReport) VersionFor(role string) string {
+	if version, ok := r.RoleVersions[role]; ok {
+		return version
+	}
+	return r.Version
+}
+
+func newestHostVersion(versions map[string]string, fallback string) string {
+	newest := fallback
+	for _, version := range versions {
+		if dottedVersionAfter(version, newest) {
+			newest = version
+		}
+	}
+	return newest
+}
+
+func dottedVersionAfter(a, b string) bool {
+	ap, bp := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(ap) || i < len(bp); i++ {
+		x, y := "0", "0"
+		if i < len(ap) {
+			x = ap[i]
+		}
+		if i < len(bp) {
+			y = bp[i]
+		}
+		if x == y {
+			continue
+		}
+		xn, xerr := strconv.Atoi(x)
+		yn, yerr := strconv.Atoi(y)
+		if xerr == nil && yerr == nil {
+			return xn > yn
+		}
+		return x > y
+	}
+	return false
 }
 
 // mergeTools carries what a newer binary recorded about a tool onto this

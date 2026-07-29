@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { PRView } from "./api";
-import { mergeLivePRState } from "./PRDetail";
+import type { PRView, Snapshot } from "./api";
+import { isNewLiveSnapshot, mergeLivePRState } from "./PRDetail";
 
 const state = (head: string, phase: string): PRView => ({
   repo: "owner/repo",
@@ -45,5 +45,13 @@ describe("live PR state", () => {
     const current = { ...state("abcdef123", "completed"), rev: 5 };
     const stale = { ...state("abcdef123", "reviewing"), rev: 4 };
     expect(mergeLivePRState(current, stale)).toBe(current);
+  });
+
+  it("accepts a distinct live frame even when its state revision is unchanged", () => {
+    const previous = { overview: { rev: 5 } } as Snapshot;
+    const timeDerivedUpdate = { overview: { rev: 5 } } as Snapshot;
+
+    expect(isNewLiveSnapshot(previous, previous)).toBe(false);
+    expect(isNewLiveSnapshot(previous, timeDerivedUpdate)).toBe(true);
   });
 });

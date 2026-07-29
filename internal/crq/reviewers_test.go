@@ -170,6 +170,25 @@ func TestDerivationLosesNothing(t *testing.T) {
 		}
 	})
 
+	t.Run("a disabled registry primary does not return as a co-reviewer", func(t *testing.T) {
+		cfg := isolatedConfig(t, map[string]string{
+			"CRQ_BOT":           "chatgpt-codex-connector[bot]",
+			"CRQ_REQUIRED_BOTS": "chatgpt-codex-connector[bot],cursor[bot]",
+		})
+		got := cfg.ForRepo(RepoReviewers{PrimaryOff: true})
+		if _, ok := got.Primary(); ok {
+			t.Fatal("Primary() found a registry-backed primary after the repository disabled it")
+		}
+		for _, reviewer := range got.Reviewers {
+			if sameBot(reviewer.Login, cfg.Bot) {
+				t.Fatalf("reviewers = %+v, want the disabled primary absent rather than rebuilt as a co-reviewer", got.Reviewers)
+			}
+		}
+		if !hasLogin(got.RequiredBots, "cursor[bot]") {
+			t.Fatalf("required = %v, want the remaining co-reviewer to keep gating", got.RequiredBots)
+		}
+	})
+
 	t.Run("a primary that is also a registry bot is asked once", func(t *testing.T) {
 		// Appearing once in Reviewers is not enough: CoBots still drives the
 		// co-reviewer trigger post, so an entry left there means DecideFire posts

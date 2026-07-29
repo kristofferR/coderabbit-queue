@@ -142,6 +142,9 @@ func sameHostReport(prev, next HostReport) bool {
 		return false
 	}
 	for _, role := range next.Roles {
+		if prev.VersionFor(role) != next.Version {
+			return false
+		}
 		if prev.CapsFor(role) != next.Caps {
 			return false
 		}

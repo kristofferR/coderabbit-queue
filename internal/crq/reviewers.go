@@ -106,17 +106,23 @@ func buildReviewers(primary, primaryCommand string, required []string, coBots []
 	// A repository that turned the primary off has no metered reviewer at all:
 	// leaving the entry in place with Required false would still let Primary()
 	// find something to fire.
-	if primary != "" && !primaryOff {
+	if primary != "" {
 		key := dialect.NormalizeBotName(primary)
+		// Even when this repository disables the primary, reserve its identity.
+		// A registry-backed primary also has a silenced CoBots entry carrying
+		// classifier hooks; without this marker the loop below rebuilt that
+		// entry as a participating free reviewer.
 		seen[key] = true
-		out = append(out, Reviewer{
-			Login:    primary,
-			Name:     key,
-			Budget:   dialect.BudgetAccount,
-			Required: requiredSet[key],
-			Command:  primaryCommand,
-			Trigger:  engine.TriggerAlways,
-		})
+		if !primaryOff {
+			out = append(out, Reviewer{
+				Login:    primary,
+				Name:     key,
+				Budget:   dialect.BudgetAccount,
+				Required: requiredSet[key],
+				Command:  primaryCommand,
+				Trigger:  engine.TriggerAlways,
+			})
+		}
 	}
 	for _, cb := range coBots {
 		key := dialect.NormalizeBotName(cb.Login)

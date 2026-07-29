@@ -75,6 +75,26 @@ func TestAutofixCanClearTheHostAgentWhileOtherRolesPreserveIt(t *testing.T) {
 	}
 }
 
+func TestHostVersionsStayWithTheirReportingRoles(t *testing.T) {
+	now := time.Date(2026, 7, 29, 19, 0, 0, 0, time.UTC)
+	st := New()
+	st.SetHostReport(HostReport{Host: "mac", Version: "2.0.0", Roles: []string{"autofix"}}, now)
+	st.SetHostReport(HostReport{Host: "mac", Version: "2.1.0", Roles: []string{"serve"}}, now.Add(time.Minute))
+
+	got := st.HostReports["mac"]
+	if got.VersionFor("autofix") != "2.0.0" || got.VersionFor("serve") != "2.1.0" {
+		t.Fatalf("role versions = %v, want each service's own build", got.RoleVersions)
+	}
+	if got.Version != "2.1.0" {
+		t.Fatalf("host version = %q, want the newest active service", got.Version)
+	}
+
+	st.SetHostReport(HostReport{Host: "mac", Version: "2.0.0", Roles: []string{"autofix"}}, now.Add(2*time.Minute))
+	if got := st.HostReports["mac"].Version; got != "2.1.0" {
+		t.Fatalf("older role heartbeat regressed host version to %q", got)
+	}
+}
+
 // A record an older binary wrote carries roles and no dates. They are exactly
 // as old as the record, which is the honest date to expire them from — anything
 // else either drops a live role or keeps a dead one.
