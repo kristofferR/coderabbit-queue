@@ -57,7 +57,11 @@ func migrateV5State(raw []byte) ([]byte, error) {
 			next["min_interval"] = strings.TrimSpace(value)
 		default:
 			if envKey, ok := legacyFleetEnvKey(key); ok {
-				env[envKey], _ = json.Marshal(strings.TrimSpace(value))
+				encodedValue, err := json.Marshal(strings.TrimSpace(value))
+				if err != nil {
+					return nil, fmt.Errorf("encode v5 fleet env %s: %w", envKey, err)
+				}
+				env[envKey] = encodedValue
 			} else {
 				next[key] = value
 			}

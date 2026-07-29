@@ -26,28 +26,6 @@ func readGolden(t *testing.T, name string) string {
 	return string(data)
 }
 
-func TestRegistryPrimaryUsesItsOwnWordingHooks(t *testing.T) {
-	primary, ok := CoReviewerByName("codex")
-	if !ok {
-		t.Fatal("Codex registry entry is missing")
-	}
-	classifier := Classifier{
-		CodeRabbit: goldenCR,
-		Bot:        primary.Login,
-		Primary:    &primary,
-	}
-	now := time.Now().UTC()
-
-	clean := classifier.Classify(primary.Login, readGolden(t, "codex/clean-summary-tada.md"), 1, now, now)
-	if clean.Kind != EvNoAction {
-		t.Fatalf("Codex primary clean summary = %v, want primary no-action completion", clean.Kind)
-	}
-	limited := classifier.Classify(primary.Login, readGolden(t, "codex/usage-limit.md"), 2, now, now)
-	if limited.Kind != EvFailed {
-		t.Fatalf("Codex primary usage limit = %v, want failed primary attempt", limited.Kind)
-	}
-}
-
 // TestGoldenClassification pins one corpus file per known bot-message format.
 // When a bot ships a new phrasing, add a file and a row — the row IS the spec.
 func TestGoldenClassification(t *testing.T) {
@@ -72,6 +50,9 @@ func TestGoldenClassification(t *testing.T) {
 		// wantKind == EvOther (the zero value) skips the Classify assertion.
 		author   string
 		wantKind EventKind
+		// registryPrimary classifies the fixture with Codex promoted from a
+		// co-reviewer to the configured primary.
+		registryPrimary bool
 	}{
 		{file: "coderabbit/rate-limit-fair-usage.md", rateLimited: true, autoReply: true, availableIn: 48 * time.Minute},
 		// Contains the "does not re-review" boilerplate in its help section —
@@ -110,6 +91,10 @@ func TestGoldenClassification(t *testing.T) {
 		{file: "codex/clean-summary-legacy.md", codexClean: true, noAction: true, nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCoClean},
 		{file: "codex/clean-summary-tada.md", codexClean: true, noAction: true, nonActionable: true, reviewedSHA: "4d9e8bca82", author: "chatgpt-codex-connector[bot]", wantKind: EvCoClean},
 		{file: "codex/usage-limit.md", codexUsageLimit: true, nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCoUnable},
+		{file: "codex/clean-summary-tada.md", codexClean: true, noAction: true, nonActionable: true, reviewedSHA: "4d9e8bca82",
+			author: "chatgpt-codex-connector[bot]", wantKind: EvNoAction, registryPrimary: true},
+		{file: "codex/usage-limit.md", codexUsageLimit: true, nonActionable: true,
+			author: "chatgpt-codex-connector[bot]", wantKind: EvFailed, registryPrimary: true},
 		// Codex's "create an environment" platform ad, posted as a thread reply —
 		// never a finding, never a rebuttal.
 		{file: "codex/environment-notice.md", nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCoNotice},
@@ -118,8 +103,20 @@ func TestGoldenClassification(t *testing.T) {
 	base := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	classifier := Classifier{CodeRabbit: goldenCR, Bot: "coderabbitai[bot]", ReviewCommand: "@coderabbitai review", CoReviewers: KnownCoReviewers()}
 	for _, tc := range cases {
-		t.Run(tc.file, func(t *testing.T) {
+		name := tc.file
+		if tc.registryPrimary {
+			name += "/registry-primary"
+		}
+		t.Run(name, func(t *testing.T) {
 			body := readGolden(t, tc.file)
+			activeClassifier := classifier
+			if tc.registryPrimary {
+				primary, ok := CoReviewerByName("codex")
+				if !ok {
+					t.Fatal("Codex registry entry is missing")
+				}
+				activeClassifier.Bot, activeClassifier.Primary = primary.Login, &primary
+			}
 			checks := []struct {
 				name string
 				got  bool
@@ -156,7 +153,7 @@ func TestGoldenClassification(t *testing.T) {
 				t.Errorf("CodexReviewedCommitSHA = %q, want %q", got, tc.reviewedSHA)
 			}
 			if tc.wantKind != EvOther {
-				if got := classifier.Classify(tc.author, body, 1, base, base).Kind; got != tc.wantKind {
+				if got := activeClassifier.Classify(tc.author, body, 1, base, base).Kind; got != tc.wantKind {
 					t.Errorf("Classify kind = %v, want %v", got, tc.wantKind)
 				}
 			}
