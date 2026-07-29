@@ -838,12 +838,12 @@ func (s *Service) dispatchWithStart(
 	s.noteDispatchHealth(context.WithoutCancel(ctx), true, "")
 	runErr := cmd.Wait()
 	_ = logFile.Sync()
-	if question := clarificationFromLog(string(readLogTail(logPath, 256<<10))); question != "" && !lost() {
+	if question := clarificationFromLog(string(readLogTail(logPath, 256<<10))); question != "" {
 		// Asking is not a failed solution attempt. Hold the PR with the exact
 		// question so it appears in the dashboard's existing attention surface,
 		// then release this claim without consuming the per-head budget.
 		reason := "Autofix needs clarification: " + question
-		if _, err := s.Hold(context.WithoutCancel(ctx), report.Repo, report.PR, reason); err == nil {
+		if _, err := s.holdDispatch(context.WithoutCancel(ctx), report, token, reason); err == nil {
 			s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
 			return false, fmt.Sprintf("%s (log: %s)", reason, logPath)
 		}

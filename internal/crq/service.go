@@ -109,6 +109,13 @@ const warnRateLimited = dialect.ReasonRateLimited
 
 const leaderCapabilityHolds = "administrative-holds"
 
+var errDispatchClaimLost = errors.New("dispatch claim is no longer owned by this watcher")
+
+type dispatchOwnership struct {
+	head  string
+	token string
+}
+
 // Hold takes a PR out of the review queue in one write.
 //
 // Holding used to need two commands that could not be one: the skip marker
@@ -119,6 +126,30 @@ const leaderCapabilityHolds = "administrative-holds"
 // It does not cancel a round already in flight: that review is bought and its
 // findings are still worth having. It stops the next one.
 func (s *Service) Hold(ctx context.Context, repo string, pr int, reason string) (HoldResult, error) {
+	return s.hold(ctx, repo, pr, reason, nil)
+}
+
+// holdDispatch records an agent's clarification only while that agent still
+// owns the dispatch claim. The ownership check and hold write share one CAS
+// update, so a watcher that lost its claim cannot stop the PR.
+func (s *Service) holdDispatch(
+	ctx context.Context,
+	report NextReport,
+	token string,
+	reason string,
+) (HoldResult, error) {
+	return s.hold(ctx, report.Repo, report.PR, reason, &dispatchOwnership{
+		head: report.Head, token: token,
+	})
+}
+
+func (s *Service) hold(
+	ctx context.Context,
+	repo string,
+	pr int,
+	reason string,
+	owner *dispatchOwnership,
+) (HoldResult, error) {
 	repo = NormalizeRepo(repo)
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
@@ -130,6 +161,13 @@ func (s *Service) Hold(ctx context.Context, repo string, pr int, reason string) 
 		return result, nil
 	}
 	state, err := s.store.Update(ctx, func(st *State) error {
+		if owner != nil {
+			round := st.Round(repo, pr)
+			if round == nil || round.Head != owner.head ||
+				round.Dispatch == nil || round.Dispatch.Token != owner.token {
+				return errDispatchClaimLost
+			}
+		}
 		// An older daemon preserves Holds as unknown JSON but cannot enforce it.
 		// Require a capable live leader: without one, an older standby could
 		// acquire the expired/empty lease immediately after this write.

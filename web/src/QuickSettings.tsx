@@ -34,8 +34,8 @@ export function QuickSettings({
   const [runs, setRuns] = useState<string[]>(repo.reviewers);
   const [required, setRequired] = useState<string[]>(repo.required);
   const { run: runOperation, running: busy, error } = useOperation();
-  const serverRuns = repo.reviewers.join();
-  const serverRequired = repo.required.join();
+  const serverRuns = [...repo.reviewers].sort().join("\0");
+  const serverRequired = [...repo.required].sort().join("\0");
 
   useEffect(() => {
     setRuns(repo.reviewers);
