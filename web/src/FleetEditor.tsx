@@ -36,6 +36,7 @@ export function FleetEditor({
   const [autofix, setAutofix] = useState(fleet.autofix_default);
 
   const [impact, setImpact] = useState<FleetImpact | null>(null);
+  const [clearing, setClearing] = useState(false);
   const { run: runOperation, running: busy, error } = useOperation();
 
   const fleetRuns = fleet.reviewers
@@ -52,6 +53,7 @@ export function FleetEditor({
     setWeekly(String(fleet.weekly_limit));
     setAutofix(fleet.autofix_default);
     setImpact(null);
+    setClearing(false);
   }, [
     fleetRunsKey,
     fleetRequiredKey,
@@ -79,17 +81,26 @@ export function FleetEditor({
   // Ask first. The answer is the confirmation's whole body — there is no
   // generic "are you sure", because the useful question is always "what does
   // this actually do to the 7 repositories following the fleet".
-  const preview = () => runOperation(fleetImpact(change()), { onSuccess: setImpact });
+  const preview = (clear = false) =>
+    runOperation(fleetImpact(clear ? { clear: true } : change()), {
+      onSuccess: (nextImpact) => {
+        setClearing(clear);
+        setImpact(nextImpact);
+      },
+    });
 
-  const save = (clear = false) =>
+  const save = () =>
     runOperation(
       act("fleet", {
-        fleet: clear ? { clear: true } : { ...change(), expected_rev: impact?.rev },
+        fleet: clearing
+          ? { clear: true, expected_rev: impact?.rev }
+          : { ...change(), expected_rev: impact?.rev },
       }),
       {
         onSuccess: ({ snapshot }) => {
           onSnapshot?.(snapshot);
           setImpact(null);
+          setClearing(false);
         },
       },
     );
@@ -275,7 +286,7 @@ export function FleetEditor({
             <button
               type="button"
               disabled={busy}
-              onClick={() => void save(true)}
+              onClick={() => void preview(true)}
               className="ml-auto text-[12.5px] text-acc hover:underline disabled:opacity-45"
             >
               Drop the record — follow this host's env again
@@ -286,9 +297,17 @@ export function FleetEditor({
 
       {impact && (
         <Confirm
-          title="Save fleet defaults?"
+          title={clearing ? "Drop fleet defaults?" : "Save fleet defaults?"}
           danger={impact.reopened > 0}
-          confirmLabel={impact.reopened > 0 ? `Save and reopen ${impact.reopened}` : "Save"}
+          confirmLabel={
+            clearing
+              ? impact.reopened > 0
+                ? `Drop and reopen ${impact.reopened}`
+                : "Drop"
+              : impact.reopened > 0
+                ? `Save and reopen ${impact.reopened}`
+                : "Save"
+          }
           busy={busy}
           error={error}
           body={
@@ -308,7 +327,10 @@ export function FleetEditor({
             </>
           }
           onConfirm={() => void save()}
-          onCancel={() => setImpact(null)}
+          onCancel={() => {
+            setImpact(null);
+            setClearing(false);
+          }}
         />
       )}
     </Card>

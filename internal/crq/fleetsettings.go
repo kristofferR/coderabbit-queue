@@ -206,20 +206,25 @@ func (s *Service) SetFleetSettings(ctx context.Context, change FleetChange) (Fle
 		if err := checkFleetPreviewRevision(*st, change.ExpectedRev); err != nil {
 			return err
 		}
-		before := map[string]Config{}
-		for _, repo := range s.reposFollowingFleet(*st) {
-			before[repo] = s.cfgFor(*st, repo)
-		}
+		var applied FleetDefaults
 		if change.Clear {
 			if st.Fleet.Empty() {
 				return ErrNoChange
 			}
-			st.Fleet = FleetDefaults{}
 		} else {
-			applied, aerr := s.applyFleetChange(*st, change)
+			var aerr error
+			applied, aerr = s.applyFleetChange(*st, change)
 			if aerr != nil {
 				return aerr
 			}
+		}
+		before := map[string]Config{}
+		for _, repo := range s.reposWithChangedReviewers(*st, applied) {
+			before[repo] = s.cfgFor(*st, repo)
+		}
+		if change.Clear {
+			st.Fleet = FleetDefaults{}
+		} else {
 			st.SetFleetDefaults(applied, s.cfg.Host, now)
 		}
 		for repo, was := range before {
@@ -343,11 +348,17 @@ func (s *Service) fleetImpact(st State, next FleetDefaults, open map[string]map[
 	}
 
 	beforeCfg, afterCfg := s.cfg.WithFleet(st.Fleet), s.cfg.WithFleet(next)
+	changedReviewers := s.reposWithChangedReviewers(st, next)
 	// Which reviewers RUN and which of them GATE are separate questions and
 	// both are changes: turning a bot off stops its findings arriving at all,
 	// which is not the same as it merely no longer holding the round open.
 	beforeCo := beforeCfg.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
 	afterCo := afterCfg.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
+	if !sameBot(beforeCfg.Bot, afterCfg.Bot) {
+		impact.Changes = append(impact.Changes, fmt.Sprintf("primary reviewer: %s → %s",
+			shortBots([]string{beforeCfg.Bot}), shortBots([]string{afterCfg.Bot})))
+		reaches(changedReviewers)
+	}
 	if !sameLogins(beforeCo, afterCo) {
 		impact.Changes = append(impact.Changes, fmt.Sprintf("co-reviewers running: %s → %s",
 			shortBots(beforeCo), shortBots(afterCo)))
@@ -391,7 +402,7 @@ func (s *Service) fleetImpact(st State, next FleetDefaults, open map[string]map[
 	// A completed round is the "this head was reviewed" marker. Requiring a
 	// reviewer it never had means that marker is now wrong, and the round has to
 	// be reopened — which is the consequence worth stating before the click.
-	for _, repo := range following {
+	for _, repo := range changedReviewers {
 		wasCfg, isCfg := s.cfgFor(st, repo), s.cfgFor(after, repo)
 		wasCo := wasCfg.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
 		isCo := isCfg.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
@@ -431,7 +442,7 @@ func (s *Service) openPRsForReviewerChange(ctx context.Context, st State, next F
 	after := st
 	after.Fleet = next
 	open := map[string]map[int]bool{}
-	for _, repo := range s.reposFollowingFleet(st) {
+	for _, repo := range s.reposWithChangedReviewers(st, next) {
 		wasCfg, isCfg := s.cfgFor(st, repo), s.cfgFor(after, repo)
 		wasCo := wasCfg.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
 		isCo := isCfg.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
@@ -455,6 +466,22 @@ func (s *Service) openPRsForReviewerChange(ctx context.Context, st State, next F
 		open[repo] = prs
 	}
 	return open, nil
+}
+
+// reposWithChangedReviewers resolves both sides for every active repository.
+// This is intentionally broader than reposFollowingFleet: a repository can
+// override both co-reviewer choices and still inherit the primary, so clearing
+// a fleet CRQ_BOT reaches it unless PrimaryOff says otherwise.
+func (s *Service) reposWithChangedReviewers(st State, next FleetDefaults) []string {
+	after := st
+	after.Fleet = next
+	var out []string
+	for _, repo := range s.fleetRepos(st) {
+		if !sameReviewers(s.cfgFor(st, repo), s.cfgFor(after, repo)) {
+			out = append(out, repo)
+		}
+	}
+	return out
 }
 
 // fullyOverridesReviewers reports whether repo answers BOTH reviewer questions

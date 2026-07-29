@@ -884,6 +884,64 @@ func TestFleetSaveRejectsAStalePreviewRevision(t *testing.T) {
 	}
 }
 
+func TestClearFleetSettingsReopensFullyOverriddenRepoForNewPrimary(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":          "owner/gate",
+		"CRQ_REPOS":         "o/repo",
+		"CRQ_BOT":           "env-primary[bot]",
+		"CRQ_REVIEW_CMD":    "@env-primary review",
+		"CRQ_COBOTS":        "codex",
+		"CRQ_REQUIRED_BOTS": "env-primary[bot],codex",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: "o/repo", Number: 1}}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	now := time.Now().UTC()
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Fleet.Env = map[string]string{
+			"CRQ_BOT":           "fleet-primary[bot]",
+			"CRQ_REVIEW_CMD":    "@fleet-primary review",
+			"CRQ_REQUIRED_BOTS": "fleet-primary[bot],codex",
+		}
+		st.SetRepoOverride("o/repo", RepoReviewers{
+			CoBots: []string{"codex"}, SetCoBots: true,
+			Required: []string{"codex"}, SetRequired: true,
+		})
+		round, err := st.NewRound("o/repo", 1, "head-1", now)
+		if err != nil {
+			return err
+		}
+		round.Phase = PhaseCompleted
+		st.PutRound(*round)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	impact, err := svc.PreviewFleet(ctx, FleetChange{Clear: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if impact.Reopened != 1 || !strings.Contains(strings.Join(impact.Changes, " "), "primary reviewer") {
+		t.Fatalf("clear impact = %+v, want the inherited primary change and one reopened round", impact)
+	}
+	if _, _, err := svc.SetFleetSettings(ctx, FleetChange{Clear: true, ExpectedRev: &impact.Rev}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("o/repo", 1); round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("round after clear = %+v, want it reopened for the env primary", round)
+	}
+}
+
 // A save the fleet will ignore is worse than a refused one: the settings page
 // then reports a value that no daemon is running. Every setting below is read
 // back through a "> 0" guard, so a zero — or a negative that Atoi happily

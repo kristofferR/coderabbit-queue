@@ -22,4 +22,5 @@ export const fleetImpact = (fleet: {
   min_interval?: string;
   weekly_limit?: number;
   autofix_default?: boolean;
+  clear?: boolean;
 }) => act("fleet", { fleet, preview: true });

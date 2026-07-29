@@ -468,7 +468,9 @@ export function EnrollmentEditor({
           busy={previewing || busy}
           error={enablePreview.error ?? error}
           body={<EnrollImpactCopy preview={enablePreview} />}
-          onConfirm={() => void run({ repo, enabled: true })}
+          onConfirm={() =>
+            void run({ repo, enabled: true, expected_rev: enablePreview.impact?.rev })
+          }
           onCancel={() => setEnablePreview(null)}
         />
       )}
