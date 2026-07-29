@@ -61,6 +61,20 @@ func TestFixAgentIgnoresAHostWhoseAutofixRoleExpired(t *testing.T) {
 	}
 }
 
+func TestAutofixCanClearTheHostAgentWhileOtherRolesPreserveIt(t *testing.T) {
+	now := time.Date(2026, 7, 29, 19, 0, 0, 0, time.UTC)
+	st := New()
+	st.SetHostReport(HostReport{Host: "mac", Roles: []string{"autofix"}, Agent: "claude"}, now)
+	st.SetHostReport(HostReport{Host: "mac", Roles: []string{"serve"}}, now.Add(time.Minute))
+	if got := st.HostReports["mac"].Agent; got != "claude" {
+		t.Fatalf("serve cleared agent to %q, want it preserved", got)
+	}
+	st.SetHostReport(HostReport{Host: "mac", Roles: []string{"autofix"}}, now.Add(2*time.Minute))
+	if got := st.HostReports["mac"].Agent; got != "" {
+		t.Fatalf("autofix cleared agent to %q, want empty", got)
+	}
+}
+
 // A record an older binary wrote carries roles and no dates. They are exactly
 // as old as the record, which is the honest date to expire them from — anything
 // else either drops a live role or keeps a dead one.

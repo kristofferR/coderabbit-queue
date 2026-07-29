@@ -27,7 +27,7 @@ type Actor interface {
 	// SetEnrollment decides whether crq reviews a repository at all, and
 	// ClearEnrollment hands it back to the hosts' env files. Like the reviewer
 	// override, they report the hosts that will not honour the record.
-	SetEnrollment(ctx context.Context, repo string, enabled bool, reason string) (lagging []string, err error)
+	SetEnrollment(ctx context.Context, repo string, enabled bool, reason string, expectedRev *int64) (lagging []string, err error)
 	ClearEnrollment(ctx context.Context, repo string) error
 	// Fleet reads the recorded defaults; SetFleet applies a change, or with
 	// preview reports what it WOULD do and writes nothing. A fleet save reaches
@@ -63,6 +63,8 @@ type actionRequest struct {
 	PR      int    `json:"pr"`
 	Reason  string `json:"reason"`
 	Enabled *bool  `json:"enabled"`
+	// ExpectedRev binds a confirmed enrollment preview to the state it priced.
+	ExpectedRev *int64 `json:"expected_rev,omitempty"`
 	// CoBots and Required are the whole intended sets, not a delta: a save that
 	// sent only changes could not express "explicitly none".
 	CoBots   []string `json:"cobots"`
@@ -197,7 +199,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var lagging []string
-		lagging, err = s.actor.SetEnrollment(ctx, req.Repo, *req.Enabled, req.Reason)
+		lagging, err = s.actor.SetEnrollment(ctx, req.Repo, *req.Enabled, req.Reason, req.ExpectedRev)
 		if err == nil && len(lagging) > 0 {
 			s.writeActionSnapshot(w, ctx, "saved, but these hosts run an older binary and decide from their own env alone: "+
 				strings.Join(hostsOf(lagging), ", "))

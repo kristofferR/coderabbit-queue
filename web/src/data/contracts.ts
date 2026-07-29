@@ -571,6 +571,7 @@ export const DiscoverResponseSchema = Schema.Struct({
 });
 
 export const EnrollImpactSchema = Schema.Struct({
+  rev: Schema.Number,
   repo: Schema.String,
   open: Schema.Number,
   eligible: Schema.Number,

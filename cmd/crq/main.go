@@ -2546,8 +2546,8 @@ func unionHosts(a, b []string) []string {
 	return out
 }
 
-func (a prActor) SetEnrollment(ctx context.Context, repo string, enabled bool, reason string) ([]string, error) {
-	view, err := a.svc.SetEnrollment(ctx, repo, enabled, reason)
+func (a prActor) SetEnrollment(ctx context.Context, repo string, enabled bool, reason string, expectedRev *int64) ([]string, error) {
+	view, err := a.svc.SetEnrollmentAt(ctx, repo, enabled, reason, expectedRev)
 	if err != nil {
 		return nil, err
 	}
@@ -3085,7 +3085,7 @@ func (p enrollPreviewer) PreviewEnroll(ctx context.Context, repo string) (serve.
 		return serve.EnrollImpact{}, err
 	}
 	return serve.EnrollImpact{
-		Repo: i.Repo, Open: i.Open, Eligible: i.Eligible, Skipped: i.Skipped,
+		Rev: i.Rev, Repo: i.Repo, Open: i.Open, Eligible: i.Eligible, Skipped: i.Skipped,
 		Metered: i.Metered, Low: i.Low, High: i.High, Unpriced: i.Unpriced, Unexamined: i.Unexamined,
 		Summary: i.Summary, PricesCheckedAt: i.PricesCheckedAt,
 	}, nil

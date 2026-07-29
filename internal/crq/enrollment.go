@@ -105,6 +105,13 @@ func (s *Service) enrollmentOf(st State, repo string) EnrollmentView {
 // reason: the repository disappears from every queue, and "why did this stop
 // being reviewed" is a question the fleet should be able to answer itself.
 func (s *Service) SetEnrollment(ctx context.Context, repo string, enabled bool, reason string) (EnrollmentView, error) {
+	return s.SetEnrollmentAt(ctx, repo, enabled, reason, nil)
+}
+
+// SetEnrollmentAt records an enrollment only if the shared state still has the
+// revision a dashboard preview described. CLI callers use SetEnrollment and
+// keep the ordinary latest-state behavior.
+func (s *Service) SetEnrollmentAt(ctx context.Context, repo string, enabled bool, reason string, expectedRev *int64) (EnrollmentView, error) {
 	repo = NormalizeRepo(repo)
 	if err := checkRepoShape(repo); err != nil {
 		return EnrollmentView{}, err
@@ -117,6 +124,9 @@ func (s *Service) SetEnrollment(ctx context.Context, repo string, enabled bool, 
 	}
 	now := s.clock().UTC()
 	st, err := s.store.Update(ctx, func(st *State) error {
+		if expectedRev != nil && st.Rev != *expectedRev {
+			return fmt.Errorf("fleet state moved from revision %d to %d; preview enrollment again", *expectedRev, st.Rev)
+		}
 		if enabled && s.cfg.WithFleet(st.Fleet).ExcludeRepos[repo] {
 			return fmt.Errorf("%s is in the fleet CRQ_EXCLUDE policy — shared enrollment does not override it", repo)
 		}
@@ -423,6 +433,7 @@ func (s *Service) ScopeRepos(ctx context.Context) ([]ghapi.Repo, []string, error
 // pass. The dialog that offers it should say so in the terms the bill arrives
 // in, not in "7 pull requests".
 type EnrollImpact struct {
+	Rev  int64  `json:"rev"`
 	Repo string `json:"repo"`
 	// Open is every open pull request; Eligible is what would actually be
 	// enqueued once the skip rules are applied. The gap between them is worth
@@ -475,7 +486,7 @@ func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact,
 		return EnrollImpact{}, err
 	}
 	cfg := s.cfgFor(st, repo)
-	impact := EnrollImpact{Repo: repo, Skipped: map[string]int{}, PricesCheckedAt: dialect.PricesCheckedAt}
+	impact := EnrollImpact{Rev: st.Rev, Repo: repo, Skipped: map[string]int{}, PricesCheckedAt: dialect.PricesCheckedAt}
 
 	var eligible []int
 	examined := 0
@@ -541,6 +552,16 @@ func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact,
 	// unchanged count called a whole backlog free on the strength of the one
 	// review left for its first member.
 	allowance := accountAllowance(st)
+	meteredPerPR := 0
+	for _, reviewer := range cfg.Reviewers {
+		if dialect.EstimateCost(reviewer.Login, cfg.Bot, dialect.DiffStat{}, allowance).Metered {
+			meteredPerPR++
+		}
+	}
+	spendAllowance := func() {
+		impact.Metered += meteredPerPR
+		allowance.Remaining = max(0, allowance.Remaining-meteredPerPR)
+	}
 	for _, pr := range eligible {
 		// costFrom, not Cost: the state is already in hand, and Cost would load
 		// the ref again per pull request — four requests each, 100 across the
@@ -548,6 +569,7 @@ func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact,
 		pull, cerr := s.gh.GetPull(ctx, repo, pr)
 		if cerr != nil {
 			impact.Unpriced++
+			spendAllowance()
 			continue
 		}
 		cost := s.costWith(st, repo, pr, pull.Head.SHA, dialect.DiffStat{
@@ -563,14 +585,7 @@ func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact,
 		}
 		impact.Low += cost.Low
 		impact.High += cost.High
-		for _, r := range cost.Reviewers {
-			if r.Metered {
-				impact.Metered++
-				if allowance.Remaining > 0 {
-					allowance.Remaining--
-				}
-			}
-		}
+		spendAllowance()
 	}
 	impact.Summary = enrollSummary(impact)
 	return impact, nil

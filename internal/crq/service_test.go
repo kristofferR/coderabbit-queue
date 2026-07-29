@@ -20,6 +20,8 @@ import (
 type fakeGitHub struct {
 	mu              sync.Mutex
 	pulls           map[string]ghapi.Pull
+	pullReads       map[string]int
+	pullErrOnRead   map[string]int
 	commits         map[string]ghapi.Commit
 	commitErrs      map[string]error
 	reviews         map[string][]ghapi.Review
@@ -100,6 +102,8 @@ func (f *fakeGitHub) clock() time.Time {
 func newFakeGitHub() *fakeGitHub {
 	return &fakeGitHub{
 		pulls:           map[string]ghapi.Pull{},
+		pullReads:       map[string]int{},
+		pullErrOnRead:   map[string]int{},
 		commits:         map[string]ghapi.Commit{},
 		commitErrs:      map[string]error{},
 		reviews:         map[string][]ghapi.Review{},
@@ -158,7 +162,15 @@ func (f *fakeGitHub) setCheckRuns(ref string, runs ...ghapi.CheckRun) {
 func (f *fakeGitHub) GetPull(_ context.Context, repo string, pr int) (ghapi.Pull, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	pull, ok := f.pulls[fakeKey(repo, pr)]
+	key := fakeKey(repo, pr)
+	if f.pullReads == nil {
+		f.pullReads = map[string]int{}
+	}
+	f.pullReads[key]++
+	if f.pullErrOnRead[key] == f.pullReads[key] {
+		return ghapi.Pull{}, errors.New("injected pull read failure")
+	}
+	pull, ok := f.pulls[key]
 	if !ok {
 		return ghapi.Pull{}, errors.New("missing pull")
 	}

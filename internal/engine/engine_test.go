@@ -240,6 +240,25 @@ func TestSubmittedPrimaryReviewAcknowledgesTheRound(t *testing.T) {
 	}
 }
 
+func TestRegistryPrimaryCompletedCheckAcknowledgesTheRound(t *testing.T) {
+	r := firedRound(t, "abcdef123")
+	p := policy
+	p.Bot = dialect.CodexBotLogin
+	p.RequiredBots = []string{"some-other-bot[bot]"}
+	obs := Observation{
+		Head: "abcdef123", Open: true,
+		Checks: []CheckSeen{{
+			Bot: dialect.CodexBotLogin, Verdict: dialect.CheckDoneClean,
+			CompletedAt: t0.Add(time.Minute),
+		}},
+	}
+
+	tr := Progress(r, state.AccountQuota{}, obs, t0.Add(2*time.Minute), p)
+	if tr.Outcome != OutReviewing || tr.Reason != "check completed" {
+		t.Fatalf("completed primary check must release the slot, got %+v", tr)
+	}
+}
+
 func TestInflightTimeoutCarriesCooldown(t *testing.T) {
 	r := firedRound(t, "abcdef123")
 	now := t0.Add(16 * time.Minute)

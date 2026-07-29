@@ -236,7 +236,7 @@ func BuildOverview(st state.State, now time.Time, minInterval, inflight time.Dur
 	}
 
 	ov.InFlight = inFlight(st, now, inflight, botsFor)
-	ov.Queue = queueRows(st, now, minInterval)
+	ov.Queue = queueRows(st, now, minInterval, botsFor)
 	ov.Held = heldRows(st)
 	ov.Autofix = autofixView(st, now, maxAttempts)
 	ov.Finished = finishedRows(st)
@@ -345,8 +345,31 @@ func botMarks(r state.Round, bots []BotName) []Bot {
 	return out
 }
 
-func queueRows(st state.State, now time.Time, minInterval time.Duration) []QueueRow {
+func queueRows(st state.State, now time.Time, minInterval time.Duration, botsFor BotsFor) []QueueRow {
 	entries := st.Queue(now, minInterval)
+	hasPrimary := func(repo string) bool {
+		for _, bot := range botsFor(repo) {
+			if bot.Primary {
+				return true
+			}
+		}
+		return false
+	}
+	for i := range entries {
+		if !hasPrimary(entries[i].Repo) &&
+			(entries[i].Why == state.WaitAccountBlocked || entries[i].Why == state.WaitPacing) {
+			entries[i].Why = ""
+			entries[i].ReadyAt = time.Time{}
+		}
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		iReady := entries[i].Why == "" && entries[i].ReadyAt.IsZero()
+		jReady := entries[j].Why == "" && entries[j].ReadyAt.IsZero()
+		if iReady != jReady {
+			return iReady
+		}
+		return entries[i].Seq < entries[j].Seq
+	})
 	out := make([]QueueRow, 0, len(entries))
 	for i, e := range entries {
 		row := QueueRow{

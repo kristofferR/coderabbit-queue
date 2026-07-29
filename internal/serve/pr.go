@@ -312,6 +312,14 @@ func buildPRView(st state.State, repo string, pr int, bots []BotName, inflight t
 			// shows neither is the overview's session row with holes in it.
 			s := Session{Key: key, Repo: repo, PR: pr, Head: r.Head, Host: hostOf(d.Host),
 				Attempt: d.Attempts, Findings: d.Findings, Log: d.Log, Since: d.At}
+			for i := len(st.Archive) - 1; i >= 0; i-- {
+				archived := st.Archive[i]
+				if strings.EqualFold(archived.Repo, repo) && archived.PR == pr &&
+					archived.Dispatch != nil && archived.Dispatch.Token == d.Token {
+					s.Head = archived.Head
+					break
+				}
+			}
 			if maxAttempts != nil {
 				s.MaxAttempts = maxAttempts(repo)
 			}

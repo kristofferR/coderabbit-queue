@@ -134,7 +134,11 @@ func sameHostReport(prev, next HostReport) bool {
 	// Only when this reporter has an answer: a service that runs no fix sessions
 	// says nothing about the agent, and the record keeps what the autofix service
 	// on this host said — so its silence is not a difference to write out.
-	if next.Agent != "" && prev.Agent != next.Agent {
+	agentAuthoritative := false
+	for _, role := range next.Roles {
+		agentAuthoritative = agentAuthoritative || role == "autofix"
+	}
+	if (next.Agent != "" || agentAuthoritative) && prev.Agent != next.Agent {
 		return false
 	}
 	for _, role := range next.Roles {

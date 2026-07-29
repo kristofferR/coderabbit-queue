@@ -16,3 +16,13 @@ func TestSameHostReportComparesCapabilitiesForTheReportingRole(t *testing.T) {
 		t.Fatal("a changed serve capability was not detected")
 	}
 }
+
+func TestSameHostReportLetsAutofixClearItsAgent(t *testing.T) {
+	prev := HostReport{Agent: "claude", Roles: []string{"autofix"}}
+	if sameHostReport(prev, HostReport{Roles: []string{"autofix"}}) {
+		t.Fatal("autofix removing its agent must be recorded")
+	}
+	if !sameHostReport(prev, HostReport{Roles: []string{"serve"}}) {
+		t.Fatal("a role that does not choose the fix agent must preserve it silently")
+	}
+}

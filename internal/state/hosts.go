@@ -178,7 +178,11 @@ func (s *State) SetHostReport(r HostReport, now time.Time) {
 				caps[role] = prev.Caps
 			}
 		}
-		if r.Agent == "" {
+		agentAuthoritative := false
+		for _, role := range r.Roles {
+			agentAuthoritative = agentAuthoritative || role == "autofix"
+		}
+		if r.Agent == "" && !agentAuthoritative {
 			// Only the autofix service knows this. Every other service on the
 			// machine reports nothing, and replacing the answer with silence
 			// would make the agent flicker away on the next heartbeat.

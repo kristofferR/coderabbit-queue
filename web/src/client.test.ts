@@ -50,6 +50,7 @@ describe("dashboard data boundary", () => {
 
   it("validates event-stream frames with the endpoint contract", async () => {
     const valid = JSON.stringify({
+      rev: 17,
       repo: "openai/example",
       open: 4,
       eligible: 2,

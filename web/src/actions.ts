@@ -28,6 +28,7 @@ export type ActionBody = {
   reason?: string;
   /** Omitted entirely means "back to the fleet default" for autofix. */
   enabled?: boolean;
+  expected_rev?: number;
   /** Whole intended sets, not a delta — a delta could not express "none". */
   cobots?: string[];
   required?: string[];

@@ -932,6 +932,61 @@ func TestPreviewEnrollSpendsTheAllowanceAcrossTheBacklog(t *testing.T) {
 	}
 }
 
+func TestPreviewEnrollSpendsAllowanceWhenPricingReadFails(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.Reviewers = buildReviewers(cfg.Bot, cfg.ReviewCommand, cfg.RequiredBots, nil, false)
+	gh := newFakeGitHub()
+	for i := 1; i <= 2; i++ {
+		gh.searchPRs = append(gh.searchPRs, ghapi.SearchPR{Repo: "o/backlog", Number: i, Author: "kristofferR"})
+		var pull ghapi.Pull
+		pull.State, pull.Number, pull.Head.SHA = "open", i, fmt.Sprintf("%016d", i)
+		pull.ChangedFiles = 4
+		gh.pulls[fakeKey("o/backlog", i)] = pull
+	}
+	// reviewNeeded reads each pull once. Fail only the second read for #1,
+	// which is the pricing read after eligibility has already been established.
+	gh.pullErrOnRead[fakeKey("o/backlog", 1)] = 2
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		remaining := 1
+		st.Account.Remaining = &remaining
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	impact, err := NewService(cfg, gh, store, nil).PreviewEnroll(ctx, "o/backlog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if impact.Metered != 2 || impact.Unpriced != 2 {
+		t.Fatalf("impact = %+v, want failed #1 to spend the allowance before #2 is priced", impact)
+	}
+}
+
+func TestSetEnrollmentAtRejectsAStalePreview(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	impact, err := svc.PreviewEnroll(ctx, "o/new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.SetEnrollment("o/other", RepoEnrollment{Enabled: true})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.SetEnrollmentAt(ctx, "o/new", true, "", &impact.Rev); err == nil ||
+		!strings.Contains(err.Error(), "preview enrollment again") {
+		t.Fatalf("stale enrollment save error = %v, want preview-again refusal", err)
+	}
+}
+
 func TestPreviewEnrollDoesNotSpendCodeRabbitAllowanceForRegistryPrimary(t *testing.T) {
 	ctx := context.Background()
 	cfg, err := BuildConfig(map[string]string{

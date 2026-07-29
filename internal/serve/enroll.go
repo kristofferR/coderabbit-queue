@@ -46,6 +46,7 @@ type Candidate struct {
 
 // EnrollImpact is what enrolling a repository would do, before it is done.
 type EnrollImpact struct {
+	Rev             int64          `json:"rev"`
 	Repo            string         `json:"repo"`
 	Open            int            `json:"open"`
 	Eligible        int            `json:"eligible"`

@@ -135,7 +135,7 @@ export function AddRepo({
 
   const add = (repo: string) => {
     setBusy(repo);
-    runAdd(act("enroll", { repo, enabled: true }), {
+    runAdd(act("enroll", { repo, enabled: true, expected_rev: pending?.impact?.rev }), {
       onSuccess: ({ snapshot }) => {
         onSnapshot?.(snapshot);
         setPending(null);
