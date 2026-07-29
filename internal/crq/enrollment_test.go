@@ -337,6 +337,56 @@ func TestDisabledEnrollmentDoesNotRetryAnInflightRound(t *testing.T) {
 	}
 }
 
+func TestClearedEnrollmentDoesNotRetryOutsideTheEnvAllowlist(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/other": true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	now := time.Now().UTC()
+
+	if _, err := svc.SetEnrollment(ctx, "o/adopted", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		round, err := st.NewRound("o/adopted", 7, "abcdef123", now.Add(-time.Hour))
+		if err != nil {
+			return err
+		}
+		round.Phase = PhaseFired
+		round.FiredAt = &now
+		st.PutRound(*round)
+		st.FireSlot = &FireSlot{Key: QueueKey(round.Repo, round.PR), Token: round.Token, Since: now}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ClearEnrollment(ctx, "o/adopted"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.Update(ctx, func(st *State) error {
+		round := st.Round("o/adopted", 7)
+		return svc.applyTransition(st, round, engine.Transition{
+			Outcome: engine.OutRetry,
+			Reason:  "review failed",
+			RetryAt: now.Add(time.Minute),
+		}, now, cfg)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round("o/adopted", 7); round != nil {
+		t.Fatalf("cleared round = %+v, want it archived instead of retryable", round)
+	}
+	if len(st.Archive) != 1 || st.Archive[0].Phase != PhaseAbandoned {
+		t.Fatalf("archive = %+v, want the cleared in-flight round retained as abandoned", st.Archive)
+	}
+}
+
 func TestDisablingEnrollmentRefusesAClaimedTriggerPost(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()

@@ -518,10 +518,12 @@ function FindingRow({
           <span className="mt-0.5 block font-mono text-[12px] text-faint">
             {f.bot}
             {f.path ? ` · ${f.path}${f.line ? `:${f.line}` : ""}` : ""}
+            {f.category ? ` · ${f.category}` : ""}
+            {f.effort ? ` · ${f.effort}` : ""}
             {f.thread_id ? " · thread open" : ""}
           </span>
         </span>
-        <Pill tone={SEV_TONE[sev] ?? "mut"}>{sev}</Pill>
+        <Pill tone={SEV_TONE[sev] ?? "mut"}>{f.scale || sev}</Pill>
       </button>
       {open && (
         <div className="border-t border-[#EEF0F3] px-4 py-2.5 text-[13px] text-mut">

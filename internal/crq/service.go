@@ -937,7 +937,7 @@ func (s *Service) applyTransition(st *State, r *Round, tr engine.Transition, now
 		// instead says to retry, the next command would be a new purchase after
 		// the switch was thrown. Keep any account-wide block learned above, but
 		// end this repository's round before it becomes fire-eligible again.
-		if rec, ok := st.Enrollment(r.Repo); ok && !rec.Enabled {
+		if !s.reviewsRepo(*st, r.Repo) {
 			st.EndRound(r.Repo, r.PR, "repository turned off before retry")
 			releaseSlot(st, key)
 			return nil

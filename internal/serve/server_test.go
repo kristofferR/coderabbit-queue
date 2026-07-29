@@ -400,7 +400,7 @@ func TestAPrimarysAnswerStaysWithThePrimaryThatGaveIt(t *testing.T) {
 	running := []BotName{{Login: "macroscope[bot]", Name: "macroscope", Primary: true}}
 
 	macroscope := func(st state.State) BotCard {
-		for _, card := range botCards(st, cfg, running, now) {
+		for _, card := range botCards(st, cfg, func(string) []BotName { return running }, now) {
 			if card.Login == "macroscope[bot]" {
 				return card
 			}
@@ -432,7 +432,7 @@ func TestBotCardsUseTheEffectiveFleetPrimary(t *testing.T) {
 	running := []BotName{
 		{Login: "cursor[bot]", Name: "bugbot", Primary: true, Required: true},
 	}
-	cards := botCards(state.State{}, cfg, running, now)
+	cards := botCards(state.State{}, cfg, func(string) []BotName { return running }, now)
 	primary := ""
 	for _, card := range cards {
 		if card.Primary {
@@ -454,7 +454,7 @@ func TestBotCardsRetainConfiguredPrimaryWhenEffectiveSetIsUnavailable(t *testing
 	cfg := FleetConfig{Reviewers: []ReviewerCfg{{
 		Login: "coderabbitai[bot]", Name: "coderabbit", Primary: true, Metered: true,
 	}}}
-	cards := botCards(state.State{}, cfg, nil, time.Now())
+	cards := botCards(state.State{}, cfg, func(string) []BotName { return nil }, time.Now())
 	for _, card := range cards {
 		if card.Login == "coderabbitai[bot]" {
 			if !card.Primary || !card.Metered {
@@ -476,7 +476,7 @@ func TestBotCardsUseEffectiveReviewerMetadata(t *testing.T) {
 		Login: "cursor[bot]", Name: "bugbot", Command: "new command",
 		Trigger: "always", Grace: Dur(7 * time.Minute),
 	}}
-	cards := botCards(state.State{}, cfg, running, now)
+	cards := botCards(state.State{}, cfg, func(string) []BotName { return running }, now)
 	for _, card := range cards {
 		if card.Login != "cursor[bot]" {
 			continue
@@ -494,7 +494,7 @@ func TestBotCardsDistinguishRegistryReviewersFromCustomGates(t *testing.T) {
 		{Login: "cursor[bot]", Name: "bugbot"},
 		{Login: "sonar[bot]", Name: "sonar", Required: true},
 	}}
-	cards := botCards(state.State{}, cfg, nil, time.Now())
+	cards := botCards(state.State{}, cfg, func(string) []BotName { return nil }, time.Now())
 	got := map[string]bool{}
 	for _, card := range cards {
 		got[card.Login] = card.Configurable
@@ -505,6 +505,38 @@ func TestBotCardsDistinguishRegistryReviewersFromCustomGates(t *testing.T) {
 	if got["sonar[bot]"] {
 		t.Error("custom required login is marked as a triggerable registry co-reviewer")
 	}
+}
+
+func TestBotCardsIncludeRepositoryOnlyReviewers(t *testing.T) {
+	st := state.New()
+	st.Repos = map[string]state.RepoReviewers{}
+	st.Repos["o/special"] = state.RepoReviewers{
+		Required:    []string{"cursor[bot]"},
+		SetRequired: true,
+	}
+	botsFor := func(repo string) []BotName {
+		if repo == "o/special" {
+			return []BotName{{
+				Login: "cursor[bot]", Name: "bugbot", Required: true,
+				Command: "bugbot run", Trigger: "always", Grace: Dur(time.Minute),
+			}}
+		}
+		return nil
+	}
+
+	for _, card := range botCards(st, FleetConfig{}, botsFor, time.Now()) {
+		if card.Login != "cursor[bot]" {
+			continue
+		}
+		if !card.Enabled || !card.Required || card.Status != "unverified" || card.RepoCount != 1 {
+			t.Fatalf("repository-only reviewer card = %+v", card)
+		}
+		if card.Command != "bugbot run" || card.Trigger != "always" || card.Grace != Dur(time.Minute) {
+			t.Fatalf("repository-only reviewer lost effective metadata: %+v", card)
+		}
+		return
+	}
+	t.Fatal("no card for the repository-only reviewer")
 }
 
 func TestCoOnlyRoundLeavesPrimaryPending(t *testing.T) {

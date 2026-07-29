@@ -358,7 +358,7 @@ func BuildFleet(st state.State, cfg FleetConfig, ov Overview, tools []Tool, tool
 	return Snapshot{
 		Overview: ov,
 		Repos:    repoRows(st, cfg, now, botsFor, enrollFor, solverFor),
-		Bots:     botCards(st, cfg, botsFor(""), now),
+		Bots:     botCards(st, cfg, botsFor, now),
 		Setup:    setupView(st, cfg, ov, tools, toolsHost),
 		Settings: SettingsView{Config: cfg, Quota: ov.Quota, Plumbing: plumbing(st, cfg), Fleet: fleet, Env: env},
 	}
@@ -496,7 +496,8 @@ func (c FleetConfig) enrollmentOf(repo string) string {
 	return "unknown"
 }
 
-func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Time) []BotCard {
+func botCards(st state.State, cfg FleetConfig, botsFor BotsFor, now time.Time) []BotCard {
+	fleetBots := botsFor("")
 	seen := map[string]*time.Time{}
 	asked := map[string]*time.Time{}
 	where := map[string]string{}
@@ -586,9 +587,27 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Tim
 	}
 
 	repoCount := map[string]int{}
-	for _, rv := range st.Repos {
-		for _, b := range rv.CoBots {
-			repoCount[dialect.NormalizeBotName(b)]++
+	repoBots := map[string]BotName{}
+	repoRequired := map[string]bool{}
+	repos := make([]string, 0, len(st.Repos))
+	for repo := range st.Repos {
+		repos = append(repos, repo)
+	}
+	sort.Strings(repos)
+	for _, repo := range repos {
+		rv := st.Repos[repo]
+		named := map[string]bool{}
+		for _, login := range append(append([]string(nil), rv.CoBots...), rv.Required...) {
+			named[dialect.NormalizeBotName(login)] = true
+		}
+		for _, b := range botsFor(repo) {
+			key := dialect.NormalizeBotName(b.Login)
+			if !named[key] {
+				continue
+			}
+			repoCount[key]++
+			repoBots[key] = b
+			repoRequired[key] = repoRequired[key] || b.Required
 		}
 	}
 
@@ -607,10 +626,13 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Tim
 	add := func(login, name string, primary, metered bool, from *ReviewerCfg) {
 		key := dialect.NormalizeBotName(login)
 		b, on := running[key]
+		if !on {
+			b, on = repoBots[key]
+		}
 		_, configurable := dialect.CoReviewerByName(login)
 		card := BotCard{
 			Login: login, Name: name, Primary: primary, Metered: metered,
-			Enabled: on, Required: on && b.Required, Configurable: configurable,
+			Enabled: on, Required: on && (b.Required || repoRequired[key]), Configurable: configurable,
 			LastSeen: seen[key], LastAsked: asked[key], SeenOn: where[key],
 			RepoCount: repoCount[key],
 			Status:    botStatus(on, seen[key], asked[key], now, answerLog),
@@ -635,7 +657,9 @@ func botCards(st state.State, cfg FleetConfig, fleetBots []BotName, now time.Tim
 				}
 			}
 		}
-		if from != nil {
+		if on {
+			card.Command, card.Trigger, card.Grace = b.Command, b.Trigger, b.Grace
+		} else if from != nil {
 			card.Command, card.Trigger, card.Grace = from.Command, from.Trigger, from.Grace
 		}
 		out = append(out, card)

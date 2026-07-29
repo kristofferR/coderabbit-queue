@@ -73,7 +73,7 @@ export function AddRepo({
   const [busy, setBusy] = useState<string | null>(null);
   const requested = useRef(false);
   const { run: runRequest, error } = useOperation();
-  const { run: runPreview } = useOperation();
+  const { run: runPreview, running: previewing } = useOperation();
   const { run: runAdd, error: addError, clearError: clearAddError } = useOperation();
   // The backlog contract: enrolling a repository with a dozen open pull
   // requests becomes a dozen metered reviews on the next pass. Nothing is
@@ -279,7 +279,7 @@ export function AddRepo({
           <Confirm
             title={`Review ${pending.repo}?`}
             confirmLabel={busy ? "Adding…" : "Add it"}
-            busy={busy === pending.repo}
+            busy={previewing || busy === pending.repo}
             error={pending.error ?? addError}
             body={<EnrollImpactCopy preview={pending} />}
             onConfirm={() => void add(pending.repo)}
@@ -325,7 +325,7 @@ export function EnrollmentEditor({
   const [confirming, setConfirming] = useState(false);
   const [why, setWhy] = useState("");
   const { run: runOperation, running: busy, error } = useOperation();
-  const { run: runPreview } = useOperation();
+  const { run: runPreview, running: previewing } = useOperation();
   const [warning, setWarning] = useState<string | null>(null);
   const [enablePreview, setEnablePreview] = useState<EnrollPreview | null>(null);
 
@@ -457,7 +457,7 @@ export function EnrollmentEditor({
         <Confirm
           title={`Review ${repo}?`}
           confirmLabel="Review this repository"
-          busy={busy}
+          busy={previewing || busy}
           error={enablePreview.error ?? error}
           body={<EnrollImpactCopy preview={enablePreview} />}
           onConfirm={() => void run({ repo, enabled: true })}

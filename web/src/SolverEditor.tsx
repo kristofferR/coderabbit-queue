@@ -154,16 +154,25 @@ export function SolverEditor({
             {solver.agent_on?.map((h) => (
               <span
                 key={h.host}
-                title={h.has ? h.path : "not on the PATH that host's service runs with"}
-                className={`rounded-full border px-2 py-0.5 ${
-                  h.has === undefined
-                    ? "border-edge text-faint"
+                title={
+                  h.stale
+                    ? "this host's last report is stale"
                     : h.has
-                      ? "border-ok-edge bg-ok-bg text-ok"
-                      : "border-bad-edge bg-bad-bg text-bad"
+                      ? h.path
+                      : "not on the PATH that host's service runs with"
+                }
+                className={`rounded-full border px-2 py-0.5 ${
+                  h.stale
+                    ? "border-warn-edge bg-warn-bg text-warn"
+                    : h.has === undefined
+                      ? "border-edge text-faint"
+                      : h.has
+                        ? "border-ok-edge bg-ok-bg text-ok"
+                        : "border-bad-edge bg-bad-bg text-bad"
                 }`}
               >
-                {h.host} {h.has === undefined ? "· unknown" : h.has ? "✓" : "missing"}
+                {h.host}{" "}
+                {h.stale ? "· stale" : h.has === undefined ? "· unknown" : h.has ? "✓" : "missing"}
               </span>
             ))}
           </p>

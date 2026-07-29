@@ -1,7 +1,7 @@
 import { Effect, Schema } from "effect";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { decodeFrame, requestJson } from "./client";
-import { EnrollImpactSchema } from "./data/contracts";
+import { EnrollImpactSchema, FindingSchema } from "./data/contracts";
 
 const NameSchema = Schema.Struct({ name: Schema.String });
 
@@ -68,6 +68,24 @@ describe("dashboard data boundary", () => {
       Effect.flip(decodeFrame(EnrollImpactSchema, '{"repo":"openai/example"}')),
     );
     expect(failure.kind).toBe("decode");
+  });
+
+  it("preserves reviewer rubric metadata on findings", async () => {
+    const finding = JSON.stringify({
+      id: "finding-1",
+      bot: "coderabbitai[bot]",
+      severity: "potential",
+      scale: "P2",
+      category: "Bug",
+      effort: "Quick win",
+      title: "Keep the useful labels",
+    });
+
+    await expect(Effect.runPromise(decodeFrame(FindingSchema, finding))).resolves.toMatchObject({
+      scale: "P2",
+      category: "Bug",
+      effort: "Quick win",
+    });
   });
 
   it("propagates Effect interruption into the fetch AbortSignal", async () => {
