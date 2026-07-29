@@ -122,7 +122,7 @@ func (s *Service) costWith(st State, repo string, pr int, head string, d dialect
 		// automatically, or may not participate in this round at all. Its
 		// published price is therefore an upper bound, never a guaranteed
 		// minimum.
-		if !r.Metered() && r.Trigger != engine.TriggerAlways {
+		if !est.Metered && r.Trigger != engine.TriggerAlways {
 			est.Low = 0
 			if est.High > 0 {
 				est.Exact = false

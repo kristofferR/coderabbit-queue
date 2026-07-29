@@ -98,6 +98,36 @@ func TestEnrollmentPrecedence(t *testing.T) {
 	}
 }
 
+func TestSetEnrollmentHonorsFleetExcludePolicy(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "o/gate",
+		"CRQ_HOST": "testhost",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Fleet.Env = map[string]string{"CRQ_EXCLUDE": "o/excluded"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if _, err := svc.SetEnrollment(ctx, "o/excluded", true, ""); err == nil {
+		t.Fatal("enrolling a repository excluded by fleet policy succeeded")
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.Enrollment("o/excluded"); ok {
+		t.Fatal("rejected fleet-excluded enrollment persisted a record")
+	}
+}
+
 func TestSetEnrollmentRejectsInvalidRepositorySlugs(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()

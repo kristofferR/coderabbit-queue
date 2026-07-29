@@ -366,6 +366,14 @@ func TestSetEnvNormalizesStoredValues(t *testing.T) {
 	}
 }
 
+func TestConfigValueOfIncludesCalibrationTTL(t *testing.T) {
+	cfg := firingConfig()
+	cfg.CalibrationTTL = 7 * time.Minute
+	if got := configValueOf(cfg, "CRQ_CALIBRATE_TTL"); got != "7m0s" {
+		t.Fatalf("calibration TTL = %q, want 7m0s", got)
+	}
+}
+
 func TestDashboardReviewerSummaryUsesFleetState(t *testing.T) {
 	cfg, err := BuildConfig(map[string]string{
 		"CRQ_REPO":   "owner/gate",

@@ -25,8 +25,19 @@ func migrateV5State(raw []byte) ([]byte, error) {
 	}
 
 	next := make(map[string]any)
-	env := make(map[string]string)
+	env := make(map[string]json.RawMessage)
+	if valueRaw, ok := legacy["env"]; ok {
+		// Some v5 writers already emitted FleetDefaults while others still
+		// emitted the flat policy. Start with the nested shape so flat legacy
+		// keys below deterministically win when both spell the same setting.
+		if err := json.Unmarshal(valueRaw, &env); err != nil {
+			return nil, fmt.Errorf("decode v5 fleet env: %w", err)
+		}
+	}
 	for key, valueRaw := range legacy {
+		if key == "env" {
+			continue
+		}
 		var value string
 		if err := json.Unmarshal(valueRaw, &value); err != nil {
 			// V4 values were strings. Preserve an unexpected future member
@@ -46,23 +57,14 @@ func migrateV5State(raw []byte) ([]byte, error) {
 			next["min_interval"] = strings.TrimSpace(value)
 		default:
 			if envKey, ok := legacyFleetEnvKey(key); ok {
-				env[envKey] = strings.TrimSpace(value)
+				env[envKey], _ = json.Marshal(strings.TrimSpace(value))
 			} else {
 				next[key] = value
 			}
 		}
 	}
 	if len(env) > 0 {
-		merged := make(map[string]string)
-		if existing, ok := next["env"].(json.RawMessage); ok {
-			if err := json.Unmarshal(existing, &merged); err != nil {
-				return nil, fmt.Errorf("decode v5 fleet env: %w", err)
-			}
-		}
-		for key, value := range env {
-			merged[key] = value
-		}
-		next["env"] = merged
+		next["env"] = env
 	}
 	encoded, err := json.Marshal(next)
 	if err != nil {

@@ -116,8 +116,41 @@ func (s State) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON decodes fleet defaults and remembers anything it did not recognise.
 func (f *FleetDefaults) UnmarshalJSON(raw []byte) error {
 	type plain FleetDefaults
+	decodable := raw
+	var object map[string]json.RawMessage
+	var envUnknown unknownFields
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return err
+	}
+	if envRaw, ok := object["env"]; ok {
+		var nested map[string]json.RawMessage
+		if err := json.Unmarshal(envRaw, &nested); err != nil {
+			return err
+		}
+		known := make(map[string]string)
+		for key, valueRaw := range nested {
+			var value string
+			if err := json.Unmarshal(valueRaw, &value); err != nil {
+				if envUnknown == nil {
+					envUnknown = unknownFields{}
+				}
+				envUnknown[key] = valueRaw
+				continue
+			}
+			known[key] = value
+		}
+		knownRaw, err := json.Marshal(known)
+		if err != nil {
+			return err
+		}
+		object["env"] = knownRaw
+		decodable, err = json.Marshal(object)
+		if err != nil {
+			return err
+		}
+	}
 	var decoded plain
-	if err := json.Unmarshal(raw, &decoded); err != nil {
+	if err := json.Unmarshal(decodable, &decoded); err != nil {
 		return err
 	}
 	unknown, err := captureUnknown(raw, fleetFields)
@@ -125,6 +158,7 @@ func (f *FleetDefaults) UnmarshalJSON(raw []byte) error {
 		return err
 	}
 	*f = FleetDefaults(decoded)
+	f.envUnknown = envUnknown
 	f.unknown = unknown
 	return nil
 }
@@ -132,7 +166,31 @@ func (f *FleetDefaults) UnmarshalJSON(raw []byte) error {
 // MarshalJSON writes fleet defaults back with the members it did not recognise intact.
 func (f FleetDefaults) MarshalJSON() ([]byte, error) {
 	type plain FleetDefaults
-	return mergeUnknown(plain(f), f.unknown)
+	raw, err := mergeUnknown(plain(f), f.unknown)
+	if err != nil || len(f.envUnknown) == 0 {
+		return raw, err
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return nil, err
+	}
+	nested := make(map[string]json.RawMessage, len(f.Env)+len(f.envUnknown))
+	for key, valueRaw := range f.envUnknown {
+		nested[key] = valueRaw
+	}
+	for key, value := range f.Env {
+		valueRaw, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		nested[key] = valueRaw
+	}
+	envRaw, err := json.Marshal(nested)
+	if err != nil {
+		return nil, err
+	}
+	object["env"] = envRaw
+	return json.Marshal(object)
 }
 
 // UnmarshalJSON decodes solver settings and remembers anything it did not recognise.

@@ -45,3 +45,34 @@ func TestCostUsesZeroLowerBoundForConditionalPaidReviewer(t *testing.T) {
 	}
 	t.Fatal("macroscope estimate was not included")
 }
+
+func TestCostMarksAllowanceUseByVendorInsteadOfPrimaryRole(t *testing.T) {
+	codeRabbitCfg, err := BuildConfig(map[string]string{"CRQ_REPO": "o/gate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	codeRabbitCost := (&Service{cfg: codeRabbitCfg}).costWith(
+		DefaultState(codeRabbitCfg), "o/repo", 1, "abcdef123",
+		dialect.DiffStat{}, dialect.Allowance{Remaining: 1, RemainingKnown: true},
+	)
+	if len(codeRabbitCost.Reviewers) == 0 || !codeRabbitCost.Reviewers[0].Metered {
+		t.Fatalf("CodeRabbit estimate = %+v, want shared allowance marked", codeRabbitCost.Reviewers)
+	}
+
+	registryCfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":       "o/gate",
+		"CRQ_BOT":        "chatgpt-codex-connector[bot]",
+		"CRQ_REVIEW_CMD": "@codex review",
+		"CRQ_COBOTS":     "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registryCost := (&Service{cfg: registryCfg}).costWith(
+		DefaultState(registryCfg), "o/repo", 1, "abcdef123",
+		dialect.DiffStat{}, dialect.Allowance{Remaining: 1, RemainingKnown: true},
+	)
+	if len(registryCost.Reviewers) == 0 || registryCost.Reviewers[0].Metered {
+		t.Fatalf("registry-primary estimate = %+v, want no CodeRabbit allowance use", registryCost.Reviewers)
+	}
+}

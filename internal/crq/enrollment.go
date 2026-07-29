@@ -117,8 +117,8 @@ func (s *Service) SetEnrollment(ctx context.Context, repo string, enabled bool, 
 	}
 	now := s.clock().UTC()
 	st, err := s.store.Update(ctx, func(st *State) error {
-		if s.cfg.WithFleet(st.Fleet).ExcludeRepos[repo] {
-			return fmt.Errorf("%s is in CRQ_EXCLUDE on %s — that is a kill switch and shared enrollment does not override it", repo, s.cfg.Host)
+		if enabled && s.cfg.WithFleet(st.Fleet).ExcludeRepos[repo] {
+			return fmt.Errorf("%s is in the fleet CRQ_EXCLUDE policy — shared enrollment does not override it", repo)
 		}
 		if cur, ok := st.Enrollment(repo); ok && cur.Enabled == enabled && cur.Reason == reason {
 			return ErrNoChange

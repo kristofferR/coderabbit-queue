@@ -53,6 +53,9 @@ type FleetDefaults struct {
 	By        string     `json:"by,omitempty"`
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
 
+	// envUnknown carries members a newer binary wrote inside Env with a value
+	// shape this binary cannot parse yet.
+	envUnknown unknownFields
 	// unknown carries members a newer binary wrote inside this record. State's
 	// own carrier cannot: it sees "fleet" as a member it knows and hands the
 	// whole object to the ordinary decoder. See tolerant.go.
@@ -70,7 +73,7 @@ type FleetDefaults struct {
 func (f FleetDefaults) Empty() bool {
 	return !f.SetCoBots && !f.SetRequired && f.MinInterval == "" &&
 		f.WeeklyLimit == nil && f.AutofixDefault == nil && f.Solver.Empty() &&
-		len(f.Env) == 0 && len(f.unknown) == 0
+		len(f.Env) == 0 && len(f.envUnknown) == 0 && len(f.unknown) == 0
 }
 
 // AutofixDefaultOn is the answer for a repository with no explicit switch.
