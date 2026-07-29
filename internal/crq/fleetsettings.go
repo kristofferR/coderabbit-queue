@@ -102,7 +102,7 @@ func (s *Service) fleetViewOf(st State) FleetView {
 		}
 		return false
 	}
-	from("reviewers", recorded("CRQ_BOT", "CRQ_COBOTS", "CRQ_REQUIRED_BOTS"), "CRQ_COBOTS", "CRQ_REQUIRED_BOTS")
+	from("reviewers", recorded("CRQ_BOT", "CRQ_COBOTS", "CRQ_REQUIRED_BOTS"), "CRQ_BOT", "CRQ_COBOTS", "CRQ_REQUIRED_BOTS")
 	from("min_interval", recorded("CRQ_MIN_INTERVAL"), "CRQ_MIN_INTERVAL")
 	from("weekly_limit", recorded("CRQ_WEEKLY_LIMIT"), "CRQ_WEEKLY_LIMIT")
 	from("autofix_default", st.Fleet.AutofixDefault != nil)
@@ -745,6 +745,8 @@ func configValueOf(cfg Config, key string) string {
 		return cfg.InflightTimeout.String()
 	case "CRQ_RL_FALLBACK":
 		return cfg.RateLimitFallback.String()
+	case "CRQ_CALIBRATE_TTL":
+		return cfg.CalibrationTTL.String()
 	case "CRQ_WEEKLY_LIMIT":
 		return fmt.Sprint(cfg.WeeklyReviewLimit)
 	case "CRQ_AUTOREVIEW_POLL":
@@ -930,15 +932,7 @@ func (s *Service) SetEnv(ctx context.Context, key, value string, unset bool) (Fl
 	after := loaded
 	after.Fleet = fleetEnvSet(loaded.Fleet, key, value, unset)
 	open := map[string]map[int]bool{}
-	affectedRepos := s.reposFollowingFleet(loaded)
-	if key == "CRQ_BOT" {
-		// The primary is never overridden by a repository's co-reviewer or
-		// required-set choices. Only PrimaryOff blocks a fleet primary change.
-		affectedRepos = s.fleetReposWhere(loaded, func(repo string) bool {
-			ov, ok := loaded.RepoOverride(repo)
-			return !ok || !ov.PrimaryOff
-		})
-	}
+	affectedRepos := s.affectedReposForEnvKey(loaded, key)
 	for _, repo := range affectedRepos {
 		if sameReviewers(s.cfgFor(loaded, repo), s.cfgFor(after, repo)) {
 			continue
@@ -964,13 +958,7 @@ func (s *Service) SetEnv(ctx context.Context, key, value string, unset bool) (Fl
 		// fleet after the open-PR prefetch above. It has no prefetched open set,
 		// so reopenForChangedReviewers conservatively marks its completed rounds
 		// for reopening when that PR is next observed alive.
-		affectedRepos := s.reposFollowingFleet(*st)
-		if key == "CRQ_BOT" {
-			affectedRepos = s.fleetReposWhere(*st, func(repo string) bool {
-				ov, ok := st.RepoOverride(repo)
-				return !ok || !ov.PrimaryOff
-			})
-		}
+		affectedRepos := s.affectedReposForEnvKey(*st, key)
 		for _, repo := range affectedRepos {
 			before[repo] = s.cfgFor(*st, repo)
 		}
@@ -989,6 +977,18 @@ func (s *Service) SetEnv(ctx context.Context, key, value string, unset bool) (Fl
 		return FleetView{}, err
 	}
 	return s.fleetViewOf(st), nil
+}
+
+func (s *Service) affectedReposForEnvKey(st State, key string) []string {
+	if key == "CRQ_BOT" {
+		// The primary is never overridden by a repository's co-reviewer or
+		// required-set choices. Only PrimaryOff blocks a fleet primary change.
+		return s.fleetReposWhere(st, func(repo string) bool {
+			ov, ok := st.RepoOverride(repo)
+			return !ok || !ov.PrimaryOff
+		})
+	}
+	return s.reposFollowingFleet(st)
 }
 
 // fleetEnvSet returns fd with one generic setting recorded or removed.

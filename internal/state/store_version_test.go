@@ -150,7 +150,8 @@ func TestLoadMigratesAlreadyNestedV5FleetDefaults(t *testing.T) {
 			"required":["coderabbitai[bot]"],
 			"set_required":true,
 			"min_interval":"3m",
-			"env":{"CRQ_SETTLE":"45s"}
+			"env":{"CRQ_SETTLE":"45s"},
+			"scope":"owner"
 		}
 	}`
 	st, _, err := versionStore(t, payload).Load(context.Background())
@@ -160,7 +161,8 @@ func TestLoadMigratesAlreadyNestedV5FleetDefaults(t *testing.T) {
 	if st.Version != SchemaVersion || !st.Fleet.SetCoBots || !st.Fleet.SetRequired ||
 		strings.Join(st.Fleet.CoBots, ",") != "codex" ||
 		strings.Join(st.Fleet.Required, ",") != "coderabbitai[bot]" ||
-		st.Fleet.MinInterval != "3m" || st.Fleet.Env["CRQ_SETTLE"] != "45s" {
+		st.Fleet.MinInterval != "3m" || st.Fleet.Env["CRQ_SETTLE"] != "45s" ||
+		st.Fleet.Env["CRQ_SCOPE"] != "owner" {
 		t.Fatalf("nested v5 fleet defaults were not preserved: %+v", st.Fleet)
 	}
 }

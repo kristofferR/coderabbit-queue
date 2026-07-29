@@ -112,14 +112,14 @@ func (s *Service) SetEnrollment(ctx context.Context, repo string, enabled bool, 
 	if !enabled && strings.TrimSpace(reason) == "" {
 		return EnrollmentView{}, errors.New("turning a repository off needs --reason (every screen that shows it will show why)")
 	}
-	if s.cfg.ExcludeRepos[repo] {
-		return EnrollmentView{}, fmt.Errorf("%s is in CRQ_EXCLUDE on %s — that is a per-host kill switch and shared state does not override it", repo, s.cfg.Host)
-	}
 	if repo == NormalizeRepo(s.cfg.GateRepo) {
 		return EnrollmentView{}, fmt.Errorf("%s is the gate repository: it holds crq's own state and dashboard", repo)
 	}
 	now := s.clock().UTC()
 	st, err := s.store.Update(ctx, func(st *State) error {
+		if s.cfg.WithFleet(st.Fleet).ExcludeRepos[repo] {
+			return fmt.Errorf("%s is in CRQ_EXCLUDE on %s — that is a kill switch and shared enrollment does not override it", repo, s.cfg.Host)
+		}
 		if cur, ok := st.Enrollment(repo); ok && cur.Enabled == enabled && cur.Reason == reason {
 			return ErrNoChange
 		}
@@ -558,16 +558,7 @@ func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact,
 		impact.Low += cost.Low
 		impact.High += cost.High
 		for _, r := range cost.Reviewers {
-			// The vendor owns the budget, not the role. A registry bot may be
-			// configured as CRQ_BOT while still consuming none of CodeRabbit's
-			// account allowance.
-			registryReviewer, known := dialect.CoReviewerByName(r.Bot)
-			metered := !known &&
-				dialect.NormalizeBotName(r.Bot) == dialect.NormalizeBotName(cfg.Bot)
-			if known {
-				metered = registryReviewer.Budget == dialect.BudgetAccount
-			}
-			if metered {
+			if r.Metered {
 				impact.Metered++
 				if allowance.Remaining > 0 {
 					allowance.Remaining--

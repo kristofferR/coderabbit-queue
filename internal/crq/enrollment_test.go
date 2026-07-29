@@ -207,6 +207,15 @@ func TestEnrollmentAndScanUseFleetResolvedPolicy(t *testing.T) {
 	if view := svc.enrollmentOf(st, "fleet-owner/excluded"); view.Enabled || view.Source != "excluded" {
 		t.Fatalf("fleet exclusion was ignored: %+v", view)
 	}
+	if _, err := svc.SetEnrollment(ctx, "fleet-owner/excluded", true, ""); err == nil {
+		t.Fatal("enrolling a fleet-excluded repository must be refused")
+	}
+	if st, _, err = store.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.Enrollment("fleet-owner/excluded"); ok {
+		t.Fatal("fleet-excluded repository was persisted")
+	}
 	if targets, scoped := svc.scanTargets(st); scoped || len(targets) != 1 || targets[0] != "fleet-owner/new" {
 		t.Fatalf("scan targets = %v scoped=%v, want only the fleet-resolved repository", targets, scoped)
 	}

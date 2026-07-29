@@ -104,16 +104,29 @@ func TestEnvSettingsRenderEffectiveDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	settings := (&Service{cfg: cfg}).EnvSettings(State{})
+	foundCalibration := false
+	foundDegrade := false
 	for _, setting := range settings {
+		if setting.Key == "CRQ_CALIBRATE_TTL" {
+			foundCalibration = true
+			if setting.Value != "2m0s" || setting.Source != "default" {
+				t.Fatalf("calibration setting = %+v, want the effective default", setting)
+			}
+		}
 		if setting.Key != "CRQ_RL_CO_DEGRADE" {
 			continue
 		}
+		foundDegrade = true
 		if setting.Value != "1" || setting.Source != "default" {
 			t.Fatalf("degrade setting = %+v, want the effective on-by-default value", setting)
 		}
-		return
 	}
-	t.Fatal("CRQ_RL_CO_DEGRADE was not listed")
+	if !foundCalibration {
+		t.Fatal("CRQ_CALIBRATE_TTL was not listed")
+	}
+	if !foundDegrade {
+		t.Fatal("CRQ_RL_CO_DEGRADE was not listed")
+	}
 }
 
 func TestFleetViewRecognizesGenericFleetProvenance(t *testing.T) {
@@ -304,6 +317,25 @@ func TestFleetViewRecognizesExplicitEmptyEnvironmentOverrides(t *testing.T) {
 	}
 	if got := view.Sources["reviewers"]; got != "env" {
 		t.Fatalf("reviewer source = %q, want env for a present empty override", got)
+	}
+}
+
+func TestFleetViewRecognizesPrimaryEnvironmentOverride(t *testing.T) {
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate",
+		"CRQ_HOST": "testhost",
+		"CRQ_BOT":  "replacement-reviewer[bot]",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil).
+		FleetSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := view.Sources["reviewers"]; got != "env" {
+		t.Fatalf("reviewer source = %q, want env for CRQ_BOT", got)
 	}
 }
 

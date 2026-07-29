@@ -53,7 +53,16 @@ func migrateV5State(raw []byte) ([]byte, error) {
 		}
 	}
 	if len(env) > 0 {
-		next["env"] = env
+		merged := make(map[string]string)
+		if existing, ok := next["env"].(json.RawMessage); ok {
+			if err := json.Unmarshal(existing, &merged); err != nil {
+				return nil, fmt.Errorf("decode v5 fleet env: %w", err)
+			}
+		}
+		for key, value := range env {
+			merged[key] = value
+		}
+		next["env"] = merged
 	}
 	encoded, err := json.Marshal(next)
 	if err != nil {

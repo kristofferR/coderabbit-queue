@@ -89,6 +89,8 @@ type CostEstimate struct {
 	Bot  string
 	Low  float64
 	High float64
+	// Metered says this review spends CodeRabbit's account allowance.
+	Metered bool
 	// Exact says Low and High are the same number and that number is not a
 	// guess.
 	Exact bool
@@ -137,7 +139,7 @@ func EstimateMacroscope(d DiffStat) CostEstimate {
 // EstimateCodeRabbit prices one CodeRabbit review of this diff against the
 // account's remaining allowance.
 func EstimateCodeRabbit(login string, d DiffStat, a Allowance) CostEstimate {
-	est := CostEstimate{Bot: login}
+	est := CostEstimate{Bot: login, Metered: true}
 	switch {
 	case !a.RemainingKnown:
 		est.Unknown = true
@@ -179,10 +181,14 @@ func EstimateCodeRabbit(login string, d DiffStat, a Allowance) CostEstimate {
 // primary still lands on its own estimator.
 func EstimateCost(login, primary string, d DiffStat, a Allowance) CostEstimate {
 	if co, ok := CoReviewerByName(login); ok {
+		var estimate CostEstimate
 		if co.Price != nil {
-			return co.Price(d)
+			estimate = co.Price(d)
+		} else {
+			estimate = freeEstimate(co.Login, "covered by its own subscription — it spends no per-review money")
 		}
-		return freeEstimate(co.Login, "covered by its own subscription — it spends no per-review money")
+		estimate.Metered = co.Budget == BudgetAccount
+		return estimate
 	}
 	if primary != "" && NormalizeBotName(login) == NormalizeBotName(primary) {
 		return EstimateCodeRabbit(login, d, a)

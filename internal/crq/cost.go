@@ -15,6 +15,8 @@ type CostEstimate struct {
 	Bot  string  `json:"bot"`
 	Low  float64 `json:"low"`
 	High float64 `json:"high"`
+	// Metered says this review spends CodeRabbit's account allowance.
+	Metered bool `json:"metered"`
 	// Exact says low and high are the same figure and it is not a guess.
 	Exact bool `json:"exact,omitempty"`
 	// Unknown says crq has no basis to price this reviewer. Renderers must show
@@ -129,7 +131,7 @@ func (s *Service) costWith(st State, repo string, pr int, head string, d dialect
 		}
 		out.Reviewers = append(out.Reviewers, CostEstimate{
 			Bot: est.Bot, Low: est.Low, High: est.High,
-			Exact: est.Exact, Unknown: est.Unknown, Basis: est.Basis,
+			Metered: est.Metered, Exact: est.Exact, Unknown: est.Unknown, Basis: est.Basis,
 		})
 		if est.Unknown {
 			out.Unpriced = append(out.Unpriced, r.Login)

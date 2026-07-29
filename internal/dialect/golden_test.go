@@ -720,7 +720,7 @@ func TestGoldenPricing(t *testing.T) {
 
 		// A co-reviewer on its own subscription is free and says why; an
 		// unknown login is Unknown, never a confident $0.00.
-		if e := EstimateCost(CodexBotLogin, "coderabbitai[bot]", DiffStat{}, Allowance{}); !e.Exact || e.High != 0 || e.Basis == "" {
+		if e := EstimateCost(CodexBotLogin, "coderabbitai[bot]", DiffStat{}, Allowance{}); !e.Exact || e.High != 0 || e.Basis == "" || e.Metered {
 			t.Errorf("codex = %+v, want an explained zero", e)
 		}
 		if e := EstimateCost("sonar[bot]", "coderabbitai[bot]", DiffStat{}, Allowance{}); !e.Unknown {
@@ -744,7 +744,7 @@ func TestGoldenPricing(t *testing.T) {
 		// The primary is free inside the allowance, unknown without a count,
 		// and priced per file only once past it WITH usage-based billing on.
 		d := DiffStat{ChangedFiles: 8}
-		if e := EstimateCodeRabbit("coderabbitai[bot]", d, Allowance{Remaining: 3, RemainingKnown: true}); !e.Exact || e.High != 0 {
+		if e := EstimateCodeRabbit("coderabbitai[bot]", d, Allowance{Remaining: 3, RemainingKnown: true}); !e.Exact || e.High != 0 || !e.Metered {
 			t.Errorf("inside allowance = %+v, want free", e)
 		}
 		if e := EstimateCodeRabbit("coderabbitai[bot]", d, Allowance{}); !e.Unknown {
