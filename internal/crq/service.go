@@ -1267,7 +1267,7 @@ func (s *Service) fireRound(ctx context.Context, cfg Config, round Round, obs en
 			st.LastFired = &lf
 			// The rolling fair-use log. Written in the same CAS as the fire it
 			// records, so a count can never include a fire that did not land.
-			st.NoteFire(firedAt)
+			st.NoteObservedFire(firedAt, now)
 			dl := firedAt.Add(s.feedbackWait(*st))
 			r.WaitDeadline = &dl
 			st.Warn = ""
@@ -2642,7 +2642,8 @@ func (s *Service) noteCoAnswers(ctx context.Context, cfg Config, round Round, ob
 			answered = append(answered, cb.Login)
 		}
 	}
-	primary := cfg.Bot != "" && engine.CoReviewedHead(obs, cfg.Bot)
+	primary := cfg.Bot != "" &&
+		(engine.CoReviewedHead(obs, cfg.Bot) || engine.PrimaryCompletedRound(round, obs, cfg.policy()))
 	if len(answered) == 0 && !primary {
 		return
 	}

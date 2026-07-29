@@ -958,7 +958,8 @@ func TestPumpAdoptsExistingReviewCommandWithoutRefiring(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	gh := newFakeGitHub()
-	headTime := time.Now().UTC().Add(-time.Minute)
+	observedAt := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	headTime := observedAt.Add(-time.Minute)
 	var pull ghapi.Pull
 	pull.State = "open"
 	pull.Head.SHA = "abcdef1234567890"
@@ -972,6 +973,7 @@ func TestPumpAdoptsExistingReviewCommandWithoutRefiring(t *testing.T) {
 	gh.graphQL = noForcePush
 	store := NewMemoryStore(cfg)
 	service := NewService(cfg, gh, store, nil)
+	service.now = func() time.Time { return observedAt }
 
 	if _, err := service.Enqueue(ctx, "owner/repo", 12); err != nil {
 		t.Fatal(err)
@@ -1002,6 +1004,10 @@ func TestPumpAdoptsExistingReviewCommandWithoutRefiring(t *testing.T) {
 	}
 	if r.WaitDeadline == nil || !r.WaitDeadline.Equal(comment.CreatedAt.Add(cfg.FeedbackWaitTimeout)) {
 		t.Fatalf("adopted review command should set the feedback wait deadline from the comment timestamp, got %#v", r)
+	}
+	if state.Account.FiresFrom == nil || !state.Account.FiresFrom.Equal(observedAt) {
+		t.Fatalf("fire-log coverage = %v, want the command observation time %s",
+			state.Account.FiresFrom, observedAt)
 	}
 }
 

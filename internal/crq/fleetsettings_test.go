@@ -256,6 +256,57 @@ func TestSetEnvBlankClearsGenericFleetSetting(t *testing.T) {
 	}
 }
 
+func TestSetEnvPreservesMeaningfulEmptyFleetSettings(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost",
+		"CRQ_AUTOREVIEW_SKIP_AUTHORS": "dependabot[bot]",
+		"CRQ_AUTOREVIEW_SKIP_MARKER":  "<!-- host marker -->",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	for _, key := range []string{"CRQ_AUTOREVIEW_SKIP_AUTHORS", "CRQ_AUTOREVIEW_SKIP_MARKER"} {
+		if _, err := svc.SetEnv(ctx, key, "", false); err != nil {
+			t.Fatalf("recording empty %s: %v", key, err)
+		}
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"CRQ_AUTOREVIEW_SKIP_AUTHORS", "CRQ_AUTOREVIEW_SKIP_MARKER"} {
+		if value, ok := st.Fleet.Env[key]; !ok || value != "" {
+			t.Errorf("fleet[%s] = %q (present=%v), want an explicit empty value", key, value, ok)
+		}
+	}
+	effective := svc.cfgFor(st, "owner/repo")
+	if len(effective.SkipAuthors) != 0 || effective.SkipMarker != "" {
+		t.Fatalf("effective skip policy = authors %v marker %q, want both disabled",
+			effective.SkipAuthors, effective.SkipMarker)
+	}
+}
+
+func TestFleetSettingsNamesLaggingAutofixWatchers(t *testing.T) {
+	now := time.Date(2026, 7, 29, 9, 0, 0, 0, time.UTC)
+	cfg := firingConfig()
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	svc.now = func() time.Time { return now }
+	st := DefaultState(cfg)
+	st.SetFleetDefaults(FleetDefaults{AutofixDefault: boolptr(false)}, "operator", now)
+	st.SetHostReport(HostReport{
+		Host: "old-watcher", Caps: CapsFleetDefaults - 1, Roles: []string{"autofix"},
+	}, now)
+
+	view := svc.fleetViewOf(st)
+	if len(view.Lagging) != 1 || view.Lagging[0] != "old-watcher" {
+		t.Fatalf("lagging = %v, want the autofix watcher that ignores fleet defaults", view.Lagging)
+	}
+}
+
 // A fleet default reaches the repositories that follow the fleet, and a
 // repository somebody turned off follows nothing. It has both an enrollment
 // record and completed rounds, so it used to reach the requeue set twice over —
@@ -700,6 +751,40 @@ func TestAdoptEnvAppliesPrimaryBeforeRequiredBotsInOneWrite(t *testing.T) {
 	}
 	if got := strings.Join(st.Fleet.Required, ","); got != "replacement-reviewer[bot]" {
 		t.Fatalf("required = %q, want newly adopted primary", got)
+	}
+}
+
+func TestAdoptEnvIncludesPerBotRequiredSettings(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost",
+		"CRQ_COBOTS": "", "CRQ_COBOT_BUGBOT_REQUIRED": "1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	if _, err := svc.AdoptEnv(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Fleet.Env["CRQ_COBOT_BUGBOT_REQUIRED"]; got != "1" {
+		t.Fatalf("adopted required flag = %q, want 1", got)
+	}
+	neutral, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "other-host", "CRQ_COBOTS": "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective := neutral.WithFleet(st.Fleet)
+	if !hasLogin(effective.RequiredBots, "cursor[bot]") {
+		t.Fatalf("required reviewers = %v, want adopted bugbot requirement on another host", effective.RequiredBots)
 	}
 }
 

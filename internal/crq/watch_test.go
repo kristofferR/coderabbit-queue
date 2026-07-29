@@ -146,7 +146,7 @@ func TestProviderOutageUsesFallbackWithoutSpendingAnAttempt(t *testing.T) {
 	opts := WatchOptions{Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 5}
 
 	var claimedModel string
-	if ok, why, _, model := svc.claimDispatchModels(context.Background(), report, "first", 5, []string{"opus", "sonnet"}); !ok {
+	if ok, why, _, model := svc.claimDispatchModels(context.Background(), report, "first", 5); !ok {
 		t.Fatalf("first claim: %s", why)
 	} else if model != "opus" {
 		t.Fatalf("first claim returned model %q, want opus", model)
@@ -167,7 +167,7 @@ func TestProviderOutageUsesFallbackWithoutSpendingAnAttempt(t *testing.T) {
 		t.Fatalf("provider outage spent %d attempts, want 0", got)
 	}
 
-	if ok, why, _, model := svc.claimDispatchModels(context.Background(), report, "second", 5, []string{"opus", "sonnet"}); !ok {
+	if ok, why, _, model := svc.claimDispatchModels(context.Background(), report, "second", 5); !ok {
 		t.Fatalf("fallback claim: %s", why)
 	} else if model != "sonnet" {
 		t.Fatalf("fallback claim returned model %q, want sonnet", model)
@@ -1621,5 +1621,45 @@ func TestRecordedMaxAttemptsReadsBothRecords(t *testing.T) {
 	}
 	if got := svc.recordedMaxAttempts(ctx, "o/other", 7); got != 9 {
 		t.Errorf("attempts = %d, want another repository still on the fleet's 9", got)
+	}
+}
+
+func TestDispatchClaimResolvesCurrentSolverSettingsInsideCAS(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.FixModels = []string{"old-model"}
+	cfg.FixModel = "old-model"
+	store := NewMemoryStore(cfg)
+	repo, pr, head := "o/r", 19, "abcdef123"
+	seedRound(t, store, cfg, repo, pr, head, PhaseQueued, time.Now().UTC(), 0)
+
+	hooked := &hookedStore{StateStore: store}
+	hooked.hook = func() {
+		if _, err := store.Update(ctx, func(st *State) error {
+			sv := st.EffectiveSolver(repo)
+			sv.Models, sv.SetModels, sv.Model = []string{"new-model"}, true, "new-model"
+			sv.MaxAttempts = intptr(1)
+			st.SetSolver(repo, sv, "operator", time.Now().UTC())
+			return nil
+		}); err != nil {
+			t.Error(err)
+		}
+	}
+	svc := NewService(cfg, newFakeGitHub(), hooked, nil)
+	report := NextReport{Repo: repo, PR: pr, Head: head, Action: "fix"}
+
+	ok, why, _, model := svc.claimDispatchModels(ctx, report, "first", 5)
+	if !ok {
+		t.Fatalf("first claim: %s", why)
+	}
+	if model != "new-model" {
+		t.Fatalf("selected model = %q, want the ranking written immediately before the CAS", model)
+	}
+	svc.releaseDispatch(ctx, report, "first", true)
+
+	if ok, why, byDesign, _ := svc.claimDispatchModels(ctx, report, "second", 5); ok {
+		t.Fatal("a second claim exceeded the current one-attempt limit")
+	} else if !byDesign || !strings.Contains(why, "attempt") {
+		t.Fatalf("second claim = byDesign %v reason %q, want the current attempt limit", byDesign, why)
 	}
 }

@@ -860,3 +860,31 @@ func TestReplayRecordsThePrimaryAnswerFromEvidenceNotThePhase(t *testing.T) {
 		t.Errorf("a review at the head must record the primary's answer, got %+v", r)
 	}
 }
+
+func TestReplayRecordsCleanPrimarySummaryAsAnAnswer(t *testing.T) {
+	base := time.Date(2026, 7, 17, 9, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = []string{cfg.Bot}
+	})
+	repo, pr, head := "o/r", 22, "5555666677778888"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Hour))
+
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected fire, got %+v", res)
+	}
+	f.botComment(repo, pr, 504,
+		corpusMessage(t, "coderabbit/no-actionable-comments.md"),
+		f.clk.now().Add(time.Minute))
+	f.clk.advance(2 * time.Minute)
+	f.pump()
+
+	r := f.round(repo, pr)
+	if r == nil || r.Phase != PhaseCompleted {
+		t.Fatalf("clean primary summary must complete the round, got %+v", r)
+	}
+	if r.PrimaryAnsweredAt == nil {
+		t.Fatalf("clean primary summary completed the round without recording an answer: %+v", r)
+	}
+}

@@ -37,6 +37,9 @@ type EnvKey struct {
 	PerHost bool
 	// Identity marks bootstrap settings that must not be edited at all.
 	Identity bool
+	// AllowEmpty means an explicitly recorded empty string changes behaviour
+	// rather than handing the setting back to each host's environment.
+	AllowEmpty bool
 }
 
 // envKeys is every setting the dashboard knows about. Anything absent is not
@@ -62,7 +65,7 @@ var envKeys = []EnvKey{
 	{Key: "CRQ_REVIEW_CMD", Kind: "text", Group: "review", Label: "Review command",
 		Help: "The comment crq posts to ask the primary for a review."},
 	{Key: "CRQ_COBOTS", Kind: "list", Group: "review", Label: "Co-reviewers",
-		Help: "Which co-reviewers run. Editable as toggles above; this is the same setting."},
+		Help: "Which co-reviewers run. Editable as toggles above; this is the same setting.", AllowEmpty: true},
 	{Key: "CRQ_REQUIRED_BOTS", Kind: "list", Group: "review", Label: "Required reviewers",
 		Help: "Which reviewers convergence waits for."},
 	{Key: "CRQ_FEEDBACK_BOTS", Kind: "list", Group: "review", Label: "Feedback reviewers",
@@ -74,9 +77,9 @@ var envKeys = []EnvKey{
 	{Key: "CRQ_RL_CO_DEGRADE", Kind: "bool", Group: "review", Label: "Degrade on block",
 		Help: "During a quota block, ask the co-reviewers now and keep the primary queued, instead of waiting the block out."},
 	{Key: "CRQ_AUTOREVIEW_SKIP_AUTHORS", Kind: "list", Group: "review", Label: "Skip authors",
-		Help: "Pull-request authors auto-review never enqueues."},
+		Help: "Pull-request authors auto-review never enqueues.", AllowEmpty: true},
 	{Key: "CRQ_AUTOREVIEW_SKIP_MARKER", Kind: "text", Group: "review", Label: "Skip marker",
-		Help: "A pull-request body containing this is left alone by fleet auto-review."},
+		Help: "A pull-request body containing this is left alone by fleet auto-review.", AllowEmpty: true},
 
 	// Per-bot trigger policy. Generated rather than listed, so adding a
 	// co-reviewer to the registry adds its settings here too — the alternative
@@ -124,6 +127,9 @@ func EnvKeys() []EnvKey {
 	for _, co := range dialect.KnownCoReviewers() {
 		up := strings.ToUpper(co.Name)
 		out = append(out,
+			EnvKey{Key: "CRQ_COBOT_" + up + "_REQUIRED", Kind: "bool", Group: "review",
+				Label: co.Name + " required",
+				Help:  "Whether convergence waits for " + co.Name + "."},
 			EnvKey{Key: "CRQ_COBOT_" + up + "_TRIGGER", Kind: "text", Group: "review",
 				Label: co.Name + " trigger",
 				Help: "never (crq stays out of its way) · selfheal (ask only if it has not shown up) · " +
@@ -132,8 +138,9 @@ func EnvKeys() []EnvKey {
 				Label: co.Name + " self-heal grace",
 				Help:  "How long to wait for " + co.Name + " to review on its own before asking."},
 			EnvKey{Key: "CRQ_COBOT_" + up + "_CMD", Kind: "text", Group: "review",
-				Label: co.Name + " command",
-				Help:  "The comment crq posts to ask " + co.Name + " for a review."},
+				Label:      co.Name + " command",
+				Help:       "The comment crq posts to ask " + co.Name + " for a review.",
+				AllowEmpty: true},
 		)
 	}
 	return out
@@ -185,7 +192,9 @@ func validateEnvValue(key, value string) error {
 	}
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return nil // empty means "unset here", which every key allows
+		// Empty either clears the setting or is the setting's explicit value;
+		// both shapes are valid, and SetEnv keeps that distinction.
+		return nil
 	}
 	if key == "CRQ_TZ" {
 		if value == "Local" {

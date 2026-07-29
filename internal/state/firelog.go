@@ -28,17 +28,28 @@ const FireLogMax = 1000
 // reviewed is the question no other record can answer, because rounds are
 // superseded and the archive is a 50-entry ring that a busy day evicts in hours.
 func (s *State) NoteFire(t time.Time) {
+	s.noteFire(t, t, true)
+}
+
+// NoteObservedFire records a fire whose historical timestamp predates crq's
+// observation of it. The event still belongs in the count at firedAt, but log
+// coverage cannot honestly start before observedAt.
+func (s *State) NoteObservedFire(firedAt, observedAt time.Time) {
+	s.noteFire(firedAt, observedAt, false)
+}
+
+func (s *State) noteFire(t, coverageStart time.Time, extendCoverageBack bool) {
 	at := t.UTC()
 	if s.Account.FiresFrom == nil {
 		// The first fire this log ever saw starts its coverage. A log written by
 		// a binary that predates this field starts at its oldest entry, which is
 		// the most it can honestly claim.
-		from := at
+		from := coverageStart.UTC()
 		if len(s.Account.Fires) > 0 && s.Account.Fires[0].Before(from) {
 			from = s.Account.Fires[0]
 		}
 		s.Account.FiresFrom = &from
-	} else if at.Before(*s.Account.FiresFrom) {
+	} else if extendCoverageBack && at.Before(*s.Account.FiresFrom) {
 		from := at
 		s.Account.FiresFrom = &from
 	}

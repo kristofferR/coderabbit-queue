@@ -106,3 +106,20 @@ func TestCoverageOutlivesTheOldestRetainedFire(t *testing.T) {
 		t.Errorf("coverage = %v, want it to restart at the oldest entry the cap left", capped.Account.FiresFrom)
 	}
 }
+
+func TestObservedHistoricalFireDoesNotBackdateCoverage(t *testing.T) {
+	observedAt := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	firedAt := observedAt.Add(-8 * 24 * time.Hour)
+	s := New()
+
+	s.NoteObservedFire(firedAt, observedAt)
+	if len(s.Account.Fires) != 1 || !s.Account.Fires[0].Equal(firedAt) {
+		t.Fatalf("fires = %v, want the historical event counted at %s", s.Account.Fires, firedAt)
+	}
+	if s.Account.FiresFrom == nil || !s.Account.FiresFrom.Equal(observedAt) {
+		t.Fatalf("coverage = %v, want observation time %s", s.Account.FiresFrom, observedAt)
+	}
+	if usage := s.FairUse(observedAt, 60); usage.Complete {
+		t.Fatalf("usage = %+v, an adopted old command cannot supply a week of unseen coverage", usage)
+	}
+}

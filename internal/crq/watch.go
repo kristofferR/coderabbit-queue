@@ -631,12 +631,7 @@ func (s *Service) queueDispatch(
 		return false, why, nil, nil
 	}
 	token := randomToken()
-	maxAttempts := s.recordedMaxAttempts(ctx, report.Repo, opts.MaxAttempts)
-	models := append([]string(nil), solver.FixModels...)
-	if len(models) == 0 && solver.FixModel != "" {
-		models = []string{solver.FixModel}
-	}
-	claimed, why, byDesign, model := s.claimDispatchModels(ctx, report, token, maxAttempts, models)
+	claimed, why, byDesign, model := s.claimDispatchModels(ctx, report, token, opts.MaxAttempts)
 	if !claimed {
 		pool.release()
 		// A round another watcher already holds, or one that has spent its
@@ -682,6 +677,10 @@ func (s *Service) recordedMaxAttempts(ctx context.Context, repo string, fallback
 	if err != nil {
 		return fallback
 	}
+	return recordedMaxAttemptsIn(st, repo, fallback)
+}
+
+func recordedMaxAttemptsIn(st State, repo string, fallback int) int {
 	if sv := st.EffectiveSolver(repo); sv.MaxAttempts != nil {
 		return *sv.MaxAttempts
 	}
@@ -1048,7 +1047,7 @@ func (s *Service) writeFindings(report NextReport) (string, error) {
 // already running for this PR, or a head that has spent its attempt budget —
 // rather than evidence about whether fix sessions can start at all.
 func (s *Service) claimDispatch(ctx context.Context, report NextReport, token string, maxAttempts int) (bool, string, bool) {
-	ok, why, byDesign, _ := s.claimDispatchModels(ctx, report, token, maxAttempts, nil)
+	ok, why, byDesign, _ := s.claimDispatchModels(ctx, report, token, maxAttempts)
 	return ok, why, byDesign
 }
 
@@ -1056,8 +1055,7 @@ func (s *Service) claimDispatchModels(
 	ctx context.Context,
 	report NextReport,
 	token string,
-	maxAttempts int,
-	models []string,
+	fallbackMaxAttempts int,
 ) (bool, string, bool, string) {
 	reason, byDesign := "", false
 	var seen string
@@ -1152,6 +1150,16 @@ func (s *Service) claimDispatchModels(
 				round.Note = "adopted to fix feedback carried from an earlier head"
 			}
 		}
+		// The operator can replace the model ranking or lower the attempt limit
+		// after this pass's initial read. Resolve both from the state revision
+		// this CAS will write, so a claim cannot spend an extra attempt or select
+		// a model the current record has removed.
+		claimCfg := s.cfgFor(*st, report.Repo)
+		models := append([]string(nil), claimCfg.FixModels...)
+		if len(models) == 0 && claimCfg.FixModel != "" {
+			models = []string{claimCfg.FixModel}
+		}
+		maxAttempts := recordedMaxAttemptsIn(*st, report.Repo, fallbackMaxAttempts)
 		ok, why := round.ClaimDispatchModels(s.cfg.Host, token, s.clock(), maxAttempts, models)
 		if !ok {
 			reason, byDesign = why, true

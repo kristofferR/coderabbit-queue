@@ -113,7 +113,11 @@ func (s *Service) fleetViewOf(st State) FleetView {
 	if st.Fleet.UpdatedAt != nil {
 		view.By = st.Fleet.By
 		view.UpdatedAt = st.Fleet.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z")
-		view.Lagging = st.LaggingWriters(CapsFleetDefaults, s.clock().UTC())
+		// The autofix watcher consumes fleet defaults too, but holds neither the
+		// autoreview leader lease nor the fire slot. Include its role report or
+		// an old watcher can ignore an autofix-off switch while this page says
+		// every acting host understands the record.
+		view.Lagging = st.LaggingRoleWriters(CapsFleetDefaults, s.clock().UTC(), "autofix")
 	}
 	return view
 }
@@ -766,13 +770,14 @@ func (s *Service) SetEnv(ctx context.Context, key, value string, unset bool) (Fl
 		// Unset is its own instruction, not a change to some other value. Encoding
 		// it as one meant a cleared list read as "leave it alone" and a cleared
 		// weekly limit wrote 60 — so a host whose env said 90 never got it back.
-		clearTyped := unset || strings.TrimSpace(value) == ""
+		envKey, _ := envKeyByName(key)
+		clearTyped := unset || strings.TrimSpace(value) == "" && !envKey.AllowEmpty
 		switch key {
 		case "CRQ_COBOTS":
 			if clearTyped {
 				change.UnsetCoBots = true
 			} else {
-				change.CoBots = splitCommas(value)
+				change.CoBots = append([]string{}, splitCommas(value)...)
 			}
 		case "CRQ_REQUIRED_BOTS":
 			if clearTyped {
@@ -801,11 +806,11 @@ func (s *Service) SetEnv(ctx context.Context, key, value string, unset bool) (Fl
 		view, _, err := s.SetFleetSettings(ctx, change)
 		return view, err
 	}
-	// Validation treats blank as "unset here". Keep storage aligned with that
-	// contract so clearing a generic fleet value restores the host's env value
-	// instead of recording a blank that BuildConfig replaces with a built-in
-	// default.
-	if strings.TrimSpace(value) == "" {
+	// Most settings use a blank as shorthand for inheritance. A few parsers
+	// deliberately distinguish a present empty value (skip nobody, disable the
+	// marker or command), so only --clear may remove those records.
+	envKey, _ := envKeyByName(key)
+	if strings.TrimSpace(value) == "" && !envKey.AllowEmpty {
 		unset = true
 	}
 
