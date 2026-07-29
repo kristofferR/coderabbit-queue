@@ -59,13 +59,14 @@ func (s *Service) Enrollment(ctx context.Context, repo string) (EnrollmentView, 
 // fleet that never touches this.
 func (s *Service) enrollmentOf(st State, repo string) EnrollmentView {
 	repo = NormalizeRepo(repo)
+	cfg := s.cfg.WithFleet(st.Fleet)
 	view := EnrollmentView{Repo: repo}
-	inEnv := s.cfg.AllowRepos[repo]
+	inEnv := cfg.AllowRepos[repo]
 	switch {
-	case s.cfg.ExcludeRepos[repo]:
+	case cfg.ExcludeRepos[repo]:
 		view.Source, view.Enabled = "excluded", false
 		return view
-	case repo == NormalizeRepo(s.cfg.GateRepo):
+	case repo == NormalizeRepo(cfg.GateRepo):
 		// The gate repository holds the queue's own state and dashboard;
 		// reviewing it would be crq reviewing its own bookkeeping.
 		view.Source, view.Enabled = "excluded", false
@@ -92,7 +93,7 @@ func (s *Service) enrollmentOf(st State, repo string) EnrollmentView {
 	switch {
 	case inEnv:
 		view.Source, view.Enabled = "env", true
-	case len(s.cfg.AllowRepos) == 0:
+	case len(cfg.AllowRepos) == 0:
 		view.Source, view.Enabled = "scope", true
 	default:
 		view.Source, view.Enabled = "off", false
@@ -302,6 +303,7 @@ func (s *Service) reviewsRepo(st State, repo string) bool {
 // set only for reviewsRepo to reject every row, spending the shared REST quota
 // on a host that has no eligible repository to find.
 func (s *Service) scanTargets(st State) (targets []string, scoped bool) {
+	cfg := s.cfg.WithFleet(st.Fleet)
 	// An empty CRQ_REPOS means this host searches CRQ_SCOPE owner-wide. Records
 	// must not narrow that to themselves: enrolling one repository would then
 	// silently stop every other one from being scanned.
@@ -311,12 +313,12 @@ func (s *Service) scanTargets(st State) (targets []string, scoped bool) {
 	// enrolled by every screen while no owner-wide search can ever reach it —
 	// enrolled, counted, and never enqueued. Those are named individually
 	// alongside the scope search rather than in place of it.
-	if len(s.cfg.AllowRepos) == 0 {
+	if len(cfg.AllowRepos) == 0 {
 		return s.enrolledOutsideScope(st), true
 	}
 	seen := map[string]bool{}
 	var out []string
-	for repo := range s.cfg.AllowRepos {
+	for repo := range cfg.AllowRepos {
 		if s.reviewsRepo(st, repo) && !seen[repo] {
 			seen[repo] = true
 			out = append(out, repo)
@@ -339,8 +341,9 @@ func (s *Service) scanTargets(st State) (targets []string, scoped bool) {
 // be walked twice, and every pull request it found would be examined against
 // the same scan budget twice over.
 func (s *Service) enrolledOutsideScope(st State) []string {
+	cfg := s.cfg.WithFleet(st.Fleet)
 	inScope := map[string]bool{}
-	for _, owner := range s.cfg.Scope {
+	for _, owner := range cfg.Scope {
 		if owner = strings.ToLower(strings.TrimSpace(owner)); owner != "" {
 			inScope[owner] = true
 		}
@@ -555,7 +558,16 @@ func (s *Service) PreviewEnroll(ctx context.Context, repo string) (EnrollImpact,
 		impact.Low += cost.Low
 		impact.High += cost.High
 		for _, r := range cost.Reviewers {
-			if dialect.NormalizeBotName(r.Bot) == dialect.NormalizeBotName(cfg.Bot) {
+			// The vendor owns the budget, not the role. A registry bot may be
+			// configured as CRQ_BOT while still consuming none of CodeRabbit's
+			// account allowance.
+			registryReviewer, known := dialect.CoReviewerByName(r.Bot)
+			metered := !known &&
+				dialect.NormalizeBotName(r.Bot) == dialect.NormalizeBotName(cfg.Bot)
+			if known {
+				metered = registryReviewer.Budget == dialect.BudgetAccount
+			}
+			if metered {
 				impact.Metered++
 				if allowance.Remaining > 0 {
 					allowance.Remaining--

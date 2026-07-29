@@ -9,6 +9,75 @@ import (
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
+func TestRefreshQuotaUsesFleetResolvedPrimary(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":          "o/state",
+		"CRQ_CAL_PR":        "77",
+		"CRQ_SCOPE":         "startup-owner",
+		"CRQ_CALIBRATE_TTL": "1m",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	gh := newFakeGitHub()
+	reply := ghapi.IssueComment{
+		Body:      "auto-generated reply by CodeRabbit\nYou have 3 reviews remaining.",
+		CreatedAt: now.Add(-10 * time.Second),
+		UpdatedAt: now.Add(-10 * time.Second),
+	}
+	reply.User.Login = "chatgpt-codex-connector[bot]"
+	gh.comments[fakeKey(cfg.GateRepo, cfg.CalibrationPR)] = []ghapi.IssueComment{reply}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Fleet.Env = map[string]string{
+			"CRQ_BOT":   "chatgpt-codex-connector[bot]",
+			"CRQ_SCOPE": "fleet-owner",
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+
+	got, err := svc.RefreshQuota(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Account.Remaining == nil || *got.Account.Remaining != 3 {
+		t.Fatalf("remaining = %v, want the fleet primary's calibration reply", got.Account.Remaining)
+	}
+	if got.Account.Scope != "fleet-owner" {
+		t.Fatalf("scope = %q, want the fleet-resolved scope", got.Account.Scope)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("a matching fleet-primary reply should not post a new probe: %v", gh.posted)
+	}
+}
+
+func TestRefreshQuotaDryRunHasNoSideEffects(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CalibrationPR = 77
+	cfg.DryRun = true
+	gh := newFakeGitHub()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	got, err := svc.RefreshQuota(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gh.posted) != 0 {
+		t.Fatalf("dry-run refresh posted a calibration probe: %v", gh.posted)
+	}
+	if got.Account.CheckedAt != nil || got.Account.CalibAskedAt != nil {
+		t.Fatalf("dry-run refresh mutated quota state: %+v", got.Account)
+	}
+}
+
 // The calibration probe is the one writer that replaced the whole quota, so it
 // was also the one that could SHORTEN a standing block. That matters more now
 // that a PR's own rate-limit notice records one: a probe whose reply carries no

@@ -283,12 +283,13 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 	if err != nil {
 		return err
 	}
+	fleetCfg := s.cfg.WithFleet(state.Fleet)
 	// The scan bound is a fleet setting like the pacing above, resolved from the
 	// snapshot this pass just read rather than from the env the process started
 	// with. Positive only, for the same reason: a recorded 0 would stop the
 	// whole fleet scanning anything, silently.
 	maxScan := s.cfg.AutoReviewMaxScan
-	if resolved := s.cfg.WithFleet(state.Fleet).AutoReviewMaxScan; resolved > 0 {
+	if resolved := fleetCfg.AutoReviewMaxScan; resolved > 0 {
 		maxScan = resolved
 	}
 	// Owner-wide searches only when there is no allow-list at all. An allow-list
@@ -302,7 +303,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 	targets, scoped := s.scanTargets(state)
 	byRepo := func(target string) bool { return !scoped || strings.Contains(target, "/") }
 	if scoped {
-		targets = append(targets, s.cfg.Scope...)
+		targets = append(targets, fleetCfg.Scope...)
 	}
 	var candidates []queueCandidate
 	var titles []queueCandidate

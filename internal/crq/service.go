@@ -2082,22 +2082,29 @@ func (s *Service) RefreshQuota(ctx context.Context) (State, error) {
 	if err != nil {
 		return State{}, err
 	}
-	if s.cfg.CalibrationPR <= 0 {
+	// Dry-run is a local process safety promise. A shared fleet setting must not
+	// turn it off and let a direct `debug refresh` post or mutate quota state.
+	if s.cfg.DryRun {
+		return state, nil
+	}
+	quotaService := *s
+	quotaService.cfg = s.cfg.WithFleet(state.Fleet)
+	if quotaService.cfg.CalibrationPR <= 0 {
 		return state, nil
 	}
 	now := s.clock()
 	// Honor the freshness shortcut only when the last reading was conclusive. If a
 	// probe is still pending (CalibAskedAt set, no reply yet), keep re-checking so a
 	// late "account blocked" reply isn't ignored for the full TTL.
-	if state.Account.CalibAskedAt == nil && state.Account.CheckedAt != nil && now.Sub(*state.Account.CheckedAt) < s.cfg.CalibrationTTL {
+	if state.Account.CalibAskedAt == nil && state.Account.CheckedAt != nil && now.Sub(*state.Account.CheckedAt) < quotaService.cfg.CalibrationTTL {
 		return state, nil
 	}
-	quota, err := s.readQuota(ctx, s.calibrationIssue(state), now, state.Account.CalibAskedAt)
+	quota, err := quotaService.readQuota(ctx, quotaService.calibrationIssue(state), now, state.Account.CalibAskedAt)
 	if err != nil {
 		return state, err
 	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
-		if st.Account.CalibAskedAt == nil && st.Account.CheckedAt != nil && now.Sub(*st.Account.CheckedAt) < s.cfg.CalibrationTTL {
+		if st.Account.CalibAskedAt == nil && st.Account.CheckedAt != nil && now.Sub(*st.Account.CheckedAt) < quotaService.cfg.CalibrationTTL {
 			return ErrNoChange
 		}
 		// Calibration owns only its reading fields. Edit those on the existing

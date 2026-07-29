@@ -154,6 +154,44 @@ func TestEnrollmentDoesNotNarrowAScopeWideHost(t *testing.T) {
 	}
 }
 
+func TestEnrollmentAndScanUseFleetResolvedPolicy(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":  "owner/gate",
+		"CRQ_SCOPE": "startup-owner",
+		"CRQ_REPOS": "startup-owner/old",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Fleet.Env = map[string]string{
+			"CRQ_SCOPE":   "fleet-owner",
+			"CRQ_REPOS":   "fleet-owner/new,fleet-owner/excluded",
+			"CRQ_EXCLUDE": "fleet-owner/excluded",
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if view := svc.enrollmentOf(st, "startup-owner/old"); view.Enabled {
+		t.Fatalf("startup-only repository remained enabled: %+v", view)
+	}
+	if view := svc.enrollmentOf(st, "fleet-owner/excluded"); view.Enabled || view.Source != "excluded" {
+		t.Fatalf("fleet exclusion was ignored: %+v", view)
+	}
+	if targets, scoped := svc.scanTargets(st); scoped || len(targets) != 1 || targets[0] != "fleet-owner/new" {
+		t.Fatalf("scan targets = %v scoped=%v, want only the fleet-resolved repository", targets, scoped)
+	}
+}
+
 // The record round-trips members a newer binary added, but only if the toggle
 // EDITS it. Building a replacement from scratch — which is what every save did —
 // erased them on the next CAS, so an older binary flipping a switch silently
@@ -814,5 +852,33 @@ func TestPreviewEnrollSpendsTheAllowanceAcrossTheBacklog(t *testing.T) {
 	}
 	if !strings.Contains(impact.Summary, "could not") {
 		t.Errorf("summary = %q, want it to say the price past the allowance is unread", impact.Summary)
+	}
+}
+
+func TestPreviewEnrollDoesNotSpendCodeRabbitAllowanceForRegistryPrimary(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":       "o/gate",
+		"CRQ_BOT":        "chatgpt-codex-connector[bot]",
+		"CRQ_REVIEW_CMD": "@codex review",
+		"CRQ_COBOTS":     "",
+		"CRQ_REPOS":      "o/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: "o/repo", Number: 1, Author: "kristofferR"}}
+	var pull ghapi.Pull
+	pull.State, pull.Number, pull.Head.SHA = "open", 1, "abcdef1234567890"
+	gh.pulls[fakeKey("o/repo", 1)] = pull
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	impact, err := svc.PreviewEnroll(ctx, "o/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if impact.Eligible != 1 || impact.Metered != 0 {
+		t.Fatalf("impact = %+v, want one eligible review that spends no CodeRabbit allowance", impact)
 	}
 }

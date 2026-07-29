@@ -535,6 +535,43 @@ func TestSetEnvPrimaryReopensCompletedRounds(t *testing.T) {
 	}
 }
 
+func TestSetEnvPrimaryReopensFullyOverriddenRepository(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost", "CRQ_REPOS": "o/r",
+		"CRQ_COBOTS": "", "CRQ_MIN_INTERVAL": "0s",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, pr, head := "o/r", 14, "cccccccc3"
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	var pull ghapi.Pull
+	pull.State, pull.Head.SHA = "open", head+"def1234"
+	gh.pulls[fakeKey(repo, pr)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+
+	// Both repository-level reviewer questions are overridden. The primary is
+	// still inherited unless PrimaryOff is set.
+	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{cfg.Bot}, nil); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 21)
+
+	if _, err := svc.SetEnv(ctx, "CRQ_BOT", "replacement-reviewer[bot]", false); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(repo, pr); round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("round = %#v, want a primary change to requeue the fully overridden repository", round)
+	}
+}
+
 func TestSetEnvTriggerPolicyReopensCompletedRounds(t *testing.T) {
 	ctx := context.Background()
 	cfg, err := BuildConfig(map[string]string{

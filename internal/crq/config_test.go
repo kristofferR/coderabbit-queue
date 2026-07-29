@@ -11,6 +11,22 @@ import (
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
 )
 
+func TestBuildConfigRetainsACopyOfTheInputEnvironment(t *testing.T) {
+	env := map[string]string{
+		"CRQ_REPO": "owner/gate",
+		"CRQ_BOT":  "original-reviewer[bot]",
+	}
+	cfg, err := BuildConfig(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env["CRQ_BOT"] = "mutated-reviewer[bot]"
+	if got := cfg.WithFleet(FleetDefaults{}).Bot; got != "original-reviewer[bot]" {
+		t.Fatalf("fleet rebuild used caller-mutated env: bot = %q", got)
+	}
+}
+
 func TestLoadConfigDefaultsToCodeRabbitRequiredBot(t *testing.T) {
 	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
 	t.Setenv("CRQ_REQUIRED_BOTS", "")

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -356,7 +357,7 @@ func BuildConfig(env map[string]string) (Config, error) {
 	}
 	// Kept so a fleet record can be layered over it and the whole thing
 	// re-parsed. Unexported: it is an input, not part of the configuration.
-	cfg.env = env
+	cfg.env = maps.Clone(env)
 	if len(cfg.Scope) == 0 && cfg.GateRepo != "" {
 		cfg.Scope = []string{ownerOf(cfg.GateRepo)}
 	}
