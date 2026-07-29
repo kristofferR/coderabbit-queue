@@ -103,7 +103,7 @@ export function SolverEditor({
   };
 
   const inherit = (
-    field: "models" | "effort" | "severities" | "ask_mode" | "forks" | "skip_authors",
+    field: "models" | "effort" | "prompt" | "severities" | "ask_mode" | "forks" | "skip_authors",
   ) => {
     setWarning(null);
     const change: NonNullable<ActionBody["solver"]> =
@@ -111,13 +111,15 @@ export function SolverEditor({
         ? { unset_models: true }
         : field === "effort"
           ? { unset_effort: true }
-          : field === "severities"
-            ? { unset_severities: true }
-            : field === "ask_mode"
-              ? { unset_ask_mode: true }
-              : field === "forks"
-                ? { unset_forks: true }
-                : { unset_skip_authors: true };
+          : field === "prompt"
+            ? { unset_prompt: true }
+            : field === "severities"
+              ? { unset_severities: true }
+              : field === "ask_mode"
+                ? { unset_ask_mode: true }
+                : field === "forks"
+                  ? { unset_forks: true }
+                  : { unset_skip_authors: true };
     runOperation(
       act("solver", {
         repo,
@@ -341,6 +343,11 @@ export function SolverEditor({
                 onChange={(e) => setPrompt(e.target.value)}
                 placeholder="standing instruction appended to every fix session here"
                 className="w-full rounded-lg border border-edge bg-[#FBFBFC] px-2 py-1 text-[12.5px]"
+              />
+              <Inherit
+                shown={src("prompt") === "repo"}
+                busy={busy || dirty}
+                onClick={() => inherit("prompt")}
               />
             </Row>
           </tbody>

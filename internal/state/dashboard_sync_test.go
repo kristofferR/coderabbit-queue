@@ -167,3 +167,28 @@ func TestSyncDashboardSkipsWriteWhenTheIssueAlreadyMatches(t *testing.T) {
 		t.Fatal("the cross-process check must actually read the issue")
 	}
 }
+
+func TestSyncDashboardUsesStateBackedRenderConfig(t *testing.T) {
+	srv := &issueServer{}
+	_, client := srv.start(t)
+	startup := StoreConfig{
+		GateRepo: "owner/state", StateRef: "crq-state-v3", DashboardIssue: 1,
+		Scope: []string{"owner"}, CoReviewers: "codex (selfheal)",
+	}
+	store := NewGitStateStore(startup, client, nil)
+	store.SetRenderConfig(func(State) StoreConfig {
+		effective := startup
+		effective.CoReviewers = "codex (required, always)"
+		return effective
+	})
+
+	if err := store.SyncDashboard(context.Background(), syncTestState(t)); err != nil {
+		t.Fatal(err)
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if !strings.Contains(srv.body, "codex (required, always)") ||
+		strings.Contains(srv.body, "codex (selfheal)") {
+		t.Fatalf("dashboard used startup reviewers instead of state-backed reviewers:\n%s", srv.body)
+	}
+}

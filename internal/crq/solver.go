@@ -169,6 +169,7 @@ type SolverChange struct {
 	// an empty author list is "skip nobody", so none can also mean inheritance.
 	UnsetModels      bool `json:"unset_models,omitempty"`
 	UnsetEffort      bool `json:"unset_effort,omitempty"`
+	UnsetPrompt      bool `json:"unset_prompt,omitempty"`
 	UnsetSeverities  bool `json:"unset_severities,omitempty"`
 	UnsetAskMode     bool `json:"unset_ask_mode,omitempty"`
 	UnsetForks       bool `json:"unset_forks,omitempty"`
@@ -322,7 +323,9 @@ func applySolverChange(sv SolverSettings, change SolverChange) (SolverSettings, 
 		}
 		sv.Effort, sv.SetEffort = effort, true
 	}
-	if change.Prompt != nil {
+	if change.UnsetPrompt {
+		sv.Prompt, sv.SetPrompt = "", false
+	} else if change.Prompt != nil {
 		prompt := strings.TrimSpace(*change.Prompt)
 		// The prompt is appended to every fix session's instructions, so a
 		// runaway one is a runaway cost on every pull request in the repository.

@@ -1067,3 +1067,20 @@ func TestRenderDashboardPrefersTheFleetTimezone(t *testing.T) {
 		t.Errorf("an unloadable fleet zone must fall back to the host's:\n%s", out)
 	}
 }
+
+func TestCoReviewerCellListsOnlyCoBotOverrides(t *testing.T) {
+	st := New()
+	st.SetRepoOverride("owner/primary-only", RepoReviewers{PrimaryOff: true})
+	st.SetRepoOverride("owner/required-only", RepoReviewers{SetRequired: true})
+	st.SetRepoOverride("owner/cobots", RepoReviewers{SetCoBots: true})
+
+	got := coReviewerCell(st, "codex")
+	if !strings.Contains(got, "owner/cobots") {
+		t.Fatalf("co-reviewer cell omitted the co-bot override: %q", got)
+	}
+	for _, unrelated := range []string{"owner/primary-only", "owner/required-only"} {
+		if strings.Contains(got, unrelated) {
+			t.Fatalf("co-reviewer cell lists unrelated override %q: %q", unrelated, got)
+		}
+	}
+}

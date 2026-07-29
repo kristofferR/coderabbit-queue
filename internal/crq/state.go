@@ -114,10 +114,15 @@ func (c Config) coReviewerSummary() string {
 	return strings.Join(parts, " · ")
 }
 
-// NewGitStateStore builds the git-ref-backed store. The logger surfaces the
-// loud auto-reinit line when a stale-schema payload is loaded.
+// NewGitStateStore builds the git-ref-backed store. Dashboard rendering resolves
+// the fleet record from the state being written rather than using this host's
+// frozen startup configuration.
 func NewGitStateStore(cfg Config, gh *ghapi.GitHub, log Logger) *crqstate.GitStateStore {
-	return crqstate.NewGitStateStore(cfg.storeConfig(), gh, log)
+	store := crqstate.NewGitStateStore(cfg.storeConfig(), gh, log)
+	store.SetRenderConfig(func(st State) StoreConfig {
+		return cfg.WithFleet(st.Fleet).storeConfig()
+	})
+	return store
 }
 
 func NewMemoryStore(cfg Config) *crqstate.MemoryStore {
@@ -134,19 +139,19 @@ func DefaultState(cfg Config) State {
 }
 
 func renderDashboard(st State, cfg Config) string {
-	return crqstate.RenderDashboard(st, cfg.storeConfig())
+	return crqstate.RenderDashboard(st, cfg.WithFleet(st.Fleet).storeConfig())
 }
 func renderTitle(st State, cfg Config) string {
-	return crqstate.RenderTitle(st, cfg.storeConfig())
+	return crqstate.RenderTitle(st, cfg.WithFleet(st.Fleet).storeConfig())
 }
 
 // StatusLine renders the queue as a single line for a harness status bar.
 func StatusLine(st State, cfg Config) string {
-	return crqstate.StatusLine(st, cfg.storeConfig())
+	return crqstate.StatusLine(st, cfg.WithFleet(st.Fleet).storeConfig())
 }
 
 func issueBody(st State, cfg Config) (string, error) {
-	return crqstate.IssueBody(st, cfg.storeConfig())
+	return crqstate.IssueBody(st, cfg.WithFleet(st.Fleet).storeConfig())
 }
 
 // policy assembles the engine Policy from config.

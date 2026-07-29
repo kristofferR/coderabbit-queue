@@ -185,6 +185,25 @@ func TestExplicitEmptyRepoPromptOverridesFleetPrompt(t *testing.T) {
 	}
 }
 
+func TestRepositoryPromptCanReturnToInheritance(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	if _, err := svc.SetFleetSolver(ctx, SolverChange{Prompt: strptr("fleet instructions")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SetSolver(ctx, "o/repo", SolverChange{Prompt: strptr("")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SetSolver(ctx, "o/repo", SolverChange{UnsetPrompt: true}); err != nil {
+		t.Fatal(err)
+	}
+	if view, _ := svc.Solver(ctx, "o/repo"); view.Prompt != "fleet instructions" || view.Sources["prompt"] != "fleet" {
+		t.Fatalf("view = %+v, want the inherited fleet prompt", view)
+	}
+}
+
 // The hosts that will ignore a solver setting have to be named wherever it was
 // recorded. Asking only about a repository's own record meant a FLEET model or
 // attempt limit — the one every repository inherits — warned about nobody,

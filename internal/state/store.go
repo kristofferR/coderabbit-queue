@@ -102,6 +102,10 @@ type GitStateStore struct {
 	gh  *gh.GitHub
 	log Logger
 
+	// renderCfg resolves state-backed fleet settings before rendering. It is
+	// installed once by crq, which owns the bot registry needed to format them.
+	renderCfg func(State) StoreConfig
+
 	// syncMu serializes the read-then-write in SyncDashboard, so concurrent
 	// syncs cannot both see a stale gate issue and both write it.
 	syncMu sync.Mutex
@@ -109,6 +113,19 @@ type GitStateStore struct {
 
 func NewGitStateStore(cfg StoreConfig, client *gh.GitHub, log Logger) *GitStateStore {
 	return &GitStateStore{cfg: cfg, gh: client, log: log}
+}
+
+// SetRenderConfig installs the effective configuration used for dashboard.md
+// and the gate issue.
+func (s *GitStateStore) SetRenderConfig(resolve func(State) StoreConfig) {
+	s.renderCfg = resolve
+}
+
+func (s *GitStateStore) renderConfig(st State) StoreConfig {
+	if s.renderCfg == nil {
+		return s.cfg
+	}
+	return s.renderCfg(st)
 }
 
 func (s *GitStateStore) logf(format string, args ...any) {
@@ -232,7 +249,7 @@ func (s *GitStateStore) Update(ctx context.Context, mutate func(*State) error) (
 }
 
 func (s *GitStateStore) compareAndSwap(ctx context.Context, st *State, rev Revision) error {
-	dashboard := RenderDashboard(*st, s.cfg)
+	dashboard := RenderDashboard(*st, s.renderConfig(*st))
 	st.DashboardSHA = hashString(dashboard)
 	stateJSON, err := json.MarshalIndent(*st, "", "  ")
 	if err != nil {
@@ -298,11 +315,12 @@ func (s *GitStateStore) SyncDashboard(ctx context.Context, st State) error {
 	if err := s.cfg.requireDashboard(); err != nil {
 		return err
 	}
-	body, err := IssueBody(st, s.cfg)
+	cfg := s.renderConfig(st)
+	body, err := IssueBody(st, cfg)
 	if err != nil {
 		return err
 	}
-	title := RenderTitle(st, s.cfg)
+	title := RenderTitle(st, cfg)
 
 	// Held across read-then-write so two concurrent syncs cannot both observe a
 	// stale issue and both write it.

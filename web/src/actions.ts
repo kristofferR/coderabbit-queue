@@ -65,6 +65,7 @@ export type ActionBody = {
     skip_authors?: string[];
     unset_models?: boolean;
     unset_effort?: boolean;
+    unset_prompt?: boolean;
     unset_severities?: boolean;
     unset_ask_mode?: boolean;
     unset_forks?: boolean;

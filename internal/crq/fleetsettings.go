@@ -752,6 +752,7 @@ func defaultValueOf(defaults Config, key string) string {
 // SetEnv records or clears one fleet setting.
 func (s *Service) SetEnv(ctx context.Context, key, value string, unset bool) (FleetView, error) {
 	key = strings.TrimSpace(key)
+	value = strings.TrimSpace(value)
 	if !fleetSettable(key) {
 		if _, known := envKeyByName(key); known {
 			return FleetView{}, fmt.Errorf("%s is not a fleet setting: it belongs to one machine, or says where the queue lives", key)

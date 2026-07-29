@@ -486,6 +486,7 @@ type SolverChange struct {
 	SkipAuthors      []string `json:"skip_authors"`
 	UnsetModels      bool     `json:"unset_models,omitempty"`
 	UnsetEffort      bool     `json:"unset_effort,omitempty"`
+	UnsetPrompt      bool     `json:"unset_prompt,omitempty"`
 	UnsetSeverities  bool     `json:"unset_severities,omitempty"`
 	UnsetAskMode     bool     `json:"unset_ask_mode,omitempty"`
 	UnsetForks       bool     `json:"unset_forks,omitempty"`
