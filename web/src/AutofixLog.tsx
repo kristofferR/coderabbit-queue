@@ -17,6 +17,7 @@ export function AutofixLog({ repo, pr }: { repo: string; pr: number }) {
   useEffect(() => {
     if (!open) return;
     const controller = new AbortController();
+    let timer: number | undefined;
     const refresh = async () => {
       try {
         const response = await fetch(`/api/autofix-log/${repo}/${pr}`, {
@@ -29,13 +30,14 @@ export function AutofixLog({ repo, pr }: { repo: string; pr: number }) {
         setError(null);
       } catch (cause) {
         if (!controller.signal.aborted) setError((cause as Error).message);
+      } finally {
+        if (!controller.signal.aborted) timer = window.setTimeout(() => void refresh(), 1000);
       }
     };
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 1000);
     return () => {
       controller.abort();
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
     };
   }, [open, repo, pr]);
 

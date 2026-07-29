@@ -80,6 +80,8 @@ export function AddRepo({
     const q = query.trim().toLowerCase();
     return q ? rows.filter((r) => r.repo.toLowerCase().includes(q)) : rows;
   }, [rows, query]);
+  const trimmedManualRepo = manualRepo.trim();
+  const manualRepoValid = /^[^/\s]+\/[^/\s]+$/.test(trimmedManualRepo);
 
   if (!open) return null;
 
@@ -160,7 +162,13 @@ export function AddRepo({
           <div className="border-b border-warn-edge bg-warn-bg px-5 py-2.5 text-[12.5px] text-warn">
             GitHub capped discovery for {truncated.join(", ")}. Enter a missing repository by its
             full owner/name:
-            <div className="mt-2 flex gap-2">
+            <form
+              className="mt-2 flex gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (manualRepoValid) preview(trimmedManualRepo);
+              }}
+            >
               <input
                 aria-label="Repository owner and name"
                 value={manualRepo}
@@ -169,14 +177,13 @@ export function AddRepo({
                 className="min-w-0 flex-1 rounded-lg border border-warn-edge bg-white px-2.5 py-1 text-ink"
               />
               <button
-                type="button"
-                disabled={manualRepo.trim() === ""}
-                onClick={() => void preview(manualRepo.trim())}
+                type="submit"
+                disabled={!manualRepoValid}
                 className="rounded-lg bg-ink px-3 py-1 font-semibold text-white disabled:opacity-45"
               >
                 Add by name
               </button>
-            </div>
+            </form>
           </div>
         )}
 

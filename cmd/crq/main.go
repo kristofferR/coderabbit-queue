@@ -18,6 +18,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/kristofferR/coderabbit-queue/internal/crq"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"

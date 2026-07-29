@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { type ActionBody, act } from "./actions";
 import type { RepoSolver, Snapshot } from "./api";
 import { Card, Pill } from "./ui";
+import { sameMembers } from "./ui/utils";
 import { useOperation } from "./useOperation";
 
 /**
@@ -69,7 +70,7 @@ export function SolverEditor({
     effort !== solverEffort ||
     prompt !== solverPrompt ||
     attempts !== solverAttempts ||
-    severities.join() !== solverSeverities ||
+    !sameMembers(severities, solver.severities) ||
     askMode !== solverAskMode ||
     forks !== solver.forks ||
     authors !== solverAuthors;
@@ -361,15 +362,19 @@ export function solverChange(
   const change: NonNullable<ActionBody["solver"]> = {};
   const currentModel = solver.model ?? "";
   if (edited.model !== currentModel) {
-    const ranking = [edited.model, ...solver.models.slice(1)].filter(Boolean);
-    change.models = ranking.filter((model, index) => ranking.indexOf(model) === index);
+    if (edited.model === "") {
+      change.unset_models = true;
+    } else {
+      const ranking = [edited.model, ...solver.models.slice(1)].filter(Boolean);
+      change.models = ranking.filter((model, index) => ranking.indexOf(model) === index);
+    }
   }
   if (edited.effort !== (solver.effort ?? "")) change.effort = edited.effort;
   if (edited.prompt !== (solver.prompt ?? "")) change.prompt = edited.prompt;
   if (edited.attempts !== String(solver.max_attempts)) {
     change.max_attempts = Number(edited.attempts) || 0;
   }
-  if (edited.severities.join() !== solver.severities.join()) {
+  if (!sameMembers(edited.severities, solver.severities)) {
     change.severities = edited.severities;
   }
   if (edited.askMode !== solver.ask_mode) change.ask_mode = edited.askMode;

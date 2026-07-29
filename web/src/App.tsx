@@ -111,9 +111,11 @@ function DashboardShell() {
           role="status"
           className="border-b border-warn-edge bg-warn-bg px-4 py-2 text-[12.5px] text-warn sm:px-6"
         >
-          {snapshot.stale
-            ? `The shared state ref is unavailable: ${snapshot.stale.error}.`
-            : "Lost the connection to crq serve."}{" "}
+          {live.error
+            ? `${live.error}.`
+            : snapshot.stale
+              ? `The shared state ref is unavailable: ${snapshot.stale.error}.`
+              : "Lost the connection to crq serve."}{" "}
           This is the last state loaded; actions are disabled until it becomes current again.
         </div>
       )}

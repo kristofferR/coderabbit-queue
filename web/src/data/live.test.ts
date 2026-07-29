@@ -9,6 +9,7 @@ class FakeEventSource {
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: (() => void) | null = null;
   unavailable: EventListenerOrEventListenerObject | undefined;
+  closed = false;
 
   constructor() {
     FakeEventSource.current = this;
@@ -22,7 +23,9 @@ class FakeEventSource {
     if (type === "unavailable" && this.unavailable === listener) this.unavailable = undefined;
   }
 
-  close() {}
+  close() {
+    this.closed = true;
+  }
 
   emitUnavailable(data: string) {
     const event = { data } as MessageEvent;
@@ -55,5 +58,6 @@ describe("live state stream", () => {
       expect(states.at(-1)).toEqual({ status: "reconnecting", error: "state ref unreadable" }),
     );
     stop();
+    await vi.waitFor(() => expect(FakeEventSource.current?.closed).toBe(true));
   });
 });

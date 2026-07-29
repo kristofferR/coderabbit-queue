@@ -245,7 +245,7 @@ export function FleetEditor({
         <div className="mt-3.5 flex flex-wrap items-center gap-2.5">
           <button
             type="button"
-            disabled={!dirty || busy}
+            disabled={!dirty || busy || weekly === ""}
             onClick={() => void preview()}
             className="rounded-lg bg-ink px-4 py-1.5 text-[13px] font-semibold text-white disabled:opacity-45"
           >
@@ -332,7 +332,9 @@ export function fleetChange(
   if (!sameMembers(edited.runs, fleetRuns)) change.cobots = edited.runs;
   if (!sameMembers(edited.required, fleetRequired)) change.required = edited.required;
   if (edited.minInterval !== fleet.min_interval) change.min_interval = edited.minInterval;
-  if (edited.weekly !== String(fleet.weekly_limit)) change.weekly_limit = Number(edited.weekly);
+  if (edited.weekly !== "" && edited.weekly !== String(fleet.weekly_limit)) {
+    change.weekly_limit = Number(edited.weekly);
+  }
   if (edited.autofix !== fleet.autofix_default) change.autofix_default = edited.autofix;
   return change;
 }

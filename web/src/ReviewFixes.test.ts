@@ -26,6 +26,18 @@ describe("settings deltas", () => {
     ).toEqual({ min_interval: "2m" });
   });
 
+  it("does not save an empty weekly limit as zero", () => {
+    expect(
+      fleetChange(fleet, [], [], {
+        runs: [],
+        required: [],
+        minInterval: "90s",
+        weekly: "",
+        autofix: true,
+      }),
+    ).toEqual({});
+  });
+
   it("keeps solver model fallbacks and omits inherited fields", () => {
     const solver: RepoSolver = {
       overridden: false,
@@ -57,6 +69,34 @@ describe("settings deltas", () => {
       severities: ["critical"],
       ask_mode: "uncertain",
     });
+  });
+
+  it("unsets a cleared model and ignores severity ordering", () => {
+    const solver: RepoSolver = {
+      overridden: true,
+      models: ["gpt-5.6-sol", "gpt-5.6-terra"],
+      model_choices: [],
+      model: "gpt-5.6-sol",
+      max_attempts: 3,
+      severities: ["critical", "major"],
+      ask_mode: "blocked",
+      forks: false,
+      skip_authors: [],
+      sources: {},
+    };
+
+    expect(
+      solverChange(solver, {
+        model: "",
+        effort: "",
+        prompt: "",
+        attempts: "3",
+        severities: ["major", "critical"],
+        askMode: "blocked",
+        forks: false,
+        authors: "",
+      }),
+    ).toEqual({ unset_models: true });
   });
 });
 
