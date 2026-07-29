@@ -225,7 +225,8 @@ func TestEnrollmentAndScanUseFleetResolvedPolicy(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	gh := newFakeGitHub()
+	svc := NewService(cfg, gh, store, nil)
 	st, _, err := store.Load(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -248,6 +249,23 @@ func TestEnrollmentAndScanUseFleetResolvedPolicy(t *testing.T) {
 	}
 	if targets, scoped := svc.scanTargets(st); scoped || len(targets) != 1 || targets[0] != "fleet-owner/new" {
 		t.Fatalf("scan targets = %v scoped=%v, want only the fleet-resolved repository", targets, scoped)
+	}
+	enrollments, err := svc.Enrollments(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed []string
+	for _, view := range enrollments {
+		listed = append(listed, view.Repo)
+	}
+	if strings.Join(listed, ",") != "fleet-owner/excluded,fleet-owner/new" {
+		t.Fatalf("enrollments = %v, want the fleet-resolved allow-list", listed)
+	}
+	if _, _, err := svc.ScopeRepos(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(gh.owners, ",") != "fleet-owner" {
+		t.Fatalf("discovery owners = %v, want the fleet-resolved scope", gh.owners)
 	}
 }
 

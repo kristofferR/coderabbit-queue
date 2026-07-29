@@ -1,16 +1,30 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 import type { Live, Snapshot } from "./api";
 import { subscribe } from "./api";
 import { DashboardContext, useDashboard } from "./DashboardState";
 import { ago, useNow } from "./time";
 
+export function newestSnapshot<T extends { overview: { rev: number } }>(
+  current: T | null,
+  incoming: T,
+): T {
+  return current && incoming.overview.rev < current.overview.rev ? current : incoming;
+}
+
 export function DashboardProvider({ children }: { children: ReactNode }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [live, setLive] = useState<Live>({ status: "connecting" });
+  const applySnapshot = useCallback((incoming: Snapshot) => {
+    setSnapshot((current) => newestSnapshot(current, incoming));
+  }, []);
 
-  useEffect(() => subscribe(setSnapshot, setLive), []);
+  useEffect(() => subscribe(applySnapshot, setLive), [applySnapshot]);
 
-  return <DashboardContext value={{ snapshot, setSnapshot, live }}>{children}</DashboardContext>;
+  return (
+    <DashboardContext value={{ snapshot, setSnapshot: applySnapshot, live }}>
+      {children}
+    </DashboardContext>
+  );
 }
 
 export function DashboardLoading() {

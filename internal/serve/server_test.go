@@ -645,9 +645,17 @@ func TestObservationKeyIncludesEffectiveReviewers(t *testing.T) {
 		{Login: "coderabbitai[bot]", Primary: true, Required: true},
 		{Login: "cursor[bot]", Required: true, Trigger: "always", Command: "bugbot run"},
 	}
-	if observationKey("o/r", 1, "abcdef123", base) ==
-		observationKey("o/r", 1, "abcdef123", changed) {
+	if observationKey("o/r", 1, "abcdef123", 7, base) ==
+		observationKey("o/r", 1, "abcdef123", 7, changed) {
 		t.Fatal("reviewer change reused the old observation cache key")
+	}
+}
+
+func TestObservationKeyIncludesStateRevision(t *testing.T) {
+	bots := []BotName{{Login: "coderabbitai[bot]", Primary: true, Required: true}}
+	if observationKey("o/r", 1, "abcdef123", 7, bots) ==
+		observationKey("o/r", 1, "abcdef123", 8, bots) {
+		t.Fatal("round-state change reused the old observation cache key")
 	}
 }
 

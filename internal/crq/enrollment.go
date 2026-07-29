@@ -262,6 +262,7 @@ func (s *Service) Enrollments(ctx context.Context) ([]EnrollmentView, error) {
 	if err != nil {
 		return nil, err
 	}
+	cfg := s.cfg.WithFleet(st.Fleet)
 	seen := map[string]bool{}
 	var repos []string
 	add := func(repo string) {
@@ -272,7 +273,7 @@ func (s *Service) Enrollments(ctx context.Context) ([]EnrollmentView, error) {
 		seen[repo] = true
 		repos = append(repos, repo)
 	}
-	for repo := range s.cfg.AllowRepos {
+	for repo := range cfg.AllowRepos {
 		add(repo)
 	}
 	for _, repo := range st.EnrolledRepos() {
@@ -382,10 +383,15 @@ const scopeRepoLimit = 1000
 // truncation is reported, and `crq repos add <owner>/<name>` enrolls one by name
 // without any listing at all.
 func (s *Service) ScopeRepos(ctx context.Context) ([]ghapi.Repo, []string, error) {
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg := s.cfg.WithFleet(st.Fleet)
 	seen := map[string]bool{}
 	var out []ghapi.Repo
 	var truncated []string
-	for _, owner := range s.cfg.Scope {
+	for _, owner := range cfg.Scope {
 		owner = strings.TrimSpace(owner)
 		if owner == "" {
 			continue

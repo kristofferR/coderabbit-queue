@@ -124,8 +124,9 @@ type HistoryEntry struct {
 	Current bool       `json:"current,omitempty"`
 }
 
-// observeCache keeps one observation per (repo, pr, head, reviewer config).
-// Both the head and effective reviewers shape convergence and findings.
+// observeCache keeps one observation per (repo, pr, head, state revision,
+// reviewer config). Round state and dismissals shape convergence and findings
+// even when the head and reviewer configuration stay unchanged.
 type observeCache struct {
 	mu      sync.Mutex
 	entries map[string]observeEntry
@@ -217,9 +218,10 @@ func costKey(repo string, pr int, head string, bots []BotName, remaining *int) s
 	return b.String()
 }
 
-func observationKey(repo string, pr int, head string, bots []BotName) string {
+func observationKey(repo string, pr int, head string, rev int64, bots []BotName) string {
 	var b strings.Builder
-	b.WriteString(strings.ToLower(repo) + "#" + strconv.Itoa(pr) + "@" + head)
+	b.WriteString(strings.ToLower(repo) + "#" + strconv.Itoa(pr) + "@" + head +
+		"|rev=" + strconv.FormatInt(rev, 10))
 	for _, bot := range bots {
 		b.WriteString("|" + bot.Login)
 		if bot.Primary {
@@ -385,7 +387,7 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 		if view.Round != nil {
 			head = view.Round.Head
 		}
-		key := observationKey(repo, pr, head, bots)
+		key := observationKey(repo, pr, head, st.Rev, bots)
 		if r.URL.Query().Get("refresh") == "1" {
 			s.observations.put(key, observeEntry{})
 		}

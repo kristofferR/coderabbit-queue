@@ -53,6 +53,7 @@ type fakeGitHub struct {
 	// enqueue count and very different REST bills.
 	searches   int
 	ownerRepos []ghapi.Repo
+	owners     []string
 	getComment func(repo string, id int64) (ghapi.IssueComment, error)
 	// now, when set, timestamps posted comments off the same injected clock the
 	// service uses, so a fire's recorded FiredAt tracks the fake wall clock the
@@ -300,9 +301,10 @@ func (f *fakeGitHub) SearchOpenPRs(context.Context, string, bool, int) ([]ghapi.
 
 // ownerRepos backs ListOwnerRepos; empty is a fine default, since only the
 // repository picker asks and nothing in the queue depends on it.
-func (f *fakeGitHub) ListOwnerRepos(_ context.Context, _ string, _ int) ([]ghapi.Repo, error) {
+func (f *fakeGitHub) ListOwnerRepos(_ context.Context, owner string, _ int) ([]ghapi.Repo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.owners = append(f.owners, owner)
 	return append([]ghapi.Repo(nil), f.ownerRepos...), nil
 }
 
