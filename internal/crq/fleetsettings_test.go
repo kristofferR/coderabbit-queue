@@ -251,6 +251,43 @@ func TestFleetDefaultsLayering(t *testing.T) {
 	}
 }
 
+func TestClearFleetSettingsClearsTimestampLessMigratedPolicy(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":  "owner/gate",
+		"CRQ_SCOPE": "startup-owner",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Fleet.Env = map[string]string{"CRQ_SCOPE": "migrated-owner"}
+		st.Fleet.UpdatedAt = nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	if view, err := svc.FleetSettings(ctx); err != nil {
+		t.Fatal(err)
+	} else if !view.Recorded {
+		t.Fatal("timestamp-less migrated policy was reported as absent")
+	}
+
+	view, _, err := svc.SetFleetSettings(ctx, FleetChange{Clear: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Recorded {
+		t.Fatal("cleared migrated policy still reports a fleet record")
+	}
+	st, _, _ := store.Load(ctx)
+	if !st.Fleet.Empty() {
+		t.Fatalf("fleet policy was not cleared: %+v", st.Fleet)
+	}
+}
+
 func TestFleetViewRecognizesExplicitEmptyEnvironmentOverrides(t *testing.T) {
 	cfg, err := BuildConfig(map[string]string{
 		"CRQ_REPO":   "owner/gate",

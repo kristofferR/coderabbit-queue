@@ -214,13 +214,14 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	if stateErr != nil {
 		return fmt.Errorf("loading shared state for watch pass: %w", stateErr)
 	}
+	fleetCfg := s.cfg.WithFleet(st.Fleet)
 	// Copied, never appended to in place. `crq watch -- <cmd>` splits argv at
 	// "--", so the flag half keeps CAPACITY reaching into the command half, and
 	// fs.Args() is a sub-slice of it: filling an empty list with append wrote the
 	// repository names straight over the fix command, and every dispatch in the
 	// fleet died with "fork/exec kristofferr/coderabbit-queue: no such file or
 	// directory". A caller's slice is the caller's.
-	repos := make([]string, 0, len(opts.Repos)+len(s.cfg.AllowRepos))
+	repos := make([]string, 0, len(opts.Repos)+len(fleetCfg.AllowRepos))
 	repos = append(repos, opts.Repos...)
 	if len(repos) == 0 {
 		// Enrollment is a fleet-wide record, and autoreview already builds its
@@ -236,7 +237,7 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			seen[repo] = true
 			repos = append(repos, repo)
 		}
-		for repo := range s.cfg.AllowRepos {
+		for repo := range fleetCfg.AllowRepos {
 			add(repo)
 		}
 		for _, repo := range st.EnrolledRepos() {

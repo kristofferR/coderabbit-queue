@@ -61,10 +61,15 @@ func (s *Service) RecordCLIQuota(ctx context.Context, report PreflightReport, cl
 	if err := s.cfg.RequireState(); err != nil {
 		return CLIQuotaResult{Reason: "no crq state configured, so there is no shared quota to update"}, nil
 	}
-	if !s.cliOrgMatches(cliOrg) {
+	state, _, err := s.store.Load(ctx)
+	if err != nil {
+		return CLIQuotaResult{Reason: "shared quota state could not be read, so the account behind the block cannot be confirmed"}, nil
+	}
+	cfg := s.cfg.WithFleet(state.Fleet)
+	if !cliOrgMatches(cfg, cliOrg) {
 		return CLIQuotaResult{
 			Reason: "the coderabbit cli is authenticated to " + orDash(cliOrg) +
-				", which is not the account crq queues for (" + strings.Join(s.cfg.Scope, ",") + ")",
+				", which is not the account crq queues for (" + strings.Join(cfg.Scope, ",") + ")",
 		}, nil
 	}
 
@@ -80,7 +85,7 @@ func (s *Service) RecordCLIQuota(ctx context.Context, report PreflightReport, cl
 		// setting, and reading this host's startup value recorded a shorter block
 		// than the settings page said was in force — resuming metered fires early
 		// against the number the dashboard was showing.
-		fallback := now.Add(cliQuotaFallback(s.fleetCfg(ctx).RateLimitFallback))
+		fallback := now.Add(cliQuotaFallback(cfg.RateLimitFallback))
 		until = &fallback
 	}
 
@@ -90,9 +95,14 @@ func (s *Service) RecordCLIQuota(ctx context.Context, report PreflightReport, cl
 		return result, nil
 	}
 
-	applied, standing, err := s.applyAccountBlock(ctx, *until, "coderabbit-cli")
+	applied, standing, matched, err := s.applyAccountBlock(ctx, *until, "coderabbit-cli", cfg, cliOrg)
 	if err != nil {
 		return result, err
+	}
+	if !matched {
+		result.Reason = "the fleet account changed before the block could be recorded"
+		result.Until = standing
+		return result, nil
 	}
 	result.Applied = applied
 	if !applied {
@@ -105,7 +115,7 @@ func (s *Service) RecordCLIQuota(ctx context.Context, report PreflightReport, cl
 // cliOrgMatches reports whether the CLI's current organisation is the account
 // crq queues for. An empty org fails closed: without knowing whose limit this is,
 // applying it fleet-wide is the more expensive mistake.
-func (s *Service) cliOrgMatches(cliOrg string) bool {
+func cliOrgMatches(cfg Config, cliOrg string) bool {
 	org := strings.ToLower(strings.TrimSpace(cliOrg))
 	if org == "" {
 		return false
@@ -114,7 +124,7 @@ func (s *Service) cliOrgMatches(cliOrg string) bool {
 	// let a personal CodeRabbit org stall an unrelated scope: with
 	// CRQ_REPO=alice/crq-state and CRQ_SCOPE=acme, Alice's local limit would have
 	// blocked every review for acme.
-	for _, scope := range s.cfg.Scope {
+	for _, scope := range cfg.Scope {
 		if strings.EqualFold(strings.TrimSpace(scope), org) {
 			return true
 		}

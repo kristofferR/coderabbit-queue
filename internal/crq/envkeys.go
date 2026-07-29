@@ -51,6 +51,8 @@ var envKeys = []EnvKey{
 		Help: "How long a fired round waits for any bot response before it is retried."},
 	{Key: "CRQ_RL_FALLBACK", Kind: "duration", Group: "pacing", Label: "Rate-limit fallback",
 		Help: "Block window assumed when the bot's \"available in\" cannot be parsed."},
+	{Key: "CRQ_CALIBRATE_TTL", Kind: "duration", Group: "pacing", Label: "Calibration freshness",
+		Help: "How long an account-quota calibration reply remains current."},
 	{Key: "CRQ_WEEKLY_LIMIT", Kind: "int", Group: "pacing", Label: "Weekly fair-use limit",
 		Help: "Reviews per rolling week before the vendor throttles: 60 on Pro, 90 on Pro+. 0 counts without forecasting."},
 	{Key: "CRQ_AUTOREVIEW_POLL", Kind: "duration", Group: "pacing", Label: "Auto-review poll",
@@ -190,6 +192,7 @@ func fleetReadable(key string) bool {
 var positiveOnly = map[string]bool{
 	"CRQ_INFLIGHT_TIMEOUT":      true,
 	"CRQ_RL_FALLBACK":           true,
+	"CRQ_CALIBRATE_TTL":         true,
 	"CRQ_AUTOREVIEW_POLL":       true,
 	"CRQ_AUTOREVIEW_MAX_SCAN":   true,
 	"CRQ_LEADER_TTL":            true,

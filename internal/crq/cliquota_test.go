@@ -351,3 +351,81 @@ func TestRecordCLIQuotaUsesTheFleetFallbackWindow(t *testing.T) {
 			st.Account.BlockedUntil)
 	}
 }
+
+func TestRecordCLIQuotaUsesTheFleetResolvedScope(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":  "owner/crq-state",
+		"CRQ_SCOPE": "startup-account",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Fleet.Env = map[string]string{"CRQ_SCOPE": "fleet-account"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	svc.now = func() time.Time { return now }
+
+	got, err := svc.RecordCLIQuota(ctx, blockedReport(t, "32 minutes"), "fleet-account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Applied {
+		t.Fatalf("fleet account's block was rejected: %+v", got)
+	}
+	st, _, _ := store.Load(ctx)
+	if st.Account.Scope != "fleet-account" {
+		t.Fatalf("recorded scope = %q, want fleet-account", st.Account.Scope)
+	}
+}
+
+func TestRecordCLIQuotaDropsABlockWhenFleetAccountChanges(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":  "owner/crq-state",
+		"CRQ_SCOPE": "startup-account",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := NewMemoryStore(cfg)
+	if _, err := base.Update(ctx, func(st *State) error {
+		st.Fleet.Env = map[string]string{"CRQ_SCOPE": "fleet-account"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store := &beforeUpdateStore{StateStore: base}
+	store.before = func() {
+		_, updateErr := base.Update(ctx, func(st *State) error {
+			fd := st.Fleet
+			fd.Env = map[string]string{"CRQ_SCOPE": "replacement-account"}
+			st.SetFleetDefaults(fd, "other-host", now)
+			return nil
+		})
+		if updateErr != nil {
+			t.Fatal(updateErr)
+		}
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	svc.now = func() time.Time { return now }
+
+	got, err := svc.RecordCLIQuota(ctx, blockedReport(t, "32 minutes"), "fleet-account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Applied || got.Reason == "" {
+		t.Fatalf("block for the replaced account was not refused: %+v", got)
+	}
+	st, _, _ := base.Load(ctx)
+	if st.Account.BlockedUntil != nil {
+		t.Fatalf("block for the prior fleet account was committed: %+v", st.Account)
+	}
+}

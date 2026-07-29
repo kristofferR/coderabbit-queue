@@ -9,6 +9,20 @@ import (
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
+type beforeUpdateStore struct {
+	StateStore
+	before func()
+	fired  bool
+}
+
+func (s *beforeUpdateStore) Update(ctx context.Context, mutate func(*State) error) (State, error) {
+	if s.before != nil && !s.fired {
+		s.fired = true
+		s.before()
+	}
+	return s.StateStore.Update(ctx, mutate)
+}
+
 func TestRefreshQuotaUsesFleetResolvedPrimary(t *testing.T) {
 	ctx := context.Background()
 	cfg, err := BuildConfig(map[string]string{
@@ -75,6 +89,50 @@ func TestRefreshQuotaDryRunHasNoSideEffects(t *testing.T) {
 	}
 	if got.Account.CheckedAt != nil || got.Account.CalibAskedAt != nil {
 		t.Fatalf("dry-run refresh mutated quota state: %+v", got.Account)
+	}
+}
+
+func TestRefreshQuotaDropsAReadingWhenFleetPolicyChanges(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":          "o/state",
+		"CRQ_CAL_PR":        "77",
+		"CRQ_CALIBRATE_TTL": "10m",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	gh := newFakeGitHub()
+	reply := ghapi.IssueComment{
+		Body:      "auto-generated reply by CodeRabbit\nYou have 3 reviews remaining.",
+		CreatedAt: now.Add(-5 * time.Minute),
+		UpdatedAt: now.Add(-5 * time.Minute),
+	}
+	reply.User.Login = cfg.Bot
+	gh.comments[fakeKey(cfg.GateRepo, cfg.CalibrationPR)] = []ghapi.IssueComment{reply}
+	base := NewMemoryStore(cfg)
+	store := &beforeUpdateStore{StateStore: base}
+	store.before = func() {
+		_, updateErr := base.Update(ctx, func(st *State) error {
+			fd := st.Fleet
+			fd.Env = map[string]string{"CRQ_CALIBRATE_TTL": "1m"}
+			st.SetFleetDefaults(fd, "other-host", now)
+			return nil
+		})
+		if updateErr != nil {
+			t.Fatal(updateErr)
+		}
+	}
+	svc := NewService(cfg, gh, store, nil)
+	svc.now = func() time.Time { return now }
+
+	got, err := svc.RefreshQuota(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Account.Remaining != nil || got.Account.CheckedAt != nil {
+		t.Fatalf("stale in-flight calibration was committed after the TTL changed: %+v", got.Account)
 	}
 }
 

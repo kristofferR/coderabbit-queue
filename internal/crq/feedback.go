@@ -934,10 +934,11 @@ func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, he
 			}
 			return ErrNoChange
 		}
+		ownerToken := r.Token
 		if err := r.Complete(); err != nil {
 			return err
 		}
-		releaseSlot(st, QueueKey(repo, pr))
+		releaseSlot(st, QueueKey(repo, pr), ownerToken)
 		st.PutRound(*r)
 		changed = true
 		return nil

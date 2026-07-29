@@ -206,7 +206,7 @@ func (s *Service) abandonPendingRounds(st *State, repo string) {
 		// the repository back on then enqueues its current head again, which is
 		// what an off switch that can be undone has to mean.
 		st.EndRound(round.Repo, round.PR, "repository turned off")
-		releaseSlot(st, QueueKey(round.Repo, round.PR))
+		releaseSlot(st, QueueKey(round.Repo, round.PR), round.Token)
 		if s.log != nil {
 			s.log.Printf("enrollment: dropped queued round %s#%d@%s — the repository was turned off",
 				round.Repo, round.PR, round.Head)

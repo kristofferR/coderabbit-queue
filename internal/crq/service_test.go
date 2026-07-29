@@ -872,6 +872,54 @@ func firingConfig() Config {
 	}
 }
 
+func TestApplyTransitionDropsRetryWhenFleetPolicyChanged(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	repo, pr := "owner/repo", 88
+	now := time.Now().UTC()
+	seedRound(t, store, cfg, repo, pr, "abcdef123", PhaseFired, now.Add(-time.Minute), 9)
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decidedCfg := svc.cfgFor(st, repo)
+	changedAt := now.Add(time.Second)
+	st.Fleet.UpdatedAt = &changedAt
+	round := st.Round(repo, pr)
+
+	err = svc.applyTransition(&st, round, engine.Transition{
+		Outcome: engine.OutRetry,
+		Reason:  "old in-flight timeout elapsed",
+		RetryAt: now.Add(time.Minute),
+	}, now, decidedCfg)
+	if !errors.Is(err, ErrNoChange) {
+		t.Fatalf("applyTransition error = %v, want stale retry discarded", err)
+	}
+	if round.Phase != PhaseFired || st.FireSlot == nil {
+		t.Fatalf("stale retry changed the live round or released its slot: round=%+v slot=%+v", round, st.FireSlot)
+	}
+}
+
+func TestReleaseSlotRequiresTheOwningToken(t *testing.T) {
+	until := time.Now().UTC().Add(time.Minute)
+	st := State{
+		FireSlot:          &FireSlot{Key: "owner/repo#1", Token: "old-token", HoldUntil: &until},
+		FireSlotHoldUntil: &until,
+	}
+
+	releaseSlot(&st, "owner/repo#1", "replacement-token")
+	if st.FireSlot == nil || st.FireSlot.HoldUntil == nil || st.FireSlotHoldUntil == nil {
+		t.Fatalf("replacement round cleared the original command's slot hold: %+v", st.FireSlot)
+	}
+
+	releaseSlot(&st, "owner/repo#1", "old-token")
+	if st.FireSlot != nil || st.FireSlotHoldUntil != nil {
+		t.Fatalf("owning token did not clear its slot and compatibility hold: %+v", st.FireSlot)
+	}
+}
+
 func TestFallbackTokenIsSafeToShorten(t *testing.T) {
 	for _, now := range []time.Time{time.Unix(0, 0), time.Unix(0, 1)} {
 		if got := fallbackToken(now); len(got) < 8 {

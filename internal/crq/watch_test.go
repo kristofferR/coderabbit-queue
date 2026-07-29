@@ -1516,6 +1516,43 @@ func TestWatchTargetsIncludeRepositoriesEnrolledFromTheDashboard(t *testing.T) {
 	}
 }
 
+func TestWatchTargetsIncludeMigratedFleetAllowList(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":  "owner/gate",
+		"CRQ_REPOS": "owner/startup",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gh := newFakeGitHub()
+	for _, repo := range []string{"owner/startup", "owner/migrated"} {
+		var pull ghapi.Pull
+		pull.State, pull.Number, pull.Head.SHA = "open", 1, "aaaaaaaa1"
+		gh.pulls[fakeKey(repo, 1)] = pull
+	}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Fleet.Env = map[string]string{"CRQ_REPOS": "owner/migrated"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	seen := map[string]bool{}
+	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0),
+		func(e WatchEvent) error { seen[NormalizeRepo(e.Repo)] = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !seen["owner/migrated"] {
+		t.Errorf("watched %v, want the repository from the migrated fleet allow-list", seen)
+	}
+	if seen["owner/startup"] {
+		t.Errorf("watched %v, startup allow-list should be replaced by the migrated fleet policy", seen)
+	}
+}
+
 // The fork switch is not a refinement of a setting; it is the line between
 // running an agent over the operator's own code and over a stranger's. When the
 // shared record cannot be read, falling back to a permissive host value would

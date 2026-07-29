@@ -69,7 +69,7 @@ func (s *Service) FleetSettings(ctx context.Context) (FleetView, error) {
 func (s *Service) fleetViewOf(st State) FleetView {
 	cfg := s.cfg.WithFleet(st.Fleet)
 	view := FleetView{
-		Recorded:       st.Fleet.UpdatedAt != nil,
+		Recorded:       !st.Fleet.Empty(),
 		MinInterval:    cfg.MinInterval.String(),
 		WeeklyLimit:    cfg.WeeklyReviewLimit,
 		AutofixDefault: st.AutofixDefaultOn(),
@@ -200,7 +200,7 @@ func (s *Service) SetFleetSettings(ctx context.Context, change FleetChange) (Fle
 			before[repo] = s.cfgFor(*st, repo)
 		}
 		if change.Clear {
-			if st.Fleet.UpdatedAt == nil {
+			if st.Fleet.Empty() {
 				return ErrNoChange
 			}
 			st.Fleet = FleetDefaults{}
