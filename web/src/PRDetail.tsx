@@ -413,7 +413,9 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
               <div className="px-[18px] pb-3.5 text-[13px]">
                 <Pill tone="ok">Running · {elapsed(view.round.fixing.since, now)}</Pill>
                 <div className="mt-1.5 text-mut">
-                  {view.round.fixing.host} · attempt {view.round.fixing.attempt}
+                  {view.round.fixing.host}
+                  {view.round.fixing.model ? ` · ${view.round.fixing.model}` : ""} · attempt{" "}
+                  {view.round.fixing.attempt}
                   {view.round.fixing.max_attempts ? ` of ${view.round.fixing.max_attempts}` : ""}
                   {view.round.fixing.findings
                     ? ` · working through ${view.round.fixing.findings} finding(s)`

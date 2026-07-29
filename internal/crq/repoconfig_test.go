@@ -366,6 +366,46 @@ func TestChangingRequirementsReopensACompletedRound(t *testing.T) {
 	}
 }
 
+func TestPreviewReviewersPricesReenablingThePrimary(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost", "CRQ_REPOS": "o/r",
+		"CRQ_COBOTS": "codex", "CRQ_REQUIRED_BOTS": "codex",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, pr, head := "o/r", 18, "abcdef124"
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	off := false
+	if _, err := svc.SetReviewers(ctx, repo, nil, nil, &off); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 42)
+
+	on := true
+	impact, err := svc.PreviewReviewers(ctx, repo, nil, nil, &on)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if impact.Reopened != 1 || !strings.Contains(strings.Join(impact.Changes, "\n"), "coderabbitai") {
+		t.Fatalf("impact = %+v, want the primary and one reopened completed round", impact)
+	}
+	if _, _, err := svc.SetReviewersAt(ctx, repo, nil, nil, &on, &impact.Rev); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(repo, pr); round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("round = %#v, want the confirmed edit to reopen it", round)
+	}
+}
+
 func TestPreviewClearReviewersPricesRestoredFleetReviewers(t *testing.T) {
 	ctx := context.Background()
 	cfg, err := BuildConfig(map[string]string{

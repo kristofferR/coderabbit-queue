@@ -130,6 +130,7 @@ export const SessionSchema = Schema.Struct({
   pr: Schema.Number,
   head: Optional(Schema.String),
   host: Optional(Schema.String),
+  model: Optional(Schema.String),
   attempt: Optional(Schema.Number),
   max_attempts: Optional(Schema.Number),
   findings: Optional(Schema.Number),

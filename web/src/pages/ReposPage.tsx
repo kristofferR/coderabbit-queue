@@ -342,7 +342,7 @@ function ReviewerEditor({
 }) {
   const [runs, setRuns] = useState<string[]>(repo.reviewers);
   const [required, setRequired] = useState<string[]>(repo.required);
-  const [confirming, setConfirming] = useState(false);
+  const [saveImpact, setSaveImpact] = useState<FleetImpact | null>(null);
   const [resetImpact, setResetImpact] = useState<FleetImpact | null>(null);
   const { run: runOperation, running: busy, error, clearError } = useOperation();
   const [warning, setWarning] = useState<string | null>(null);
@@ -352,6 +352,7 @@ function ReviewerEditor({
   useEffect(() => {
     setRuns(serverRuns ? serverRuns.split("\0") : []);
     setRequired(serverRequired ? serverRequired.split("\0") : []);
+    setSaveImpact(null);
     setResetImpact(null);
   }, [serverRuns, serverRequired]);
 
@@ -400,7 +401,7 @@ function ReviewerEditor({
         onSuccess: ({ snapshot, warning: nextWarning }) => {
           onSnapshot?.(snapshot);
           setWarning(nextWarning ?? null);
-          setConfirming(false);
+          setSaveImpact(null);
           setResetImpact(null);
         },
       },
@@ -411,6 +412,18 @@ function ReviewerEditor({
     runOperation(act("reviewers", { repo: repo.repo, clear: true, preview: true }), {
       onSuccess: (impact) => setResetImpact(impact),
     });
+
+  const previewSave = () =>
+    runOperation(
+      act("reviewers", {
+        repo: repo.repo,
+        cobots: runs.filter((name) => name !== primaryBot?.name && configurableNames.has(name)),
+        required,
+        primary: primaryBot ? primaryOn : undefined,
+        preview: true,
+      }),
+      { onSuccess: (impact) => setSaveImpact(impact) },
+    );
 
   return (
     <Card title="Reviewers" end={repo.override ? "override" : "inherited from the fleet"}>
@@ -508,7 +521,7 @@ function ReviewerEditor({
             {warning}
           </div>
         )}
-        {error && !confirming && (
+        {error && !saveImpact && (
           <div className="mt-3 rounded-lg border border-bad-edge bg-bad-bg px-3 py-2 text-[12.5px] text-bad">
             {error}
           </div>
@@ -518,7 +531,7 @@ function ReviewerEditor({
           <button
             type="button"
             disabled={!dirty || busy}
-            onClick={() => setConfirming(true)}
+            onClick={previewSave}
             className="rounded-lg bg-ink px-4 py-1.5 text-[13px] font-semibold text-white disabled:opacity-45"
           >
             Save reviewers
@@ -529,6 +542,7 @@ function ReviewerEditor({
             onClick={() => {
               setRuns(repo.reviewers);
               setRequired(repo.required);
+              setSaveImpact(null);
             }}
             className="rounded-lg border border-edge px-4 py-1.5 text-[13px] font-semibold text-mut disabled:opacity-45"
           >
@@ -548,12 +562,19 @@ function ReviewerEditor({
         </div>
       </div>
 
-      {confirming && (
+      {saveImpact && (
         <Confirm
           title={`Save reviewers for ${repo.repo.split("/").pop()}?`}
+          danger={saveImpact.reopened > 0}
           body={
             <>
-              This repository will stop following the fleet default and keep its own list.
+              <ul className="mb-2 list-disc pl-4">
+                {saveImpact.changes.map((change) => (
+                  <li key={change}>{change}</li>
+                ))}
+              </ul>
+              {saveImpact.summary}. This repository will stop following the fleet default and keep
+              its own list.
               {primaryBot && primaryOn !== primaryWas && (
                 <>
                   {" "}
@@ -579,16 +600,21 @@ function ReviewerEditor({
                   <b>{retiredOn.join(", ")}</b> {retiredOn.length === 1 ? "is" : "are"} retired and
                   will be removed from this repository&apos;s saved reviewer and required sets.
                 </>
-              )}{" "}
-              No metered reviews are spent by saving.
+              )}
+              {saveImpact.reopened > 0 && (
+                <p className="mt-2 text-warn">
+                  Reopened rounds are reviewed again, and metered reviews spend the shared
+                  allowance.
+                </p>
+              )}
             </>
           }
-          confirmLabel="Save"
+          confirmLabel={saveImpact.reopened > 0 ? `Save and reopen ${saveImpact.reopened}` : "Save"}
           busy={busy}
           error={error}
-          onConfirm={() => save(false)}
+          onConfirm={() => save(false, saveImpact.rev)}
           onCancel={() => {
-            setConfirming(false);
+            setSaveImpact(null);
             clearError();
           }}
         />

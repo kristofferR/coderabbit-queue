@@ -2519,14 +2519,25 @@ func (a prActor) ClearAutofix(ctx context.Context, repo string) error {
 	return err
 }
 
-func (a prActor) SetReviewers(ctx context.Context, repo string, coBots, required []string, primary *bool) ([]string, error) {
-	view, err := a.svc.SetReviewers(ctx, repo, coBots, required, primary)
+func (a prActor) SetReviewers(
+	ctx context.Context,
+	repo string,
+	coBots, required []string,
+	primary *bool,
+	expectedRev *int64,
+	preview bool,
+) ([]string, serve.FleetImpact, error) {
+	if preview {
+		impact, err := a.svc.PreviewReviewers(ctx, repo, coBots, required, primary)
+		return nil, fleetImpactOf(impact), err
+	}
+	view, impact, err := a.svc.SetReviewersAt(ctx, repo, coBots, required, primary, expectedRev)
 	if err != nil {
-		return nil, err
+		return nil, serve.FleetImpact{}, err
 	}
 	// A host that honours overrides but not the primary switch would still fire
 	// the metered reviewer here, which is the whole thing being turned off.
-	return unionHosts(view.Lagging, view.LaggingPrimaryOff), nil
+	return unionHosts(view.Lagging, view.LaggingPrimaryOff), fleetImpactOf(impact), nil
 }
 
 // unionHosts merges two lagging-host lists without repeating a host that lacks

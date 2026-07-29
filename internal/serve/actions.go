@@ -46,7 +46,14 @@ type Actor interface {
 	SetFleet(ctx context.Context, change FleetChange, preview bool) (FleetImpact, error)
 	// SetReviewers returns the hosts that will not honour the override, so the
 	// UI can say so rather than reporting a save that some daemon ignores.
-	SetReviewers(ctx context.Context, repo string, coBots, required []string, primary *bool) (lagging []string, err error)
+	SetReviewers(
+		ctx context.Context,
+		repo string,
+		coBots, required []string,
+		primary *bool,
+		expectedRev *int64,
+		preview bool,
+	) (lagging []string, impact FleetImpact, err error)
 	ClearReviewers(ctx context.Context, repo string, expectedRev *int64, preview bool) (FleetImpact, error)
 
 	// The three ways a finding stops blocking. They are distinct on purpose:
@@ -191,7 +198,14 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var lagging []string
-		lagging, err = s.actor.SetReviewers(ctx, req.Repo, req.CoBots, req.Required, req.Primary)
+		var impact FleetImpact
+		lagging, impact, err = s.actor.SetReviewers(
+			ctx, req.Repo, req.CoBots, req.Required, req.Primary, req.ExpectedRev, req.Preview,
+		)
+		if err == nil && req.Preview {
+			writeJSON(w, http.StatusOK, map[string]any{"impact": impact})
+			return
+		}
 		if err == nil && len(lagging) > 0 {
 			s.writeActionSnapshot(w, ctx, "saved, but these hosts run an older binary and will ignore it: "+
 				strings.Join(hostsOf(lagging), ", "))

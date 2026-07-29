@@ -810,6 +810,43 @@ func TestListOwnerReposCanReadOneSentinelPastTenPages(t *testing.T) {
 	}
 }
 
+func TestListOwnerReposPaginatesPastNonOwnerRows(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "t")
+	pages := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/user":
+			_, _ = w.Write([]byte(`{"login":"alice"}`))
+		case "/users/alice":
+			_, _ = w.Write([]byte(`{"type":"User"}`))
+		case "/user/repos":
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			pages = max(pages, page)
+			if page == 1 {
+				repos := make([]Repo, 100)
+				for i := range repos {
+					repos[i].FullName = "other/repo-" + strconv.Itoa(i)
+				}
+				_ = json.NewEncoder(w).Encode(repos)
+				return
+			}
+			_ = json.NewEncoder(w).Encode([]Repo{{FullName: "alice/private-old"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 2, maxWait: time.Second, backoffBase: time.Millisecond, networkMaxWait: time.Second}
+
+	repos, err := g.ListOwnerRepos(context.Background(), "alice", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 1 || repos[0].FullName != "alice/private-old" || pages != 2 {
+		t.Fatalf("repos=%+v pages=%d, want the owner match from page 2", repos, pages)
+	}
+}
+
 // "crq cannot read who this token is" is cached for the process, because a
 // token without the scope will not grow one. A 500 or a timeout is not that
 // answer — caching it kept every later repository picker on the public-only

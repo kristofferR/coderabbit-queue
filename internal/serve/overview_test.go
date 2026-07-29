@@ -10,7 +10,7 @@ import (
 func TestAutofixSessionKeepsTheHeadOwnedByItsClaim(t *testing.T) {
 	now := time.Date(2026, 7, 29, 17, 0, 0, 0, time.UTC)
 	key := state.Key("o/repo", 1)
-	claim := state.DispatchClaim{Host: "atlas", Token: "session-1", At: now, Heartbeat: now}
+	claim := state.DispatchClaim{Host: "atlas", Token: "session-1", Model: "fallback-model", At: now, Heartbeat: now}
 	st := state.New()
 	st.Rounds[key] = state.Round{Repo: "o/repo", PR: 1, Head: "new-head"}
 	st.Archive = []state.Round{{
@@ -19,8 +19,9 @@ func TestAutofixSessionKeepsTheHeadOwnedByItsClaim(t *testing.T) {
 	st.Dispatches = map[string]state.DispatchClaim{key: claim}
 
 	view := autofixView(st, now, nil)
-	if len(view.Sessions) != 1 || view.Sessions[0].Head != "old-head" {
-		t.Fatalf("sessions = %+v, want the live session's archived head", view.Sessions)
+	if len(view.Sessions) != 1 ||
+		view.Sessions[0].Head != "old-head" || view.Sessions[0].Model != "fallback-model" {
+		t.Fatalf("sessions = %+v, want the live session's archived head and selected fallback model", view.Sessions)
 	}
 }
 
@@ -56,7 +57,7 @@ func TestPrimaryOffQueueRowIgnoresMeteredQuotaGates(t *testing.T) {
 func TestPRSessionKeepsTheArchivedHeadOwnedByItsClaim(t *testing.T) {
 	now := time.Date(2026, 7, 29, 17, 0, 0, 0, time.UTC)
 	key := state.Key("o/repo", 1)
-	claim := state.DispatchClaim{Host: "atlas", Token: "session-1", At: now, Heartbeat: now}
+	claim := state.DispatchClaim{Host: "atlas", Token: "session-1", Model: "fallback-model", At: now, Heartbeat: now}
 	st := state.New()
 	st.Rounds[key] = state.Round{
 		Repo: "o/repo", PR: 1, Head: "new-head", Phase: state.PhaseQueued, EnqueuedAt: now,
@@ -67,7 +68,8 @@ func TestPRSessionKeepsTheArchivedHeadOwnedByItsClaim(t *testing.T) {
 	st.Dispatches = map[string]state.DispatchClaim{key: claim}
 
 	view := buildPRView(st, "o/repo", 1, nil, time.Minute, now, nil)
-	if view.Round == nil || view.Round.Fixing == nil || view.Round.Fixing.Head != "old-head" {
-		t.Fatalf("PR fixing session = %+v, want its archived head", view.Round)
+	if view.Round == nil || view.Round.Fixing == nil ||
+		view.Round.Fixing.Head != "old-head" || view.Round.Fixing.Model != "fallback-model" {
+		t.Fatalf("PR fixing session = %+v, want its archived head and selected fallback model", view.Round)
 	}
 }
