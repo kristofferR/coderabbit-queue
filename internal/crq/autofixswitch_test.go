@@ -98,7 +98,10 @@ func TestAutofixSwitchRejectsMalformedRepositoryNames(t *testing.T) {
 	store := NewMemoryStore(cfg)
 	svc := NewService(cfg, newFakeGitHub(), store, nil)
 
-	for _, repo := range []string{"owner", "owner/repo/", "/repo", "owner/repo/extra", "../repo"} {
+	for _, repo := range []string{
+		"owner", "owner/repo/", "/repo", "owner/repo/extra", "../repo",
+		"owner/bad repo", "owner/control\nname", "bad_owner/repo", "-owner/repo",
+	} {
 		if _, err := svc.SetAutofixEnabled(ctx, repo, false, "operator stop"); err == nil {
 			t.Errorf("SetAutofixEnabled(%q) succeeded", repo)
 		}

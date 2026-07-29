@@ -170,9 +170,9 @@ func (s *GitStateStore) Load(ctx context.Context) (State, Revision, error) {
 	if err != nil {
 		return State{}, Revision{}, err
 	}
-	// Peek at the schema version before a full decode. V4 is the one supported
-	// migration: v5 intentionally fences v4 writers that would erase dispatch
-	// scheduling fields, while preserving every live v4 round during rollout.
+	// Peek at the schema version before a full decode. V5 is the one supported
+	// migration: v6 fences v5 writers that encoded fleet policy with a
+	// different shape, while preserving every live v5 round during rollout.
 	var probe struct {
 		Version int `json:"v"`
 	}
@@ -188,9 +188,9 @@ func (s *GitStateStore) Load(ctx context.Context) (State, Revision, error) {
 		return s.fresh(), rev, nil
 	}
 	if probe.Version == SchemaVersion-1 {
-		raw, err = migrateV4State(raw)
+		raw, err = migrateV5State(raw)
 		if err != nil {
-			return State{}, Revision{}, s.refuse("holds a v4 fleet policy this binary cannot migrate", err)
+			return State{}, Revision{}, s.refuse("holds a v5 fleet policy this binary cannot migrate", err)
 		}
 	}
 	var st State

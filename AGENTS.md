@@ -32,7 +32,7 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
   credential-safe Git execution, stale-worktree pruning, and mirror migration.
   Owns persistent filesystem and process I/O for checkouts; `crq` supplies only
   configured roots and a current-token resolver.
-- `internal/state/` — persisted schema v5: one `Round` per PR, one global
+- `internal/state/` — persisted schema v6: one `Round` per PR, one global
   `FireSlot`, the CodeRabbit `AccountQuota`, an `Archive` ring, and the
   per-repository records (`Repos` reviewer overrides incl. `PrimaryOff`,
   `RepoAutofix`, `Enrolled`). `WriterCaps` is a monotonic integer bumped

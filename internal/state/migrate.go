@@ -6,11 +6,11 @@ import (
 	"strings"
 )
 
-// migrateV4State translates v4's flat fleet policy map into FleetDefaults.
+// migrateV5State translates v5's flat fleet policy map into FleetDefaults.
 // The "fleet" member kept its JSON name in v5, so decoding it directly would
 // either discard the old policy or fail on values such as cobots, whose shape
 // changed from a comma-separated string to an array.
-func migrateV4State(raw []byte) ([]byte, error) {
+func migrateV5State(raw []byte) ([]byte, error) {
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &root); err != nil {
 		return nil, err
@@ -21,7 +21,7 @@ func migrateV4State(raw []byte) ([]byte, error) {
 	}
 	var legacy map[string]json.RawMessage
 	if err := json.Unmarshal(fleetRaw, &legacy); err != nil {
-		return nil, fmt.Errorf("decode v4 fleet policy: %w", err)
+		return nil, fmt.Errorf("decode v5 fleet policy: %w", err)
 	}
 
 	next := make(map[string]any)

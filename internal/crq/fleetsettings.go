@@ -236,6 +236,7 @@ func (s *Service) applyFleetChange(st State, change FleetChange) (FleetDefaults,
 	if change.Clear {
 		return FleetDefaults{}, nil
 	}
+	existingRequired := s.cfg.WithFleet(st.Fleet).RequiredBots
 	fd := st.Fleet
 	switch {
 	case change.UnsetCoBots:
@@ -254,7 +255,8 @@ func (s *Service) applyFleetChange(st State, change FleetChange) (FleetDefaults,
 		if len(change.Required) == 0 {
 			return fd, errors.New("the required set cannot be empty: a round that gates on nobody converges before any reviewer runs")
 		}
-		resolved, err := resolveRequiredLogins(change.Required, s.cfg.WithFleet(fd).Bot)
+		resolved, err := resolveRequiredLoginsPreserving(
+			change.Required, s.cfg.WithFleet(fd).Bot, existingRequired)
 		if err != nil {
 			return fd, err
 		}

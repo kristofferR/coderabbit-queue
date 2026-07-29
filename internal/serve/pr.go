@@ -206,7 +206,7 @@ func costKey(repo string, pr int, head string, bots []BotName, remaining *int) s
 	var b strings.Builder
 	b.WriteString(strings.ToLower(repo) + "#" + strconv.Itoa(pr) + "@" + head)
 	for _, bot := range bots {
-		b.WriteString("|" + bot.Login)
+		b.WriteString("|" + bot.Login + ":primary=" + strconv.FormatBool(bot.Primary) + ":trigger=" + bot.Trigger)
 	}
 	b.WriteString("|allowance=")
 	if remaining == nil {

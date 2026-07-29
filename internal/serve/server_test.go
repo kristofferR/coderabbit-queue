@@ -651,6 +651,20 @@ func TestObservationKeyIncludesEffectiveReviewers(t *testing.T) {
 	}
 }
 
+func TestCostKeyIncludesReviewerPricingPolicy(t *testing.T) {
+	base := []BotName{{Login: "macroscope-app[bot]", Trigger: "selfheal"}}
+	always := []BotName{{Login: "macroscope-app[bot]", Trigger: "always"}}
+	if costKey("o/r", 1, "abcdef123", base, nil) ==
+		costKey("o/r", 1, "abcdef123", always, nil) {
+		t.Fatal("trigger policy change reused the old cost cache key")
+	}
+	primary := []BotName{{Login: "macroscope-app[bot]", Trigger: "selfheal", Primary: true}}
+	if costKey("o/r", 1, "abcdef123", base, nil) ==
+		costKey("o/r", 1, "abcdef123", primary, nil) {
+		t.Fatal("reviewer role change reused the old cost cache key")
+	}
+}
+
 func TestPRObservationCacheRejectsAnObservationForAnotherHead(t *testing.T) {
 	now := time.Now().UTC()
 	observer := &sequenceObserver{observations: []Observation{

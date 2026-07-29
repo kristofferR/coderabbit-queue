@@ -1,4 +1,4 @@
-// Package state defines crq's persisted schema v5: one Round per tracked PR,
+// Package state defines crq's persisted schema v6: one Round per tracked PR,
 // a single global fire slot, and the CodeRabbit account quota. A Round is
 // never deleted, only transitioned (or archived when superseded by a new
 // head) — the invariant that makes "forgot we already requested a review at
@@ -463,7 +463,7 @@ func (l LeaderCapabilityLease) HasCapability(want string) bool {
 	return false
 }
 
-// State is schema v5. It persists as state.json in the existing git state ref;
+// State is schema v6. It persists as state.json in the existing git state ref;
 // v4 is migrated in place so its live rounds survive the compatibility fence.
 type State struct {
 	Version int   `json:"v"` // 5
@@ -584,7 +584,7 @@ func (s State) LeaderHasCapability(want string) bool {
 		s.LeaderCapabilities.HasCapability(want)
 }
 
-const SchemaVersion = 5
+const SchemaVersion = 6
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.

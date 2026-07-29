@@ -56,6 +56,26 @@ func TestFleetRequiredReviewersResolveAgainstTheEffectivePrimary(t *testing.T) {
 	}
 }
 
+func TestFleetReviewerEditPreservesExistingCustomRequiredBot(t *testing.T) {
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":          "owner/gate",
+		"CRQ_REQUIRED_BOTS": "coderabbitai[bot],sonar[bot]",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := &Service{cfg: cfg}
+	next, err := svc.applyFleetChange(DefaultState(cfg), FleetChange{
+		Required: []string{"coderabbitai[bot]", "sonar[bot]", "codex"},
+	})
+	if err != nil {
+		t.Fatalf("unrelated fleet reviewer edit rejected the existing custom gate: %v", err)
+	}
+	if got := strings.Join(next.Required, ","); !strings.Contains(got, "sonar[bot]") {
+		t.Fatalf("required = %q, want the existing custom gate preserved", got)
+	}
+}
+
 func TestMigratedFleetScopeAndRepoPolicyStillApplies(t *testing.T) {
 	cfg, err := BuildConfig(map[string]string{
 		"CRQ_REPO":    "owner/gate",

@@ -117,13 +117,36 @@ func (s *Service) AutofixSettings(ctx context.Context) ([]AutofixSetting, error)
 // the hazard is a setting recorded under a name nothing will ever match.
 func validRepoSlug(repo string) bool {
 	owner, name, ok := strings.Cut(repo, "/")
-	if !ok || owner == "" || name == "" {
+	return ok && validOwnerLogin(owner) && validNameSegment(name)
+}
+
+const maxOwnerLogin = 39
+
+func validOwnerLogin(login string) bool {
+	if login == "" || len(login) > maxOwnerLogin ||
+		strings.HasPrefix(login, "-") || strings.HasSuffix(login, "-") ||
+		strings.Contains(login, "--") {
 		return false
 	}
-	// Same segment rules the workspace package applies to a path: "." and ".."
-	// are not repository names, and a second slash means this is not one either.
-	for _, part := range []string{owner, name} {
-		if part == "." || part == ".." || strings.ContainsAny(part, `/\`) {
+	for _, r := range login {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validNameSegment(part string) bool {
+	if part == "" || part == "." || part == ".." {
+		return false
+	}
+	for _, r := range part {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
 			return false
 		}
 	}

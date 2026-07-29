@@ -76,9 +76,9 @@ func TestLoadRefusesUndecodableCurrentState(t *testing.T) {
 	}
 }
 
-func TestLoadMigratesV4WithoutLosingLiveRounds(t *testing.T) {
+func TestLoadMigratesV5WithoutLosingLiveRounds(t *testing.T) {
 	payload := `{
-		"v":4,
+		"v":5,
 		"rev":7,
 		"next_seq":2,
 		"rounds":{
@@ -116,10 +116,10 @@ func TestLoadMigratesV4WithoutLosingLiveRounds(t *testing.T) {
 		t.Fatalf("live v4 round was lost during migration: %+v", round)
 	}
 	if !st.Fleet.SetRequired || strings.Join(st.Fleet.Required, ",") != "coderabbitai[bot],cursor[bot]" {
-		t.Errorf("required = %v (set %v), want migrated v4 policy", st.Fleet.Required, st.Fleet.SetRequired)
+		t.Errorf("required = %v (set %v), want migrated v5 policy", st.Fleet.Required, st.Fleet.SetRequired)
 	}
 	if !st.Fleet.SetCoBots || strings.Join(st.Fleet.CoBots, ",") != "bugbot,codex" {
-		t.Errorf("cobots = %v (set %v), want migrated v4 policy", st.Fleet.CoBots, st.Fleet.SetCoBots)
+		t.Errorf("cobots = %v (set %v), want migrated v5 policy", st.Fleet.CoBots, st.Fleet.SetCoBots)
 	}
 	if st.Fleet.MinInterval != "2m" || st.Fleet.Env["CRQ_SCOPE"] != "owner,friend" ||
 		st.Fleet.Env["CRQ_REPOS"] != "owner/repo,friend/private" ||
@@ -133,10 +133,35 @@ func TestLoadMigratesV4WithoutLosingLiveRounds(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(encoded), "future_top_level") {
-		t.Fatalf("unknown v4 state was lost during migration: %s", encoded)
+		t.Fatalf("unknown v5 state was lost during migration: %s", encoded)
 	}
 	if !strings.Contains(string(encoded), "future-policy") {
-		t.Fatalf("unknown v4 fleet policy was lost during migration: %s", encoded)
+		t.Fatalf("unknown v5 fleet policy was lost during migration: %s", encoded)
+	}
+}
+
+func TestLoadMigratesAlreadyNestedV5FleetDefaults(t *testing.T) {
+	payload := `{
+		"v":5,
+		"rounds":{},
+		"fleet":{
+			"cobots":["codex"],
+			"set_cobots":true,
+			"required":["coderabbitai[bot]"],
+			"set_required":true,
+			"min_interval":"3m",
+			"env":{"CRQ_SETTLE":"45s"}
+		}
+	}`
+	st, _, err := versionStore(t, payload).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Version != SchemaVersion || !st.Fleet.SetCoBots || !st.Fleet.SetRequired ||
+		strings.Join(st.Fleet.CoBots, ",") != "codex" ||
+		strings.Join(st.Fleet.Required, ",") != "coderabbitai[bot]" ||
+		st.Fleet.MinInterval != "3m" || st.Fleet.Env["CRQ_SETTLE"] != "45s" {
+		t.Fatalf("nested v5 fleet defaults were not preserved: %+v", st.Fleet)
 	}
 }
 
