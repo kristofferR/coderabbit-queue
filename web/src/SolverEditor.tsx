@@ -102,17 +102,26 @@ export function SolverEditor({
     );
   };
 
-  const inherit = (field: "models" | "severities" | "ask_mode") => {
+  const inherit = (
+    field: "models" | "effort" | "severities" | "ask_mode" | "forks" | "skip_authors",
+  ) => {
     setWarning(null);
+    const change: NonNullable<ActionBody["solver"]> =
+      field === "models"
+        ? { unset_models: true }
+        : field === "effort"
+          ? { unset_effort: true }
+          : field === "severities"
+            ? { unset_severities: true }
+            : field === "ask_mode"
+              ? { unset_ask_mode: true }
+              : field === "forks"
+                ? { unset_forks: true }
+                : { unset_skip_authors: true };
     runOperation(
       act("solver", {
         repo,
-        solver:
-          field === "models"
-            ? { unset_models: true }
-            : field === "severities"
-              ? { unset_severities: true }
-              : { unset_ask_mode: true },
+        solver: change,
       }),
       {
         onSuccess: ({ snapshot, warning: next }) => {
@@ -215,6 +224,11 @@ export function SolverEditor({
                   </option>
                 ))}
               </select>
+              <Inherit
+                shown={src("effort") === "repo"}
+                busy={busy || dirty}
+                onClick={() => inherit("effort")}
+              />
             </Row>
             <Row label="Attempts" source={src("max_attempts")}>
               <input
@@ -299,6 +313,11 @@ export function SolverEditor({
               <span className="ml-2 text-[12px] text-faint">
                 a session runs an agent over that branch's code with approvals bypassed
               </span>
+              <Inherit
+                shown={src("forks") === "repo"}
+                busy={busy || dirty}
+                onClick={() => inherit("forks")}
+              />
             </Row>
             <Row label="Skip authors" source={src("skip_authors")}>
               <input
@@ -307,6 +326,11 @@ export function SolverEditor({
                 onChange={(e) => setAuthors(e.target.value)}
                 placeholder="dependabot[bot], …"
                 className="w-full rounded-lg border border-edge bg-[#FBFBFC] px-2 py-1 font-mono text-[12.5px]"
+              />
+              <Inherit
+                shown={src("skip_authors") === "repo"}
+                busy={busy || dirty}
+                onClick={() => inherit("skip_authors")}
               />
             </Row>
             <Row label="Extra prompt" source={src("prompt")}>

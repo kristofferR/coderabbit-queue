@@ -450,10 +450,13 @@ function ReviewerEditor({
                     <Toggle
                       on={runs.includes(b.name)}
                       label={`${b.name} runs for ${repo.repo}`}
+                      locked={!b.primary && !b.configurable}
                       title={
                         b.primary
                           ? "the metered reviewer — turning it off spends no quota here"
-                          : undefined
+                          : b.configurable
+                            ? undefined
+                            : "this retired reviewer is shown for history and cannot be configured"
                       }
                       onClick={() => toggleRuns(b.name)}
                     />
@@ -462,6 +465,12 @@ function ReviewerEditor({
                     <Toggle
                       on={required.includes(b.name)}
                       label={`${b.name} required for ${repo.repo}`}
+                      locked={!b.primary && !b.configurable}
+                      title={
+                        !b.primary && !b.configurable
+                          ? "this retired reviewer is shown for history and cannot be configured"
+                          : undefined
+                      }
                       onClick={() => toggleRequired(b.name)}
                     />
                   </Td>

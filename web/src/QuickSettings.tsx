@@ -43,7 +43,10 @@ export function QuickSettings({
     runOperation(
       act("reviewers", {
         repo: repo.repo,
-        cobots: runs.filter((n) => n !== primary?.name),
+        cobots: runs.filter(
+          (name) =>
+            name !== primary?.name && bots.some((bot) => bot.name === name && bot.configurable),
+        ),
         required,
         primary: primary ? runs.includes(primary.name) : undefined,
       }),
@@ -88,10 +91,13 @@ export function QuickSettings({
                     <Toggle
                       on={runs.includes(b.name)}
                       label={`${b.name} runs`}
+                      locked={!b.primary && !b.configurable}
                       title={
                         b.primary
                           ? "the metered reviewer — off here spends no quota on this repo"
-                          : undefined
+                          : b.configurable
+                            ? undefined
+                            : "this retired reviewer is shown for history and cannot be configured"
                       }
                       onClick={() =>
                         setRuns((cur) => {
@@ -107,6 +113,12 @@ export function QuickSettings({
                     <Toggle
                       on={required.includes(b.name)}
                       label={`${b.name} required`}
+                      locked={!b.primary && !b.configurable}
+                      title={
+                        !b.primary && !b.configurable
+                          ? "this retired reviewer is shown for history and cannot be configured"
+                          : undefined
+                      }
                       onClick={() =>
                         setRequired((cur) => {
                           const on = cur.includes(b.name);

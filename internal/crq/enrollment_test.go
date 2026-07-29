@@ -284,6 +284,49 @@ func TestDisablingEnrollmentDropsTheQueuedRounds(t *testing.T) {
 	}
 }
 
+func TestSetEnrollmentDryRunDoesNotMutateState(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/stopped": true}
+	cfg.DryRun = true
+	store := NewMemoryStore(cfg)
+	now := time.Date(2026, 7, 29, 8, 0, 0, 0, time.UTC)
+	if _, err := store.Update(ctx, func(st *State) error {
+		_, err := st.NewRound("o/stopped", 7, "abcdef123", now)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, revision, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	svc.now = func() time.Time { return now }
+
+	view, err := svc.SetEnrollment(ctx, "o/stopped", false, "preview stopping reviews")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Enabled || view.Source != "state" || view.Reason != "preview stopping reviews" {
+		t.Fatalf("dry-run preview = %+v, want the proposed disabled enrollment", view)
+	}
+
+	after, afterRevision, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterRevision != revision {
+		t.Fatalf("dry-run changed state revision: before=%+v after=%+v", revision, afterRevision)
+	}
+	if _, ok := after.Enrollment("o/stopped"); ok {
+		t.Fatal("dry-run recorded the enrollment change")
+	}
+	if before.Round("o/stopped", 7) == nil || after.Round("o/stopped", 7) == nil {
+		t.Fatal("dry-run archived the queued round")
+	}
+}
+
 func TestDisabledEnrollmentDoesNotRetryAnInflightRound(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
