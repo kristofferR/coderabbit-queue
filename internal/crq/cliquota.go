@@ -70,6 +70,7 @@ func (s *Service) RecordCLIQuota(ctx context.Context, report PreflightReport, cl
 		return CLIQuotaResult{
 			Reason: "the coderabbit cli is authenticated to " + orDash(cliOrg) +
 				", which is not the account crq queues for (" + strings.Join(cfg.Scope, ",") + ")",
+			Until: state.Account.BlockedUntil,
 		}, nil
 	}
 

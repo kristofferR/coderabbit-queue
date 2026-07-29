@@ -900,6 +900,26 @@ func TestApplyTransitionDropsRetryWhenFleetPolicyChanged(t *testing.T) {
 	if round.Phase != PhaseFired || st.FireSlot == nil {
 		t.Fatalf("stale retry changed the live round or released its slot: round=%+v slot=%+v", round, st.FireSlot)
 	}
+
+	until := now.Add(30 * time.Minute)
+	noticeAt := now.Add(-time.Minute)
+	err = svc.applyTransition(&st, round, engine.Transition{
+		Outcome: engine.OutRetry,
+		Reason:  dialect.ReasonRateLimited,
+		RetryAt: until,
+		Blocked: &engine.AccountBlock{
+			Until: until, CommentID: 5, CommentUpdated: noticeAt,
+		},
+	}, now, decidedCfg)
+	if err != nil {
+		t.Fatalf("applyTransition error = %v, want independent account evidence retained", err)
+	}
+	if st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.Equal(until) {
+		t.Fatalf("blocked until = %v, want %s", st.Account.BlockedUntil, until)
+	}
+	if round.Phase != PhaseFired || st.FireSlot == nil {
+		t.Fatalf("account evidence applied the stale retry: round=%+v slot=%+v", round, st.FireSlot)
+	}
 }
 
 func TestReleaseSlotRequiresTheOwningToken(t *testing.T) {

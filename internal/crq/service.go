@@ -960,11 +960,29 @@ func (s *Service) progressSlotRound(ctx context.Context, slot Round) (PumpResult
 func (s *Service) applyTransition(st *State, r *Round, tr engine.Transition, now time.Time, cfg Config) error {
 	key := QueueKey(r.Repo, r.PR)
 	ownerToken := r.Token
-	if (tr.Outcome == engine.OutRetry || tr.Outcome == engine.OutReleaseSlot) &&
+	if tr.Outcome == engine.OutRetry {
+		current := s.cfgFor(*st, r.Repo)
+		fallbackChanged := current.RateLimitFallback != cfg.RateLimitFallback
+		policyChanged := reviewersChanged(st, r.Repo, cfg) ||
+			!sameBot(current.Bot, cfg.Bot) ||
+			current.PrimaryOff != cfg.PrimaryOff ||
+			!sameReviewers(current, cfg) ||
+			current.InflightTimeout != cfg.InflightTimeout ||
+			fallbackChanged
+		if policyChanged {
+			// The account block is independent evidence unless its window was
+			// derived from the fallback that just changed. Preserve a parsed block
+			// while dropping the stale round transition; a fallback-derived one is
+			// recomputed from the observation on the next pump.
+			if tr.Blocked != nil && !fallbackChanged &&
+				observedAccountBlockChanges(st.Account, tr.Blocked) {
+				applyAccountBlock(st, tr.Blocked, now)
+				return nil
+			}
+			return ErrNoChange
+		}
+	} else if tr.Outcome == engine.OutReleaseSlot &&
 		reviewersChanged(st, r.Repo, cfg) {
-		// Retry and release timing come from cfg.policy(). A newer fleet record
-		// may lengthen an in-flight timeout while observation is running; applying
-		// the old result would release the slot and permit a duplicate fire.
 		return ErrNoChange
 	}
 	switch tr.Outcome {
