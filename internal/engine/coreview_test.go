@@ -35,6 +35,12 @@ func TestCoReviewerActiveIgnoresHeadScope(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "trigger command attributed to reviewer",
+			obs: Observation{Head: "new", Events: []dialect.BotEvent{{
+				Kind: dialect.EvCoCommand, Bot: "human", For: bugbotLogin,
+			}}},
+		},
+		{
 			name: "explicit attribution takes precedence over author",
 			obs:  Observation{Head: "new", Events: []dialect.BotEvent{{Bot: bugbotLogin, For: macroLogin}}},
 		},

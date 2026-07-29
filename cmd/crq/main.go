@@ -2625,7 +2625,7 @@ func (c prCoster) Cost(ctx context.Context, repo string, pr int) (serve.Cost, er
 		return serve.Cost{}, err
 	}
 	out := serve.Cost{
-		Low: est.Low, High: est.High, Exact: est.Exact, Unpriced: est.Unpriced,
+		Head: est.Head, Low: est.Low, High: est.High, Exact: est.Exact, Unpriced: est.Unpriced,
 		Summary: est.Summary, PricesCheckedAt: est.PricesCheckedAt,
 		Diff: serve.CostDiff{
 			Additions: est.Diff.Additions, Deletions: est.Diff.Deletions,

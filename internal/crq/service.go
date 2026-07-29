@@ -2702,7 +2702,7 @@ func (s *Service) LoadState(ctx context.Context) (State, error) {
 // decides, so failing a pass over one would trade something that matters for
 // something that does not.
 func (s *Service) noteTitles(ctx context.Context, items []queueCandidate) {
-	if len(items) == 0 {
+	if s.cfg.DryRun || len(items) == 0 {
 		return
 	}
 	_, err := s.store.Update(ctx, func(st *State) error {

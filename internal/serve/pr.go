@@ -43,6 +43,7 @@ type Coster interface {
 // prices-checked date, because a single confident figure would be the one
 // output guaranteed to be wrong.
 type Cost struct {
+	Head            string         `json:"head"`
 	Low             float64        `json:"low"`
 	High            float64        `json:"high"`
 	Exact           bool           `json:"exact,omitempty"`
@@ -422,13 +423,10 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 		// reasoning does not hold: the page went on quoting the previous diff's
 		// price for five minutes after a push.
 		head := ""
-		switch {
-		case view.Observed != nil:
+		if view.Observed != nil {
 			head = view.Observed.Head
-		case view.Round != nil:
-			head = view.Round.Head
 		}
-		key := costKey(repo, pr, head, s.botsFor(&st)(repo), st.Account.Remaining)
+		key := costKey(repo, pr, head, bots, st.Account.Remaining)
 		if r.URL.Query().Get("refresh") == "1" {
 			s.costs.put(key, costEntry{})
 		}
@@ -446,7 +444,13 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 				entry.cost = &cost
 				view.Cost = &cost
 			}
-			s.costs.put(key, entry)
+			cacheHead := head
+			if entry.cost != nil {
+				cacheHead = entry.cost.Head
+			}
+			if cacheHead != "" {
+				s.costs.put(costKey(repo, pr, cacheHead, bots, st.Account.Remaining), entry)
+			}
 		}
 	}
 

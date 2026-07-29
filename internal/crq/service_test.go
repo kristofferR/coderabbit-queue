@@ -706,6 +706,29 @@ func TestAutoReviewScanSkipsMarkedPRs(t *testing.T) {
 	}
 }
 
+func TestNoteTitlesDoesNotWriteDuringDryRun(t *testing.T) {
+	ctx := context.Background()
+	cfg := Config{DryRun: true}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.PutRound(Round{Repo: "o/r", PR: 1, Head: "aaaaaaaaa", Title: "old title"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	svc.noteTitles(ctx, []queueCandidate{{Repo: "o/r", PR: 1, Title: "new title"}})
+
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Round("o/r", 1).Title; got != "old title" {
+		t.Fatalf("title = %q, want dry-run state unchanged", got)
+	}
+}
+
 func TestEnqueueBatchAppendsOncePerPR(t *testing.T) {
 	cfg := Config{GateRepo: "o/gate", Scope: []string{"o"}, Host: "h"}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)

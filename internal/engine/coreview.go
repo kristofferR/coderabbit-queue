@@ -450,7 +450,7 @@ func CoReviewerActive(obs Observation, login string) bool {
 		}
 	}
 	for _, ev := range obs.Events {
-		if eventConcerns(ev, login) {
+		if ev.Kind != dialect.EvCoCommand && eventConcerns(ev, login) {
 			return true
 		}
 	}

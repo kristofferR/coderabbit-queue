@@ -211,6 +211,9 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	// at all and which of them may be fixed, so it is read BEFORE the target
 	// list is built.
 	st, _, stateErr := s.store.Load(ctx)
+	if stateErr != nil {
+		return fmt.Errorf("loading shared state for watch pass: %w", stateErr)
+	}
 	// Copied, never appended to in place. `crq watch -- <cmd>` splits argv at
 	// "--", so the flag half keeps CAPACITY reaching into the command half, and
 	// fs.Args() is a sub-slice of it: filling an empty list with append wrote the
@@ -236,10 +239,8 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		for repo := range s.cfg.AllowRepos {
 			add(repo)
 		}
-		if stateErr == nil {
-			for _, repo := range st.EnrolledRepos() {
-				add(repo)
-			}
+		for _, repo := range st.EnrolledRepos() {
+			add(repo)
 		}
 		sort.Strings(repos) // stable order: a pass must not depend on map iteration
 	}
@@ -267,14 +268,12 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	// A repository turned off from the dashboard must stop being watched on the
 	// next pass, not on restart.
 	notEnrolled := map[string]bool{}
-	if stateErr == nil {
-		for _, repo := range repos {
-			if !st.AutofixEnabled(repo) {
-				autofixOff[NormalizeRepo(repo)] = true
-			}
-			if !s.reviewsRepo(st, repo) {
-				notEnrolled[NormalizeRepo(repo)] = true
-			}
+	for _, repo := range repos {
+		if !st.AutofixEnabled(repo) {
+			autofixOff[NormalizeRepo(repo)] = true
+		}
+		if !s.reviewsRepo(st, repo) {
+			notEnrolled[NormalizeRepo(repo)] = true
 		}
 	}
 	for _, repo := range repos {

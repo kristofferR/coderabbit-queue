@@ -43,6 +43,23 @@ func (o *sequenceObserver) Observe(context.Context, string, int) (Observation, e
 	return got, nil
 }
 
+type failingObserver struct{ calls int }
+
+func (o *failingObserver) Observe(context.Context, string, int) (Observation, error) {
+	o.calls++
+	return Observation{}, errors.New("observation unavailable")
+}
+
+type countingCoster struct {
+	cost  Cost
+	calls int
+}
+
+func (c *countingCoster) Cost(context.Context, string, int) (Cost, error) {
+	c.calls++
+	return c.cost, nil
+}
+
 // Before the first load returns there is no snapshot — and no error either. The
 // zero Snapshot encodes its collections as null, and the client takes a 200 for
 // live state and iterates them straight away, so the dashboard crashed during
@@ -504,5 +521,36 @@ func TestPRObservationCacheRejectsAnObservationForAnotherHead(t *testing.T) {
 	request()
 	if observer.calls != 2 {
 		t.Fatalf("observer calls = %d, want a refetch because the cached observation belonged to another head", observer.calls)
+	}
+}
+
+func TestPRCostCacheDoesNotUseAStaleRoundHeadWhenObservationFails(t *testing.T) {
+	observer := &failingObserver{}
+	coster := &countingCoster{cost: Cost{Head: "bbbbbbbbb"}}
+	srv := New(&stubLoader{}, Options{
+		Addr: "127.0.0.1:7777", Observer: observer, Coster: coster,
+	})
+	srv.loaded = true
+	srv.lastState = state.New()
+	srv.lastState.Rounds = map[string]state.Round{
+		"o/r#1": {Repo: "o/r", PR: 1, Head: "aaaaaaaaa", Phase: state.PhaseCompleted},
+	}
+
+	request := func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost:7777/api/pr/o/r/1", nil)
+		req.Header.Set("X-CRQ-Dashboard", "1")
+		req.SetPathValue("owner", "o")
+		req.SetPathValue("name", "r")
+		req.SetPathValue("pr", "1")
+		srv.handlePR(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PR read = %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+	request()
+	request()
+	if coster.calls != 2 {
+		t.Fatalf("cost calls = %d, want a fresh live-head price while observation is unavailable", coster.calls)
 	}
 }

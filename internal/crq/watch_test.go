@@ -1517,6 +1517,19 @@ func (s *loadSwitchStore) Load(ctx context.Context) (State, Revision, error) {
 	return s.StateStore.Load(ctx)
 }
 
+func TestWatchPassStopsWhenSharedStateCannotBeRead(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/r": true}
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: "o/r", Number: 1}}
+	svc := NewService(cfg, gh, unreadableStore{NewMemoryStore(cfg)}, nil)
+
+	err := svc.watchPass(context.Background(), WatchOptions{}, newDispatchPool(0), nil)
+	if err == nil || !strings.Contains(err.Error(), "loading shared state") {
+		t.Fatalf("watchPass error = %v, want shared-state load failure", err)
+	}
+}
+
 // A solver record that names an author to skip has to reach the watcher too.
 // Next is a MUTATING oracle — it enqueues, it can fire, and it can start a fix
 // session that runs an agent with approvals bypassed — so a watcher that
