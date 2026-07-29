@@ -685,7 +685,7 @@ func run(ctx context.Context, args []string) int {
 		enrollFor := func(st crq.State, repo string) serve.Enrollment {
 			v := service.EnrollmentIn(st, repo)
 			return serve.Enrollment{
-				Source: v.Source, Enabled: v.Enabled, EnvConflict: v.EnvConflict,
+				Source: v.Source, Enabled: v.Enabled, EnvConflict: v.EnvConflict, ClearEnables: v.ClearEnables,
 				Reason: v.Reason, By: v.By, UpdatedAt: parseStamp(v.UpdatedAt),
 			}
 		}
@@ -2554,14 +2554,23 @@ func (a prActor) SetEnrollment(ctx context.Context, repo string, enabled bool, r
 	return view.Lagging, nil
 }
 
-func (a prActor) ClearEnrollment(ctx context.Context, repo string) error {
-	_, err := a.svc.ClearEnrollment(ctx, repo)
+func (a prActor) ClearEnrollment(ctx context.Context, repo string, expectedRev *int64) error {
+	_, err := a.svc.ClearEnrollmentAt(ctx, repo, expectedRev)
 	return err
 }
 
-func (a prActor) ClearReviewers(ctx context.Context, repo string) error {
-	_, err := a.svc.ClearReviewers(ctx, repo)
-	return err
+func (a prActor) ClearReviewers(ctx context.Context, repo string, expectedRev *int64, preview bool) (serve.FleetImpact, error) {
+	var impact crq.FleetImpact
+	var err error
+	if preview {
+		impact, err = a.svc.PreviewClearReviewers(ctx, repo)
+	} else {
+		_, impact, err = a.svc.ClearReviewersAt(ctx, repo, expectedRev)
+	}
+	if err != nil {
+		return serve.FleetImpact{}, err
+	}
+	return fleetImpactOf(impact), nil
 }
 
 func (a prActor) ResolveThreads(ctx context.Context, threadIDs []string) error {

@@ -28,7 +28,7 @@ type Actor interface {
 	// ClearEnrollment hands it back to the hosts' env files. Like the reviewer
 	// override, they report the hosts that will not honour the record.
 	SetEnrollment(ctx context.Context, repo string, enabled bool, reason string, expectedRev *int64) (lagging []string, err error)
-	ClearEnrollment(ctx context.Context, repo string) error
+	ClearEnrollment(ctx context.Context, repo string, expectedRev *int64) error
 	// Fleet reads the recorded defaults; SetFleet applies a change, or with
 	// preview reports what it WOULD do and writes nothing. A fleet save reaches
 	// every repository that has not overridden the setting, so the preview is
@@ -47,7 +47,7 @@ type Actor interface {
 	// SetReviewers returns the hosts that will not honour the override, so the
 	// UI can say so rather than reporting a save that some daemon ignores.
 	SetReviewers(ctx context.Context, repo string, coBots, required []string, primary *bool) (lagging []string, err error)
-	ClearReviewers(ctx context.Context, repo string) error
+	ClearReviewers(ctx context.Context, repo string, expectedRev *int64, preview bool) (FleetImpact, error)
 
 	// The three ways a finding stops blocking. They are distinct on purpose:
 	// resolving says it was handled, declining says it was considered and
@@ -161,8 +161,22 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		}
 	case "reviewers":
 		if req.Clear {
-			err = s.actor.ClearReviewers(ctx, req.Repo)
-			break
+			impact, clearErr := s.actor.ClearReviewers(ctx, req.Repo, req.ExpectedRev, req.Preview)
+			if clearErr != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": clearErr.Error()})
+				return
+			}
+			if req.Preview {
+				writeJSON(w, http.StatusOK, map[string]any{"impact": impact})
+				return
+			}
+			snap, warning := s.actionSnapshot(ctx)
+			response := map[string]any{"snapshot": snap, "impact": impact}
+			if warning != "" {
+				response["warning"] = warning
+			}
+			writeJSON(w, http.StatusOK, response)
+			return
 		}
 		// A nil list was not sent at all (a save that only flips the primary
 		// switch), which is different from a sent-but-empty one. The service
@@ -185,7 +199,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		}
 	case "enroll":
 		if req.Clear {
-			err = s.actor.ClearEnrollment(ctx, req.Repo)
+			err = s.actor.ClearEnrollment(ctx, req.Repo, req.ExpectedRev)
 			break
 		}
 		if req.Enabled == nil {

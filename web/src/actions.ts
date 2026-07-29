@@ -86,26 +86,26 @@ export type ActionBody = {
  * header cross-origin without a preflight the server never approves.
  */
 export function act(
-  action: "fleet" | "env",
+  action: "fleet" | "env" | "reviewers",
   body: ActionBody & { preview: true },
 ): Effect.Effect<FleetImpact, DashboardError>;
 export function act(
-  action: "fleet" | "env",
+  action: "fleet" | "env" | "reviewers",
   body: ActionBody & { preview?: false | undefined },
 ): Effect.Effect<ActionResult, DashboardError>;
 export function act(
-  action: "fleet" | "env",
+  action: "fleet" | "env" | "reviewers",
   body: ActionBody,
 ): Effect.Effect<ActionResult | FleetImpact, DashboardError>;
 export function act(
-  action: Exclude<ActionName, "fleet" | "env">,
+  action: Exclude<ActionName, "fleet" | "env" | "reviewers">,
   body: ActionBody,
 ): Effect.Effect<ActionResult, DashboardError>;
 export function act(
   action: ActionName,
   body: ActionBody,
 ): Effect.Effect<ActionResult | FleetImpact, DashboardError> {
-  if ((action === "fleet" || action === "env") && body.preview === true) {
+  if ((action === "fleet" || action === "env" || action === "reviewers") && body.preview === true) {
     return requestJson(FleetImpactResponseSchema, `/api/action/${action}`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-CRQ-Dashboard": "1" },

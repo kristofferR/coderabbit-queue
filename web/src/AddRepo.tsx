@@ -315,6 +315,7 @@ export function EnrollmentEditor({
   source,
   reviewed,
   envConflict,
+  clearEnables,
   reason,
   by,
   active,
@@ -324,6 +325,7 @@ export function EnrollmentEditor({
   source: string;
   reviewed: boolean;
   envConflict?: boolean;
+  clearEnables?: boolean;
   reason?: string;
   by?: string;
   /** Rounds in flight here, so stopping can say what happens to them. */
@@ -336,6 +338,7 @@ export function EnrollmentEditor({
   const { run: runPreview, running: previewing } = useOperation();
   const [warning, setWarning] = useState<string | null>(null);
   const [enablePreview, setEnablePreview] = useState<EnrollPreview | null>(null);
+  const [previewingClear, setPreviewingClear] = useState(false);
 
   const run = (body: Parameters<typeof act>[1]) =>
     runOperation(act("enroll", body), {
@@ -344,11 +347,13 @@ export function EnrollmentEditor({
         setWarning(nextWarning ?? null);
         setConfirming(false);
         setEnablePreview(null);
+        setPreviewingClear(false);
         setWhy("");
       },
     });
 
-  const previewEnable = () => {
+  const previewEnable = (clear = false) => {
+    setPreviewingClear(clear);
     setEnablePreview({});
     runPreview(enrollmentImpact(repo), {
       onSuccess: (impact) => setEnablePreview({ impact }),
@@ -442,7 +447,7 @@ export function EnrollmentEditor({
               <button
                 type="button"
                 disabled={busy || enablePreview !== null}
-                onClick={() => void previewEnable()}
+                onClick={() => previewEnable()}
                 className="rounded-lg bg-ink px-4 py-1.5 text-[13px] font-semibold text-white disabled:opacity-45"
               >
                 {enablePreview ? "Checking backlog…" : "Review this repository"}
@@ -452,7 +457,7 @@ export function EnrollmentEditor({
               <button
                 type="button"
                 disabled={busy}
-                onClick={() => void run({ repo, clear: true })}
+                onClick={() => (clearEnables ? previewEnable(true) : run({ repo, clear: true }))}
                 className="ml-auto text-[12.5px] text-acc hover:underline disabled:opacity-45"
               >
                 Follow this host's env instead
@@ -463,15 +468,22 @@ export function EnrollmentEditor({
       </div>
       {enablePreview && (
         <Confirm
-          title={`Review ${repo}?`}
-          confirmLabel="Review this repository"
+          title={previewingClear ? `Follow this host's policy for ${repo}?` : `Review ${repo}?`}
+          confirmLabel={previewingClear ? "Clear record and review" : "Review this repository"}
           busy={previewing || busy}
           error={enablePreview.error ?? error}
           body={<EnrollImpactCopy preview={enablePreview} />}
           onConfirm={() =>
-            void run({ repo, enabled: true, expected_rev: enablePreview.impact?.rev })
+            run(
+              previewingClear
+                ? { repo, clear: true, expected_rev: enablePreview.impact?.rev }
+                : { repo, enabled: true, expected_rev: enablePreview.impact?.rev },
+            )
           }
-          onCancel={() => setEnablePreview(null)}
+          onCancel={() => {
+            setEnablePreview(null);
+            setPreviewingClear(false);
+          }}
         />
       )}
     </Card>

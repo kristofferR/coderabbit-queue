@@ -16,12 +16,13 @@ import (
 // shared record and a host's env file is a queue rule, and two answers to it
 // would be one too many.
 type Enrollment struct {
-	Source      string     `json:"source"` // state|env|excluded|scope|off
-	Enabled     bool       `json:"enabled"`
-	EnvConflict bool       `json:"env_conflict,omitempty"`
-	Reason      string     `json:"reason,omitempty"`
-	By          string     `json:"by,omitempty"`
-	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
+	Source       string     `json:"source"` // state|env|excluded|scope|off
+	Enabled      bool       `json:"enabled"`
+	EnvConflict  bool       `json:"env_conflict,omitempty"`
+	ClearEnables bool       `json:"clear_enables,omitempty"`
+	Reason       string     `json:"reason,omitempty"`
+	By           string     `json:"by,omitempty"`
+	UpdatedAt    *time.Time `json:"updated_at,omitempty"`
 }
 
 // EnrollFor resolves one repository against a loaded state.

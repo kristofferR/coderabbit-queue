@@ -2,7 +2,7 @@ import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { AddRepo, EnrollmentEditor } from "../AddRepo";
 import { act } from "../actions";
-import type { BotCard, HeldRow, RepoRow, Snapshot } from "../api";
+import type { BotCard, FleetImpact, HeldRow, RepoRow, Snapshot } from "../api";
 import { Confirm } from "../Confirm";
 import { HOLD_ACTIONS_ENABLED } from "../features";
 import { SolverEditor } from "../SolverEditor";
@@ -156,6 +156,7 @@ export function ReposPage({
             source={selected.enrollment}
             reviewed={selected.reviewed}
             envConflict={selected.env_conflict}
+            clearEnables={selected.clear_enables}
             reason={selected.enroll_reason}
             by={selected.enroll_by}
             active={selected.active_rounds}
@@ -342,6 +343,7 @@ function ReviewerEditor({
   const [runs, setRuns] = useState<string[]>(repo.reviewers);
   const [required, setRequired] = useState<string[]>(repo.required);
   const [confirming, setConfirming] = useState(false);
+  const [resetImpact, setResetImpact] = useState<FleetImpact | null>(null);
   const { run: runOperation, running: busy, error, clearError } = useOperation();
   const [warning, setWarning] = useState<string | null>(null);
   const serverRuns = [...repo.reviewers].sort().join("\0");
@@ -350,6 +352,7 @@ function ReviewerEditor({
   useEffect(() => {
     setRuns(serverRuns ? serverRuns.split("\0") : []);
     setRequired(serverRequired ? serverRequired.split("\0") : []);
+    setResetImpact(null);
   }, [serverRuns, serverRequired]);
 
   // The primary is the one metered reviewer, so its Runs toggle is a budget
@@ -383,7 +386,7 @@ function ReviewerEditor({
     setRuns((cur) => (cur.includes(name) ? cur : [...cur, name]));
   };
 
-  const save = (clear = false) => {
+  const save = (clear = false, expectedRev?: number) => {
     runOperation(
       act("reviewers", {
         repo: repo.repo,
@@ -391,16 +394,23 @@ function ReviewerEditor({
         required,
         primary: primaryBot ? primaryOn : undefined,
         clear,
+        expected_rev: expectedRev,
       }),
       {
         onSuccess: ({ snapshot, warning: nextWarning }) => {
           onSnapshot?.(snapshot);
           setWarning(nextWarning ?? null);
           setConfirming(false);
+          setResetImpact(null);
         },
       },
     );
   };
+
+  const previewReset = () =>
+    runOperation(act("reviewers", { repo: repo.repo, clear: true, preview: true }), {
+      onSuccess: (impact) => setResetImpact(impact),
+    });
 
   return (
     <Card title="Reviewers" end={repo.override ? "override" : "inherited from the fleet"}>
@@ -529,7 +539,7 @@ function ReviewerEditor({
             <button
               type="button"
               disabled={busy}
-              onClick={() => save(true)}
+              onClick={previewReset}
               className="ml-auto text-[12.5px] text-acc hover:underline disabled:opacity-45"
             >
               Reset to fleet default
@@ -579,6 +589,40 @@ function ReviewerEditor({
           onConfirm={() => save(false)}
           onCancel={() => {
             setConfirming(false);
+            clearError();
+          }}
+        />
+      )}
+      {resetImpact && (
+        <Confirm
+          title={`Reset reviewers for ${repo.repo.split("/").pop()}?`}
+          danger={resetImpact.reopened > 0}
+          confirmLabel={
+            resetImpact.reopened > 0
+              ? `Reset and reopen ${resetImpact.reopened}`
+              : "Reset to fleet default"
+          }
+          busy={busy}
+          error={error}
+          body={
+            <>
+              <ul className="mb-2 list-disc pl-4">
+                {resetImpact.changes.map((change) => (
+                  <li key={change}>{change}</li>
+                ))}
+              </ul>
+              {resetImpact.summary}
+              {resetImpact.reopened > 0 && (
+                <p className="mt-2 text-warn">
+                  Reopened rounds are reviewed again, and metered reviews spend the shared
+                  allowance.
+                </p>
+              )}
+            </>
+          }
+          onConfirm={() => save(true, resetImpact.rev)}
+          onCancel={() => {
+            setResetImpact(null);
             clearError();
           }}
         />

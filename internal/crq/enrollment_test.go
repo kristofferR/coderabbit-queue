@@ -57,7 +57,7 @@ func TestEnrollmentPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.Enabled || view.Source != "state" || !view.EnvConflict {
+	if view.Enabled || view.Source != "state" || !view.EnvConflict || !view.ClearEnables {
 		t.Errorf("view = %+v, want off by record with the env disagreement reported", view)
 	}
 
@@ -1012,6 +1012,38 @@ func TestSetEnrollmentAtRejectsAStalePreview(t *testing.T) {
 	if _, err := svc.SetEnrollmentAt(ctx, "o/new", true, "", &impact.Rev); err == nil ||
 		!strings.Contains(err.Error(), "preview enrollment again") {
 		t.Fatalf("stale enrollment save error = %v, want preview-again refusal", err)
+	}
+}
+
+func TestClearEnrollmentAtRejectsAStaleEnablingPreview(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/re-enabled": true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	if _, err := svc.SetEnrollment(ctx, "o/re-enabled", false, "paused"); err != nil {
+		t.Fatal(err)
+	}
+	impact, err := svc.PreviewEnroll(ctx, "o/re-enabled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.CalibrationIssue++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ClearEnrollmentAt(ctx, "o/re-enabled", &impact.Rev); err == nil ||
+		!strings.Contains(err.Error(), "preview enrollment again") {
+		t.Fatalf("stale clear error = %v, want preview-again refusal", err)
+	}
+	view, err := svc.Enrollment(ctx, "o/re-enabled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Enabled || !view.ClearEnables {
+		t.Fatalf("view = %+v, want the off record retained with its enabling-clear warning", view)
 	}
 }
 

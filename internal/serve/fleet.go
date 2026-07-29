@@ -93,6 +93,7 @@ type RepoRow struct {
 	// Reviewed is the resolved answer; Enrollment is only where it came from.
 	Reviewed     bool       `json:"reviewed"`
 	EnvConflict  bool       `json:"env_conflict,omitempty"`
+	ClearEnables bool       `json:"clear_enables,omitempty"`
 	EnrollReason string     `json:"enroll_reason,omitempty"`
 	EnrollBy     string     `json:"enroll_by,omitempty"`
 	EnrollAt     *time.Time `json:"enroll_at,omitempty"`
@@ -453,7 +454,7 @@ func repoRows(st state.State, cfg FleetConfig, now time.Time, botsFor BotsFor, e
 		}
 		if enrollFor != nil {
 			e := enrollFor(st, row.Repo)
-			row.Enrollment, row.Reviewed, row.EnvConflict = e.Source, e.Enabled, e.EnvConflict
+			row.Enrollment, row.Reviewed, row.EnvConflict, row.ClearEnables = e.Source, e.Enabled, e.EnvConflict, e.ClearEnables
 			row.EnrollReason, row.EnrollBy, row.EnrollAt = e.Reason, e.By, e.UpdatedAt
 		} else {
 			row.Enrollment = cfg.enrollmentOf(row.Repo)

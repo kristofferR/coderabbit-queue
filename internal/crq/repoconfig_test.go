@@ -366,6 +366,58 @@ func TestChangingRequirementsReopensACompletedRound(t *testing.T) {
 	}
 }
 
+func TestPreviewClearReviewersPricesRestoredFleetReviewers(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost", "CRQ_REPOS": "o/r",
+		"CRQ_COBOTS": "codex", "CRQ_REQUIRED_BOTS": "coderabbitai[bot],codex",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, pr, head := "o/r", 17, "abcdef123"
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := svc.SetReviewers(ctx, repo, []string{}, []string{cfg.Bot}, nil); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 41)
+
+	impact, err := svc.PreviewClearReviewers(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if impact.Reopened != 1 || !strings.Contains(strings.Join(impact.Changes, "\n"), "codex") {
+		t.Fatalf("impact = %+v, want the inherited Codex reviewer and one reopened round", impact)
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.CalibrationIssue++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.ClearReviewersAt(ctx, repo, &impact.Rev); err == nil ||
+		!strings.Contains(err.Error(), "preview the change again") {
+		t.Fatalf("stale reset error = %v, want preview-again refusal", err)
+	}
+	impact, err = svc.PreviewClearReviewers(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.ClearReviewersAt(ctx, repo, &impact.Rev); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(repo, pr); round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("round = %#v, want the confirmed reset to reopen it", round)
+	}
+}
+
 func TestSettingIdenticalReviewersPreservesOverrideIdentity(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()

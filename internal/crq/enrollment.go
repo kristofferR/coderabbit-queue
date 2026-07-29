@@ -29,11 +29,15 @@ type EnrollmentView struct {
 	// EnvConflict says the host's env and the shared record disagree. The record
 	// wins, but silently overriding a file someone edited is how a fleet grows a
 	// mystery, so it is reported.
-	EnvConflict bool     `json:"env_conflict,omitempty"`
-	Reason      string   `json:"reason,omitempty"`
-	By          string   `json:"by,omitempty"`
-	UpdatedAt   string   `json:"updated_at,omitempty"`
-	Lagging     []string `json:"lagging_hosts,omitempty"`
+	EnvConflict bool `json:"env_conflict,omitempty"`
+	// ClearEnables says removing this shared record hands the repository to an
+	// env/scope policy that reviews it. The dashboard previews that clear as an
+	// enable because it can enqueue and spend against the backlog.
+	ClearEnables bool     `json:"clear_enables,omitempty"`
+	Reason       string   `json:"reason,omitempty"`
+	By           string   `json:"by,omitempty"`
+	UpdatedAt    string   `json:"updated_at,omitempty"`
+	Lagging      []string `json:"lagging_hosts,omitempty"`
 }
 
 // Enrollment reports whether crq reviews repo, and why.
@@ -82,6 +86,7 @@ func (s *Service) enrollmentOf(st State, repo string) EnrollmentView {
 		// repository a host's CRQ_REPOS lists. A record that turns one ON that
 		// env never mentioned is the feature working, not a conflict.
 		view.EnvConflict = inEnv && !rec.Enabled
+		view.ClearEnables = !rec.Enabled && (inEnv || len(cfg.AllowRepos) == 0)
 		// The autofix watcher reads this record too, and it holds neither the
 		// leader lease nor the fire slot — so an old one went on scanning a
 		// repository the off switch had just abandoned while the save reported
@@ -227,12 +232,21 @@ func (s *Service) abandonPendingRounds(st *State, repo string) {
 // ClearEnrollment drops the record, handing the repository back to the hosts'
 // env files.
 func (s *Service) ClearEnrollment(ctx context.Context, repo string) (EnrollmentView, error) {
+	return s.ClearEnrollmentAt(ctx, repo, nil)
+}
+
+// ClearEnrollmentAt binds a backlog preview to the state revision it priced.
+// CLI callers omit expectedRev and retain latest-state behavior.
+func (s *Service) ClearEnrollmentAt(ctx context.Context, repo string, expectedRev *int64) (EnrollmentView, error) {
 	repo = NormalizeRepo(repo)
 	if err := checkRepoShape(repo); err != nil {
 		return EnrollmentView{}, err
 	}
 	now := s.clock().UTC()
 	st, err := s.store.Update(ctx, func(st *State) error {
+		if expectedRev != nil && st.Rev != *expectedRev {
+			return fmt.Errorf("fleet state moved from revision %d to %d; preview enrollment again", *expectedRev, st.Rev)
+		}
 		if !st.ClearEnrollment(repo) {
 			return ErrNoChange
 		}

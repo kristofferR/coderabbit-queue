@@ -201,36 +201,127 @@ func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, require
 
 // ClearReviewers returns repo to the fleet default.
 func (s *Service) ClearReviewers(ctx context.Context, repo string) (ReviewerView, error) {
+	view, _, err := s.ClearReviewersAt(ctx, repo, nil)
+	return view, err
+}
+
+// PreviewClearReviewers reports which inherited reviewers a reset restores and
+// how many completed open rounds need another review.
+func (s *Service) PreviewClearReviewers(ctx context.Context, repo string) (FleetImpact, error) {
+	repo = NormalizeRepo(repo)
+	if err := checkRepoShape(repo); err != nil {
+		return FleetImpact{}, err
+	}
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return FleetImpact{}, err
+	}
+	impact, _, err := s.analyzeClearReviewers(ctx, st, repo)
+	return impact, err
+}
+
+// ClearReviewersAt binds the reset to the state revision its preview described.
+func (s *Service) ClearReviewersAt(ctx context.Context, repo string, expectedRev *int64) (ReviewerView, FleetImpact, error) {
 	repo = NormalizeRepo(repo)
 	// A typo like "owner-repo" would otherwise clear a key nothing uses and exit
 	// 0, so automation believes it restored the fleet default while the real
 	// override is still in force.
 	if err := checkRepoShape(repo); err != nil {
-		return ReviewerView{}, err
+		return ReviewerView{}, FleetImpact{}, err
 	}
-	open, err := s.openPRs(ctx, repo)
+	loaded, _, err := s.store.Load(ctx)
 	if err != nil {
-		return ReviewerView{}, err
+		return ReviewerView{}, FleetImpact{}, err
 	}
+	if err := checkFleetPreviewRevision(loaded, expectedRev); err != nil {
+		return ReviewerView{}, FleetImpact{}, err
+	}
+	impact, open, err := s.analyzeClearReviewers(ctx, loaded, repo)
+	if err != nil {
+		return ReviewerView{}, FleetImpact{}, err
+	}
+	now := s.clock().UTC()
 	state, err := s.store.Update(ctx, func(st *State) error {
+		if err := checkFleetPreviewRevision(*st, expectedRev); err != nil {
+			return err
+		}
 		// Clearing returns the repository to the FLEET default, so that is what
 		// the "after" side has to be — s.cfg is this host's env, which is only
 		// the same thing when the fleet has recorded nothing.
 		base := s.cfg.WithFleet(st.Fleet)
-		before := base.ForRepo(mustOverride(st, repo))
-		if !st.ClearRepoOverride(repo) {
+		override, ok := st.RepoOverride(repo)
+		if !ok {
 			return ErrNoChange
 		}
+		before := base.ForRepo(override)
+		if claimedTriggerRepo(st, repo, now) {
+			return errors.New("a review trigger is already being posted; wait for it to finish before resetting this repository's reviewers")
+		}
+		st.ClearRepoOverride(repo)
 		s.reopenForChangedReviewers(st, repo, before, base, open)
 		return nil
 	})
 	if err != nil && !errors.Is(err, ErrNoChange) {
-		return ReviewerView{}, err
+		return ReviewerView{}, FleetImpact{}, err
 	}
 	if err == nil {
 		s.sync(ctx, state)
 	}
-	return s.Reviewers(ctx, repo)
+	view, err := s.Reviewers(ctx, repo)
+	return view, impact, err
+}
+
+// analyzeClearReviewers returns both the user-visible consequence preview and
+// the exact open-PR snapshot used to apply it. A confirmed reset must not ask
+// GitHub a second time and silently act on a different set than it displayed.
+func (s *Service) analyzeClearReviewers(ctx context.Context, st State, repo string) (FleetImpact, map[int]bool, error) {
+	impact := FleetImpact{Rev: st.Rev, Changes: []string{}}
+	ov, ok := st.RepoOverride(repo)
+	if !ok {
+		impact.Summary = "nothing would change"
+		return impact, nil, nil
+	}
+	base := s.cfg.WithFleet(st.Fleet)
+	before, after := base.ForRepo(ov), base
+	beforeRuns := before.reviewerLogins(func(Reviewer) bool { return true })
+	afterRuns := after.reviewerLogins(func(Reviewer) bool { return true })
+	if !sameLogins(beforeRuns, afterRuns) {
+		impact.Changes = append(impact.Changes, fmt.Sprintf("reviewers running: %s → %s",
+			shortBots(beforeRuns), shortBots(afterRuns)))
+	}
+	if !sameLogins(before.RequiredBots, after.RequiredBots) {
+		impact.Changes = append(impact.Changes, fmt.Sprintf("required reviewers: %s → %s",
+			shortBots(before.RequiredBots), shortBots(after.RequiredBots)))
+	}
+	if sameLogins(beforeRuns, afterRuns) && !sameTriggerPolicies(before.Reviewers, after.Reviewers) {
+		impact.Changes = append(impact.Changes, "reviewer trigger policies changed")
+	}
+	if len(impact.Changes) == 0 {
+		impact.Summary = "removes the override; effective reviewers stay the same"
+		return impact, nil, nil
+	}
+	impact.Repos = 1
+	beforeCo := before.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
+	afterCo := after.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
+	var open map[int]bool
+	if addedReviewers(before, after, beforeCo, afterCo) {
+		var err error
+		open, err = s.openPRs(ctx, repo)
+		if err != nil {
+			return FleetImpact{}, nil, err
+		}
+		for _, round := range st.Rounds {
+			if NormalizeRepo(round.Repo) == repo && round.Phase == PhaseCompleted && open[round.PR] {
+				impact.Reopened++
+			}
+		}
+	}
+	if impact.Reopened > 0 {
+		impact.Summary = fmt.Sprintf("resets to the fleet default; %d completed round(s) would be reopened and reviewed again", impact.Reopened)
+	} else {
+		impact.Summary = "resets to the fleet default; no round would be reopened"
+	}
+	return impact, open, nil
 }
 
 // checkRepoShape is the one repository-shape check every reviewers path applies,
