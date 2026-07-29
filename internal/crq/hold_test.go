@@ -2,6 +2,7 @@ package crq
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -350,6 +351,22 @@ func TestClarificationHoldRequiresDispatchOwnership(t *testing.T) {
 	}
 	if _, held := st.HeldPR(repo, pr); held {
 		t.Fatal("rejected clarification persisted a hold")
+	}
+
+	now = now.Add(DispatchTTL)
+	if _, err := svc.holdDispatch(ctx, report, "new-token", "needs clarification"); !errors.Is(err, errDispatchClaimLost) {
+		t.Fatalf("clarification hold with expired claim error = %v, want %v", err, errDispatchClaimLost)
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		round := st.Round(repo, pr)
+		if ok, taken := round.HeartbeatDispatch("new-token", now); !ok || taken {
+			t.Fatalf("heartbeat: ok %v taken %v", ok, taken)
+		}
+		st.RememberDispatch(repo, pr, *round.Dispatch)
+		st.PutRound(*round)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 
 	if _, err := svc.holdDispatch(ctx, report, "new-token", "needs clarification"); err != nil {

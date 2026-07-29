@@ -164,7 +164,8 @@ func (s *Service) hold(
 		if owner != nil {
 			round := st.Round(repo, pr)
 			if round == nil || round.Head != owner.head ||
-				round.Dispatch == nil || round.Dispatch.Token != owner.token {
+				round.Dispatch == nil || round.Dispatch.Token != owner.token ||
+				!round.DispatchHeld(now) {
 				return errDispatchClaimLost
 			}
 		}

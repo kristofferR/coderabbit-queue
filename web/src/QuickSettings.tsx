@@ -34,6 +34,7 @@ export function QuickSettings({
   const [runs, setRuns] = useState<string[]>(repo.reviewers);
   const [required, setRequired] = useState<string[]>(repo.required);
   const { run: runOperation, running: busy, error } = useOperation();
+  const [warning, setWarning] = useState<string | null>(null);
   const serverRuns = [...repo.reviewers].sort().join("\0");
   const serverRequired = [...repo.required].sort().join("\0");
 
@@ -56,6 +57,7 @@ export function QuickSettings({
   ];
 
   const save = () => {
+    setWarning(null);
     runOperation(
       act("reviewers", {
         repo: repo.repo,
@@ -64,8 +66,12 @@ export function QuickSettings({
         primary: primary ? runs.includes(primary.name) : undefined,
       }),
       {
-        onSuccess: ({ snapshot }) => {
+        onSuccess: ({ snapshot, warning: nextWarning }) => {
           onSnapshot?.(snapshot);
+          if (nextWarning) {
+            setWarning(nextWarning);
+            return;
+          }
           onClose();
         },
       },
@@ -165,6 +171,14 @@ export function QuickSettings({
               {error}
             </div>
           )}
+          {warning && (
+            <div
+              role="status"
+              className="mt-3 rounded-lg border border-warn-edge bg-warn-bg px-3 py-2 text-[12.5px] text-warn"
+            >
+              {warning}
+            </div>
+          )}
 
           <Link to="/repos" className="mt-3 inline-block text-[12.5px] text-acc hover:underline">
             Everything else for this repository →
@@ -186,6 +200,7 @@ export function QuickSettings({
             onClick={() => {
               setRuns(repo.reviewers);
               setRequired(repo.required);
+              setWarning(null);
             }}
             className="rounded-lg border border-edge px-4 py-1.5 text-[13px] font-semibold text-mut disabled:opacity-45"
           >
