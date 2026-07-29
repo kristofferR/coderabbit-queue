@@ -632,7 +632,7 @@ func (s *Service) queueDispatch(
 		return false, why, nil, nil
 	}
 	token := randomToken()
-	claimed, why, byDesign, model := s.claimDispatchModels(ctx, report, token, opts.MaxAttempts)
+	claimed, why, byDesign, model := s.claimDispatchModels(ctx, &report, token, opts.MaxAttempts)
 	if !claimed {
 		pool.release()
 		// A round another watcher already holds, or one that has spent its
@@ -1057,19 +1057,20 @@ func (s *Service) writeFindings(report NextReport) (string, error) {
 // already running for this PR, or a head that has spent its attempt budget —
 // rather than evidence about whether fix sessions can start at all.
 func (s *Service) claimDispatch(ctx context.Context, report NextReport, token string, maxAttempts int) (bool, string, bool) {
-	ok, why, byDesign, _ := s.claimDispatchModels(ctx, report, token, maxAttempts)
+	ok, why, byDesign, _ := s.claimDispatchModels(ctx, &report, token, maxAttempts)
 	return ok, why, byDesign
 }
 
 func (s *Service) claimDispatchModels(
 	ctx context.Context,
-	report NextReport,
+	report *NextReport,
 	token string,
 	fallbackMaxAttempts int,
 ) (bool, string, bool, string) {
 	reason, byDesign := "", false
 	var seen string
 	var selectedModel string
+	var selectedFindings []dialect.Finding
 	_, err := s.store.Update(ctx, func(st *State) error {
 		// The pass-level snapshot is only an optimization. The switch is an
 		// operator safety gate, so enforce it in the same CAS that grants the
@@ -1097,7 +1098,7 @@ func (s *Service) claimDispatchModels(
 		// claim at all, and no test reproduces it: the tests assert the refusal
 		// and get it. So the next occurrence has to explain itself from the log —
 		// which round each grant saw, and what its claim said at the time.
-		seen = describeDispatchClaim(round, st, report, s.clock())
+		seen = describeDispatchClaim(round, st, *report, s.clock())
 		// Somebody is fixing an earlier head of this PR right now, and is entitled
 		// to finish: a session's own push moves the head, so this is what a
 		// successful session looks like from the outside. Superseding its round
@@ -1160,11 +1161,15 @@ func (s *Service) claimDispatchModels(
 				round.Note = "adopted to fix feedback carried from an earlier head"
 			}
 		}
-		// The operator can replace the model ranking or lower the attempt limit
-		// after this pass's initial read. Resolve both from the state revision
-		// this CAS will write, so a claim cannot spend an extra attempt or select
-		// a model the current record has removed.
+		// The operator can replace the severity policy, model ranking, or attempt
+		// limit after this pass's initial read. Resolve all three from the state
+		// revision this CAS will write.
 		claimCfg := s.cfgFor(*st, report.Repo)
+		selectedFindings = autofixFindings(report.Findings, claimCfg.FixSeverities)
+		if len(report.Findings) > 0 && len(selectedFindings) == 0 {
+			reason, byDesign = "current autofix policy excludes every open finding", true
+			return ErrNoChange
+		}
 		models := append([]string(nil), claimCfg.FixModels...)
 		if len(models) == 0 && claimCfg.FixModel != "" {
 			models = []string{claimCfg.FixModel}
@@ -1182,6 +1187,11 @@ func (s *Service) claimDispatchModels(
 	})
 	if err != nil {
 		return false, err.Error(), false, ""
+	}
+	if reason == "" {
+		// The session receives exactly the finding set selected by the same
+		// state revision that granted its claim.
+		report.Findings = selectedFindings
 	}
 	if s.log != nil {
 		outcome := "granted"

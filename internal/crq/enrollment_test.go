@@ -98,6 +98,26 @@ func TestEnrollmentPrecedence(t *testing.T) {
 	}
 }
 
+func TestSetEnrollmentRejectsInvalidRepositorySlugs(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	for _, repo := range []string{"owner/..", "owner/name?bad", "bad_owner/name", "owner/name/extra"} {
+		if _, err := svc.SetEnrollment(ctx, repo, true, ""); err == nil {
+			t.Errorf("SetEnrollment(%q) succeeded, want invalid slug rejected", repo)
+		}
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repos := st.EnrolledRepos(); len(repos) != 0 {
+		t.Fatalf("invalid enrollment records persisted: %v", repos)
+	}
+}
+
 // A host with no allow-list searches its whole CRQ_SCOPE. Records must not
 // narrow that to themselves, or enrolling one repository would silently stop
 // every other one from being scanned.

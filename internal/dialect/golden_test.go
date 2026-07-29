@@ -26,6 +26,28 @@ func readGolden(t *testing.T, name string) string {
 	return string(data)
 }
 
+func TestRegistryPrimaryUsesItsOwnWordingHooks(t *testing.T) {
+	primary, ok := CoReviewerByName("codex")
+	if !ok {
+		t.Fatal("Codex registry entry is missing")
+	}
+	classifier := Classifier{
+		CodeRabbit: goldenCR,
+		Bot:        primary.Login,
+		Primary:    &primary,
+	}
+	now := time.Now().UTC()
+
+	clean := classifier.Classify(primary.Login, readGolden(t, "codex/clean-summary-tada.md"), 1, now, now)
+	if clean.Kind != EvNoAction {
+		t.Fatalf("Codex primary clean summary = %v, want primary no-action completion", clean.Kind)
+	}
+	limited := classifier.Classify(primary.Login, readGolden(t, "codex/usage-limit.md"), 2, now, now)
+	if limited.Kind != EvFailed {
+		t.Fatalf("Codex primary usage limit = %v, want failed primary attempt", limited.Kind)
+	}
+}
+
 // TestGoldenClassification pins one corpus file per known bot-message format.
 // When a bot ships a new phrasing, add a file and a row — the row IS the spec.
 func TestGoldenClassification(t *testing.T) {

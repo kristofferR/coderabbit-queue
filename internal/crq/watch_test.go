@@ -190,7 +190,7 @@ func TestProviderOutageUsesFallbackWithoutSpendingAnAttempt(t *testing.T) {
 	opts := WatchOptions{Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 5}
 
 	var claimedModel string
-	if ok, why, _, model := svc.claimDispatchModels(context.Background(), report, "first", 5); !ok {
+	if ok, why, _, model := svc.claimDispatchModels(context.Background(), &report, "first", 5); !ok {
 		t.Fatalf("first claim: %s", why)
 	} else if model != "opus" {
 		t.Fatalf("first claim returned model %q, want opus", model)
@@ -211,7 +211,7 @@ func TestProviderOutageUsesFallbackWithoutSpendingAnAttempt(t *testing.T) {
 		t.Fatalf("provider outage spent %d attempts, want 0", got)
 	}
 
-	if ok, why, _, model := svc.claimDispatchModels(context.Background(), report, "second", 5); !ok {
+	if ok, why, _, model := svc.claimDispatchModels(context.Background(), &report, "second", 5); !ok {
 		t.Fatalf("fallback claim: %s", why)
 	} else if model != "sonnet" {
 		t.Fatalf("fallback claim returned model %q, want sonnet", model)
@@ -1729,7 +1729,7 @@ func TestDispatchClaimResolvesCurrentSolverSettingsInsideCAS(t *testing.T) {
 	svc := NewService(cfg, newFakeGitHub(), hooked, nil)
 	report := NextReport{Repo: repo, PR: pr, Head: head, Action: "fix"}
 
-	ok, why, _, model := svc.claimDispatchModels(ctx, report, "first", 5)
+	ok, why, _, model := svc.claimDispatchModels(ctx, &report, "first", 5)
 	if !ok {
 		t.Fatalf("first claim: %s", why)
 	}
@@ -1738,9 +1738,37 @@ func TestDispatchClaimResolvesCurrentSolverSettingsInsideCAS(t *testing.T) {
 	}
 	svc.releaseDispatch(ctx, report, "first", true)
 
-	if ok, why, byDesign, _ := svc.claimDispatchModels(ctx, report, "second", 5); ok {
+	if ok, why, byDesign, _ := svc.claimDispatchModels(ctx, &report, "second", 5); ok {
 		t.Fatal("a second claim exceeded the current one-attempt limit")
 	} else if !byDesign || !strings.Contains(why, "attempt") {
 		t.Fatalf("second claim = byDesign %v reason %q, want the current attempt limit", byDesign, why)
+	}
+}
+
+func TestDispatchClaimFiltersFindingsWithCurrentSeverityPolicy(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/r": true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	repo, pr, head := "o/r", 29, "abcdef123"
+	if _, err := svc.SetSolver(ctx, repo, SolverChange{Severities: []string{"minor"}}); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, repo, pr, head, PhaseQueued, time.Now().UTC(), 0)
+	report := NextReport{
+		Repo: repo, PR: pr, Head: head, Action: "fix",
+		Findings: []dialect.Finding{
+			{ID: "major", Severity: "major"},
+			{ID: "minor", Severity: "minor"},
+		},
+	}
+
+	ok, why, _, _ := svc.claimDispatchModels(ctx, &report, "severity-token", 5)
+	if !ok {
+		t.Fatalf("claim refused: %s", why)
+	}
+	if len(report.Findings) != 1 || report.Findings[0].Severity != "minor" {
+		t.Fatalf("claimed findings = %+v, want only the severity allowed by the claiming state revision", report.Findings)
 	}
 }

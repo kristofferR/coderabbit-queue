@@ -241,8 +241,7 @@ func (s *Service) ClearReviewers(ctx context.Context, repo string) (ReviewerView
 // otherwise print the fleet default and exit 0, reading as a report about a
 // project crq follows.
 func checkRepoShape(repo string) error {
-	owner, name, ok := strings.Cut(repo, "/")
-	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+	if !validRepoSlug(repo) {
 		return fmt.Errorf("repo must be owner/name, got %q", repo)
 	}
 	return nil

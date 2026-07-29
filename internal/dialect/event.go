@@ -83,13 +83,15 @@ func (e BotEvent) ObservedTime() time.Time {
 }
 
 // Classifier classifies issue comments into BotEvents. Bot is the configured
-// CodeRabbit login; ReviewCommand is the exact trigger comment body;
+// primary login; ReviewCommand is the exact trigger comment body; Primary
+// carries registry wording hooks when that login is a known co-reviewer;
 // CoReviewers are the enabled co-reviewer entries with their config-resolved
 // trigger commands (empty: no co-reviewer classification at all).
 type Classifier struct {
 	CodeRabbit    CodeRabbit
 	Bot           string
 	ReviewCommand string
+	Primary       *CoReviewer
 	CoReviewers   []CoReviewer
 }
 
@@ -111,6 +113,25 @@ func (c Classifier) Classify(author, body string, id int64, createdAt, updatedAt
 			ev.For = co.Login
 			return ev
 		}
+	}
+	if fromConfigured && c.Primary != nil && c.Primary.Is(author) {
+		if c.Primary.ClassifyComment == nil {
+			return ev
+		}
+		primary := c.Primary.ClassifyComment(body)
+		ev.SHA = primary.SHA
+		ev.Approved = primary.Approved
+		switch primary.Kind {
+		case EvCoClean:
+			ev.Kind = EvNoAction
+		case EvCoUnable:
+			// A registry primary that cannot produce the requested review is a
+			// failed attempt, not an optional co-reviewer disengaging its gate.
+			ev.Kind = EvFailed
+		default:
+			ev.Kind = EvOther
+		}
+		return ev
 	}
 	for _, co := range c.CoReviewers {
 		if !co.Is(author) {

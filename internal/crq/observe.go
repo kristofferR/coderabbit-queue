@@ -89,6 +89,7 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 		CodeRabbit:    s.cr,
 		Bot:           cfg.Bot,
 		ReviewCommand: cfg.ReviewCommand,
+		Primary:       cfg.classifierPrimary(),
 		CoReviewers:   cfg.classifierCoReviewers(),
 	}
 	presentComments := make(map[int64]bool, len(comments))
@@ -214,6 +215,18 @@ func (s *Service) observe(ctx context.Context, cfg Config, repo string, pr int, 
 	return o, nil
 }
 
+// classifierPrimary returns registry wording hooks when the configured primary
+// is itself a known reviewer. CodeRabbit has no registry entry and continues
+// through the dedicated CodeRabbit classifier.
+func (c Config) classifierPrimary() *dialect.CoReviewer {
+	primary, ok := dialect.CoReviewerByName(c.Bot)
+	if !ok {
+		return nil
+	}
+	primary.Command = c.ReviewCommand
+	return &primary
+}
+
 // classifierCoReviewers resolves the enabled registry entries with their
 // config-resolved trigger commands.
 func (c Config) classifierCoReviewers() []dialect.CoReviewer {
@@ -233,6 +246,9 @@ func (c Config) classifierCoReviewers() []dialect.CoReviewer {
 // so the extra REST fetch (ETag'd — repeat polls are 304s) is only spent when
 // a bot's evidence can live there.
 func (c Config) coChecksRelevant() bool {
+	if primary := c.classifierPrimary(); primary != nil && primary.AppSlug != "" {
+		return true
+	}
 	for _, cb := range c.CoBots {
 		if co, ok := dialect.CoReviewerByName(cb.Name); ok && co.AppSlug != "" {
 			return true
@@ -243,6 +259,9 @@ func (c Config) coChecksRelevant() bool {
 
 // coBotEnabled reports whether login is one of the enabled co-reviewers.
 func (c Config) coBotEnabled(login string) bool {
+	if primary := c.classifierPrimary(); primary != nil && primary.Is(login) {
+		return true
+	}
 	for _, cb := range c.CoBots {
 		if dialect.NormalizeBotName(cb.Login) == dialect.NormalizeBotName(login) {
 			return true
