@@ -1037,6 +1037,38 @@ func TestTurningThePrimaryOffRefusesAClaimedTriggerPost(t *testing.T) {
 	}
 }
 
+func TestRemovingACoReviewerRefusesItsClaimedTriggerPost(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RequiredBots = []string{cfg.Bot, dialect.CodexBotLogin}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	repo := "o/private"
+	if _, err := store.Update(ctx, func(st *State) error {
+		round, err := st.NewRound(repo, 8, "abcdef123", time.Now())
+		if err != nil {
+			return err
+		}
+		round.ClaimCo(dialect.CodexBotLogin, time.Now())
+		st.PutRound(*round)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.SetReviewers(ctx, repo, []string{}, []string{cfg.Bot}, nil); err == nil {
+		t.Fatal("removing Codex succeeded while its trigger was being posted")
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, changed := st.RepoOverride(repo); changed {
+		t.Fatal("the rejected edit still persisted a repository override")
+	}
+}
+
 func TestReviewerEditPreservesAnExistingCustomRequiredLogin(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()

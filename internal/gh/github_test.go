@@ -2,6 +2,7 @@ package gh
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -769,6 +770,43 @@ func TestListOwnerReposUsesTheAuthenticatedEndpointForPersonalAccounts(t *testin
 		!strings.HasPrefix(paths[1], "/users/bob/repos?per_page=100") ||
 		!strings.HasPrefix(paths[2], "/user/repos?affiliation=owner,collaborator") {
 		t.Fatalf("requested %q, want both public and authenticated endpoints for another personal owner", paths)
+	}
+}
+
+func TestListOwnerReposCanReadOneSentinelPastTenPages(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "t")
+	pages := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/user":
+			_, _ = w.Write([]byte(`{"login":"alice"}`))
+		case "/users/alice":
+			_, _ = w.Write([]byte(`{"type":"User"}`))
+		case "/user/repos":
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			pages = max(pages, page)
+			count := 100
+			if page == 11 {
+				count = 1
+			}
+			repos := make([]Repo, 0, count)
+			for i := 0; i < count; i++ {
+				repos = append(repos, Repo{FullName: "alice/repo-" + strconv.Itoa((page-1)*100+i)})
+			}
+			_ = json.NewEncoder(w).Encode(repos)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 2, maxWait: time.Second, backoffBase: time.Millisecond, networkMaxWait: time.Second}
+
+	repos, err := g.ListOwnerRepos(context.Background(), "alice", 1001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 1001 || pages != 11 {
+		t.Fatalf("repos=%d pages=%d, want the one-row sentinel from page 11", len(repos), pages)
 	}
 }
 

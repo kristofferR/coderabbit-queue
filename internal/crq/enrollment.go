@@ -377,9 +377,8 @@ func (s *Service) EnrollmentIn(st State, repo string) EnrollmentView {
 	return s.enrollmentOf(st, repo)
 }
 
-// scopeRepoLimit bounds the listing per owner. It is the transport's own
-// ceiling — ten pages of a hundred — so raising it further would need
-// pagination changes there rather than a bigger number here.
+// scopeRepoLimit bounds the listing per owner. Discovery asks for one sentinel
+// row beyond it so exactly 1,000 repositories is not mislabeled as truncated.
 const scopeRepoLimit = 1000
 
 // ScopeRepos lists the repositories in CRQ_SCOPE, for choosing one to enroll.
@@ -406,12 +405,13 @@ func (s *Service) ScopeRepos(ctx context.Context) ([]ghapi.Repo, []string, error
 		if owner == "" {
 			continue
 		}
-		repos, err := s.gh.ListOwnerRepos(ctx, owner, scopeRepoLimit)
+		repos, err := s.gh.ListOwnerRepos(ctx, owner, scopeRepoLimit+1)
 		if err != nil {
 			return nil, nil, err
 		}
-		if len(repos) >= scopeRepoLimit {
+		if len(repos) > scopeRepoLimit {
 			truncated = append(truncated, owner)
+			repos = repos[:scopeRepoLimit]
 		}
 		for _, r := range repos {
 			key := NormalizeRepo(r.FullName)

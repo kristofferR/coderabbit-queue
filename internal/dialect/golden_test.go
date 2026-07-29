@@ -715,8 +715,8 @@ func TestGoldenPricing(t *testing.T) {
 		}
 		// A large one is a range, and never above the per-review cap.
 		large := EstimateMacroscope(DiffStat{Additions: 40000, Deletions: 20000, ChangedFiles: 300})
-		if large.High > 10.0 || large.Low > large.High {
-			t.Errorf("large diff = %+v, want a range capped at $10", large)
+		if large.High > 10.0 || large.Low != macroscopeMinKB*macroscopePerKB || large.Low >= large.High || large.Exact {
+			t.Errorf("large diff = %+v, want the incremental floor through the capped whole-diff upper bound", large)
 		}
 
 		// A co-reviewer on its own subscription is free and says why; an

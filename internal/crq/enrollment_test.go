@@ -965,6 +965,34 @@ func TestPreviewEnrollSpendsAllowanceWhenPricingReadFails(t *testing.T) {
 	}
 }
 
+func TestScopeReposUsesASentinelBeforeReportingTruncation(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.Scope = []string{"owner"}
+	gh := newFakeGitHub()
+	for i := 0; i < scopeRepoLimit; i++ {
+		gh.ownerRepos = append(gh.ownerRepos, ghapi.Repo{FullName: fmt.Sprintf("owner/repo-%04d", i)})
+	}
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
+
+	repos, truncated, err := svc.ScopeRepos(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != scopeRepoLimit || len(truncated) != 0 {
+		t.Fatalf("repos=%d truncated=%v, want an exact-limit complete listing", len(repos), truncated)
+	}
+
+	gh.ownerRepos = append(gh.ownerRepos, ghapi.Repo{FullName: "owner/one-too-many"})
+	repos, truncated, err = svc.ScopeRepos(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != scopeRepoLimit || len(truncated) != 1 || truncated[0] != "owner" {
+		t.Fatalf("repos=%d truncated=%v, want the sentinel removed and owner marked", len(repos), truncated)
+	}
+}
+
 func TestSetEnrollmentAtRejectsAStalePreview(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()

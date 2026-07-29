@@ -47,21 +47,11 @@ type DiffStat struct {
 // Lines is the diff's total changed lines.
 func (d DiffStat) Lines() int { return d.Additions + d.Deletions }
 
-// Bytes-per-changed-line band used to turn a line count into the kilobytes
-// Macroscope bills for.
-//
-// It is a band, not a constant, because the real figure is not one number.
-// Measured over this repository's own history at seven diff sizes, it ranges
-// from 41 bytes per line on large mixed diffs to 118 on ones dominated by long
-// lines — a nearly 3× spread, driven by per-file headers on small diffs and by
-// line length everywhere else. The band brackets what was actually observed
-// rather than averaging it away, which is why big diffs get a wide range and
-// say so. Small ones do not need it: under about 85 changed lines the whole
-// band fits below Macroscope's 10 KB minimum, and the minimum is exact.
-const (
-	bytesPerLineLow  = 35.0
-	bytesPerLineHigh = 120.0
-)
+// bytesPerLineHigh turns a cumulative line count into a conservative whole-diff
+// upper bound for Macroscope. Measurements over this repository reached 118
+// bytes per line on long-line-heavy diffs; later rounds may instead bill only
+// their increment, whose lower bound is the vendor's per-review floor.
+const bytesPerLineHigh = 120.0
 
 // Allowance is the account state a CodeRabbit estimate depends on: whether the
 // plan's included reviews are exhausted, and whether usage-based billing is
@@ -120,9 +110,12 @@ func freeEstimate(login, why string) CostEstimate {
 // head), so this is an upper bound on later rounds and exact on the first.
 func EstimateMacroscope(d DiffStat) CostEstimate {
 	est := CostEstimate{Bot: MacroscopeLogin}
-	lowKB := math.Max(macroscopeMinKB, float64(d.Lines())*bytesPerLineLow/1024)
 	highKB := math.Max(macroscopeMinKB, float64(d.Lines())*bytesPerLineHigh/1024)
-	est.Low = math.Min(macroscopeMaxSpend, lowKB*macroscopePerKB)
+	// The first review sees the whole pull-request diff, but later reviews are
+	// incremental. Without the previously reviewed head the only honest lower
+	// bound is the per-review floor; a tiny follow-up can cost that little even
+	// when the cumulative PR diff is large.
+	est.Low = macroscopeMinKB * macroscopePerKB
 	est.High = math.Min(macroscopeMaxSpend, highKB*macroscopePerKB)
 	switch {
 	case est.Low == est.High && est.High == macroscopeMinKB*macroscopePerKB:
@@ -131,12 +124,11 @@ func EstimateMacroscope(d DiffStat) CostEstimate {
 		est.Exact = true
 		est.Basis = fmt.Sprintf("%d changed lines is under the 10 KB minimum, so it is the $%.2f floor",
 			d.Lines(), macroscopeMinKB*macroscopePerKB)
-	case est.Low == est.High:
-		est.Exact = true
-		est.Basis = fmt.Sprintf("%d changed lines exceeds the $%.0f per-review cap either way", d.Lines(), macroscopeMaxSpend)
 	default:
-		est.Basis = fmt.Sprintf("%d changed lines at $%.2f/KB, from a %.0f–%.0f bytes-per-line range",
-			d.Lines(), macroscopePerKB, bytesPerLineLow, bytesPerLineHigh)
+		est.Basis = fmt.Sprintf(
+			"$%.2f incremental-review floor to a $%.2f whole-diff upper bound (%d changed lines at %.0f bytes/line)",
+			est.Low, est.High, d.Lines(), bytesPerLineHigh,
+		)
 	}
 	return est
 }

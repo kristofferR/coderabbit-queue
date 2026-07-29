@@ -1372,7 +1372,8 @@ func (g *GitHub) ListOwnerRepos(ctx context.Context, owner string, limit int) ([
 
 func (g *GitHub) listRepos(ctx context.Context, base, filterOwner string, limit int) ([]Repo, error) {
 	out := make([]Repo, 0, limit)
-	for page := 1; len(out) < limit && page <= 10; page++ {
+	maxPages := (limit + 99) / 100
+	for page := 1; len(out) < limit && page <= maxPages; page++ {
 		var batch []Repo
 		sep := "?"
 		if strings.Contains(base, "?") {

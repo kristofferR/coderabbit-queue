@@ -4,11 +4,18 @@ import { subscribe } from "./api";
 import { DashboardContext, useDashboard } from "./DashboardState";
 import { ago, useNow } from "./time";
 
-export function newestSnapshot<T extends { overview: { rev: number } }>(
+export function newestSnapshot<T extends { overview: { rev: number; now?: string } }>(
   current: T | null,
   incoming: T,
 ): T {
-  return current && incoming.overview.rev < current.overview.rev ? current : incoming;
+  if (!current || incoming.overview.rev > current.overview.rev) return incoming;
+  if (incoming.overview.rev < current.overview.rev) return current;
+
+  const currentAt = Date.parse(current.overview.now ?? "");
+  const incomingAt = Date.parse(incoming.overview.now ?? "");
+  return Number.isFinite(currentAt) && Number.isFinite(incomingAt) && incomingAt < currentAt
+    ? current
+    : incoming;
 }
 
 export function DashboardProvider({ children }: { children: ReactNode }) {
