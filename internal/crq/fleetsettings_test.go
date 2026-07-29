@@ -130,6 +130,14 @@ func TestEnvSettingsRenderEffectiveDefaults(t *testing.T) {
 	}
 }
 
+func TestEnvSettingsUseOnlyTheTypedRequiredReviewerControl(t *testing.T) {
+	for _, setting := range EnvKeys() {
+		if strings.HasPrefix(setting.Key, "CRQ_COBOT_") && strings.HasSuffix(setting.Key, "_REQUIRED") {
+			t.Fatalf("%s exposes a shadowed per-bot required control; use CRQ_REQUIRED_BOTS", setting.Key)
+		}
+	}
+}
+
 func TestFleetViewRecognizesGenericFleetProvenance(t *testing.T) {
 	cfg, err := BuildConfig(map[string]string{"CRQ_REPO": "owner/gate"})
 	if err != nil {
@@ -698,7 +706,7 @@ func TestSetEnvTriggerPolicyReopensCompletedRounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if impact.Reopened != 1 || !strings.Contains(strings.Join(impact.Changes, "\n"), "trigger policies") {
+	if impact.Reopened != 1 || !strings.Contains(strings.Join(impact.Changes, "\n"), "trigger policy") {
 		t.Fatalf("impact = %+v, want the trigger change and one reopened round", impact)
 	}
 	if _, _, err := svc.SetEnvAt(ctx, "CRQ_COBOT_CODEX_TRIGGER", "always", false, &impact.Rev); err != nil {
@@ -755,6 +763,51 @@ func TestFleetReviewerChangeRefusesAClaimedCoTrigger(t *testing.T) {
 	}
 	if st.Fleet.SetCoBots || st.Fleet.SetRequired {
 		t.Fatalf("fleet = %+v, want the rejected reviewer edit not to land", st.Fleet)
+	}
+}
+
+func TestFleetCommandChangeRefusesAClaimedCoTrigger(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost", "CRQ_REPOS": "o/r",
+		"CRQ_COBOTS": "codex", "CRQ_COBOT_CODEX_TRIGGER": "always",
+		"CRQ_COBOT_CODEX_CMD": "@codex review",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		round, err := st.NewRound("o/r", 9, "abcdef123", time.Now())
+		if err != nil {
+			return err
+		}
+		round.ClaimCo(dialect.CodexBotLogin, time.Now())
+		st.PutRound(*round)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	impact, err := svc.PreviewEnv(ctx, "CRQ_COBOT_CODEX_CMD", "@codex full review", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(impact.Changes, "\n"), "command") {
+		t.Fatalf("impact = %+v, want the command change reported", impact)
+	}
+	if _, _, err := svc.SetEnvAt(
+		ctx, "CRQ_COBOT_CODEX_CMD", "@codex full review", false, &impact.Rev,
+	); err == nil || !strings.Contains(err.Error(), "trigger is already being posted") {
+		t.Fatalf("command save error = %v, want the claimed post to block it", err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.Fleet.Env["CRQ_COBOT_CODEX_CMD"]; ok {
+		t.Fatalf("fleet env = %+v, want the rejected command edit not to land", st.Fleet.Env)
 	}
 }
 
@@ -1250,8 +1303,12 @@ func TestAdoptEnvIncludesPerBotRequiredSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := st.Fleet.Env["CRQ_COBOT_BUGBOT_REQUIRED"]; got != "1" {
-		t.Fatalf("adopted required flag = %q, want 1", got)
+	if !st.Fleet.SetRequired || !hasLogin(st.Fleet.Required, "cursor[bot]") {
+		t.Fatalf("fleet required = %v (set=%v), want the compatibility alias folded into the typed required set",
+			st.Fleet.Required, st.Fleet.SetRequired)
+	}
+	if _, ok := st.Fleet.Env["CRQ_COBOT_BUGBOT_REQUIRED"]; ok {
+		t.Fatalf("fleet env = %+v, want no shadowed per-bot required setting", st.Fleet.Env)
 	}
 	neutral, err := BuildConfig(map[string]string{
 		"CRQ_REPO": "owner/gate", "CRQ_HOST": "other-host", "CRQ_COBOTS": "",

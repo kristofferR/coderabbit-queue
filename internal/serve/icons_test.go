@@ -97,6 +97,23 @@ func TestIconFetchCanAcquireATokenAfterAnUnauthenticatedResponse(t *testing.T) {
 	}
 }
 
+func TestIconFetchRejectsAnOversizedBody(t *testing.T) {
+	icons := NewIcons("", nil)
+	icons.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"image/png"}},
+			Body:       io.NopCloser(strings.NewReader(strings.Repeat("x", (512<<10)+1))),
+			Request:    req,
+		}, nil
+	})
+
+	body, _, ok := icons.fetch(t.Context(), "https://example.test/oversized.png")
+	if ok || body != nil {
+		t.Fatalf("fetch = (%d bytes, %t), want the oversized response rejected", len(body), ok)
+	}
+}
+
 func TestIconUnauthorizedBodyStaysReadableWithoutARefreshToken(t *testing.T) {
 	icons := NewIcons("", func(context.Context) string { return "" })
 	icons.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {

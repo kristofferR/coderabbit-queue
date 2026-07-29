@@ -204,8 +204,9 @@ func (ic *Icons) fetch(ctx context.Context, rawURL string) ([]byte, string, bool
 	}
 	// A favicon is small; anything large is not one, and streaming it would
 	// only tie up memory.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 512<<10))
-	if err != nil || len(body) == 0 {
+	const maxIconBytes = 512 << 10
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxIconBytes+1))
+	if err != nil || len(body) == 0 || len(body) > maxIconBytes {
 		return nil, "", false
 	}
 	ctype := resp.Header.Get("Content-Type")
