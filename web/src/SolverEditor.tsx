@@ -41,7 +41,7 @@ export function SolverEditor({
   const solverEffort = solver.effort ?? "";
   const solverPrompt = solver.prompt ?? "";
   const solverAttempts = String(solver.max_attempts);
-  const solverSeverities = solver.severities.join();
+  const solverSeverities = [...solver.severities].sort().join("\0");
   const solverAskMode = solver.ask_mode;
   const solverAuthors = (solver.skip_authors ?? []).join(", ");
 
@@ -50,7 +50,7 @@ export function SolverEditor({
     setEffort(solverEffort);
     setPrompt(solverPrompt);
     setAttempts(solverAttempts);
-    setSeverities(solver.severities);
+    setSeverities(solverSeverities ? solverSeverities.split("\0") : []);
     setAskMode(solverAskMode);
     setForks(solver.forks);
     setAuthors(solverAuthors);

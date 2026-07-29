@@ -8,6 +8,7 @@ import { HOLD_ACTIONS_ENABLED } from "../features";
 import { SolverEditor } from "../SolverEditor";
 import { ago, useNow } from "../time";
 import { BotIcon, Card, Empty, Pill, PRLink, RepoIcon, Td, Th, Toggle } from "../ui";
+import { sameMembers } from "../ui/utils";
 import { useOperation } from "../useOperation";
 
 /* ------------------------------------------------------------------ Repos */
@@ -343,12 +344,12 @@ function ReviewerEditor({
   const [confirming, setConfirming] = useState(false);
   const { run: runOperation, running: busy, error, clearError } = useOperation();
   const [warning, setWarning] = useState<string | null>(null);
-  const serverRuns = repo.reviewers.join();
-  const serverRequired = repo.required.join();
+  const serverRuns = [...repo.reviewers].sort().join("\0");
+  const serverRequired = [...repo.required].sort().join("\0");
 
   useEffect(() => {
-    setRuns(repo.reviewers);
-    setRequired(repo.required);
+    setRuns(serverRuns ? serverRuns.split("\0") : []);
+    setRequired(serverRequired ? serverRequired.split("\0") : []);
   }, [serverRuns, serverRequired]);
 
   // The primary is the one metered reviewer, so its Runs toggle is a budget
@@ -358,7 +359,7 @@ function ReviewerEditor({
   const primaryOn = primaryBot ? runs.includes(primaryBot.name) : false;
   const primaryWas = primaryBot ? repo.reviewers.includes(primaryBot.name) : false;
 
-  const dirty = runs.join() !== repo.reviewers.join() || required.join() !== repo.required.join();
+  const dirty = !sameMembers(runs, repo.reviewers) || !sameMembers(required, repo.required);
   const newlyOn = runs.filter((b) => !repo.reviewers.includes(b) && b !== primaryBot?.name);
   const configurableNames = new Set(bots.filter((bot) => bot.configurable).map((bot) => bot.name));
   const retiredOn = [

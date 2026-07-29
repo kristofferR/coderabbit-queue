@@ -38,8 +38,8 @@ export function QuickSettings({
   const serverRequired = [...repo.required].sort().join("\0");
 
   useEffect(() => {
-    setRuns(repo.reviewers);
-    setRequired(repo.required);
+    setRuns(serverRuns ? serverRuns.split("\0") : []);
+    setRequired(serverRequired ? serverRequired.split("\0") : []);
   }, [serverRuns, serverRequired]);
 
   const primary = bots.find((b) => b.primary);

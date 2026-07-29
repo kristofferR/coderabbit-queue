@@ -13,6 +13,7 @@ export function AutofixLog({ repo, pr }: { repo: string; pr: number }) {
   const [tail, setTail] = useState<Tail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const pane = useRef<HTMLPreElement>(null);
+  const tailText = tail?.text;
 
   useEffect(() => {
     if (!open) return;
@@ -42,8 +43,10 @@ export function AutofixLog({ repo, pr }: { repo: string; pr: number }) {
   }, [open, repo, pr]);
 
   useEffect(() => {
-    if (pane.current) pane.current.scrollTop = pane.current.scrollHeight;
-  }, [tail?.text]);
+    if (open && tailText !== undefined && pane.current) {
+      pane.current.scrollTop = pane.current.scrollHeight;
+    }
+  }, [open, tailText]);
 
   return (
     <div className="w-full">
