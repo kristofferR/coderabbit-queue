@@ -396,6 +396,7 @@ export const EnvSettingSchema = Schema.Struct({
   help: Schema.String,
   per_host: Optional(Schema.Boolean),
   identity: Optional(Schema.Boolean),
+  review_impact: Optional(Schema.Boolean),
   value: Schema.String,
   source: Schema.Literals(["fleet", "env", "default"]),
   host_value: Optional(Schema.String),

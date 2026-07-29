@@ -418,6 +418,10 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				entry.err = err.Error()
 				view.ObserveError = entry.err
+			} else if head != "" && obs.Head != "" && !sameHead(head, obs.Head) {
+				entry.err = "pull request moved while this view was loading; refresh for current state"
+				entry.fetched = time.Time{} // never cache a state/observation race
+				view.ObserveError = entry.err
 			} else {
 				view.Observed = &obs
 			}
@@ -471,4 +475,9 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, view)
+}
+
+func sameHead(a, b string) bool {
+	a, b = strings.ToLower(strings.TrimSpace(a)), strings.ToLower(strings.TrimSpace(b))
+	return a != "" && b != "" && (strings.HasPrefix(a, b) || strings.HasPrefix(b, a))
 }

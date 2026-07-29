@@ -369,6 +369,11 @@ func (s *Service) fleetImpact(st State, next FleetDefaults, open map[string]map[
 			shortBots(beforeCfg.RequiredBots), shortBots(afterCfg.RequiredBots)))
 		reaches(following)
 	}
+	if sameBot(beforeCfg.Bot, afterCfg.Bot) && sameLogins(beforeCo, afterCo) &&
+		!sameTriggerPolicies(beforeCfg.Reviewers, afterCfg.Reviewers) {
+		impact.Changes = append(impact.Changes, "reviewer trigger policies changed")
+		reaches(changedReviewers)
+	}
 	if beforeCfg.MinInterval != afterCfg.MinInterval {
 		impact.Changes = append(impact.Changes,
 			fmt.Sprintf("pacing: %s → %s", beforeCfg.MinInterval, afterCfg.MinInterval))
@@ -896,71 +901,127 @@ func sortedTrueKeys(values map[string]bool) []string {
 	return out
 }
 
-// SetEnv records or clears one fleet setting.
-func (s *Service) SetEnv(ctx context.Context, key, value string, unset bool) (FleetView, error) {
+// normalizeEnvEdit validates one raw setting edit and applies the dashboard and
+// CLI convention that a blank non-empty-capable value means "inherit".
+func normalizeEnvEdit(key, value string, unset bool) (string, string, bool, error) {
 	key = strings.TrimSpace(key)
 	value = strings.TrimSpace(value)
 	if !fleetSettable(key) {
 		if _, known := envKeyByName(key); known {
-			return FleetView{}, fmt.Errorf("%s is not a fleet setting: it belongs to one machine, or says where the queue lives", key)
+			return "", "", false, fmt.Errorf("%s is not a fleet setting: it belongs to one machine, or says where the queue lives", key)
 		}
-		return FleetView{}, fmt.Errorf("%s is not a setting crq knows", key)
+		return "", "", false, fmt.Errorf("%s is not a setting crq knows", key)
 	}
 	if !unset {
 		if err := validateEnvValue(key, value); err != nil {
-			return FleetView{}, err
+			return "", "", false, err
 		}
 	}
+	envKey, _ := envKeyByName(key)
+	if value == "" && !envKey.AllowEmpty {
+		unset = true
+	}
+	return key, value, unset, nil
+}
+
+// typedFleetChangeForEnv maps the four settings with a typed home into the
+// same change model used by the fleet editor.
+func typedFleetChangeForEnv(key, value string, unset bool) (FleetChange, bool, error) {
+	if !typedEnvKey(key) {
+		return FleetChange{}, false, nil
+	}
+	change := FleetChange{}
 	// Keys with a typed home go there, so one setting never lives in two places
 	// with one of them silently shadowed by the other.
-	if typedEnvKey(key) {
-		change := FleetChange{}
-		// Unset is its own instruction, not a change to some other value. Encoding
-		// it as one meant a cleared list read as "leave it alone" and a cleared
-		// weekly limit wrote 60 — so a host whose env said 90 never got it back.
-		envKey, _ := envKeyByName(key)
-		clearTyped := unset || strings.TrimSpace(value) == "" && !envKey.AllowEmpty
-		switch key {
-		case "CRQ_COBOTS":
-			if clearTyped {
-				change.UnsetCoBots = true
-			} else {
-				change.CoBots = append([]string{}, splitCommas(value)...)
-			}
-		case "CRQ_REQUIRED_BOTS":
-			if clearTyped {
-				change.UnsetRequired = true
-			} else {
-				change.Required = splitCommas(value)
-			}
-		case "CRQ_MIN_INTERVAL":
-			if clearTyped {
-				change.UnsetMinInterval = true
-			} else {
-				v := value
-				change.MinInterval = &v
-			}
-		case "CRQ_WEEKLY_LIMIT":
-			if clearTyped {
-				change.UnsetWeeklyLimit = true
-			} else {
-				n, err := strconv.Atoi(strings.TrimSpace(value))
-				if err != nil {
-					return FleetView{}, fmt.Errorf("%s: %w", key, err)
-				}
-				change.WeeklyLimit = &n
-			}
+	// Unset is its own instruction, not a change to some other value. Encoding
+	// it as one meant a cleared list read as "leave it alone" and a cleared
+	// weekly limit wrote 60 — so a host whose env said 90 never got it back.
+	switch key {
+	case "CRQ_COBOTS":
+		if unset {
+			change.UnsetCoBots = true
+		} else {
+			change.CoBots = append([]string{}, splitCommas(value)...)
 		}
-		view, _, err := s.SetFleetSettings(ctx, change)
-		return view, err
+	case "CRQ_REQUIRED_BOTS":
+		if unset {
+			change.UnsetRequired = true
+		} else {
+			change.Required = splitCommas(value)
+		}
+	case "CRQ_MIN_INTERVAL":
+		if unset {
+			change.UnsetMinInterval = true
+		} else {
+			v := value
+			change.MinInterval = &v
+		}
+	case "CRQ_WEEKLY_LIMIT":
+		if unset {
+			change.UnsetWeeklyLimit = true
+		} else {
+			n, err := strconv.Atoi(value)
+			if err != nil {
+				return FleetChange{}, true, fmt.Errorf("%s: %w", key, err)
+			}
+			change.WeeklyLimit = &n
+		}
 	}
-	// Most settings use a blank as shorthand for inheritance. A few parsers
-	// deliberately distinguish a present empty value (skip nobody, disable the
-	// marker or command), so only --clear may remove those records.
-	envKey, _ := envKeyByName(key)
-	value = strings.TrimSpace(value)
-	if strings.TrimSpace(value) == "" && !envKey.AllowEmpty {
-		unset = true
+	return change, true, nil
+}
+
+// PreviewEnv reports the reviewer and requeue impact of a raw environment-key
+// edit without writing it.
+func (s *Service) PreviewEnv(ctx context.Context, key, value string, unset bool) (FleetImpact, error) {
+	key, value, unset, err := normalizeEnvEdit(key, value, unset)
+	if err != nil {
+		return FleetImpact{}, err
+	}
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return FleetImpact{}, err
+	}
+	change, typed, err := typedFleetChangeForEnv(key, value, unset)
+	if err != nil {
+		return FleetImpact{}, err
+	}
+	var next FleetDefaults
+	if typed {
+		next, err = s.applyFleetChange(st, change)
+		if err != nil {
+			return FleetImpact{}, err
+		}
+	} else {
+		next = fleetEnvSet(st.Fleet, key, value, unset)
+	}
+	open, err := s.openPRsForReviewerChange(ctx, st, next)
+	if err != nil {
+		return FleetImpact{}, err
+	}
+	return s.fleetImpact(st, next, open), nil
+}
+
+// SetEnv records or clears one fleet setting against the latest state. CLI
+// callers use this form; dashboard confirmations use SetEnvAt.
+func (s *Service) SetEnv(ctx context.Context, key, value string, unset bool) (FleetView, error) {
+	view, _, err := s.SetEnvAt(ctx, key, value, unset, nil)
+	return view, err
+}
+
+// SetEnvAt records a setting only if the confirmed preview revision is still
+// current, and returns the impact that was applied.
+func (s *Service) SetEnvAt(ctx context.Context, key, value string, unset bool, expectedRev *int64) (FleetView, FleetImpact, error) {
+	key, value, unset, err := normalizeEnvEdit(key, value, unset)
+	if err != nil {
+		return FleetView{}, FleetImpact{}, err
+	}
+	change, typed, err := typedFleetChangeForEnv(key, value, unset)
+	if err != nil {
+		return FleetView{}, FleetImpact{}, err
+	}
+	if typed {
+		change.ExpectedRev = expectedRev
+		return s.SetFleetSettings(ctx, change)
 	}
 
 	// A generic setting can still change WHO reviews: CRQ_BOT names the primary,
@@ -972,25 +1033,23 @@ func (s *Service) SetEnv(ctx context.Context, key, value string, unset bool) (Fl
 	// may only touch live pull requests and the CAS closure cannot ask GitHub.
 	loaded, _, err := s.store.Load(ctx)
 	if err != nil {
-		return FleetView{}, err
+		return FleetView{}, FleetImpact{}, err
 	}
-	after := loaded
-	after.Fleet = fleetEnvSet(loaded.Fleet, key, value, unset)
-	open := map[string]map[int]bool{}
-	affectedRepos := s.affectedReposForEnvKey(loaded, key)
-	for _, repo := range affectedRepos {
-		if sameReviewers(s.cfgFor(loaded, repo), s.cfgFor(after, repo)) {
-			continue
-		}
-		prs, err := s.openPRs(ctx, repo)
-		if err != nil {
-			return FleetView{}, err
-		}
-		open[repo] = prs
+	if err := checkFleetPreviewRevision(loaded, expectedRev); err != nil {
+		return FleetView{}, FleetImpact{}, err
 	}
+	next := fleetEnvSet(loaded.Fleet, key, value, unset)
+	open, err := s.openPRsForReviewerChange(ctx, loaded, next)
+	if err != nil {
+		return FleetView{}, FleetImpact{}, err
+	}
+	impact := s.fleetImpact(loaded, next, open)
 
 	now := s.clock().UTC()
 	st, err := s.store.Update(ctx, func(st *State) error {
+		if err := checkFleetPreviewRevision(*st, expectedRev); err != nil {
+			return err
+		}
 		if _, ok := st.Fleet.Env[key]; unset && !ok {
 			return ErrNoChange
 		}
@@ -1003,37 +1062,25 @@ func (s *Service) SetEnv(ctx context.Context, key, value string, unset bool) (Fl
 		// fleet after the open-PR prefetch above. It has no prefetched open set,
 		// so reopenForChangedReviewers conservatively marks its completed rounds
 		// for reopening when that PR is next observed alive.
-		affectedRepos := s.affectedReposForEnvKey(*st, key)
-		for _, repo := range affectedRepos {
+		applied := fleetEnvSet(st.Fleet, key, value, unset)
+		for _, repo := range s.reposWithChangedReviewers(*st, applied) {
 			before[repo] = s.cfgFor(*st, repo)
 		}
-		st.SetFleetDefaults(fleetEnvSet(st.Fleet, key, value, unset), s.cfg.Host, now)
+		st.SetFleetDefaults(applied, s.cfg.Host, now)
 		for repo, was := range before {
 			s.reopenForChangedReviewers(st, repo, was, s.cfgFor(*st, repo), open[repo])
 		}
 		return nil
 	})
 	if err != nil && !errors.Is(err, ErrNoChange) {
-		return FleetView{}, err
+		return FleetView{}, FleetImpact{}, err
 	}
 	if err == nil {
 		s.sync(ctx, st)
 	} else if st, _, err = s.store.Load(ctx); err != nil {
-		return FleetView{}, err
+		return FleetView{}, FleetImpact{}, err
 	}
-	return s.fleetViewOf(st), nil
-}
-
-func (s *Service) affectedReposForEnvKey(st State, key string) []string {
-	if key == "CRQ_BOT" {
-		// The primary is never overridden by a repository's co-reviewer or
-		// required-set choices. Only PrimaryOff blocks a fleet primary change.
-		return s.fleetReposWhere(st, func(repo string) bool {
-			ov, ok := st.RepoOverride(repo)
-			return !ok || !ov.PrimaryOff
-		})
-	}
-	return s.reposFollowingFleet(st)
+	return s.fleetViewOf(st), impact, nil
 }
 
 // fleetEnvSet returns fd with one generic setting recorded or removed.

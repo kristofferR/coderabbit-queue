@@ -511,6 +511,37 @@ func TestUnknownEnrollmentFieldsSurviveARewrite(t *testing.T) {
 	}
 }
 
+func TestUnknownAutofixSwitchFieldsSurviveReplacement(t *testing.T) {
+	foreign := `{
+	  "v": 6, "rev": 3, "next_seq": 1,
+	  "repo_autofix": {
+	    "owner/repo": {
+	      "enabled": true,
+	      "future_fix_policy": {"sandbox": "strict"}
+	    }
+	  }
+	}`
+	var st State
+	if err := json.Unmarshal([]byte(foreign), &st); err != nil {
+		t.Fatal(err)
+	}
+	st.SetAutofixSwitch("owner/repo", RepoAutofixSwitch{Enabled: false, Reason: "paused"})
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	switches, _ := back["repo_autofix"].(map[string]any)
+	sw, _ := switches["owner/repo"].(map[string]any)
+	future, _ := sw["future_fix_policy"].(map[string]any)
+	if sw["enabled"] != false || future["sandbox"] != "strict" {
+		t.Fatalf("replaced switch lost known or future fields: %#v", sw)
+	}
+}
+
 // A host report is nested twice over: State recognises "host_reports" and hands
 // each record to an ordinary decoder, which in turn hands each tool probe to
 // another. So neither the map nor the report above it can carry a member a

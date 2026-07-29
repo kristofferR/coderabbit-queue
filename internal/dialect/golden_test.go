@@ -181,6 +181,7 @@ func TestGoldenFindings(t *testing.T) {
 		path     string
 		line     int
 		severity string // "" = don't check
+		scale    string // "" = don't check
 		title    string // "" = don't check
 		source   string
 		commit   string // "" = don't check
@@ -219,7 +220,7 @@ func TestGoldenFindings(t *testing.T) {
 		{
 			file: "codex/findings-outside-diff.md",
 			bot:  "chatgpt-codex-connector[bot]",
-			want: []want{{path: "convex/sections/aiCommands.ts", line: 2170, severity: "minor", title: "Query learning history by topic before taking", source: "review_body", commit: "347388ffd"}},
+			want: []want{{path: "convex/sections/aiCommands.ts", line: 2170, severity: "potential", scale: "P2", title: "Query learning history by topic before taking", source: "review_body", commit: "347388ffd"}},
 		},
 	}
 	for _, tc := range cases {
@@ -236,6 +237,9 @@ func TestGoldenFindings(t *testing.T) {
 				}
 				if w.severity != "" && f.Severity != w.severity {
 					t.Errorf("finding %d severity = %q, want %q", i, f.Severity, w.severity)
+				}
+				if w.scale != "" && f.Scale != w.scale {
+					t.Errorf("finding %d scale = %q, want %q", i, f.Scale, w.scale)
 				}
 				if w.title != "" && f.Title != w.title {
 					t.Errorf("finding %d title = %q, want %q", i, f.Title, w.title)

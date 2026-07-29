@@ -2825,10 +2825,14 @@ func (a prActor) SetFleet(ctx context.Context, change serve.FleetChange, preview
 	if err != nil {
 		return serve.FleetImpact{}, err
 	}
+	return fleetImpactOf(impact), nil
+}
+
+func fleetImpactOf(impact crq.FleetImpact) serve.FleetImpact {
 	return serve.FleetImpact{
 		Rev: impact.Rev, Repos: impact.Repos, Reopened: impact.Reopened, Overridden: impact.Overridden,
 		Changes: impact.Changes, Summary: impact.Summary,
-	}, nil
+	}
 }
 
 func fleetSettingsOf(view crq.FleetView) *serve.FleetSettings {
@@ -3064,16 +3068,25 @@ func (a prActor) EnvSettings(st crq.State) []serve.EnvSetting {
 	for _, s := range a.svc.EnvSettings(st) {
 		out = append(out, serve.EnvSetting{
 			Key: s.Key, Kind: s.Kind, Group: s.Group, Label: s.Label, Help: s.Help,
-			PerHost: s.PerHost, Identity: s.Identity,
+			PerHost: s.PerHost, Identity: s.Identity, ReviewImpact: s.ReviewImpact,
 			Value: s.Value, Source: s.Source, HostValue: s.HostValue,
 		})
 	}
 	return out
 }
 
-func (a prActor) SetEnv(ctx context.Context, key, value string, unset bool) error {
-	_, err := a.svc.SetEnv(ctx, key, value, unset)
-	return err
+func (a prActor) SetEnv(ctx context.Context, key, value string, unset bool, expectedRev *int64, preview bool) (serve.FleetImpact, error) {
+	var impact crq.FleetImpact
+	var err error
+	if preview {
+		impact, err = a.svc.PreviewEnv(ctx, key, value, unset)
+	} else {
+		_, impact, err = a.svc.SetEnvAt(ctx, key, value, unset, expectedRev)
+	}
+	if err != nil {
+		return serve.FleetImpact{}, err
+	}
+	return fleetImpactOf(impact), nil
 }
 
 // enrollPreviewer prices an enrollment for the dashboard's add-repo dialog.

@@ -31,6 +31,7 @@ var (
 	fleetFields         = jsonFieldNames(reflect.TypeOf(FleetDefaults{}))
 	solverFields        = jsonFieldNames(reflect.TypeOf(SolverSettings{}))
 	repoReviewersFields = jsonFieldNames(reflect.TypeOf(RepoReviewers{}))
+	repoAutofixFields   = jsonFieldNames(reflect.TypeOf(RepoAutofixSwitch{}))
 	enrollmentFields    = jsonFieldNames(reflect.TypeOf(RepoEnrollment{}))
 	accountFields       = jsonFieldNames(reflect.TypeOf(AccountQuota{}))
 	coBotFields         = jsonFieldNames(reflect.TypeOf(CoBotRound{}))
@@ -263,6 +264,29 @@ func (e *RepoEnrollment) UnmarshalJSON(raw []byte) error {
 func (e RepoEnrollment) MarshalJSON() ([]byte, error) {
 	type plain RepoEnrollment
 	return mergeUnknown(plain(e), e.unknown)
+}
+
+// UnmarshalJSON decodes a repository autofix switch and remembers anything it
+// did not recognise.
+func (s *RepoAutofixSwitch) UnmarshalJSON(raw []byte) error {
+	type plain RepoAutofixSwitch
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	unknown, err := captureUnknown(raw, repoAutofixFields)
+	if err != nil {
+		return err
+	}
+	*s = RepoAutofixSwitch(decoded)
+	s.unknown = unknown
+	return nil
+}
+
+// MarshalJSON writes an autofix switch back with unknown members intact.
+func (s RepoAutofixSwitch) MarshalJSON() ([]byte, error) {
+	type plain RepoAutofixSwitch
+	return mergeUnknown(plain(s), s.unknown)
 }
 
 // The same nesting argument applies to records that have been recognised for

@@ -721,6 +721,37 @@ func TestPRObservationCacheRejectsAnObservationForAnotherHead(t *testing.T) {
 	}
 }
 
+func TestPROmitsObservationThatRacedAheadOfState(t *testing.T) {
+	now := time.Now().UTC()
+	observer := &sequenceObserver{observations: []Observation{{
+		Head: "bbbbbbbbb", CheckedAt: now,
+	}}}
+	srv := New(&stubLoader{}, Options{Addr: "127.0.0.1:7777", Observer: observer})
+	srv.loaded = true
+	srv.lastState = state.New()
+	srv.lastState.Rounds = map[string]state.Round{
+		"o/r#1": {Repo: "o/r", PR: 1, Head: "aaaaaaaaa", Phase: state.PhaseCompleted},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost:7777/api/pr/o/r/1", nil)
+	req.Header.Set("X-CRQ-Dashboard", "1")
+	req.SetPathValue("owner", "o")
+	req.SetPathValue("name", "r")
+	req.SetPathValue("pr", "1")
+	srv.handlePR(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PR read = %d: %s", rec.Code, rec.Body.String())
+	}
+	var view PRView
+	if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.Observed != nil || !strings.Contains(view.ObserveError, "moved") {
+		t.Fatalf("observed = %+v error = %q, want mixed-head observation omitted", view.Observed, view.ObserveError)
+	}
+}
+
 func TestPRCostCacheDoesNotUseAStaleRoundHeadWhenObservationFails(t *testing.T) {
 	observer := &failingObserver{}
 	coster := &countingCoster{cost: Cost{Head: "bbbbbbbbb"}}

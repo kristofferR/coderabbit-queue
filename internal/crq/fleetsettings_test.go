@@ -583,7 +583,31 @@ func TestSetEnvPrimaryReopensCompletedRounds(t *testing.T) {
 	svc := NewService(cfg, gh, store, nil)
 	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 11)
 
-	if _, err := svc.SetEnv(ctx, "CRQ_BOT", "chatgpt-codex-connector[bot]", false); err != nil {
+	impact, err := svc.PreviewEnv(ctx, "CRQ_BOT", "chatgpt-codex-connector[bot]", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if impact.Reopened != 1 || !strings.Contains(strings.Join(impact.Changes, "\n"), "primary reviewer") {
+		t.Fatalf("impact = %+v, want the primary change and one reopened round", impact)
+	}
+
+	// A confirmation is tied to exactly what it priced. An unrelated writer
+	// moving state still makes the operator preview again.
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.CalibrationIssue++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.SetEnvAt(ctx, "CRQ_BOT", "chatgpt-codex-connector[bot]", false, &impact.Rev); err == nil ||
+		!strings.Contains(err.Error(), "preview the change again") {
+		t.Fatalf("stale save error = %v, want a revision mismatch", err)
+	}
+	impact, err = svc.PreviewEnv(ctx, "CRQ_BOT", "chatgpt-codex-connector[bot]", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.SetEnvAt(ctx, "CRQ_BOT", "chatgpt-codex-connector[bot]", false, &impact.Rev); err != nil {
 		t.Fatal(err)
 	}
 	st, _, err := store.Load(ctx)
@@ -669,7 +693,14 @@ func TestSetEnvTriggerPolicyReopensCompletedRounds(t *testing.T) {
 	svc := NewService(cfg, gh, store, nil)
 	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 12)
 
-	if _, err := svc.SetEnv(ctx, "CRQ_COBOT_CODEX_TRIGGER", "always", false); err != nil {
+	impact, err := svc.PreviewEnv(ctx, "CRQ_COBOT_CODEX_TRIGGER", "always", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if impact.Reopened != 1 || !strings.Contains(strings.Join(impact.Changes, "\n"), "trigger policies") {
+		t.Fatalf("impact = %+v, want the trigger change and one reopened round", impact)
+	}
+	if _, _, err := svc.SetEnvAt(ctx, "CRQ_COBOT_CODEX_TRIGGER", "always", false, &impact.Rev); err != nil {
 		t.Fatal(err)
 	}
 	st, _, err := store.Load(ctx)

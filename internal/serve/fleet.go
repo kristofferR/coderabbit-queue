@@ -309,6 +309,10 @@ type EnvSetting struct {
 	// more useful answer than a disabled control with no explanation.
 	PerHost  bool `json:"per_host,omitempty"`
 	Identity bool `json:"identity,omitempty"`
+	// ReviewImpact marks settings whose save can reopen completed rounds. Those
+	// go through the same live preview and revision-bound confirmation as the
+	// fleet reviewer editor.
+	ReviewImpact bool `json:"review_impact,omitempty"`
 
 	Value  string `json:"value"`
 	Source string `json:"source"` // fleet | env | default

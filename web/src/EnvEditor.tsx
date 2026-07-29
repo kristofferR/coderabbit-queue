@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { act } from "./actions";
-import type { EnvSetting, Snapshot } from "./api";
+import type { EnvSetting, FleetImpact, Snapshot } from "./api";
+import { Confirm } from "./Confirm";
 import { Card, Pill } from "./ui";
 import { useOperation } from "./useOperation";
 
@@ -43,17 +44,34 @@ export function EnvEditor({
 }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [pending, setPending] = useState<{
+    setting: EnvSetting;
+    value: string;
+    clear: boolean;
+    impact: FleetImpact;
+  } | null>(null);
   const { run: runOperation, running: busy, error } = useOperation();
 
   const groups = [...new Set(env.map((e) => e.group))];
 
-  const save = (key: string, value: string, clear = false) =>
-    runOperation(act("env", { key, value, clear }), {
+  const commit = (setting: EnvSetting, value: string, clear: boolean, expectedRev?: number) =>
+    runOperation(act("env", { key: setting.key, value, clear, expected_rev: expectedRev }), {
       onSuccess: ({ snapshot }) => {
         onSnapshot?.(snapshot);
         setEditing(null);
+        setPending(null);
       },
     });
+
+  const save = (setting: EnvSetting, value: string, clear = false) => {
+    if (!setting.review_impact) {
+      commit(setting, value, clear);
+      return;
+    }
+    runOperation(act("env", { key: setting.key, value, clear, preview: true }), {
+      onSuccess: (impact) => setPending({ setting, value, clear, impact }),
+    });
+  };
 
   return (
     <>
@@ -106,7 +124,7 @@ export function EnvEditor({
                             <button
                               type="button"
                               disabled={busy}
-                              onClick={() => void save(e.key, draft)}
+                              onClick={() => save(e, draft)}
                               className="rounded-lg bg-ink px-3 py-1 text-[12.5px] font-semibold text-white disabled:opacity-45"
                             >
                               Save for the fleet
@@ -147,6 +165,7 @@ export function EnvEditor({
                               type="button"
                               onClick={() => {
                                 setEditing(e.key);
+                                setPending(null);
                                 setDraft(
                                   e.kind === "bool"
                                     ? ["1", "true", "yes", "on"].includes(e.value.toLowerCase())
@@ -163,7 +182,7 @@ export function EnvEditor({
                               <button
                                 type="button"
                                 disabled={busy}
-                                onClick={() => void save(e.key, "", true)}
+                                onClick={() => save(e, "", true)}
                                 className="text-mut hover:underline disabled:opacity-45"
                               >
                                 Unset
@@ -180,6 +199,43 @@ export function EnvEditor({
           </Card>
         );
       })}
+      {pending && (
+        <Confirm
+          title={
+            pending.clear ? `Unset ${pending.setting.label}?` : `Save ${pending.setting.label}?`
+          }
+          danger={pending.impact.reopened > 0}
+          confirmLabel={
+            pending.impact.reopened > 0
+              ? `${pending.clear ? "Unset" : "Save"} and reopen ${pending.impact.reopened}`
+              : pending.clear
+                ? "Unset"
+                : "Save"
+          }
+          busy={busy}
+          error={error}
+          body={
+            <>
+              <ul className="mb-2 list-disc pl-4">
+                {pending.impact.changes.map((change) => (
+                  <li key={change}>{change}</li>
+                ))}
+              </ul>
+              {pending.impact.summary}
+              {pending.impact.reopened > 0 && (
+                <p className="mt-2 text-warn">
+                  Reopened rounds are reviewed again, and metered reviews spend the shared
+                  allowance.
+                </p>
+              )}
+            </>
+          }
+          onConfirm={() =>
+            commit(pending.setting, pending.value, pending.clear, pending.impact.rev)
+          }
+          onCancel={() => setPending(null)}
+        />
+      )}
     </>
   );
 }

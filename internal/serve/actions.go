@@ -38,8 +38,8 @@ type Actor interface {
 	// EnvSettings is every individual setting with its effective value and the
 	// layer that decided it. Pure: it reads the state it is handed.
 	EnvSettings(st state.State) []EnvSetting
-	// SetEnv records or clears one fleet-wide setting by its env name.
-	SetEnv(ctx context.Context, key, value string, unset bool) error
+	// SetEnv previews or records one fleet-wide setting by its env name.
+	SetEnv(ctx context.Context, key, value string, unset bool, expectedRev *int64, preview bool) (FleetImpact, error)
 	// SetSolver records how one repository's fix sessions run, or with an empty
 	// repo the fleet default every repository inherits.
 	SetSolver(ctx context.Context, repo string, change SolverChange) error
@@ -234,7 +234,22 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no setting named"})
 			return
 		}
-		err = s.actor.SetEnv(ctx, req.Key, req.Value, req.Clear)
+		impact, envErr := s.actor.SetEnv(ctx, req.Key, req.Value, req.Clear, req.ExpectedRev, req.Preview)
+		if envErr != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": envErr.Error()})
+			return
+		}
+		if req.Preview {
+			writeJSON(w, http.StatusOK, map[string]any{"impact": impact})
+			return
+		}
+		snap, warning := s.actionSnapshot(ctx)
+		response := map[string]any{"snapshot": snap, "impact": impact}
+		if warning != "" {
+			response["warning"] = warning
+		}
+		writeJSON(w, http.StatusOK, response)
+		return
 	case "solver":
 		var change SolverChange
 		if err := json.Unmarshal(req.Solver, &change); len(req.Solver) > 0 && err != nil {

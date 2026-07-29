@@ -144,9 +144,15 @@ func ParseCodexReviewFindings(body string, review ReviewMeta, bot string) []Find
 		if title == "" {
 			title = TitleOf(block)
 		}
+		labels := ReviewLabelsFor(bot, block)
+		severity := labels.Severity
+		if severity == "" {
+			severity = CodexPrioritySeverity(block)
+		}
 		finding := Finding{
 			Bot:       bot,
-			Severity:  CodexPrioritySeverity(block),
+			Severity:  severity,
+			Scale:     labels.Scale,
 			Path:      path,
 			Line:      line,
 			Title:     title,

@@ -756,7 +756,8 @@ This boilerplate must not become part of the finding.
 	if finding.Path != "convex/sections/aiCommands.ts" || finding.Line != 2170 {
 		t.Fatalf("location mismatch: %#v", finding)
 	}
-	if finding.Title != "Query learning history by topic before taking" || finding.Severity != "minor" {
+	if finding.Title != "Query learning history by topic before taking" ||
+		finding.Severity != "potential" || finding.Scale != "P2" {
 		t.Fatalf("metadata mismatch: %#v", finding)
 	}
 	if finding.Commit != "347388ffd" || finding.Source != "review_body" {

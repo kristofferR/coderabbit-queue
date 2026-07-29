@@ -40,6 +40,10 @@ type EnvKey struct {
 	// AllowEmpty means an explicitly recorded empty string changes behaviour
 	// rather than handing the setting back to each host's environment.
 	AllowEmpty bool
+	// ReviewImpact means changing this value can change who reviews or gates a
+	// pull request. The dashboard previews those writes because they can reopen
+	// completed rounds and spend the shared allowance.
+	ReviewImpact bool
 }
 
 // envKeys is every setting the dashboard knows about. Anything absent is not
@@ -63,13 +67,13 @@ var envKeys = []EnvKey{
 		Help: "How long a daemon's claim to drive the queue survives without a heartbeat."},
 
 	{Key: "CRQ_BOT", Kind: "text", Group: "review", Label: "Primary reviewer",
-		Help: "The metered reviewer's login. Changing it changes which bot's wording crq reads."},
+		Help: "The metered reviewer's login. Changing it changes which bot's wording crq reads.", ReviewImpact: true},
 	{Key: "CRQ_REVIEW_CMD", Kind: "text", Group: "review", Label: "Review command",
 		Help: "The comment crq posts to ask the primary for a review."},
 	{Key: "CRQ_COBOTS", Kind: "list", Group: "review", Label: "Co-reviewers",
-		Help: "Which co-reviewers run. Editable as toggles above; this is the same setting.", AllowEmpty: true},
+		Help: "Which co-reviewers run. Editable as toggles above; this is the same setting.", AllowEmpty: true, ReviewImpact: true},
 	{Key: "CRQ_REQUIRED_BOTS", Kind: "list", Group: "review", Label: "Required reviewers",
-		Help: "Which reviewers convergence waits for."},
+		Help: "Which reviewers convergence waits for.", ReviewImpact: true},
 	{Key: "CRQ_FEEDBACK_BOTS", Kind: "list", Group: "review", Label: "Feedback reviewers",
 		Help: "Whose findings are surfaced. Defaults to everyone who reviews; widen it to read a bot without waiting for it."},
 	{Key: "CRQ_SETTLE", Kind: "duration", Group: "review", Label: "Settle window",
@@ -131,11 +135,11 @@ func EnvKeys() []EnvKey {
 		out = append(out,
 			EnvKey{Key: "CRQ_COBOT_" + up + "_REQUIRED", Kind: "bool", Group: "review",
 				Label: co.Name + " required",
-				Help:  "Whether convergence waits for " + co.Name + "."},
+				Help:  "Whether convergence waits for " + co.Name + ".", ReviewImpact: true},
 			EnvKey{Key: "CRQ_COBOT_" + up + "_TRIGGER", Kind: "text", Group: "review",
 				Label: co.Name + " trigger",
 				Help: "never (crq stays out of its way) · selfheal (ask only if it has not shown up) · " +
-					"always (ask on every round)."},
+					"always (ask on every round).", ReviewImpact: true},
 			EnvKey{Key: "CRQ_COBOT_" + up + "_GRACE", Kind: "duration", Group: "review",
 				Label: co.Name + " self-heal grace",
 				Help:  "How long to wait for " + co.Name + " to review on its own before asking."},
