@@ -373,8 +373,8 @@ func (s *Service) fleetImpact(st State, next FleetDefaults, open map[string]map[
 		reaches(following)
 	}
 	if sameBot(beforeCfg.Bot, afterCfg.Bot) && sameLogins(beforeCo, afterCo) &&
-		!sameTriggerPolicies(beforeCfg.Reviewers, afterCfg.Reviewers) {
-		impact.Changes = append(impact.Changes, "reviewer trigger policies changed")
+		!sameTriggerSettings(beforeCfg.Reviewers, afterCfg.Reviewers) {
+		impact.Changes = append(impact.Changes, "reviewer trigger policy or command changed")
 		reaches(changedReviewers)
 	}
 	if beforeCfg.MinInterval != afterCfg.MinInterval {
@@ -604,6 +604,14 @@ type AdoptedSetting struct {
 // their differing value had become the fleet's when state had kept the old one.
 func (s *Service) AdoptEnv(ctx context.Context, dryRun bool) ([]AdoptedSetting, error) {
 	host := s.cfg.Env()
+	// Per-bot REQUIRED keys remain valid file-level compatibility aliases, but
+	// the dashboard has one required-reviewer editor and one typed state field.
+	// Fold those aliases into that canonical list at the adoption boundary
+	// rather than publishing controls whose generic writes the typed field
+	// would silently override.
+	if strings.TrimSpace(host["CRQ_REQUIRED_BOTS"]) == "" && hasPerBotRequiredEnv(host) {
+		host["CRQ_REQUIRED_BOTS"] = strings.Join(s.cfg.RequiredBots, ",")
+	}
 	defaults, err := BuildConfig(map[string]string{})
 	if err != nil {
 		return nil, err
@@ -697,6 +705,16 @@ func (s *Service) AdoptEnv(ctx context.Context, dryRun bool) ([]AdoptedSetting, 
 		}
 	}
 	return adopted, nil
+}
+
+func hasPerBotRequiredEnv(env map[string]string) bool {
+	for _, co := range dialect.KnownCoReviewers() {
+		key := "CRQ_COBOT_" + strings.ToUpper(co.Name) + "_REQUIRED"
+		if boolEnv(env, key, false) {
+			return true
+		}
+	}
+	return false
 }
 
 // adoptFleetEnv folds the settings this host offered onto a fleet record.

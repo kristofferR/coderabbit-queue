@@ -69,7 +69,7 @@ var envKeys = []EnvKey{
 	{Key: "CRQ_BOT", Kind: "text", Group: "review", Label: "Primary reviewer",
 		Help: "The metered reviewer's login. Changing it changes which bot's wording crq reads.", ReviewImpact: true},
 	{Key: "CRQ_REVIEW_CMD", Kind: "text", Group: "review", Label: "Review command",
-		Help: "The comment crq posts to ask the primary for a review."},
+		Help: "The comment crq posts to ask the primary for a review.", ReviewImpact: true},
 	{Key: "CRQ_COBOTS", Kind: "list", Group: "review", Label: "Co-reviewers",
 		Help: "Which co-reviewers run. Editable as toggles above; this is the same setting.", AllowEmpty: true, ReviewImpact: true},
 	{Key: "CRQ_REQUIRED_BOTS", Kind: "list", Group: "review", Label: "Required reviewers",
@@ -133,9 +133,6 @@ func EnvKeys() []EnvKey {
 	for _, co := range dialect.KnownCoReviewers() {
 		up := strings.ToUpper(co.Name)
 		out = append(out,
-			EnvKey{Key: "CRQ_COBOT_" + up + "_REQUIRED", Kind: "bool", Group: "review",
-				Label: co.Name + " required",
-				Help:  "Whether convergence waits for " + co.Name + ".", ReviewImpact: true},
 			EnvKey{Key: "CRQ_COBOT_" + up + "_TRIGGER", Kind: "text", Group: "review",
 				Label: co.Name + " trigger",
 				Help: "never (crq stays out of its way) · selfheal (ask only if it has not shown up) · " +
@@ -146,7 +143,7 @@ func EnvKeys() []EnvKey {
 			EnvKey{Key: "CRQ_COBOT_" + up + "_CMD", Kind: "text", Group: "review",
 				Label:      co.Name + " command",
 				Help:       "The comment crq posts to ask " + co.Name + " for a review.",
-				AllowEmpty: true},
+				AllowEmpty: true, ReviewImpact: true},
 		)
 	}
 	return out

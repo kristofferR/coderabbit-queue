@@ -34,6 +34,11 @@ func TestPrimaryOffQueueRowIgnoresMeteredQuotaGates(t *testing.T) {
 	st.Rounds[state.Key("o/free", 1)] = state.Round{
 		Repo: "o/free", PR: 1, Head: "free-head", Phase: state.PhaseQueued, Seq: 1, EnqueuedAt: now,
 	}
+	st.Rounds[state.Key("o/metered", 2)] = state.Round{
+		Repo: "o/metered", PR: 2, Head: "metered-head", Phase: state.PhaseReserved,
+		Seq: 2, EnqueuedAt: now.Add(-time.Minute), ReservedAt: &now, Token: "slot-token",
+	}
+	st.FireSlot = &state.FireSlot{Key: state.Key("o/metered", 2), Token: "slot-token", Since: now}
 	botsFor := func(string) []BotName {
 		return []BotName{{Login: "chatgpt-codex-connector[bot]", Name: "Codex"}}
 	}

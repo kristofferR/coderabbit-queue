@@ -293,8 +293,8 @@ func (s *Service) analyzeClearReviewers(ctx context.Context, st State, repo stri
 		impact.Changes = append(impact.Changes, fmt.Sprintf("required reviewers: %s → %s",
 			shortBots(before.RequiredBots), shortBots(after.RequiredBots)))
 	}
-	if sameLogins(beforeRuns, afterRuns) && !sameTriggerPolicies(before.Reviewers, after.Reviewers) {
-		impact.Changes = append(impact.Changes, "reviewer trigger policies changed")
+	if sameLogins(beforeRuns, afterRuns) && !sameTriggerSettings(before.Reviewers, after.Reviewers) {
+		impact.Changes = append(impact.Changes, "reviewer trigger policy or command changed")
 	}
 	if len(impact.Changes) == 0 {
 		impact.Summary = "removes the override; effective reviewers stay the same"
@@ -516,20 +516,30 @@ func sameReviewers(before, after Config) bool {
 	return sameLogins(before.RequiredBots, after.RequiredBots) &&
 		sameLogins(before.reviewerLogins(func(Reviewer) bool { return true }),
 			after.reviewerLogins(func(Reviewer) bool { return true })) &&
-		sameTriggerPolicies(before.Reviewers, after.Reviewers)
+		sameTriggerSettings(before.Reviewers, after.Reviewers)
 }
 
-func sameTriggerPolicies(a, b []Reviewer) bool {
+// sameTriggerSettings covers both whether crq posts and what it posts. A
+// command is captured before the network call, so changing it while a trigger
+// claim is live is the same configuration race as changing its mode.
+func sameTriggerSettings(a, b []Reviewer) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	triggers := make(map[string]engine.TriggerMode, len(a))
+	type setting struct {
+		trigger engine.TriggerMode
+		command string
+	}
+	triggers := make(map[string]setting, len(a))
 	for _, reviewer := range a {
-		triggers[dialect.NormalizeBotName(reviewer.Login)] = reviewer.Trigger
+		triggers[dialect.NormalizeBotName(reviewer.Login)] = setting{
+			trigger: reviewer.Trigger,
+			command: strings.TrimSpace(reviewer.Command),
+		}
 	}
 	for _, reviewer := range b {
-		trigger, ok := triggers[dialect.NormalizeBotName(reviewer.Login)]
-		if !ok || trigger != reviewer.Trigger {
+		got, ok := triggers[dialect.NormalizeBotName(reviewer.Login)]
+		if !ok || got.trigger != reviewer.Trigger || got.command != strings.TrimSpace(reviewer.Command) {
 			return false
 		}
 	}
