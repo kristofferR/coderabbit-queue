@@ -62,6 +62,26 @@ func TestServeInstallPreservesPollInterval(t *testing.T) {
 	}
 }
 
+func TestServiceInstallersHonourConfiguredDryRun(t *testing.T) {
+	cfg := firingConfig()
+	cfg.DryRun = true
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	serve, err := svc.InstallServe(context.Background(), "", nil, false, 0, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	autoreview, err := svc.InstallAutoReview(context.Background(), false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, plan := range []ServeInstall{serve, autoreview} {
+		if !plan.DryRun || plan.Started {
+			t.Fatalf("configured dry-run %s installation applied its plan: %+v", plan.Service, plan)
+		}
+	}
+}
+
 func TestSystemdEnvironmentPreservesUnicodeAndUsesSupportedEscapes(t *testing.T) {
 	value := "CRQ_FIX_PROMPT=blå\u0085\t\"quoted\""
 	got := systemdEnvironment(value)

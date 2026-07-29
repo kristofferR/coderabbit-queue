@@ -56,7 +56,7 @@ type ServeInstall struct {
 
 // InstallServe writes the service definition for `crq serve` and starts it.
 func (s *Service) InstallServe(ctx context.Context, addr string, allowHosts []string, readOnly bool, poll time.Duration, dryRun, skipAuth bool) (ServeInstall, error) {
-	return s.installUnit(ctx, "serve", addr, allowHosts, readOnly, poll, dryRun, skipAuth)
+	return s.installUnit(ctx, "serve", addr, allowHosts, readOnly, poll, dryRun || s.cfg.DryRun, skipAuth)
 }
 
 // InstallAutoReview writes the service definition for `crq autoreview` and
@@ -67,7 +67,7 @@ func (s *Service) InstallServe(ctx context.Context, addr string, allowHosts []st
 // only fires while that machine is awake. A laptop that sleeps is the wrong
 // host for it, and nothing about the queue says so until reviews quietly stop.
 func (s *Service) InstallAutoReview(ctx context.Context, dryRun, skipAuth bool) (ServeInstall, error) {
-	return s.installUnit(ctx, "autoreview", "", nil, false, 0, dryRun, skipAuth)
+	return s.installUnit(ctx, "autoreview", "", nil, false, 0, dryRun || s.cfg.DryRun, skipAuth)
 }
 
 func (s *Service) installUnit(ctx context.Context, service, addr string, allowHosts []string, readOnly bool, poll time.Duration, dryRun, skipAuth bool) (ServeInstall, error) {

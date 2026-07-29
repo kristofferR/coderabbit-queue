@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 )
 
@@ -709,6 +710,51 @@ func TestSetEnvTriggerPolicyReopensCompletedRounds(t *testing.T) {
 	}
 	if round := st.Round(repo, pr); round == nil || round.Phase != PhaseQueued {
 		t.Fatalf("round = %#v, want the trigger policy change to requeue it", round)
+	}
+}
+
+func TestFleetReviewerChangeRefusesAClaimedCoTrigger(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost", "CRQ_REPOS": "o/r",
+		"CRQ_COBOTS": "codex", "CRQ_REQUIRED_BOTS": "coderabbitai[bot],codex",
+		"CRQ_COBOT_CODEX_TRIGGER": "always", "CRQ_COBOT_CODEX_CMD": "@codex review",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	if _, err := store.Update(ctx, func(st *State) error {
+		round, err := st.NewRound("o/r", 9, "abcdef123", time.Now())
+		if err != nil {
+			return err
+		}
+		round.ClaimCo(dialect.CodexBotLogin, time.Now())
+		st.PutRound(*round)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	impact, err := svc.PreviewFleet(ctx, FleetChange{
+		CoBots: []string{}, Required: []string{cfg.Bot},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = svc.SetFleetSettings(ctx, FleetChange{
+		CoBots: []string{}, Required: []string{cfg.Bot}, ExpectedRev: &impact.Rev,
+	})
+	if err == nil || !strings.Contains(err.Error(), "trigger is already being posted") {
+		t.Fatalf("fleet save error = %v, want the claimed post to block reviewer removal", err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Fleet.SetCoBots || st.Fleet.SetRequired {
+		t.Fatalf("fleet = %+v, want the rejected reviewer edit not to land", st.Fleet)
 	}
 }
 

@@ -218,6 +218,9 @@ func (s *Service) SetFleetSettings(ctx context.Context, change FleetChange) (Fle
 				return aerr
 			}
 		}
+		if err := s.rejectClaimedReviewerChanges(st, applied, now); err != nil {
+			return err
+		}
 		before := map[string]Config{}
 		for _, repo := range s.reposWithChangedReviewers(*st, applied) {
 			before[repo] = s.cfgFor(*st, repo)
@@ -673,6 +676,9 @@ func (s *Service) AdoptEnv(ctx context.Context, dryRun bool) ([]AdoptedSetting, 
 		if !changed {
 			return ErrNoChange
 		}
+		if err := s.rejectClaimedReviewerChanges(st, fd, now); err != nil {
+			return err
+		}
 		st.SetFleetDefaults(fd, s.cfg.Host, now)
 		for repo, was := range before {
 			s.reopenForChangedReviewers(st, repo, was, s.cfgFor(*st, repo), open[repo])
@@ -1063,6 +1069,9 @@ func (s *Service) SetEnvAt(ctx context.Context, key, value string, unset bool, e
 		// so reopenForChangedReviewers conservatively marks its completed rounds
 		// for reopening when that PR is next observed alive.
 		applied := fleetEnvSet(st.Fleet, key, value, unset)
+		if err := s.rejectClaimedReviewerChanges(st, applied, now); err != nil {
+			return err
+		}
 		for _, repo := range s.reposWithChangedReviewers(*st, applied) {
 			before[repo] = s.cfgFor(*st, repo)
 		}
@@ -1081,6 +1090,19 @@ func (s *Service) SetEnvAt(ctx context.Context, key, value string, unset bool, e
 		return FleetView{}, FleetImpact{}, err
 	}
 	return s.fleetViewOf(st), impact, nil
+}
+
+// rejectClaimedReviewerChanges keeps a committed configuration edit from being
+// followed by a trigger chosen under the old configuration. Co-review posts are
+// claimed before their network call, so the claim is the exact interval in
+// which a reviewer-changing fleet write must wait.
+func (s *Service) rejectClaimedReviewerChanges(st *State, next FleetDefaults, now time.Time) error {
+	for _, repo := range s.reposWithChangedReviewers(*st, next) {
+		if claimedTriggerRepo(st, repo, now) {
+			return fmt.Errorf("a review trigger is already being posted for %s; wait for it to finish before changing fleet reviewers", repo)
+		}
+	}
+	return nil
 }
 
 // fleetEnvSet returns fd with one generic setting recorded or removed.
