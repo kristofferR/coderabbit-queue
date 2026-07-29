@@ -82,12 +82,17 @@ export function FleetEditor({
   const preview = () => runOperation(fleetImpact(change()), { onSuccess: setImpact });
 
   const save = (clear = false) =>
-    runOperation(act("fleet", { fleet: clear ? { clear: true } : change() }), {
-      onSuccess: ({ snapshot }) => {
-        onSnapshot?.(snapshot);
-        setImpact(null);
+    runOperation(
+      act("fleet", {
+        fleet: clear ? { clear: true } : { ...change(), expected_rev: impact?.rev },
+      }),
+      {
+        onSuccess: ({ snapshot }) => {
+          onSnapshot?.(snapshot);
+          setImpact(null);
+        },
       },
-    });
+    );
 
   const source = (key: string) => fleet.sources?.[key] ?? "env";
 

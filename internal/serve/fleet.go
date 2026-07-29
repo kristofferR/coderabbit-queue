@@ -340,6 +340,7 @@ type FleetReviewer struct {
 
 // FleetImpact is what a proposed fleet change would do, shown before it is made.
 type FleetImpact struct {
+	Rev        int64    `json:"rev"`
 	Repos      int      `json:"repos"`
 	Reopened   int      `json:"reopened"`
 	Overridden int      `json:"overridden"`

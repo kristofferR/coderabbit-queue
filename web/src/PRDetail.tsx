@@ -1,11 +1,12 @@
 import { Link } from "@tanstack/react-router";
 import { ExternalLink } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AutofixLog } from "./AutofixLog";
 import { act } from "./actions";
 import type { Cost as CostView, Finding, PRView } from "./api";
 import { pullRequest } from "./api";
 import { Confirm } from "./Confirm";
+import { useDashboard } from "./DashboardState";
 import { HOLD_ACTIONS_ENABLED } from "./features";
 import { ago, clock, countdown, elapsed, useNow } from "./time";
 import { BotIcon, BotMarks, Card, CommitLink, Empty, Pill, PRLink, RepoIcon } from "./ui";
@@ -20,7 +21,21 @@ const SEV_TONE: Record<string, "bad" | "warn" | "mut"> = {
   unknown: "mut",
 };
 
+export function mergeLivePRState(current: PRView | null, next: PRView): PRView {
+  if (!current) return next;
+  if (next.rev < current.rev) return current;
+  const sameHead = !next.round?.head || next.round.head === current.observed?.head;
+  return {
+    ...next,
+    observed: sameHead ? current.observed : undefined,
+    observe_error: sameHead ? current.observe_error : undefined,
+    cost: sameHead ? current.cost : undefined,
+    cost_error: sameHead ? current.cost_error : undefined,
+  };
+}
+
 export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
+  const { snapshot } = useDashboard();
   const now = useNow();
   const [view, setView] = useState<PRView | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -29,6 +44,7 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
     kind: "resolve" | "decline" | "dismiss";
   } | null>(null);
   const { run: runLoad, error, clearError: clearLoadError } = useOperation();
+  const { run: runLiveState } = useOperation();
   const {
     run: runFinding,
     running: busy,
@@ -40,6 +56,7 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
   // other.
   const [pending, setPending] = useState<"hold" | "cancel" | null>(null);
   const { run: runRoundOperation, running: acting, error: roundErr } = useOperation();
+  const liveCursor = useRef({ key: `${repo}#${pr}`, rev: snapshot?.overview.rev });
 
   const runRound = (kind: "hold" | "unhold" | "cancel", reason = "") =>
     runRoundOperation(act(kind, { repo, pr, reason }), {
@@ -73,7 +90,8 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
     (refresh = false) => {
       setRefreshing(refresh);
       runLoad(pullRequest(repo, pr, refresh), {
-        onSuccess: setView,
+        onSuccess: (next) =>
+          setView((current) => (current && next.rev < current.rev ? current : next)),
         onFinally: () => setRefreshing(false),
       });
     },
@@ -85,6 +103,22 @@ export function PRDetailPage({ repo, pr }: { repo: string; pr: number }) {
   useEffect(() => {
     load();
   }, [load]);
+
+  // SSE revisions update only the cheap persisted-state layer. Findings and
+  // pricing stay attached to their observed head until a refresh or head move.
+  useEffect(() => {
+    const key = `${repo}#${pr}`;
+    const rev = snapshot?.overview.rev;
+    if (liveCursor.current.key !== key) {
+      liveCursor.current = { key, rev };
+      return;
+    }
+    if (rev === undefined || rev === liveCursor.current.rev) return;
+    liveCursor.current.rev = rev;
+    runLiveState(pullRequest(repo, pr, false, true), {
+      onSuccess: (next) => setView((current) => mergeLivePRState(current, next)),
+    });
+  }, [pr, repo, runLiveState, snapshot?.overview.rev]);
 
   if (error && !view) {
     return (
@@ -645,8 +679,7 @@ function CostCard({ cost, error }: { cost?: CostView; error?: string }) {
           </p>
         )}
         <p className="mt-2 text-[11.5px] text-faint">
-          Estimate. Published prices last checked {cost.prices_checked_at}; Macroscope bills
-          incrementally after its first review of a PR, so later rounds cost less than this.
+          Estimate. Published prices last checked {cost.prices_checked_at}. {cost.pricing_note}
         </p>
       </div>
     </Card>

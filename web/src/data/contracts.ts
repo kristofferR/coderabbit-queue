@@ -483,6 +483,7 @@ export const CostSchema = Schema.Struct({
   unpriced: Optional(MutableArray(Schema.String)),
   summary: Schema.String,
   prices_checked_at: Schema.String,
+  pricing_note: Schema.String,
   reviewers: MutableArray(
     Schema.Struct({
       bot: Schema.String,
@@ -504,6 +505,7 @@ export type Cost = Schema.Schema.Type<typeof CostSchema>;
 export const PRViewSchema = Schema.Struct({
   repo: Schema.String,
   pr: Schema.Number,
+  rev: Schema.Number,
   round: Optional(RoundViewSchema),
   hold: Optional(HeldRowSchema),
   title: Optional(Schema.String),
@@ -581,6 +583,7 @@ export const EnrollImpactSchema = Schema.Struct({
 export type EnrollImpact = Schema.Schema.Type<typeof EnrollImpactSchema>;
 
 export const FleetImpactSchema = Schema.Struct({
+  rev: Schema.Number,
   summary: Schema.String,
   changes: MutableArray(Schema.String),
   reopened: Schema.Number,

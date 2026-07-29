@@ -89,8 +89,9 @@ func (s *Service) AutofixSettings(ctx context.Context) ([]AutofixSetting, error)
 		}
 		out = append(out, setting)
 	}
-	watched := make([]string, 0, len(s.cfg.AllowRepos))
-	for repo := range s.cfg.AllowRepos {
+	cfg := s.cfg.WithFleet(st.Fleet)
+	watched := make([]string, 0, len(cfg.AllowRepos))
+	for repo := range cfg.AllowRepos {
 		watched = append(watched, repo)
 	}
 	sort.Strings(watched)

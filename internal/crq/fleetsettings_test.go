@@ -861,6 +861,29 @@ func TestFleetImpactCountsOnlyOpenCompletedRounds(t *testing.T) {
 	}
 }
 
+func TestFleetSaveRejectsAStalePreviewRevision(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	impact, err := svc.PreviewFleet(ctx, FleetChange{MinInterval: strptr("3m")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.HostReports = map[string]HostReport{"other": {Host: "other"}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.SetFleetSettings(ctx, FleetChange{
+		MinInterval: strptr("3m"), ExpectedRev: &impact.Rev,
+	}); err == nil || !strings.Contains(err.Error(), "preview") {
+		t.Fatalf("stale preview save error = %v, want a preview-again refusal", err)
+	}
+}
+
 // A save the fleet will ignore is worse than a refused one: the settings page
 // then reports a value that no daemon is running. Every setting below is read
 // back through a "> 0" guard, so a zero — or a negative that Atoi happily

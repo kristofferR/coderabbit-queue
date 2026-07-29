@@ -79,6 +79,22 @@ func TestRefreshSuppressesOnlyTheInitialRevisionZeroLoad(t *testing.T) {
 	}
 }
 
+func TestRefreshUsesResolvedAllowListForRepositoryRows(t *testing.T) {
+	st := state.New()
+	st.Rev = 4
+	srv := New(&stubLoader{st: st}, Options{
+		Now:   time.Now,
+		Fleet: FleetConfig{AllowRepos: []string{"startup/old"}},
+		AllowReposFor: func(state.State) []string {
+			return []string{"fleet/new"}
+		},
+	})
+	srv.refresh(t.Context())
+	if len(srv.last.Repos) != 1 || srv.last.Repos[0].Repo != "fleet/new" {
+		t.Fatalf("repository rows = %+v, want the resolved fleet allow-list", srv.last.Repos)
+	}
+}
+
 func TestRefreshedSnapshotReportsALoadFailureAfterAnAction(t *testing.T) {
 	loader := &stubLoader{st: state.New()}
 	srv := New(loader, Options{Now: func() time.Time { return time.Unix(0, 0).UTC() }})
@@ -733,5 +749,61 @@ func TestPRCostCacheDoesNotUseAStaleRoundHeadWhenObservationFails(t *testing.T) 
 	request()
 	if coster.calls != 2 {
 		t.Fatalf("cost calls = %d, want a fresh live-head price while observation is unavailable", coster.calls)
+	}
+}
+
+func TestPRRejectsCostForADifferentObservedHead(t *testing.T) {
+	now := time.Now().UTC()
+	observer := &sequenceObserver{observations: []Observation{{Head: "aaaaaaaaa", CheckedAt: now}}}
+	coster := &countingCoster{cost: Cost{Head: "bbbbbbbbb"}}
+	srv := New(&stubLoader{}, Options{
+		Addr: "127.0.0.1:7777", Observer: observer, Coster: coster,
+	})
+	srv.loaded = true
+	srv.lastState = state.New()
+	srv.lastState.Rounds = map[string]state.Round{
+		"o/r#1": {Repo: "o/r", PR: 1, Head: "aaaaaaaaa", Phase: state.PhaseCompleted},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost:7777/api/pr/o/r/1", nil)
+	req.Header.Set("X-CRQ-Dashboard", "1")
+	req.SetPathValue("owner", "o")
+	req.SetPathValue("name", "r")
+	req.SetPathValue("pr", "1")
+	srv.handlePR(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PR read = %d: %s", rec.Code, rec.Body.String())
+	}
+	var view PRView
+	if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.Cost != nil || !strings.Contains(view.CostError, "moved") {
+		t.Fatalf("cost = %+v error = %q, want the mixed-head estimate omitted", view.Cost, view.CostError)
+	}
+}
+
+func TestPRStateOnlyReadSkipsGitHubObservationAndPricing(t *testing.T) {
+	observer := &countingObserver{}
+	coster := &countingCoster{}
+	srv := New(&stubLoader{}, Options{
+		Addr: "127.0.0.1:7777", Observer: observer, Coster: coster,
+	})
+	srv.loaded = true
+	srv.lastState = state.New()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost:7777/api/pr/o/r/1?state_only=1", nil)
+	req.Header.Set("X-CRQ-Dashboard", "1")
+	req.SetPathValue("owner", "o")
+	req.SetPathValue("name", "r")
+	req.SetPathValue("pr", "1")
+	srv.handlePR(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PR state read = %d: %s", rec.Code, rec.Body.String())
+	}
+	if observer.calls != 0 || coster.calls != 0 {
+		t.Fatalf("state-only read made %d observation and %d cost calls", observer.calls, coster.calls)
 	}
 }

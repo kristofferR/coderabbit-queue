@@ -92,6 +92,31 @@ func TestAutofixSettingsListEnrolledRepositories(t *testing.T) {
 	}
 }
 
+func TestAutofixSettingsUseFleetResolvedAllowList(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":  "owner/gate",
+		"CRQ_REPOS": "startup/old",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Fleet.Env = map[string]string{"CRQ_REPOS": "fleet/new"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := NewService(cfg, newFakeGitHub(), store, nil).AutofixSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settings) != 1 || settings[0].Repo != "fleet/new" {
+		t.Fatalf("settings = %+v, want only the fleet-resolved repository", settings)
+	}
+}
+
 func TestAutofixSwitchRejectsMalformedRepositoryNames(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()

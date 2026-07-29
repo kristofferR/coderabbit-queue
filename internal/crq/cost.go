@@ -55,6 +55,8 @@ type RoundCost struct {
 	Summary string `json:"summary"`
 	// PricesCheckedAt is when the published figures behind this were verified.
 	PricesCheckedAt string `json:"prices_checked_at"`
+	// PricingNote is the vendor-owned billing disclosure from dialect.
+	PricingNote string `json:"pricing_note"`
 }
 
 // Cost estimates the next round on repo#pr, using the repository's effective
@@ -107,7 +109,10 @@ func accountAllowance(st State) dialect.Allowance {
 // as entirely included when the account had one review left.
 func (s *Service) costWith(st State, repo string, pr int, head string, d dialect.DiffStat, allowance dialect.Allowance) RoundCost {
 	cfg := s.cfgFor(st, repo)
-	out := RoundCost{Repo: repo, PR: pr, Head: head, Exact: true, PricesCheckedAt: dialect.PricesCheckedAt}
+	out := RoundCost{
+		Repo: repo, PR: pr, Head: head, Exact: true,
+		PricesCheckedAt: dialect.PricesCheckedAt, PricingNote: dialect.PricingDisclosure,
+	}
 	out.Diff.Additions, out.Diff.Deletions, out.Diff.ChangedFiles = d.Additions, d.Deletions, d.ChangedFiles
 
 	// Usage-based billing is only ever learned from the CLI's own guidance, and
@@ -115,7 +120,7 @@ func (s *Service) costWith(st State, repo string, pr int, head string, d dialect
 	// two are not interchangeable: "off" is a claim that an exhausted allowance
 	// costs nothing, and stating it on no evidence would show an account with
 	// overages enabled "no per-review cost" for a backlog it is about to be
-	// billed per reviewed file for. Unknown says so instead of guessing.
+	// billed for. Unknown says so instead of guessing.
 	for _, r := range cfg.Reviewers {
 		est := dialect.EstimateCost(r.Login, cfg.Bot, d, allowance)
 		// A non-primary reviewer that crq does not always command may review

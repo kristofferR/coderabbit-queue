@@ -45,6 +45,8 @@ type FleetView struct {
 // the repository you are looking at, and a fleet save affects every repository
 // that has not overridden the setting — which is most of them.
 type FleetImpact struct {
+	// Rev binds a preview to the state it described.
+	Rev int64 `json:"rev"`
 	// Repos is how many repositories inherit the changed setting.
 	Repos int `json:"repos"`
 	// Reopened is how many completed rounds a reviewer change would requeue,
@@ -145,6 +147,9 @@ type FleetChange struct {
 	MinInterval    *string  `json:"min_interval"`
 	WeeklyLimit    *int     `json:"weekly_limit"`
 	AutofixDefault *bool    `json:"autofix_default"`
+	// ExpectedRev makes a confirmed dashboard preview a compare-and-swap.
+	// CLI callers omit it and retain the ordinary latest-state behavior.
+	ExpectedRev *int64 `json:"expected_rev,omitempty"`
 	// Unset* removes one typed field from the record, handing that setting back
 	// to each host's env. "Leave this alone" and "the fleet has no answer" are
 	// different instructions, and a nil pointer or slice can only express the
@@ -181,6 +186,9 @@ func (s *Service) SetFleetSettings(ctx context.Context, change FleetChange) (Fle
 	if err != nil {
 		return FleetView{}, FleetImpact{}, err
 	}
+	if err := checkFleetPreviewRevision(st, change.ExpectedRev); err != nil {
+		return FleetView{}, FleetImpact{}, err
+	}
 	next, err := s.applyFleetChange(st, change)
 	if err != nil {
 		return FleetView{}, FleetImpact{}, err
@@ -195,6 +203,9 @@ func (s *Service) SetFleetSettings(ctx context.Context, change FleetChange) (Fle
 
 	now := s.clock().UTC()
 	written, err := s.store.Update(ctx, func(st *State) error {
+		if err := checkFleetPreviewRevision(*st, change.ExpectedRev); err != nil {
+			return err
+		}
 		before := map[string]Config{}
 		for _, repo := range s.reposFollowingFleet(*st) {
 			before[repo] = s.cfgFor(*st, repo)
@@ -228,6 +239,13 @@ func (s *Service) SetFleetSettings(ctx context.Context, change FleetChange) (Fle
 		}
 	}
 	return s.fleetViewOf(written), impact, nil
+}
+
+func checkFleetPreviewRevision(st State, expected *int64) error {
+	if expected != nil && st.Rev != *expected {
+		return fmt.Errorf("fleet state moved from revision %d to %d; preview the change again", *expected, st.Rev)
+	}
+	return nil
 }
 
 // applyFleetChange folds a change onto the current record, validating it. It
@@ -306,7 +324,7 @@ func (s *Service) applyFleetChange(st State, change FleetChange) (FleetDefaults,
 func (s *Service) fleetImpact(st State, next FleetDefaults, open map[string]map[int]bool) FleetImpact {
 	after := st
 	after.Fleet = next
-	impact := FleetImpact{Changes: []string{}}
+	impact := FleetImpact{Rev: st.Rev, Changes: []string{}}
 
 	// Which repositories a change reaches depends on WHICH setting changed, and
 	// the answers differ: a reviewer default stops at a repository that answers

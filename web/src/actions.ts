@@ -45,6 +45,7 @@ export type ActionBody = {
     min_interval?: string;
     weekly_limit?: number;
     autofix_default?: boolean;
+    expected_rev?: number;
     clear?: boolean;
   };
   /** Ask what a change would do without making it. */

@@ -50,6 +50,7 @@ type Cost struct {
 	Unpriced        []string       `json:"unpriced,omitempty"`
 	Summary         string         `json:"summary"`
 	PricesCheckedAt string         `json:"prices_checked_at"`
+	PricingNote     string         `json:"pricing_note"`
 	Reviewers       []CostReviewer `json:"reviewers"`
 	Diff            CostDiff       `json:"diff"`
 }
@@ -73,6 +74,7 @@ type CostDiff struct {
 type PRView struct {
 	Repo  string     `json:"repo"`
 	PR    int        `json:"pr"`
+	Rev   int64      `json:"rev"`
 	Round *RoundView `json:"round,omitempty"`
 	Hold  *HeldRow   `json:"hold,omitempty"`
 
@@ -278,7 +280,7 @@ func (c *costCache) put(key string, e costEntry) {
 // per-repository budget the overview reads, so the two renderings of one claim
 // cannot disagree about how far along a session is; nil leaves it unsaid.
 func buildPRView(st state.State, repo string, pr int, bots []BotName, inflight time.Duration, now time.Time, maxAttempts func(repo string) int) PRView {
-	v := PRView{Repo: repo, PR: pr, History: []HistoryEntry{}}
+	v := PRView{Repo: repo, PR: pr, Rev: st.Rev, History: []HistoryEntry{}}
 	key := state.Key(repo, pr)
 	v.Title = titleOf(st, repo, pr)
 
@@ -377,8 +379,9 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 
 	bots := s.botsFor(&st)(repo)
 	view := buildPRView(st, repo, pr, bots, s.pacing(st).Inflight, s.opts.Now(), s.maxAttempts(st))
+	stateOnly := r.URL.Query().Get("state_only") == "1"
 
-	if s.observer != nil {
+	if !stateOnly && s.observer != nil {
 		// The round's head is what invalidates a cached entry, so an untracked
 		// pull request has nothing to invalidate one WITH: its key never moves,
 		// and a page reloaded after a push kept being served the previous head's
@@ -412,13 +415,13 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 			}
 			s.observations.put(key, entry)
 		}
-	} else {
+	} else if !stateOnly {
 		view.ObserveError = "this server was started without GitHub access"
 	}
 
 	// Priced on the same trip and cached the same way: it costs one more pull
 	// read, which is why the overview does not price every queue row.
-	if s.opts.Coster != nil {
+	if !stateOnly && s.opts.Coster != nil {
 		// The head GitHub just reported, when the observation above got one.
 		// The five-minute TTL rests entirely on "the diff of a head does not
 		// change", and keyed on a round's head that is empty or superseded that
@@ -441,6 +444,9 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 			entry := costEntry{fetched: time.Now()}
 			if err != nil {
 				entry.err = err.Error()
+				view.CostError = entry.err
+			} else if head != "" && !strings.EqualFold(cost.Head, head) {
+				entry.err = "pull request moved while pricing; refresh to price the observed head"
 				view.CostError = entry.err
 			} else {
 				entry.cost = &cost

@@ -62,6 +62,9 @@ type Options struct {
 	// FleetFor derives the effective fleet settings from the state already
 	// loaded for this snapshot. Nil retains the Actor fallback for embedders.
 	FleetFor func(st state.State) *FleetSettings
+	// AllowReposFor resolves the shared fleet allow-list against the state being
+	// rendered. Nil keeps Fleet.AllowRepos as a startup-only fallback.
+	AllowReposFor func(st state.State) []string
 	// Host names the machine this server runs on, so the tool list can say
 	// whose PATH it describes.
 	Host string
@@ -275,7 +278,11 @@ func (s *Server) refresh(ctx context.Context) {
 	if s.actor != nil {
 		env = s.actor.EnvSettings(st)
 	}
-	snap := BuildFleet(st, s.opts.Fleet, ov, s.tools, s.opts.Host, now, botsFor, s.opts.EnrollFor, fleet, s.opts.SolverFor, env)
+	fleetConfig := s.opts.Fleet
+	if s.opts.AllowReposFor != nil {
+		fleetConfig.AllowRepos = s.opts.AllowReposFor(st)
+	}
+	snap := BuildFleet(st, fleetConfig, ov, s.tools, s.opts.Host, now, botsFor, s.opts.EnrollFor, fleet, s.opts.SolverFor, env)
 	snap.Events = s.events.list()
 	digest := snapshotDigest(snap)
 

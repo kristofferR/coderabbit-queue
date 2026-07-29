@@ -474,6 +474,7 @@ type FleetChange struct {
 	MinInterval    *string  `json:"min_interval"`
 	WeeklyLimit    *int     `json:"weekly_limit"`
 	AutofixDefault *bool    `json:"autofix_default"`
+	ExpectedRev    *int64   `json:"expected_rev,omitempty"`
 	Clear          bool     `json:"clear"`
 }
 

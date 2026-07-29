@@ -14,6 +14,11 @@ import (
 // widely cited a year ago.
 const PricesCheckedAt = "2026-07-27"
 
+// PricingDisclosure is the shared user-facing explanation of vendor billing.
+// It lives beside the prices so changing a vendor term cannot leave the CLI and
+// dashboard describing a different model from the estimator.
+const PricingDisclosure = "Macroscope bills by diff size with a per-review minimum and charges incrementally after its first review of a pull request, so later rounds can cost less than this whole-head estimate. CodeRabbit uses the plan allowance first and may bill by reviewed file after it; path filters can reduce that figure. Codex and Cursor Bugbot are covered by their own subscriptions."
+
 // Published prices, per vendor. Named constants rather than literals in the
 // arithmetic so re-checking them is reading one block, not auditing a function.
 const (

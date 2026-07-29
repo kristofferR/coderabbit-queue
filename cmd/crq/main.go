@@ -21,6 +21,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/kristofferR/coderabbit-queue/internal/crq"
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 	"github.com/kristofferR/coderabbit-queue/internal/serve"
 	"github.com/kristofferR/coderabbit-queue/internal/state"
@@ -715,7 +716,8 @@ func run(ctx context.Context, args []string) int {
 		// so Setup stopped naming the machine you were looking at it on.
 		serveCtx, stopReports := context.WithCancel(ctx)
 		defer stopReports()
-		if !*readOnly {
+		dashboardReadOnly := *readOnly || cfg.DryRun
+		if !dashboardReadOnly {
 			service.ReportHost(ctx, "serve")
 			go func() {
 				tick := time.NewTicker(crq.HostReportTTL / 2)
@@ -756,6 +758,9 @@ func run(ctx context.Context, args []string) int {
 			FleetFor: func(st crq.State) *serve.FleetSettings {
 				return fleetSettingsOf(service.FleetSettingsIn(st))
 			},
+			AllowReposFor: func(st crq.State) []string {
+				return keysOf(service.ConfigIn(st, "").AllowRepos)
+			},
 			Discoverer:  repoDiscoverer{service},
 			Previewer:   enrollPreviewer{service},
 			Poll:        *poll,
@@ -763,14 +768,14 @@ func run(ctx context.Context, args []string) int {
 			Log:         stderrLogger{},
 			Host:        host,
 			LookupToken: ghapi.LookupToken,
-			Observer:    prObserver{svc: service, readOnly: *readOnly},
+			Observer:    prObserver{svc: service, readOnly: dashboardReadOnly},
 			Coster:      prCoster{service},
 			TailLog: func(ctx context.Context, repo, path string, maxBytes int64) (serve.LogTail, error) {
 				tail, err := service.TailSessionLog(ctx, repo, path, maxBytes)
 				return serve.LogTail{Text: tail.Text, Size: tail.Size, Truncated: tail.Truncated}, err
 			},
 			Actor:    prActor{service},
-			ReadOnly: *readOnly,
+			ReadOnly: dashboardReadOnly,
 			Fleet: serve.FleetConfig{
 				GateRepo:       cfg.GateRepo,
 				StateRef:       cfg.StateRef,
@@ -1193,7 +1198,7 @@ card rather than the page.
                changes the dashboard by restarting it, not by reinstalling.
 `)
 	case "cost":
-		fmt.Print(`crq cost <repo> <pr>
+		fmt.Printf(`crq cost <repo> <pr>
 
 What one more review round on this pull request would cost, before firing it.
 
@@ -1206,19 +1211,10 @@ Everything is an ESTIMATE and the output says which parts are not:
                    explains the figure, because a number without its reasoning
                    cannot be checked
   .prices_checked_at  when the published prices behind this were last verified
+  .pricing_note    the vendor billing disclosure shared with the dashboard
 
-Only two reviewers can cost anything. Macroscope bills per kilobyte of diff with
-a 10 KB minimum, so under roughly 85 changed lines the $0.50 floor IS the price
-and the estimate is exact; above that it is a range, because bytes-per-changed-
-line varies about 3x with the code. CodeRabbit costs nothing inside the plan
-allowance, and past it bills per REVIEWED file — an upper bound here, since path
-filters cut that down. Codex and Cursor Bugbot are covered by their own
-subscriptions.
-
-The diff basis is the whole head. Macroscope bills incrementally after its first
-review of a pull request, so this is exact on the first round and an upper bound
-on later ones.
-`)
+%s
+`, dialect.PricingDisclosure)
 	case "fix-session":
 		fmt.Print(`crq fix-session
 
@@ -2631,7 +2627,7 @@ func (c prCoster) Cost(ctx context.Context, repo string, pr int) (serve.Cost, er
 	}
 	out := serve.Cost{
 		Head: est.Head, Low: est.Low, High: est.High, Exact: est.Exact, Unpriced: est.Unpriced,
-		Summary: est.Summary, PricesCheckedAt: est.PricesCheckedAt,
+		Summary: est.Summary, PricesCheckedAt: est.PricesCheckedAt, PricingNote: est.PricingNote,
 		Diff: serve.CostDiff{
 			Additions: est.Diff.Additions, Deletions: est.Diff.Deletions,
 			ChangedFiles: est.Diff.ChangedFiles,
@@ -2817,7 +2813,7 @@ func (a prActor) SetFleet(ctx context.Context, change serve.FleetChange, preview
 	c := crq.FleetChange{
 		CoBots: change.CoBots, Required: change.Required,
 		MinInterval: change.MinInterval, WeeklyLimit: change.WeeklyLimit,
-		AutofixDefault: change.AutofixDefault, Clear: change.Clear,
+		AutofixDefault: change.AutofixDefault, ExpectedRev: change.ExpectedRev, Clear: change.Clear,
 	}
 	var impact crq.FleetImpact
 	var err error
@@ -2830,7 +2826,7 @@ func (a prActor) SetFleet(ctx context.Context, change serve.FleetChange, preview
 		return serve.FleetImpact{}, err
 	}
 	return serve.FleetImpact{
-		Repos: impact.Repos, Reopened: impact.Reopened, Overridden: impact.Overridden,
+		Rev: impact.Rev, Repos: impact.Repos, Reopened: impact.Reopened, Overridden: impact.Overridden,
 		Changes: impact.Changes, Summary: impact.Summary,
 	}, nil
 }
