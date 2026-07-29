@@ -177,8 +177,11 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		var lagging []string
 		lagging, err = s.actor.SetReviewers(ctx, req.Repo, req.CoBots, req.Required, req.Primary)
 		if err == nil && len(lagging) > 0 {
-			s.refresh(ctx)
-			snap, _, _ := s.snapshot()
+			snap, refreshErr := s.refreshedSnapshot(ctx)
+			if refreshErr != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": refreshErr.Error()})
+				return
+			}
 			writeJSON(w, http.StatusOK, map[string]any{
 				"snapshot": snap,
 				// hostOf strips the pid/run suffix the state ref keys writers by:
@@ -206,8 +209,11 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		var lagging []string
 		lagging, err = s.actor.SetEnrollment(ctx, req.Repo, *req.Enabled, req.Reason)
 		if err == nil && len(lagging) > 0 {
-			s.refresh(ctx)
-			snap, _, _ := s.snapshot()
+			snap, refreshErr := s.refreshedSnapshot(ctx)
+			if refreshErr != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": refreshErr.Error()})
+				return
+			}
 			writeJSON(w, http.StatusOK, map[string]any{
 				"snapshot": snap,
 				"warning": "saved, but these hosts run an older binary and decide from their own env alone: " +
@@ -232,8 +238,11 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"impact": impact})
 			return
 		}
-		s.refresh(ctx)
-		snap, _, _ := s.snapshot()
+		snap, refreshErr := s.refreshedSnapshot(ctx)
+		if refreshErr != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": refreshErr.Error()})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"snapshot": snap, "impact": impact})
 		return
 	case "env":
@@ -296,9 +305,24 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 
 	// Re-read immediately rather than waiting for the next poll: the person who
 	// clicked is watching, and a stale answer reads as a failed click.
-	s.refresh(ctx)
-	snap, _, _ := s.snapshot()
+	snap, refreshErr := s.refreshedSnapshot(ctx)
+	if refreshErr != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": refreshErr.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, snap)
+}
+
+func (s *Server) refreshedSnapshot(ctx context.Context) (Snapshot, error) {
+	s.refresh(ctx)
+	snap, loaded, err := s.snapshot()
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("action succeeded, but refreshing state failed: %w", err)
+	}
+	if !loaded {
+		return Snapshot{}, errors.New("action succeeded, but refreshing state produced no snapshot")
+	}
+	return snap, nil
 }
 
 // addressedHere reports whether an action request was addressed to this

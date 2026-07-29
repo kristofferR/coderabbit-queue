@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestServeUnitCarriesShellProvidedConfiguration(t *testing.T) {
@@ -47,6 +48,17 @@ func TestServeUnitCarriesShellProvidedConfiguration(t *testing.T) {
 		if strings.Contains(unit, excluded) {
 			t.Errorf("unit carries excluded %s:\n%s", excluded, unit)
 		}
+	}
+}
+
+func TestServeInstallPreservesPollInterval(t *testing.T) {
+	plan := ServeInstall{
+		Service: "serve", Binary: "/usr/bin/crq", Addr: "127.0.0.1:7777",
+		Poll: (30 * time.Second).String(),
+	}
+	got := strings.Join(serveArgv(plan), " ")
+	if !strings.Contains(got, "--poll 30s") {
+		t.Fatalf("serve argv = %q, want the configured poll interval", got)
 	}
 }
 

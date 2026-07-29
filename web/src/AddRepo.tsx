@@ -23,6 +23,14 @@ function EnrollImpactCopy({ preview }: { preview: EnrollPreview }) {
       </>
     );
   }
+  if (preview.errorKind === "enroll") {
+    return (
+      <>
+        Enabling did not return a confirmed result. Refresh before retrying — the enrollment may
+        already have been saved, and any cost estimate shown here may now be stale.
+      </>
+    );
+  }
   if (!preview.impact) {
     return <>Working out what this would enqueue, and what it would cost…</>;
   }

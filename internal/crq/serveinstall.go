@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -31,6 +32,7 @@ type ServeInstall struct {
 	LogDir   string `json:"log_dir"`
 	Binary   string `json:"binary"`
 	Addr     string `json:"addr"`
+	Poll     string `json:"poll,omitempty"`
 	// AllowHosts are the extra names the dashboard accepts actions on. Part of
 	// the unit rather than of the config file because it belongs to the address
 	// this instance is served at, which is also where --addr lives.
@@ -53,8 +55,8 @@ type ServeInstall struct {
 }
 
 // InstallServe writes the service definition for `crq serve` and starts it.
-func (s *Service) InstallServe(ctx context.Context, addr string, allowHosts []string, readOnly, dryRun, skipAuth bool) (ServeInstall, error) {
-	return s.installUnit(ctx, "serve", addr, allowHosts, readOnly, dryRun, skipAuth)
+func (s *Service) InstallServe(ctx context.Context, addr string, allowHosts []string, readOnly bool, poll time.Duration, dryRun, skipAuth bool) (ServeInstall, error) {
+	return s.installUnit(ctx, "serve", addr, allowHosts, readOnly, poll, dryRun, skipAuth)
 }
 
 // InstallAutoReview writes the service definition for `crq autoreview` and
@@ -65,10 +67,10 @@ func (s *Service) InstallServe(ctx context.Context, addr string, allowHosts []st
 // only fires while that machine is awake. A laptop that sleeps is the wrong
 // host for it, and nothing about the queue says so until reviews quietly stop.
 func (s *Service) InstallAutoReview(ctx context.Context, dryRun, skipAuth bool) (ServeInstall, error) {
-	return s.installUnit(ctx, "autoreview", "", nil, false, dryRun, skipAuth)
+	return s.installUnit(ctx, "autoreview", "", nil, false, 0, dryRun, skipAuth)
 }
 
-func (s *Service) installUnit(ctx context.Context, service, addr string, allowHosts []string, readOnly, dryRun, skipAuth bool) (ServeInstall, error) {
+func (s *Service) installUnit(ctx context.Context, service, addr string, allowHosts []string, readOnly bool, poll time.Duration, dryRun, skipAuth bool) (ServeInstall, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ServeInstall{}, fmt.Errorf("resolving home directory: %w", err)
@@ -83,6 +85,13 @@ func (s *Service) installUnit(ctx context.Context, service, addr string, allowHo
 	if service == "serve" && strings.TrimSpace(addr) == "" {
 		addr = "127.0.0.1:7777"
 	}
+	if service == "serve" && poll <= 0 {
+		poll = 5 * time.Second
+	}
+	pollText := ""
+	if service == "serve" {
+		pollText = poll.String()
+	}
 
 	// systemd refuses to start a unit whose StandardOutput path cannot be
 	// opened, so the directory has to exist before the unit does.
@@ -93,6 +102,7 @@ func (s *Service) installUnit(ctx context.Context, service, addr string, allowHo
 		LogDir:        logDir,
 		Binary:        self,
 		Addr:          addr,
+		Poll:          pollText,
 		AllowHosts:    allowHosts,
 		Config:        ConfigPath(),
 		ReadOnly:      readOnly,
@@ -213,6 +223,9 @@ func serveArgv(plan ServeInstall) []string {
 		return []string{plan.Binary, plan.Service}
 	}
 	argv := []string{plan.Binary, "serve", "--addr", plan.Addr}
+	if plan.Poll != "" {
+		argv = append(argv, "--poll", plan.Poll)
+	}
 	if len(plan.AllowHosts) > 0 {
 		argv = append(argv, "--allow-host", strings.Join(plan.AllowHosts, ","))
 	}

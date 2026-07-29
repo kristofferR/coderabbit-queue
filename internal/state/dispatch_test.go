@@ -1,6 +1,7 @@
 package state
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -348,5 +349,28 @@ func TestHeartbeatSeparatesSupersededFromStolen(t *testing.T) {
 	// A claim that expired is not somebody else working: nothing is running.
 	if ok, taken := stolen.HeartbeatDispatch("tok-a", now.Add(2*DispatchTTL)); ok || taken {
 		t.Errorf("expired claim gave ok=%v taken=%v, want a benign miss", ok, taken)
+	}
+}
+
+func TestDispatchClarificationStopsOnlyTheCurrentHead(t *testing.T) {
+	now := time.Date(2026, 7, 29, 8, 0, 0, 0, time.UTC)
+	round := Round{Repo: "o/r", PR: 1, Head: "aaaaaaaa1", Phase: PhaseQueued}
+	if ok, why := round.ClaimDispatch("host", "tok", now, 3); !ok {
+		t.Fatalf("claim: %s", why)
+	}
+	if !round.MarkDispatchClarification("tok", "Which behavior should remain?") {
+		t.Fatal("clarification did not release its claim")
+	}
+	if round.DispatchHeld(now) {
+		t.Fatal("clarification left a live dispatch claim")
+	}
+	if ok, why := round.ClaimDispatch("host", "next", now.Add(time.Minute), 3); ok ||
+		!strings.Contains(why, "Which behavior should remain?") {
+		t.Fatalf("repeat claim = ok %v reason %q, want the clarification to stay terminal", ok, why)
+	}
+
+	fresh := Round{Repo: "o/r", PR: 1, Head: "bbbbbbbb2", Phase: PhaseQueued}
+	if ok, why := fresh.ClaimDispatch("host", "fresh", now.Add(time.Minute), 3); !ok {
+		t.Fatalf("new head was stopped by the old clarification: %s", why)
 	}
 }

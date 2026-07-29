@@ -38,16 +38,21 @@ export function QuickSettings({
   const primary = bots.find((b) => b.primary);
   const dirty = !sameMembers(runs, repo.reviewers) || !sameMembers(required, repo.required);
   const newlyOn = runs.filter((n) => !repo.reviewers.includes(n));
+  const configurableNames = new Set(bots.filter((bot) => bot.configurable).map((bot) => bot.name));
+  const retiredOn = [
+    ...new Set(
+      [...runs, ...required].filter(
+        (name) => name !== primary?.name && !configurableNames.has(name),
+      ),
+    ),
+  ];
 
   const save = () => {
     runOperation(
       act("reviewers", {
         repo: repo.repo,
-        cobots: runs.filter(
-          (name) =>
-            name !== primary?.name && bots.some((bot) => bot.name === name && bot.configurable),
-        ),
-        required,
+        cobots: runs.filter((name) => name !== primary?.name && configurableNames.has(name)),
+        required: required.filter((name) => name === primary?.name || configurableNames.has(name)),
         primary: primary ? runs.includes(primary.name) : undefined,
       }),
       {
@@ -138,6 +143,9 @@ export function QuickSettings({
             <p className="mt-3 rounded-lg border border-warn-edge bg-warn-bg px-2.5 py-1.5 text-[12.5px] text-warn">
               Saving would
               {newlyOn.length > 0 ? ` enable ${newlyOn.join(", ")} here` : " change who gates"}
+              {retiredOn.length > 0
+                ? ` and remove retired ${retiredOn.join(", ")} from the saved reviewer sets`
+                : ""}
               {repo.active_rounds > 0
                 ? `, and reconsider ${repo.active_rounds} round(s) already in flight at their current heads.`
                 : ", taking effect on the next round."}

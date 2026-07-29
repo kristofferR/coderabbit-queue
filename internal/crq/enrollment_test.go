@@ -284,7 +284,7 @@ func TestDisablingEnrollmentDropsTheQueuedRounds(t *testing.T) {
 	}
 }
 
-func TestSetEnrollmentDryRunDoesNotMutateState(t *testing.T) {
+func TestSetEnrollmentPersistsInDryRun(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	cfg.AllowRepos = map[string]bool{"o/stopped": true}
@@ -297,33 +297,88 @@ func TestSetEnrollmentDryRunDoesNotMutateState(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	before, revision, err := store.Load(ctx)
+	_, revision, err := store.Load(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	svc := NewService(cfg, newFakeGitHub(), store, nil)
 	svc.now = func() time.Time { return now }
 
-	view, err := svc.SetEnrollment(ctx, "o/stopped", false, "preview stopping reviews")
+	view, err := svc.SetEnrollment(ctx, "o/stopped", false, "stop reviewing")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.Enabled || view.Source != "state" || view.Reason != "preview stopping reviews" {
-		t.Fatalf("dry-run preview = %+v, want the proposed disabled enrollment", view)
+	if view.Enabled || view.Source != "state" || view.Reason != "stop reviewing" {
+		t.Fatalf("dry-run enrollment = %+v, want the persisted disabled enrollment", view)
 	}
 
 	after, afterRevision, err := store.Load(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if afterRevision != revision {
-		t.Fatalf("dry-run changed state revision: before=%+v after=%+v", revision, afterRevision)
+	if afterRevision == revision {
+		t.Fatalf("dry-run did not change state revision: before=%+v after=%+v", revision, afterRevision)
 	}
-	if _, ok := after.Enrollment("o/stopped"); ok {
-		t.Fatal("dry-run recorded the enrollment change")
+	if enrollment, ok := after.Enrollment("o/stopped"); !ok || enrollment.Enabled ||
+		enrollment.Reason != "stop reviewing" {
+		t.Fatalf("dry-run enrollment = %+v (present %v), want the explicit configuration persisted", enrollment, ok)
 	}
-	if before.Round("o/stopped", 7) == nil || after.Round("o/stopped", 7) == nil {
-		t.Fatal("dry-run archived the queued round")
+	if after.Round("o/stopped", 7) != nil {
+		t.Fatal("dry-run left the disabled repository's queued round active")
+	}
+}
+
+func TestDisablingEnrollmentRefusesAnArchivedTriggerClaim(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/stopped": true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	now := time.Now()
+	if _, err := store.Update(ctx, func(st *State) error {
+		round, err := st.NewRound("o/stopped", 7, "abcdef123", now)
+		if err != nil {
+			return err
+		}
+		round.ClaimCo("cursor[bot]", now)
+		st.PutRound(*round)
+		_, err = st.Supersede("o/stopped", 7, "fedcba987", now.Add(time.Second))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.SetEnrollment(ctx, "o/stopped", false, "stop reviewing this"); err == nil {
+		t.Fatal("turning the repository off succeeded while an archived trigger claim was still posting")
+	}
+}
+
+func TestArchivedTriggerClaimClearsWhenItsPostFinishes(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/stopped": true}
+	cfg.CoBots = []CoBotConfig{{Login: "cursor[bot]", Command: "@cursor review"}}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	now := time.Now()
+	var claimed Round
+	if _, err := store.Update(ctx, func(st *State) error {
+		round, err := st.NewRound("o/stopped", 7, "abcdef123", now)
+		if err != nil {
+			return err
+		}
+		round.ClaimCo("cursor[bot]", now)
+		st.PutRound(*round)
+		claimed = *round
+		_, err = st.Supersede("o/stopped", 7, "fedcba987", now.Add(time.Second))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	svc.fireCoTrigger(ctx, cfg, claimed, "cursor[bot]")
+	if _, err := svc.SetEnrollment(ctx, "o/stopped", false, "stop reviewing this"); err != nil {
+		t.Fatalf("turning the repository off after the archived poster finished: %v", err)
 	}
 }
 

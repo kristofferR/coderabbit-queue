@@ -79,6 +79,20 @@ func TestRefreshSuppressesOnlyTheInitialRevisionZeroLoad(t *testing.T) {
 	}
 }
 
+func TestRefreshedSnapshotReportsALoadFailureAfterAnAction(t *testing.T) {
+	loader := &stubLoader{st: state.New()}
+	srv := New(loader, Options{Now: func() time.Time { return time.Unix(0, 0).UTC() }})
+	if _, err := srv.refreshedSnapshot(t.Context()); err != nil {
+		t.Fatalf("initial refresh: %v", err)
+	}
+
+	loader.err = errors.New("state ref unavailable")
+	if _, err := srv.refreshedSnapshot(t.Context()); err == nil ||
+		!strings.Contains(err.Error(), "state ref unavailable") {
+		t.Fatalf("failed refresh error = %v, want the state read failure", err)
+	}
+}
+
 // Before the first load returns there is no snapshot — and no error either. The
 // zero Snapshot encodes its collections as null, and the client takes a 200 for
 // live state and iterates them straight away, so the dashboard crashed during
@@ -537,6 +551,31 @@ func TestBotCardsIncludeRepositoryOnlyReviewers(t *testing.T) {
 		return
 	}
 	t.Fatal("no card for the repository-only reviewer")
+}
+
+func TestBotCardsCountEffectiveReviewersInheritedByAnOverride(t *testing.T) {
+	st := state.New()
+	st.Repos = map[string]state.RepoReviewers{
+		"o/required-only": {
+			Required: []string{"coderabbitai[bot]"}, SetRequired: true,
+		},
+	}
+	botsFor := func(string) []BotName {
+		return []BotName{
+			{Login: "coderabbitai[bot]", Name: "coderabbit", Primary: true, Required: true},
+			{Login: "cursor[bot]", Name: "bugbot"},
+		}
+	}
+
+	for _, card := range botCards(st, FleetConfig{}, botsFor, time.Now()) {
+		if card.Login == "cursor[bot]" {
+			if card.RepoCount != 1 {
+				t.Fatalf("inherited reviewer repo count = %d, want 1", card.RepoCount)
+			}
+			return
+		}
+	}
+	t.Fatal("no card for inherited reviewer")
 }
 
 func TestCoOnlyRoundLeavesPrimaryPending(t *testing.T) {

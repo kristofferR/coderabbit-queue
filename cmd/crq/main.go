@@ -609,7 +609,7 @@ func run(ctx context.Context, args []string) int {
 				fatal(err)
 				return 1
 			}
-			plan, ierr := service.InstallServe(ctx, *addr, splitList(allowHosts), *readOnly, *dryRun, *skipAuth)
+			plan, ierr := service.InstallServe(ctx, *addr, splitList(allowHosts), *readOnly, *poll, *dryRun, *skipAuth)
 			if ierr != nil {
 				fatal(ierr)
 				return 1

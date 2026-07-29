@@ -839,15 +839,24 @@ func (s *Service) dispatchWithStart(
 	runErr := cmd.Wait()
 	_ = logFile.Sync()
 	if question := clarificationFromLog(string(readLogTail(logPath, 256<<10))); question != "" {
-		// Asking is not a failed solution attempt. Release it without consuming
-		// the per-head budget, then hold the PR with the exact question so it
-		// appears in the dashboard's existing attention and held surfaces.
-		s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
+		// Asking is not a failed solution attempt. Hold the PR with the exact
+		// question so it appears in the dashboard's existing attention surface,
+		// then release this claim without consuming the per-head budget.
 		reason := "Autofix needs clarification: " + question
-		if _, err := s.Hold(context.WithoutCancel(ctx), report.Repo, report.PR, reason); err != nil {
-			return false, fmt.Sprintf("%s (could not place the clarification hold: %v; log: %s)", reason, err, logPath)
+		if _, err := s.Hold(context.WithoutCancel(ctx), report.Repo, report.PR, reason); err == nil {
+			s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
+			return false, fmt.Sprintf("%s (log: %s)", reason, logPath)
 		}
-		return false, fmt.Sprintf("%s (log: %s)", reason, logPath)
+		// Standalone watch/autofix has no autoreview leader, so it cannot create
+		// an administrative hold. Keep a head-scoped terminal dispatch marker
+		// instead; otherwise the released claim launches another paid session
+		// for the same unanswered question on the next pass.
+		if err := s.stopDispatchForClarification(
+			context.WithoutCancel(ctx), report, token, question,
+		); err != nil {
+			return false, fmt.Sprintf("%s (could not record the clarification stop: %v; log: %s)", reason, err, logPath)
+		}
+		return false, fmt.Sprintf("%s (autofix stopped for this head; log: %s)", reason, logPath)
 	}
 	// A session the WATCHER stopped did not use up the head's attempt budget.
 	//
@@ -1224,6 +1233,26 @@ func (s *Service) releaseDispatch(ctx context.Context, report NextReport, token 
 		st.PutRound(*round)
 		return nil
 	})
+}
+
+func (s *Service) stopDispatchForClarification(
+	ctx context.Context,
+	report NextReport,
+	token string,
+	question string,
+) error {
+	_, err := s.store.Update(ctx, func(st *State) error {
+		round := st.Round(report.Repo, report.PR)
+		if round == nil || !round.MarkDispatchClarification(token, question) {
+			return ErrNoChange
+		}
+		if claim, ok := st.Dispatches[QueueKey(report.Repo, report.PR)]; ok && claim.Token == token {
+			delete(st.Dispatches, QueueKey(report.Repo, report.PR))
+		}
+		st.PutRound(*round)
+		return nil
+	})
+	return err
 }
 
 // releaseDispatchUnavailable refunds an attempt that never reached the code

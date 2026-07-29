@@ -595,16 +595,8 @@ func botCards(st state.State, cfg FleetConfig, botsFor BotsFor, now time.Time) [
 	}
 	sort.Strings(repos)
 	for _, repo := range repos {
-		rv := st.Repos[repo]
-		named := map[string]bool{}
-		for _, login := range append(append([]string(nil), rv.CoBots...), rv.Required...) {
-			named[dialect.NormalizeBotName(login)] = true
-		}
 		for _, b := range botsFor(repo) {
 			key := dialect.NormalizeBotName(b.Login)
-			if !named[key] {
-				continue
-			}
 			repoCount[key]++
 			repoBots[key] = b
 			repoRequired[key] = repoRequired[key] || b.Required

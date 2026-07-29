@@ -110,6 +110,50 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	})
 }
 
+func TestStandaloneDispatchKeepsClarificationTerminal(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.AllowRepos = map[string]bool{repo: true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	report := NextReport{Repo: repo, PR: 5, Head: sha, Action: "fix"}
+	seedRound(t, store, cfg, repo, 5, sha, PhaseQueued, time.Now().UTC(), 0)
+
+	script := filepath.Join(t.TempDir(), "session.sh")
+	body := "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"result\",\"result\":\"" +
+		clarificationMarker + " Which behavior should remain?\"}'\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := newDispatchPool(0)
+	if ok, why := svc.startDispatch(context.Background(), WatchOptions{
+		Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 3,
+	}, pool, report); !ok {
+		t.Fatalf("dispatch did not run: %s", why)
+	}
+	pool.wait()
+
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(repo, 5)
+	if round == nil || round.Dispatch == nil ||
+		round.Dispatch.Clarification != "Which behavior should remain?" {
+		t.Fatalf("clarification marker = %#v, want the question retained on this head", round)
+	}
+	if ok, why, byDesign := svc.claimDispatch(context.Background(), report, "again", 3); ok ||
+		!byDesign || !strings.Contains(why, "Which behavior should remain?") {
+		t.Fatalf("repeat dispatch = ok %v byDesign %v reason %q", ok, byDesign, why)
+	}
+}
+
 func TestProviderOutageUsesFallbackWithoutSpendingAnAttempt(t *testing.T) {
 	base := t.TempDir()
 	repo := "owner/thing"

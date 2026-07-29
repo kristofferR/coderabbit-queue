@@ -978,6 +978,19 @@ func sameRound(r *Round, want Round) bool {
 	return r != nil && r.Seq == want.Seq && r.Head == want.Head
 }
 
+// archivedRound returns the exact round a concurrent supersede moved out of
+// Rounds. A trigger poster still owns claims on that object until its network
+// call returns, so its outcome must be recorded there rather than lost merely
+// because the pull request acquired a new head meanwhile.
+func archivedRound(st *State, want Round) *Round {
+	for i := len(st.Archive) - 1; i >= 0; i-- {
+		if sameRound(&st.Archive[i], want) {
+			return &st.Archive[i]
+		}
+	}
+	return nil
+}
+
 // firable is the fire guard every reserving CAS uses: eligible, and not held.
 //
 // Selecting the round and writing the reservation are two steps, and a hold that
@@ -1480,6 +1493,14 @@ func (s *Service) fireCoOnly(ctx context.Context, cfg Config, round Round, login
 		parked, uerr := s.store.Update(ctx, func(st *State) error {
 			r := st.Round(round.Repo, round.PR)
 			if !sameRound(r, round) {
+				if archived := archivedRound(st, round); archived != nil {
+					// The network calls returned, so no poster remains behind
+					// these claims and an archived round cannot retry them.
+					for _, login := range claimed {
+						archived.ClearCoClaim(login)
+					}
+					return nil
+				}
 				return ErrNoChange
 			}
 			// AwaitRetry is only legal from reserved/fired/reviewing; pass a
@@ -1514,7 +1535,21 @@ func (s *Service) fireCoOnly(ctx context.Context, cfg Config, round Round, login
 		recorded = false
 		r := st.Round(round.Repo, round.PR)
 		if !sameRound(r, round) {
-			return ErrNoChange
+			r = archivedRound(st, round)
+			if r == nil {
+				return ErrNoChange
+			}
+			for _, login := range claimed {
+				r.ClearCoClaim(login)
+			}
+			for _, p := range posts {
+				r.RecordPosted(p.login, p.id, p.at)
+				if r.Co(p.login).CommandID == 0 {
+					r.SetCoCommand(p.login, p.id, p.at)
+				}
+			}
+			recorded = true
+			return nil
 		}
 		if r.FireEligible(now) {
 			if err := r.Reserve(randomToken(), s.cfg.WriterID(), now); err != nil {
@@ -1770,6 +1805,22 @@ func (s *Service) fireCoTrigger(ctx context.Context, cfg Config, round Round, lo
 	if id == 0 {
 		// Failed post: KEEP the claim — its TTL is the retry backoff. Clearing it
 		// here would let the very next pump repost, bypassing triggerClaimTTL.
+		// An archived round has no next pump, and this returning call proves its
+		// poster is no longer in flight.
+		updated, err := s.store.Update(ctx, func(st *State) error {
+			if sameRound(st.Round(round.Repo, round.PR), round) {
+				return ErrNoChange
+			}
+			r := archivedRound(st, round)
+			if r == nil {
+				return ErrNoChange
+			}
+			r.ClearCoClaim(login)
+			return nil
+		})
+		if err == nil {
+			s.sync(ctx, updated)
+		}
 		return
 	}
 	updated, err := s.store.Update(ctx, func(st *State) error {
@@ -1777,7 +1828,10 @@ func (s *Service) fireCoTrigger(ctx context.Context, cfg Config, round Round, lo
 		// Identity guard: a same-head replacement round (new Seq) must not
 		// inherit this post's result.
 		if !sameRound(r, round) {
-			return ErrNoChange
+			r = archivedRound(st, round)
+			if r == nil {
+				return ErrNoChange
+			}
 		}
 		r.RecordPosted(login, id, at)
 		if r.Co(login).CommandID == 0 {
@@ -1785,7 +1839,9 @@ func (s *Service) fireCoTrigger(ctx context.Context, cfg Config, round Round, lo
 		} else {
 			r.ClearCoClaim(login)
 		}
-		st.PutRound(*r)
+		if sameRound(st.Round(round.Repo, round.PR), round) {
+			st.PutRound(*r)
+		}
 		return nil
 	})
 	if err != nil {

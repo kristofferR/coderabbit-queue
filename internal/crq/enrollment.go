@@ -117,16 +117,6 @@ func (s *Service) SetEnrollment(ctx context.Context, repo string, enabled bool, 
 		return EnrollmentView{}, fmt.Errorf("%s is the gate repository: it holds crq's own state and dashboard", repo)
 	}
 	now := s.clock().UTC()
-	if s.cfg.DryRun {
-		st, _, err := s.store.Load(ctx)
-		if err != nil {
-			return EnrollmentView{}, err
-		}
-		rec, _ := st.Enrollment(repo)
-		rec.Enabled, rec.Reason, rec.By, rec.UpdatedAt = enabled, reason, s.cfg.Host, &now
-		st.SetEnrollment(repo, rec)
-		return s.enrollmentOf(st, repo), nil
-	}
 	st, err := s.store.Update(ctx, func(st *State) error {
 		if cur, ok := st.Enrollment(repo); ok && cur.Enabled == enabled && cur.Reason == reason {
 			return ErrNoChange
@@ -163,6 +153,12 @@ func (s *Service) SetEnrollment(ctx context.Context, repo string, enabled bool, 
 func claimedTriggerRepo(st *State, repo string) bool {
 	for _, round := range st.Rounds {
 		if NormalizeRepo(round.Repo) == repo && triggerPostClaimed(&round) {
+			return true
+		}
+	}
+	for i := range st.Archive {
+		round := &st.Archive[i]
+		if NormalizeRepo(round.Repo) == repo && triggerPostClaimed(round) {
 			return true
 		}
 	}

@@ -588,7 +588,7 @@ const SchemaVersion = 5
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 6
+const WriterCaps = 7
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
@@ -621,6 +621,11 @@ const CapsFleetDefaults = 4
 // host below it runs every fix session with its own install-time settings, so a
 // per-repository model or attempt limit recorded here is simply not applied.
 const CapsSolver = 6
+
+// CapsDispatchClarification is the capability that makes a head-scoped
+// clarification marker terminal for autofix dispatch. Older watchers preserve
+// the marker but may still launch another session for the same question.
+const CapsDispatchClarification = 7
 
 // writerTTL is how long a host counts as still active for capability purposes.
 const writerTTL = 30 * time.Minute
@@ -1250,6 +1255,10 @@ type DispatchClaim struct {
 	ModelCursor       int                  `json:"model_cursor,omitempty"`
 	UnavailableModels map[string]time.Time `json:"unavailable_models,omitempty"`
 	LastFailure       string               `json:"last_failure,omitempty"`
+	// Clarification is a head-scoped terminal stop requested by the agent. It
+	// is separate from an administrative hold because standalone watch/autofix
+	// has no autoreview leader capable of enforcing those holds.
+	Clarification string `json:"clarification,omitempty"`
 	// AttemptResetAt makes the safety bound a cooldown rather than a permanent
 	// dead letter. Exhaustions lengthens repeated cooldowns, capped at a day.
 	AttemptResetAt *time.Time `json:"attempt_reset_at,omitempty"`
@@ -1409,6 +1418,9 @@ func (r *Round) ClaimDispatchModels(host, token string, now time.Time, maxAttemp
 		if r.DispatchHeld(now) {
 			return false, "another watcher is already fixing this round"
 		}
+		if r.Dispatch.Clarification != "" {
+			return false, "autofix needs clarification: " + r.Dispatch.Clarification
+		}
 		attempts = r.Dispatch.Attempts
 		cursor = r.Dispatch.ModelCursor
 		lastFailure = r.Dispatch.LastFailure
@@ -1566,6 +1578,20 @@ func (r *Round) ReleaseDispatch(token string) bool {
 		r.DispatchHoldRetryAt = nil
 	}
 	return true
+}
+
+// MarkDispatchClarification ends token's live claim while retaining a terminal
+// reason on this head. A new head gets a new Round and may dispatch normally.
+func (r *Round) MarkDispatchClarification(token, question string) bool {
+	if r.Dispatch == nil || r.Dispatch.Token != token {
+		return false
+	}
+	r.Dispatch.Clarification = strings.TrimSpace(question)
+	if r.Dispatch.Attempts > 0 {
+		r.Dispatch.Attempts--
+	}
+	r.Dispatch.AttemptResetAt = nil
+	return r.ReleaseDispatch(token)
 }
 
 // AutofixUnhealthyAfter is how many consecutive dispatch attempts may fail to

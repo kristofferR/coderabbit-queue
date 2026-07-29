@@ -360,6 +360,14 @@ function ReviewerEditor({
 
   const dirty = runs.join() !== repo.reviewers.join() || required.join() !== repo.required.join();
   const newlyOn = runs.filter((b) => !repo.reviewers.includes(b) && b !== primaryBot?.name);
+  const configurableNames = new Set(bots.filter((bot) => bot.configurable).map((bot) => bot.name));
+  const retiredOn = [
+    ...new Set(
+      [...runs, ...required].filter(
+        (name) => name !== primaryBot?.name && !configurableNames.has(name),
+      ),
+    ),
+  ];
 
   const toggleRuns = (name: string) => {
     setRuns((cur) => (cur.includes(name) ? cur.filter((n) => n !== name) : [...cur, name]));
@@ -377,11 +385,10 @@ function ReviewerEditor({
     runOperation(
       act("reviewers", {
         repo: repo.repo,
-        cobots: runs.filter(
-          (name) =>
-            name !== primaryBot?.name && bots.some((bot) => bot.name === name && bot.configurable),
+        cobots: runs.filter((name) => name !== primaryBot?.name && configurableNames.has(name)),
+        required: required.filter(
+          (name) => name === primaryBot?.name || configurableNames.has(name),
         ),
-        required,
         primary: primaryBot ? primaryOn : undefined,
         clear,
       }),
@@ -558,6 +565,13 @@ function ReviewerEditor({
                     ? `${repo.active_rounds} active round(s)`
                     : "the next round"}{" "}
                   at their current heads.
+                </>
+              )}
+              {retiredOn.length > 0 && (
+                <>
+                  {" "}
+                  <b>{retiredOn.join(", ")}</b> {retiredOn.length === 1 ? "is" : "are"} retired and
+                  will be removed from this repository&apos;s saved reviewer and required sets.
                 </>
               )}{" "}
               No metered reviews are spent by saving.
