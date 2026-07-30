@@ -3,6 +3,9 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/kristofferR/coderabbit-queue/internal/state"
 )
 
 func TestWatchDispatchOptionHonorsFalse(t *testing.T) {
@@ -147,6 +150,72 @@ func TestReasonFlagDetection(t *testing.T) {
 	}
 	if hasReasonArg([]string{"owner/repo", "1"}) {
 		t.Error("arguments without --reason were reported as having it")
+	}
+}
+
+func TestSolverTargetIsUnambiguous(t *testing.T) {
+	if err := validateSolverTarget("owner/repo", true); err == nil {
+		t.Fatal("a repository together with --fleet must be rejected")
+	}
+	for _, target := range []struct {
+		repo  string
+		fleet bool
+	}{
+		{repo: "owner/repo"},
+		{fleet: true},
+	} {
+		if err := validateSolverTarget(target.repo, target.fleet); err != nil {
+			t.Errorf("valid target %+v was rejected: %v", target, err)
+		}
+	}
+}
+
+func TestMutationFlagsRequireSetAction(t *testing.T) {
+	ctx := t.Context()
+	for _, tc := range []struct {
+		name string
+		run  func() int
+	}{
+		{name: "fleet show", run: func() int {
+			return runFleet(ctx, nil, []string{"--bots", "codex"})
+		}},
+		{name: "fleet clear", run: func() int {
+			return runFleet(ctx, nil, []string{"clear", "--weekly-limit", "60"})
+		}},
+		{name: "solver show", run: func() int {
+			return runSolver(ctx, nil, []string{"owner/repo", "--forks", "on"})
+		}},
+		{name: "solver clear", run: func() int {
+			return runSolver(ctx, nil, []string{"clear", "owner/repo", "--attempts", "2"})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if code := tc.run(); code == 0 {
+				t.Fatal("mutation flag outside set action succeeded")
+			}
+		})
+	}
+}
+
+func TestSolverAgentHostMarksHistoricalProbesStale(t *testing.T) {
+	const stamp = "2026-07-28T10:00:00Z"
+	now, err := time.Parse(time.RFC3339, stamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := state.HostReport{
+		Host:  "fixer",
+		Roles: []string{"serve"},
+		Tools: []state.ToolReport{{Name: "codex", Path: "/usr/bin/codex"}},
+		At:    now,
+	}
+
+	got := solverAgentHost(report, "codex", now)
+	if !got.Stale {
+		t.Fatal("a host that no longer reports the autofix role must be stale")
+	}
+	if got.Has == nil || !*got.Has || got.Path != "/usr/bin/codex" {
+		t.Fatalf("historical probe = %+v, want the last known installed path", got)
 	}
 }
 

@@ -36,12 +36,6 @@ type OpenThread struct {
 //
 // This is the read that closes that loop: list, decide, `crq resolve`.
 func (s *Service) OpenThreads(ctx context.Context, repo string, pr int) ([]OpenThread, error) {
-	repo = NormalizeRepo(repo)
-	// The same reviewer set `crq feedback` reads findings with. A login the
-	// fleet or this repository added is a bot there, and reading threads from
-	// this host's own configuration instead reported its unresolved threads as
-	// human comments — the one output an agent uses to decide whether a thread
-	// needs a person.
 	st, _, err := s.store.Load(ctx)
 	if err != nil {
 		return nil, err
@@ -68,7 +62,11 @@ func (s *Service) OpenThreads(ctx context.Context, repo string, pr int) ([]OpenT
 			} else {
 				open.Author = first.Author.Login
 			}
-			open.Title = dialect.ThreadTitle(isBot, first.Body)
+			if isBot {
+				open.Title = dialect.ReviewTitleFor(first.Author.Login, first.Body)
+			} else {
+				open.Title = dialect.ThreadTitle(false, first.Body)
+			}
 			open.URL = first.URL
 			if open.Path == "" {
 				open.Path = first.Path

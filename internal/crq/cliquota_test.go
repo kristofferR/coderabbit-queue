@@ -3,7 +3,6 @@ package crq
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -96,84 +95,6 @@ func TestRecordCLIQuotaRefusesAnotherAccount(t *testing.T) {
 		if st.Account.BlockedUntil != nil {
 			t.Errorf("org %q left a block behind: %s", org, st.Account.BlockedUntil)
 		}
-	}
-}
-
-func TestRecordCLIQuotaUsesFleetScopeAndFallback(t *testing.T) {
-	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
-	svc, store := cliQuotaService(t, now)
-	if _, err := store.Update(context.Background(), func(st *State) error {
-		st.SetFleetValue("scope", "fleet-org")
-		st.SetFleetValue("rate-limit-fallback", "47m")
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	got, err := svc.RecordCLIQuota(context.Background(), blockedReport(t, "soon"), "fleet-org")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := now.Add(47 * time.Minute)
-	if !got.Applied || got.Until == nil || !got.Until.Equal(want) {
-		t.Fatalf("fleet quota result = %+v, want applied until %s", got, want)
-	}
-}
-
-func TestRecordCLIQuotaRefusesAChangedFleetAccountAtCommit(t *testing.T) {
-	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
-	svc, store := cliQuotaService(t, now)
-	st, _, err := store.Load(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot := svc.fleetCfg(st)
-	if _, err := store.Update(context.Background(), func(st *State) error {
-		st.SetFleetValue("scope", "other-org")
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	_, _, err = svc.applyAccountBlock(
-		context.Background(), now.Add(time.Hour), "coderabbit-cli", snapshot, "kristofferR",
-	)
-	if !errors.Is(err, errFleetQuotaChanged) {
-		t.Fatalf("stale quota write = %v, want fleet-account refusal", err)
-	}
-	st, _, _ = store.Load(context.Background())
-	if st.Account.BlockedUntil != nil {
-		t.Fatalf("stale CLI account block was recorded: %+v", st.Account)
-	}
-}
-
-// Only the account the evidence belongs to can invalidate it. Comparing the
-// whole fleet revision meant any unrelated setting moving between the read and
-// the write refused an explicit, organisation-attributed block: the operator was
-// told to run preflight again while the shared quota stayed open, and the daemon
-// could post a metered review inside the window the CLI had just reported.
-func TestRecordCLIQuotaSurvivesAnUnrelatedFleetChange(t *testing.T) {
-	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
-	svc, store := cliQuotaService(t, now)
-	st, _, err := store.Load(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot := svc.fleetCfg(st)
-	if _, err := store.Update(context.Background(), func(st *State) error {
-		st.SetFleetValue("settle", "9m")
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	applied, standing, err := svc.applyAccountBlock(
-		context.Background(), now.Add(time.Hour), "coderabbit-cli", snapshot, "kristofferR",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !applied || standing == nil || !standing.Equal(now.Add(time.Hour)) {
-		t.Fatalf("applied=%v standing=%v, want the block recorded across the unrelated change", applied, standing)
 	}
 }
 
@@ -391,5 +312,120 @@ func TestRecordCLIQuotaClearsAPendingCalibration(t *testing.T) {
 	st, _, _ := store.Load(context.Background())
 	if st.Account.CalibAskedAt != nil {
 		t.Errorf("a pending calibration must not outlive the block that replaced it: %s", st.Account.CalibAskedAt)
+	}
+}
+
+// The fallback window is a fleet setting, so the block recorded here has to be
+// the one the settings page says is in force. Read from this host's startup
+// value, a fleet-lengthened window recorded the host's shorter one instead —
+// resuming metered fires early, against the number the dashboard was showing.
+func TestRecordCLIQuotaUsesTheFleetFallbackWindow(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	// Built from an env map, because the fleet's generic settings are applied by
+	// re-parsing the configuration crq was built from — which is what a host has.
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "kristofferR/crq-state", "CRQ_HOST": "testhost",
+		"CRQ_SCOPE": "kristofferR", "CRQ_COBOTS": "", "CRQ_RL_FALLBACK": "15m",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	svc.now = func() time.Time { return now }
+
+	if _, err := svc.SetEnv(ctx, "CRQ_RL_FALLBACK", "1h", false); err != nil {
+		t.Fatal(err)
+	}
+	got, rerr := svc.RecordCLIQuota(ctx, blockedReport(t, "soon"), "kristofferR")
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if !got.Applied {
+		t.Fatalf("an unreadable window must still block: %+v", got)
+	}
+	st, _, _ := store.Load(ctx)
+	if st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.Equal(now.Add(time.Hour)) {
+		t.Errorf("BlockedUntil = %v, want the fleet's hour rather than this host's 15 minutes",
+			st.Account.BlockedUntil)
+	}
+}
+
+func TestRecordCLIQuotaUsesTheFleetResolvedScope(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":  "owner/crq-state",
+		"CRQ_SCOPE": "startup-account",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Fleet.Env = map[string]string{"CRQ_SCOPE": "fleet-account"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	svc.now = func() time.Time { return now }
+
+	got, err := svc.RecordCLIQuota(ctx, blockedReport(t, "32 minutes"), "fleet-account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Applied {
+		t.Fatalf("fleet account's block was rejected: %+v", got)
+	}
+	st, _, _ := store.Load(ctx)
+	if st.Account.Scope != "fleet-account" {
+		t.Fatalf("recorded scope = %q, want fleet-account", st.Account.Scope)
+	}
+}
+
+func TestRecordCLIQuotaDropsABlockWhenFleetAccountChanges(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":  "owner/crq-state",
+		"CRQ_SCOPE": "startup-account",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := NewMemoryStore(cfg)
+	if _, err := base.Update(ctx, func(st *State) error {
+		st.Fleet.Env = map[string]string{"CRQ_SCOPE": "fleet-account"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store := &beforeUpdateStore{StateStore: base}
+	store.before = func() {
+		_, updateErr := base.Update(ctx, func(st *State) error {
+			fd := st.Fleet
+			fd.Env = map[string]string{"CRQ_SCOPE": "replacement-account"}
+			st.SetFleetDefaults(fd, "other-host", now)
+			return nil
+		})
+		if updateErr != nil {
+			t.Fatal(updateErr)
+		}
+	}
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	svc.now = func() time.Time { return now }
+
+	got, err := svc.RecordCLIQuota(ctx, blockedReport(t, "32 minutes"), "fleet-account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Applied || got.Reason == "" {
+		t.Fatalf("block for the replaced account was not refused: %+v", got)
+	}
+	st, _, _ := base.Load(ctx)
+	if st.Account.BlockedUntil != nil {
+		t.Fatalf("block for the prior fleet account was committed: %+v", st.Account)
 	}
 }

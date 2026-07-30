@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,6 +51,8 @@ type GitHub struct {
 	networkMaxWait time.Duration
 	acctTypeMu     sync.Mutex
 	acctType       map[string]string // scope login -> "org:" | "user:" search qualifier
+	viewerMu       sync.Mutex
+	viewer         string // the token's own login, "" until looked up, "-" when unreadable
 	etagMu         sync.Mutex
 	etags          map[string]*etagEntry // GET URL -> last 200 response, replayed on 304
 }
@@ -408,6 +411,21 @@ func (e *RateLimitError) Error() string {
 func IsThrottled(err error) bool {
 	var rl *RateLimitError
 	return errors.As(err, &rl)
+}
+
+// IsRecoverableRead reports a failure local to one resource that a bounded
+// multi-PR preview can count as unexamined while continuing. Authentication,
+// permission, validation and state errors are deliberately excluded.
+func IsRecoverableRead(err error) bool {
+	if errors.Is(err, ErrNotFound) {
+		return true
+	}
+	var api *APIError
+	if errors.As(err, &api) {
+		return api.Status == http.StatusNotFound || api.Status >= 500
+	}
+	var network net.Error
+	return errors.As(err, &network)
 }
 
 // ThrottleWait returns how long to wait before retrying a rate-limited error.
@@ -792,9 +810,16 @@ type Issue struct {
 type Pull struct {
 	Number  int    `json:"number"`
 	State   string `json:"state"`
+	Title   string `json:"title"`
 	Body    string `json:"body"`
 	HTMLURL string `json:"html_url"`
-	Head    struct {
+	// User is who opened the pull request. The listing carries it for free, and
+	// the skip-author rules are applied per pull request by every path that acts
+	// on one — so a caller that reads a Pull never has to ask again.
+	User struct {
+		Login string `json:"login"`
+	} `json:"user"`
+	Head struct {
 		SHA string `json:"sha"`
 		Ref string `json:"ref"`
 		// Repo is the head's repository, which differs from the base on a fork
@@ -804,6 +829,12 @@ type Pull struct {
 		} `json:"repo"`
 	} `json:"head"`
 	Merged bool `json:"merged"`
+	// Additions/Deletions/ChangedFiles are only populated by the single-pull
+	// endpoint, not by list or search results. They cost nothing extra there,
+	// and they are what a cost estimate is computed from.
+	Additions    int `json:"additions"`
+	Deletions    int `json:"deletions"`
+	ChangedFiles int `json:"changed_files"`
 }
 
 type RepoInfo struct {
@@ -990,6 +1021,7 @@ func (g *GitHub) EachOpenPR(ctx context.Context, target string, byRepo bool, fn 
 			Items []struct {
 				Number        int    `json:"number"`
 				RepositoryURL string `json:"repository_url"`
+				Title         string `json:"title"`
 				Body          string `json:"body"`
 				User          struct {
 					Login string `json:"login"`
@@ -1007,7 +1039,7 @@ func (g *GitHub) EachOpenPR(ctx context.Context, target string, byRepo bool, fn 
 			if repo == "" {
 				continue
 			}
-			stop, err := fn(SearchPR{Repo: repo, Number: item.Number, Author: item.User.Login, Body: item.Body})
+			stop, err := fn(SearchPR{Repo: repo, Number: item.Number, Author: item.User.Login, Title: item.Title, Body: item.Body})
 			if err != nil {
 				return err
 			}
@@ -1064,10 +1096,76 @@ func (g *GitHub) searchOwnerQualifier(ctx context.Context, login string) (string
 	return qualifier, nil
 }
 
+// viewerLogin is the login the token authenticates as, cached for the run, or
+// "" when it cannot be read.
+//
+// Unreadable is a legitimate answer, not an error: a token without the scope to
+// read /user can still list public repositories, and a caller asking "is this
+// owner me" should get "not that I can tell" rather than a failed page.
+func (g *GitHub) viewerLogin(ctx context.Context) (string, error) {
+	g.viewerMu.Lock()
+	cached := g.viewer
+	g.viewerMu.Unlock()
+	switch cached {
+	case "":
+	case "-":
+		return "", nil
+	default:
+		return cached, nil
+	}
+	var me struct {
+		Login string `json:"login"`
+	}
+	login := "-"
+	err := g.request(ctx, http.MethodGet, "/user", nil, &me)
+	switch {
+	case err == nil && me.Login != "":
+		login = me.Login
+	case err != nil && !deniedIdentity(err):
+		// A timeout, a 5xx or an exhausted quota is not an answer about this
+		// token. Remembering "-" for one would keep every later repository
+		// picker on /users/{owner}/repos — which omits the caller's own private
+		// repositories — for the rest of the process, long after GitHub came
+		// back. Nothing is cached, so the next caller asks again.
+		return "", err
+	}
+	g.viewerMu.Lock()
+	// Another first caller may have completed while this request was in
+	// flight. Keep its answer rather than letting a later refusal overwrite a
+	// successfully identified viewer (or vice versa).
+	if g.viewer == "" || (g.viewer == "-" && login != "-") {
+		g.viewer = login
+	} else {
+		login = g.viewer
+	}
+	g.viewerMu.Unlock()
+	if login == "-" {
+		return "", nil
+	}
+	return login, nil
+}
+
+// deniedIdentity reports whether an error is GitHub REFUSING to say who the
+// token is, rather than failing to answer. Only the refusal is worth caching: a
+// token without the scope for /user will never grow one mid-process, and a rate
+// limit surfaces as its own error rather than an APIError.
+func deniedIdentity(err error) bool {
+	var api *APIError
+	if !errors.As(err, &api) {
+		return errors.Is(err, ErrNotFound)
+	}
+	switch api.Status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+		return true
+	}
+	return false
+}
+
 type SearchPR struct {
 	Repo   string
 	Number int
 	Author string
+	Title  string
 	Body   string
 }
 
@@ -1201,4 +1299,109 @@ func refPath(ref string) string {
 		parts[i] = url.PathEscape(parts[i])
 	}
 	return strings.Join(parts, "/")
+}
+
+// Repo is one repository as the dashboard's repository picker needs it: enough
+// to recognize and to judge whether it is worth enrolling, and nothing more.
+type Repo struct {
+	FullName string `json:"full_name"`
+	Private  bool   `json:"private"`
+	Archived bool   `json:"archived"`
+	Fork     bool   `json:"fork"`
+	// OpenIssues is GitHub's open_issues_count, which counts issues AND pull
+	// requests together. There is no per-repo open-PR count without a search per
+	// repository, so this is reported as what it is rather than relabelled.
+	OpenIssues int       `json:"open_issues_count"`
+	PushedAt   time.Time `json:"pushed_at"`
+	Language   string    `json:"language"`
+}
+
+// ListOwnerRepos lists the repositories an owner has, following pagination up
+// to limit. It resolves user-vs-organization the same way the PR search does, and
+// through the same cache — the two ask the identical question about a login.
+//
+// Archived repositories are kept rather than filtered: the caller decides, and a
+// picker that silently omits a repository somebody is looking for is worse than
+// one that shows it greyed out.
+func (g *GitHub) ListOwnerRepos(ctx context.Context, owner string, limit int) ([]Repo, error) {
+	qualifier, err := g.searchOwnerQualifier(ctx, owner)
+	if err != nil {
+		return nil, err
+	}
+	viewer, err := g.viewerLogin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	if qualifier == "org:" {
+		return g.listRepos(ctx, "/orgs/"+owner+"/repos", "", limit)
+	}
+	if strings.EqualFold(owner, viewer) {
+		return g.listRepos(ctx, "/user/repos?affiliation=owner,collaborator", owner, limit)
+	}
+	public, err := g.listRepos(ctx, "/users/"+owner+"/repos", "", limit)
+	if err != nil {
+		return nil, err
+	}
+	if viewer == "" {
+		return public, nil
+	}
+	// Another personal owner needs both views. The public endpoint includes
+	// repositories where the viewer has no affiliation; the authenticated list
+	// adds private repositories on which the viewer collaborates.
+	private, err := g.listRepos(ctx, "/user/repos?affiliation=owner,collaborator", owner, limit)
+	if err != nil {
+		return nil, err
+	}
+	byName := make(map[string]Repo, len(public)+len(private))
+	for _, repo := range append(public, private...) {
+		byName[strings.ToLower(repo.FullName)] = repo
+	}
+	out := make([]Repo, 0, len(byName))
+	for _, repo := range byName {
+		out = append(out, repo)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].PushedAt.After(out[j].PushedAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (g *GitHub) listRepos(ctx context.Context, base, filterOwner string, limit int) ([]Repo, error) {
+	out := make([]Repo, 0, limit)
+	maxPages := (limit + 99) / 100
+	for page := 1; len(out) < limit && (filterOwner != "" || page <= maxPages); page++ {
+		var batch []Repo
+		sep := "?"
+		if strings.Contains(base, "?") {
+			sep = "&"
+		}
+		path := fmt.Sprintf("%s%sper_page=100&page=%d&sort=pushed", base, sep, page)
+		if err := g.request(ctx, http.MethodGet, path, nil, &batch); err != nil {
+			return nil, err
+		}
+		for _, repo := range batch {
+			if filterOwner == "" || strings.EqualFold(ownerOfRepo(repo.FullName), filterOwner) {
+				out = append(out, repo)
+			}
+			if len(out) == limit {
+				break
+			}
+		}
+		if len(batch) < 100 {
+			break
+		}
+	}
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func ownerOfRepo(fullName string) string {
+	owner, _, _ := strings.Cut(fullName, "/")
+	return owner
 }

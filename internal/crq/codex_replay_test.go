@@ -162,10 +162,9 @@ func TestCodexReplayRequiredFiresOnceAndGatesCompletion(t *testing.T) {
 	}
 }
 
-// (ii) Codex configured-required but auto-review is active (a Codex review
-// exists that no `@codex review` command preceded): crq must never post the
-// Codex command; the round still gates on Codex's own review.
-func TestCodexReplayAutoActiveSuppressesCommand(t *testing.T) {
+// (ii) Codex configured-required in always mode: historical auto-review
+// activity must not override the explicit trigger policy for the new head.
+func TestCodexReplayAlwaysModeOverridesHistoricalAutoActivity(t *testing.T) {
 	base := time.Date(2026, 7, 17, 9, 0, 0, 0, time.UTC)
 	f := newCodexReplayFixture(t, base, func(cfg *Config) {
 		cfg.RequiredBots = []string{cfg.Bot, codexLogin}
@@ -174,15 +173,16 @@ func TestCodexReplayAutoActiveSuppressesCommand(t *testing.T) {
 	oldHead, head := "1111222233334444", "5555666677778888"
 	f.openPull(repo, pr, head)
 	f.setCommitDate(head, base.Add(-time.Hour))
-	// History: Codex reviewed the previous head unprompted → auto-review is on.
+	// History: Codex reviewed the previous head unprompted. That may predict
+	// another automatic review, but "always" still commands this head.
 	f.codexReview(repo, pr, 400, oldHead, base.Add(-2*time.Hour))
 
 	f.enqueue(repo, pr)
 	if res := f.pump(); res.Action != "fired" {
 		t.Fatalf("expected fire, got %+v", res)
 	}
-	if got := f.codexPosted(repo, pr); got != 0 {
-		t.Fatalf("auto-active codex must never be commanded, got %d posts", got)
+	if got := f.codexPosted(repo, pr); got != 1 {
+		t.Fatalf("always-mode codex must be commanded once, got %d posts", got)
 	}
 
 	// CodeRabbit finishes; the round still waits for Codex's auto review.
@@ -192,8 +192,8 @@ func TestCodexReplayAutoActiveSuppressesCommand(t *testing.T) {
 	if r := f.round(repo, pr); r == nil || r.Phase != PhaseReviewing {
 		t.Fatalf("round must wait for codex auto review, got %+v", r)
 	}
-	if got := f.codexPosted(repo, pr); got != 0 {
-		t.Fatalf("waiting must not trigger a codex post, got %d", got)
+	if got := f.codexPosted(repo, pr); got != 1 {
+		t.Fatalf("waiting must not duplicate the codex post, got %d", got)
 	}
 
 	// Codex auto-reviews the head (clean) — round completes.
@@ -775,5 +775,116 @@ func TestCodexReplayAdoptRecordsExistingCodexCommand(t *testing.T) {
 	f.pump()
 	if got := f.codexPosted(repo, pr); got != 0 {
 		t.Fatalf("self-heal must not repost the recorded codex command, got %d", got)
+	}
+}
+
+// A round can go straight from fired to completed on one observation, and a
+// completed round is never looked at again. The co-reviewer bookkeeping was
+// only done in the reviewing sweep, so the evidence that Codex answered was
+// lost with the round that carried it — and the bot guide showed a bot that had
+// just reviewed as one nobody had heard from.
+func TestCodexReplayRecordsAnswerWhenTheSlotRoundCompletes(t *testing.T) {
+	base := time.Date(2026, 7, 17, 9, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = []string{cfg.Bot, codexLogin}
+	})
+	repo, pr := "o/r", 12
+	head := "1111222233334444"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Hour))
+
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected fire, got %+v", res)
+	}
+	// Both reviews land before the next observation, so the slot round is
+	// progressed once, all the way to completed.
+	f.botReview(repo, pr, 501, head, f.clk.now().Add(time.Minute))
+	f.codexReview(repo, pr, 502, head, f.clk.now().Add(time.Minute))
+	f.clk.advance(2 * time.Minute)
+	f.pump()
+
+	r := f.round(repo, pr)
+	if r == nil || r.Phase != PhaseCompleted {
+		t.Fatalf("round must complete once both reviewers answered, got %+v", r)
+	}
+	if r.Co(codexLogin).AnsweredAt == nil {
+		t.Error("the round completed without recording that codex answered — the only field that tells a working bot from a silent one")
+	}
+}
+
+// The primary's answer is recorded the same way a co-reviewer's is, from the
+// same observation — and the round's PHASE is not allowed to stand in for it.
+//
+// A required set that omits the primary completes as soon as the co-reviewers
+// answer and the primary merely acknowledges the metered command, so reading a
+// completed round as review evidence labelled a reviewer as working on the
+// strength of its own acknowledgement.
+func TestReplayRecordsThePrimaryAnswerFromEvidenceNotThePhase(t *testing.T) {
+	base := time.Date(2026, 7, 17, 9, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		// Codex alone gates convergence, so the round can complete without the
+		// primary having reviewed anything.
+		cfg.RequiredBots = []string{codexLogin}
+	})
+	repo, pr := "o/r", 21
+	head := "1111222233334444"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Hour))
+
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected fire, got %+v", res)
+	}
+	// Only Codex answers. The primary has been asked and has done nothing.
+	f.codexReview(repo, pr, 502, head, f.clk.now().Add(time.Minute))
+	f.clk.advance(2 * time.Minute)
+	f.pump()
+
+	r := f.round(repo, pr)
+	if r == nil {
+		t.Fatal("the round vanished")
+	}
+	if r.FiredAt == nil {
+		t.Error("the round must still record that the primary was asked")
+	}
+	if r.PrimaryAnsweredAt != nil {
+		t.Errorf("the primary was recorded as having answered at %s, but it only ever acknowledged", r.PrimaryAnsweredAt)
+	}
+
+	// Once it actually reviews the head, that IS the evidence.
+	f.botReview(repo, pr, 503, head, f.clk.now().Add(time.Minute))
+	f.clk.advance(2 * time.Minute)
+	f.pump()
+	if r = f.round(repo, pr); r == nil || r.PrimaryAnsweredAt == nil {
+		t.Errorf("a review at the head must record the primary's answer, got %+v", r)
+	}
+}
+
+func TestReplayRecordsCleanPrimarySummaryAsAnAnswer(t *testing.T) {
+	base := time.Date(2026, 7, 17, 9, 0, 0, 0, time.UTC)
+	f := newCodexReplayFixture(t, base, func(cfg *Config) {
+		cfg.RequiredBots = []string{cfg.Bot}
+	})
+	repo, pr, head := "o/r", 22, "5555666677778888"
+	f.openPull(repo, pr, head)
+	f.setCommitDate(head, base.Add(-time.Hour))
+
+	f.enqueue(repo, pr)
+	if res := f.pump(); res.Action != "fired" {
+		t.Fatalf("expected fire, got %+v", res)
+	}
+	f.botComment(repo, pr, 504,
+		corpusMessage(t, "coderabbit/no-actionable-comments.md"),
+		f.clk.now().Add(time.Minute))
+	f.clk.advance(2 * time.Minute)
+	f.pump()
+
+	r := f.round(repo, pr)
+	if r == nil || r.Phase != PhaseCompleted {
+		t.Fatalf("clean primary summary must complete the round, got %+v", r)
+	}
+	if r.PrimaryAnsweredAt == nil {
+		t.Fatalf("clean primary summary completed the round without recording an answer: %+v", r)
 	}
 }

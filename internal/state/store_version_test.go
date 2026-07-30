@@ -76,9 +76,9 @@ func TestLoadRefusesUndecodableCurrentState(t *testing.T) {
 	}
 }
 
-func TestLoadMigratesV4WithoutLosingLiveRounds(t *testing.T) {
+func TestLoadMigratesV5WithoutLosingLiveRounds(t *testing.T) {
 	payload := `{
-		"v":4,
+		"v":5,
 		"rev":7,
 		"next_seq":2,
 		"rounds":{
@@ -92,6 +92,17 @@ func TestLoadMigratesV4WithoutLosingLiveRounds(t *testing.T) {
 			}
 		},
 		"account":{"scope":"owner"},
+		"fleet":{
+			"scope":"owner,friend",
+			"repos":"owner/repo,friend/private",
+			"exclude":"owner/paused",
+			"required-bots":"coderabbitai[bot],cursor[bot]",
+			"cobots":"bugbot,codex",
+			"min-interval":" 2m ",
+			"inflight-timeout":"10m",
+			"cobot-bugbot-trigger":"always",
+			"future-policy":"keep"
+		},
 		"future_top_level":{"keep":true}
 	}`
 	st, _, err := versionStore(t, payload).Load(context.Background())
@@ -104,17 +115,101 @@ func TestLoadMigratesV4WithoutLosingLiveRounds(t *testing.T) {
 	if round := st.Round("owner/repo", 7); round == nil || round.Head != "abcdef123" {
 		t.Fatalf("live v4 round was lost during migration: %+v", round)
 	}
+	if !st.Fleet.SetRequired || strings.Join(st.Fleet.Required, ",") != "coderabbitai[bot],cursor[bot]" {
+		t.Errorf("required = %v (set %v), want migrated v5 policy", st.Fleet.Required, st.Fleet.SetRequired)
+	}
+	if !st.Fleet.SetCoBots || strings.Join(st.Fleet.CoBots, ",") != "bugbot,codex" {
+		t.Errorf("cobots = %v (set %v), want migrated v5 policy", st.Fleet.CoBots, st.Fleet.SetCoBots)
+	}
+	if st.Fleet.MinInterval != "2m" || st.Fleet.Env["CRQ_SCOPE"] != "owner,friend" ||
+		st.Fleet.Env["CRQ_REPOS"] != "owner/repo,friend/private" ||
+		st.Fleet.Env["CRQ_EXCLUDE"] != "owner/paused" ||
+		st.Fleet.Env["CRQ_INFLIGHT_TIMEOUT"] != "10m" ||
+		st.Fleet.Env["CRQ_COBOT_BUGBOT_TRIGGER"] != "always" {
+		t.Errorf("fleet defaults were not migrated completely: %+v", st.Fleet)
+	}
 	encoded, err := json.Marshal(st)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(encoded), "future_top_level") {
-		t.Fatalf("unknown v4 state was lost during migration: %s", encoded)
+		t.Fatalf("unknown v5 state was lost during migration: %s", encoded)
+	}
+	if !strings.Contains(string(encoded), "future-policy") {
+		t.Fatalf("unknown v5 fleet policy was lost during migration: %s", encoded)
+	}
+}
+
+func TestLoadMigratesAlreadyNestedV5FleetDefaults(t *testing.T) {
+	payload := `{
+		"v":5,
+		"rounds":{},
+		"fleet":{
+			"cobots":["codex"],
+			"set_cobots":true,
+			"required":["coderabbitai[bot]"],
+			"set_required":true,
+			"min_interval":"3m",
+			"env":{"CRQ_SETTLE":"45s"},
+			"scope":"owner"
+		}
+	}`
+	st, _, err := versionStore(t, payload).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Version != SchemaVersion || !st.Fleet.SetCoBots || !st.Fleet.SetRequired ||
+		strings.Join(st.Fleet.CoBots, ",") != "codex" ||
+		strings.Join(st.Fleet.Required, ",") != "coderabbitai[bot]" ||
+		st.Fleet.MinInterval != "3m" || st.Fleet.Env["CRQ_SETTLE"] != "45s" ||
+		st.Fleet.Env["CRQ_SCOPE"] != "owner" {
+		t.Fatalf("nested v5 fleet defaults were not preserved: %+v", st.Fleet)
+	}
+}
+
+func TestLoadMergesNestedAndFlatV5FleetEnvironment(t *testing.T) {
+	payload := `{
+		"v":5,
+		"rounds":{},
+		"fleet":{
+			"env":{
+				"CRQ_SETTLE":"45s",
+				"CRQ_SCOPE":"nested-owner",
+				"FUTURE_SETTING":{"mode":"careful"}
+			},
+			"scope":"flat-owner",
+			"inflight-timeout":"10m"
+		}
+	}`
+	st, _, err := versionStore(t, payload).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Fleet.Env["CRQ_SETTLE"] != "45s" ||
+		st.Fleet.Env["CRQ_SCOPE"] != "flat-owner" ||
+		st.Fleet.Env["CRQ_INFLIGHT_TIMEOUT"] != "10m" {
+		t.Fatalf("mixed-shape v5 environment was not merged: %+v", st.Fleet.Env)
+	}
+	encoded, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTrip struct {
+		Fleet struct {
+			Env map[string]json.RawMessage `json:"env"`
+		} `json:"fleet"`
+	}
+	if err := json.Unmarshal(encoded, &roundTrip); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(roundTrip.Fleet.Env["FUTURE_SETTING"]); got != `{"mode":"careful"}` {
+		t.Fatalf("future nested environment member = %s, want it preserved", got)
 	}
 }
 
 // An OLDER payload is genuinely obsolete: crq is pre-release, there is no
-// migration, and a v3 state describes a world this binary cannot act on.
+// multi-version migration, and a v3 state describes a world this binary cannot
+// act on safely.
 func TestLoadReinitializesOlderState(t *testing.T) {
 	st, _, err := versionStore(t, `{"v":3,"queue":[{"repo":"owner/repo","pr":7}]}`).Load(context.Background())
 	if err != nil {
@@ -124,6 +219,6 @@ func TestLoadReinitializesOlderState(t *testing.T) {
 		t.Errorf("version = %d, want a fresh v%d", st.Version, SchemaVersion)
 	}
 	if len(st.Rounds) != 0 {
-		t.Errorf("rounds = %v, want none carried from v2", st.Rounds)
+		t.Errorf("rounds = %v, want none carried from v3", st.Rounds)
 	}
 }

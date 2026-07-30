@@ -1,4 +1,4 @@
-// Package state defines crq's persisted schema v5: one Round per tracked PR,
+// Package state defines crq's persisted schema v6: one Round per tracked PR,
 // a single global fire slot, and the CodeRabbit account quota. A Round is
 // never deleted, only transitioned (or archived when superseded by a new
 // head) — the invariant that makes "forgot we already requested a review at
@@ -69,6 +69,13 @@ type Round struct {
 	// binaries never fired them, so ignoring the map is correct for them.
 	// Mutate only through Co/SetCoCommand/ClaimCo/ClearCoClaim.
 	CoBots map[string]CoBotRound `json:"cobots,omitempty"`
+	// Title is the pull request's own title, recorded when the round is
+	// enqueued. Every queue and in-flight list showed "repo#141" and nothing
+	// about what that pull request was for, and fetching a title per row would
+	// be a request per row — so it is stored once, with the round that needs it.
+	// Stale after a rename, which is a price worth paying for a list that says
+	// what it is listing.
+	Title string `json:"title,omitempty"`
 
 	// CoOnly marks a round that reached its fired/reviewing state WITHOUT crq
 	// requesting a primary review — a co-reviewer-only trigger, or a bounded
@@ -115,6 +122,27 @@ type Round struct {
 	// with it, which is the same rule body findings already follow: the current
 	// reviewer must report it again.
 	Dismissed map[string]string `json:"dismissed,omitempty"`
+
+	// PrimaryAnsweredAt is when crq OBSERVED the primary produce head evidence,
+	// the same fact CoBots[login].AnsweredAt records for a co-reviewer.
+	//
+	// It cannot be derived from the phase. A required set that omits the primary
+	// completes as soon as the co-reviewers answer and the primary merely
+	// acknowledges the metered command, so reading a completed round as proof
+	// the primary reviewed labelled a reviewer as working on the strength of its
+	// own acknowledgement. FiredAt is crq's command going out and says even less.
+	//
+	// Not in CoBots despite being the same fact: several fire and completion
+	// rules walk that map as "the co-reviewers", and the primary appearing there
+	// would quietly join them.
+	PrimaryAnsweredAt *time.Time `json:"primary_answered_at,omitempty"`
+	// PrimaryAnsweredBy is WHICH primary produced that evidence. CRQ_BOT is a
+	// setting, and a fleet that changes it leaves rounds answered by the retired
+	// one behind: attributing them to whatever the reading process calls its
+	// primary shows the new bot as working and the old one as silent, which is
+	// the two claims exactly backwards. The identity travels as data here for
+	// the same reason it does in CoBots.
+	PrimaryAnsweredBy string `json:"primary_answered_by,omitempty"`
 
 	// RetryAt is the earliest time this head may fire again (awaiting_retry).
 	RetryAt *time.Time `json:"retry_at,omitempty"`
@@ -183,10 +211,26 @@ type CoBotRound struct {
 	CommandID   int64      `json:"command_id,omitempty"`
 	CommandedAt *time.Time `json:"commanded_at,omitempty"`
 	ClaimedAt   *time.Time `json:"claimed_at,omitempty"`
+	// AnsweredAt is when crq FIRST observed this bot produce head evidence — a
+	// review, a clean summary at the SHA, a completed check run.
+	//
+	// The three fields above are all crq's own bookkeeping: what it posted and
+	// what it claimed the right to post. None of them says the bot did
+	// anything, and treating them as evidence of that is how a bot nobody has
+	// an account for reads as working — crq asks, records that it asked, and
+	// nothing ever answers. Only this field is about the bot.
+	AnsweredAt *time.Time `json:"answered_at,omitempty"`
+
+	// unknown carries members a newer binary wrote inside this record. Round's
+	// carrier cannot: it sees "cobots" as a member it knows and hands the map
+	// to the ordinary decoder, which drops anything inside the values. See
+	// tolerant.go.
+	unknown unknownFields
 }
 
 func (c CoBotRound) empty() bool {
-	return c.CommandID == 0 && c.CommandedAt == nil && c.ClaimedAt == nil
+	return c.CommandID == 0 && c.CommandedAt == nil && c.ClaimedAt == nil && c.AnsweredAt == nil &&
+		len(c.unknown) == 0
 }
 
 // codexCoBotKey is dialect.CodexBotLogin under coBotKey. The literal is
@@ -250,6 +294,34 @@ func (r *Round) ClaimCo(login string, now time.Time) {
 	r.setCo(login, c)
 }
 
+// NoteCoAnswer records that login was OBSERVED producing head evidence. The
+// FIRST such observation wins: a round is one head, so the evidence does not
+// change, and re-stamping it with each sweep's clock would both rewrite state
+// on every pass and make a bot that answered days ago read as freshly active.
+func (r *Round) NoteCoAnswer(login string, at time.Time) {
+	c := r.Co(login)
+	if c.AnsweredAt != nil {
+		return
+	}
+	t := at.UTC()
+	c.AnsweredAt = &t
+	r.setCo(login, c)
+}
+
+// NotePrimaryAnswer records that login, the primary at the time, was OBSERVED
+// producing head evidence. Same terms as NoteCoAnswer sets for a co-reviewer:
+// the FIRST observation wins, since a round is one head and re-stamping it
+// would rewrite state on every sweep. The login is stored with it so a later
+// reader is not left inferring who answered from its own configuration.
+func (r *Round) NotePrimaryAnswer(login string, at time.Time) {
+	if r.PrimaryAnsweredAt != nil {
+		return
+	}
+	t := at.UTC()
+	r.PrimaryAnsweredAt = &t
+	r.PrimaryAnsweredBy = login
+}
+
 // ClearCoClaim releases login's claim without recording a command.
 func (r *Round) ClearCoClaim(login string) {
 	c := r.Co(login)
@@ -262,8 +334,17 @@ func (r *Round) ClearCoClaim(login string) {
 // write only them, new ones dual-write), so they are authoritative in BOTH
 // directions: they overwrite the mirror entry, and an empty legacy set clears
 // a stale mirror (a writer zeroed the legacy fields directly).
+// Authoritative about what they CARRY, which is the three trigger fields.
+// AnsweredAt has no legacy counterpart — it is what crq observed the bot do,
+// not bookkeeping about crq's own post — so no writer of any version can state
+// it there. Overwriting the whole entry therefore erased it on every load, and
+// Codex alone read as a bot that never answers.
 func (r *Round) foldLegacyCodex() {
-	r.setCo(codexCoBotKey, CoBotRound{CommandID: r.CodexCommandID, CommandedAt: r.CodexCommandedAt, ClaimedAt: r.CodexClaimedAt})
+	prev := r.Co(codexCoBotKey)
+	r.setCo(codexCoBotKey, CoBotRound{
+		CommandID: r.CodexCommandID, CommandedAt: r.CodexCommandedAt, ClaimedAt: r.CodexClaimedAt,
+		AnsweredAt: prev.AnsweredAt, unknown: prev.unknown,
+	})
 }
 
 // inferCoOnly backfills CoOnly for rounds written before the flag existed. The
@@ -329,6 +410,21 @@ type AccountQuota struct {
 	// that extends the window on every bounce.
 	RLCommentID      int64      `json:"rl_comment_id,omitempty"`
 	RLCommentUpdated *time.Time `json:"rl_comment_updated,omitempty"`
+	// Fires is when metered reviews were requested, trimmed to a rolling two
+	// weeks. See firelog.go: it exists to forecast the vendor's WEEKLY fair-use
+	// throttle, which crq can already recognise but never see coming.
+	Fires []time.Time `json:"fires,omitempty"`
+	// FiresFrom is when the log's COVERAGE starts, which is not the same as its
+	// oldest surviving entry: trimming keeps the blob small and would otherwise
+	// keep moving the start forward, telling a quiet fleet its fully observed
+	// week is only a floor. Recorded once and moved only when the entry cap
+	// genuinely discards history the rolling week needs.
+	FiresFrom *time.Time `json:"fires_from,omitempty"`
+
+	// unknown carries members a newer binary wrote inside this record. State's
+	// carrier cannot: it sees "account" as a member it knows and hands the whole
+	// object to the ordinary decoder. See tolerant.go.
+	unknown unknownFields
 }
 
 type LeaderLease struct {
@@ -367,7 +463,7 @@ func (l LeaderCapabilityLease) HasCapability(want string) bool {
 	return false
 }
 
-// State is schema v5. It persists as state.json in the existing git state ref;
+// State is schema v6. It persists as state.json in the existing git state ref;
 // v4 is migrated in place so its live rounds survive the compatibility fence.
 type State struct {
 	Version int   `json:"v"` // 5
@@ -399,6 +495,13 @@ type State struct {
 	// one. Persisted in the shared state so the whole fleet uses the new issue.
 	CalibrationIssue int `json:"calibration_issue,omitempty"`
 
+	// Holds are the PRs crq must not fire a review for, keyed by "owner/name#pr".
+	//
+	// Holding used to take two commands that could not be one: the skip marker
+	// stops fleet auto-review from enqueueing, `crq cancel` stops the pump, and
+	// between the two a daemon fired anyway. A hold is one fact, in the state
+	// every firing path already reads.
+	Holds map[string]Hold `json:"holds,omitempty"`
 	// Writers records which hosts have written this state and what they can do,
 	// so a feature that only SOME binaries understand can say so instead of
 	// pretending agreement. Sharing a ref stops an old binary erasing a new
@@ -416,18 +519,6 @@ type State struct {
 	// read this ref, so both cannot disagree about it.
 	Repos map[string]RepoReviewers `json:"repos,omitempty"`
 
-	// FleetConfig is the policy every host shares — which repositories are in
-	// scope, who reviews, and the timings the queue paces itself by. Same
-	// argument as Repos above, one level up: hosts that each carry their own
-	// answer diverge silently. See fleet.go.
-	FleetConfig Fleet `json:"fleet,omitempty"`
-	// Holds are the PRs crq must not fire a review for, keyed by "owner/name#pr".
-	//
-	// Holding used to take two commands that could not be one: the skip marker
-	// stops fleet auto-review from enqueueing, `crq cancel` stops the pump, and
-	// between the two a daemon fired anyway. A hold is one fact, in the state
-	// every firing path already reads.
-	Holds map[string]Hold `json:"holds,omitempty"`
 	// Archive keeps recently finished rounds (superseded, closed, cancelled)
 	// for the dashboard and debugging. Bounded by ArchiveMax.
 	Archive []Round `json:"archive,omitempty"`
@@ -444,6 +535,18 @@ type State struct {
 	// A session may still be resolving threads after its push superseded the
 	// claimed round, and archive eviction must not admit a second session.
 	Dispatches map[string]DispatchClaim `json:"dispatches,omitempty"`
+	// Fleet is what every repository inherits, recorded once for the whole fleet
+	// rather than in each host's env file. See fleet.go.
+	Fleet FleetDefaults `json:"fleet,omitempty"`
+	// HostReports is what each machine says about itself: its crq version and
+	// the tools it can reach. See hosts.go.
+	HostReports map[string]HostReport `json:"host_reports,omitempty"`
+	// RepoSolver is how a fix session runs, per repository. See solver.go.
+	RepoSolver map[string]SolverSettings `json:"repo_solver,omitempty"`
+	// Enrolled answers "does crq review this project at all?" per repository,
+	// so the decision lives with the fleet rather than in one host's env file.
+	// Absent means the hosts' CRQ_REPOS/CRQ_EXCLUDE decide, as before.
+	Enrolled map[string]RepoEnrollment `json:"enrolled,omitempty"`
 	// RepoAutofix answers "may crq fix pull requests here?" per repository. Absent
 	// means the default, which is yes — see AutofixEnabled.
 	RepoAutofix map[string]RepoAutofixSwitch `json:"repo_autofix,omitempty"`
@@ -481,19 +584,50 @@ func (s State) LeaderHasCapability(want string) bool {
 		s.LeaderCapabilities.HasCapability(want)
 }
 
-const SchemaVersion = 5
+const SchemaVersion = 6
 
 // WriterCaps is what THIS binary understands. Bump it when a state field starts
 // changing decisions, so a fleet running two versions can tell.
-const WriterCaps = 3
+const WriterCaps = 8
 
 // CapsRepoOverrides is the capability that makes per-repository reviewer
 // overrides safe to act on.
 const CapsRepoOverrides = 1
 
-// CapsFleetPolicy is the capability that makes state-backed fleet policy safe
-// to activate while a process is driving the queue.
-const CapsFleetPolicy = 3
+// CapsPrimaryOff is the capability that makes RepoReviewers.PrimaryOff safe to
+// act on. A host below it still fires the primary there — so turning the
+// primary off has to say which hosts will not honour it, exactly as the
+// override itself does.
+//
+// Worse here than elsewhere, which is why the warning matters: a binary from
+// before RepoReviewers round-tripped unknown members does not merely ignore the
+// switch, it ERASES it on its next write, and the repository silently resumes
+// metered primary reviews on every host. Nothing can be done about a binary
+// already in the field; the tolerant decoding in tolerant.go is what stops the
+// next one from doing it.
+const CapsPrimaryOff = 2
+
+// CapsEnrollment is the capability that makes State.Enrolled safe to act on. A
+// host below it decides from its own env alone, so a repository enrolled here
+// is invisible to it and one turned off here keeps being reviewed by it.
+const CapsEnrollment = 3
+
+// CapsFleetDefaults is the capability that makes State.Fleet safe to act on. A
+// host below it keeps deciding from its own env, so a default recorded here is
+// simply not applied there.
+const CapsFleetDefaults = 4
+
+// CapsSolver is the capability that makes every solver setting safe to act on.
+// A host below it either runs every fix session with its own install-time
+// settings or cannot distinguish an explicitly empty repository prompt from
+// inheritance, so the dashboard must name it before claiming the saved answer
+// applies fleet-wide.
+const CapsSolver = 8
+
+// CapsDispatchClarification is the capability that makes a head-scoped
+// clarification marker terminal for autofix dispatch. Older watchers preserve
+// the marker but may still launch another session for the same question.
+const CapsDispatchClarification = 7
 
 // writerTTL is how long a host counts as still active for capability purposes.
 const writerTTL = 30 * time.Minute
@@ -533,39 +667,6 @@ func (s *State) NoteWriter(host string, caps int, now time.Time) {
 // on this actually honour it?" An old binary loads an unknown field, writes it
 // back untouched, and keeps deciding from its own fleet-wide configuration.
 func (s *State) LaggingWriters(caps int, now time.Time) []string {
-	var out []string
-	for host := range s.actingWriters(now) {
-		if seen, ok := s.Writers[host]; ok && seen.Caps >= caps && now.Sub(seen.At) <= writerTTL {
-			continue
-		}
-		out = append(out, host)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// AdvancedWriters names the hosts driving this queue with a capability HIGHER
-// than caps — the fleet running a newer binary than the caller's.
-//
-// It is the mirror of LaggingWriters, and answers the question an old CLI has to
-// ask before it deletes a recorded setting it cannot interpret: is anyone acting
-// on it? WriterCaps is bumped exactly when a state field starts changing
-// decisions, so a driver announcing more than this binary knows is the one that
-// wrote that setting and owns whatever cleanup dropping it needs.
-func (s *State) AdvancedWriters(caps int, now time.Time) []string {
-	var out []string
-	for host := range s.actingWriters(now) {
-		if seen, ok := s.Writers[host]; ok && seen.Caps > caps && now.Sub(seen.At) <= writerTTL {
-			out = append(out, host)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-// actingWriters names the processes DRIVING this queue: holding the leader lease
-// or the fire slot.
-func (s *State) actingWriters(now time.Time) map[string]bool {
 	acting := map[string]bool{}
 	// The leader identifies itself as "host=<name> pid=<n> run=<id>", which is
 	// exactly the process identity capabilities are recorded under — the run
@@ -576,7 +677,55 @@ func (s *State) actingWriters(now time.Time) map[string]bool {
 	if slot := s.SlotRound(); slot != nil && slot.ByHost != "" {
 		acting[slot.ByHost] = true
 	}
-	return acting
+	var out []string
+	for host := range acting {
+		if seen, ok := s.Writers[host]; ok && seen.Caps >= caps && now.Sub(seen.At) <= writerTTL {
+			continue
+		}
+		out = append(out, host)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// LaggingRoleWriters is LaggingWriters plus every host reporting one of the
+// given roles with an older capability set.
+//
+// The acting set LaggingWriters builds is the leader and the fire-slot owner —
+// the processes that drive a REVIEW. A setting consumed by something else has no
+// entry there: the autofix watcher holds neither lease, so a solver record's
+// lagging list came back empty while an old watcher went on dispatching
+// install-time model, fork and attempt values. A host's self-report is what
+// names it, since it records the binary's capabilities beside the roles running
+// there.
+//
+// Reports are named by machine and writers by process ("host=blue pid=4711
+// run=1a2b"), so a machine lagging in both registers is listed once, under the
+// writer identity that says which process it is.
+//
+// Capabilities are asked of the ROLE, not of the record: a machine mid-upgrade
+// runs one service on each build, and the record's own value is whichever wrote
+// last. Reading it let a fresh `serve` heartbeat vouch for an old watcher.
+func (s *State) LaggingRoleWriters(caps int, now time.Time, roles ...string) []string {
+	out := s.LaggingWriters(caps, now)
+	named := map[string]bool{}
+	for _, writer := range out {
+		named[hostName(writer)] = true
+	}
+	for host, report := range s.HostReports {
+		if named[host] {
+			continue
+		}
+		for _, role := range roles {
+			if report.CapsFor(role) < caps && report.RolesFresh([]string{role}, now, HostReportTTL) {
+				named[host] = true
+				out = append(out, host)
+				break
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // RepoReviewers overrides which reviewers run on one repository. A nil slice
@@ -588,12 +737,26 @@ type RepoReviewers struct {
 	CoBots []string `json:"cobots,omitempty"`
 	// Required are the logins that gate convergence here.
 	Required []string `json:"required,omitempty"`
+	// PrimaryOff turns the metered primary off for this repository: crq never
+	// posts its review command here, never spends the account quota or the fire
+	// slot on it, and never waits for its review. The co-reviewers resolve the
+	// round alone. There is no "set" companion because false IS the default —
+	// the primary runs unless a repository says otherwise.
+	PrimaryOff bool `json:"primary_off,omitempty"`
 	// SetCoBots/SetRequired record whether each list was set at all, so
 	// "explicitly none" survives a JSON round trip that drops empty slices.
 	SetCoBots   bool       `json:"set_cobots,omitempty"`
 	SetRequired bool       `json:"set_required,omitempty"`
 	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
 	By          string     `json:"by,omitempty"`
+
+	// unknown carries JSON members this binary has no field for. State
+	// recognises "repos" and hands each value to an ordinary decoder, so the
+	// top-level carrier never sees a member added INSIDE one of these records —
+	// an older binary that knows the map but not PrimaryOff would drop the
+	// switch on its next write and the repository would silently resume metered
+	// primary reviews. See tolerant.go.
+	unknown unknownFields
 }
 
 // RepoOverride returns the override for repo, and whether one exists.
@@ -902,6 +1065,28 @@ func (s *State) PutRound(r Round) {
 	s.Rounds[Key(r.Repo, r.PR)] = r
 }
 
+// MoveToFront gives the current round the lowest sequence in the state.
+//
+// Normal rounds have positive sequences. Explicitly prioritized rounds use
+// negative ones, which keeps the existing queue contract understood by older
+// binaries while also letting autofix distinguish operator priority from
+// ordinary FIFO order.
+func (s *State) MoveToFront(repo string, pr int) bool {
+	r := s.Round(repo, pr)
+	if r == nil || (r.Phase != PhaseQueued && r.Phase != PhaseAwaitingRetry) {
+		return false
+	}
+	minSeq := int64(0)
+	for _, other := range s.Rounds {
+		if other.Seq < minSeq {
+			minSeq = other.Seq
+		}
+	}
+	r.Seq = minSeq - 1
+	s.PutRound(*r)
+	return true
+}
+
 // NewRound begins a round for a head with no current round. It refuses to
 // clobber an existing round — supersede via EndRound first — so "two rounds
 // for one PR" cannot happen by accident.
@@ -1061,10 +1246,36 @@ type DispatchClaim struct {
 	Token     string    `json:"token"`
 	At        time.Time `json:"at"`
 	Heartbeat time.Time `json:"heartbeat"`
-	// Attempts counts dispatches for THIS head, so a fix that keeps failing
-	// stops instead of looping. It survives release; only a new head clears it,
-	// because a new head means the previous attempt achieved something.
+	// Attempts counts dispatches in THIS head's current attempt cycle. It
+	// survives release; the cycle resets after a cooldown or on a new head.
 	Attempts int `json:"attempts,omitempty"`
+	// Model is the model selected for this claim. ModelCursor points at the next
+	// ranked fallback, so ordinary failures rotate rather than hammering one
+	// model. UnavailableModels parks provider/model outages until their retry
+	// time without spending the head's fix-attempt budget.
+	Model             string               `json:"model,omitempty"`
+	ModelCursor       int                  `json:"model_cursor,omitempty"`
+	UnavailableModels map[string]time.Time `json:"unavailable_models,omitempty"`
+	LastFailure       string               `json:"last_failure,omitempty"`
+	// Clarification is a head-scoped terminal stop requested by the agent. It
+	// is separate from an administrative hold because standalone watch/autofix
+	// has no autoreview leader capable of enforcing those holds.
+	Clarification string `json:"clarification,omitempty"`
+	// AttemptResetAt makes the safety bound a cooldown rather than a permanent
+	// dead letter. Exhaustions lengthens repeated cooldowns, capped at a day.
+	AttemptResetAt *time.Time `json:"attempt_reset_at,omitempty"`
+	Exhaustions    int        `json:"exhaustions,omitempty"`
+	// Findings is how many the session set out to fix, and Log is where its
+	// output is going. Both are for the reader: "attempt 2" says nothing about
+	// whether that is nearly the last one, and a session with no visible log is
+	// one you cannot check on.
+	Findings int    `json:"findings,omitempty"`
+	Log      string `json:"log,omitempty"`
+
+	// unknown carries members a newer binary wrote inside this record. The maps
+	// holding claims are recognised by name, so only the claim itself can carry
+	// one. See tolerant.go.
+	unknown unknownFields
 }
 
 // DispatchHeld reports whether a live claim exists.
@@ -1083,7 +1294,7 @@ func (r *Round) DispatchHeld(now time.Time) bool {
 // same worktree generation's work.
 func (s *State) ArchivedDispatchHeld(repo string, pr int, now time.Time) bool {
 	key := Key(repo, pr)
-	if claim, ok := s.Dispatches[key]; ok && claimHeld(claim, now) {
+	if claim, ok := s.Dispatches[key]; ok && claim.Live(now) {
 		return true
 	}
 	for i := range s.Archive {
@@ -1109,7 +1320,7 @@ func (s *State) HeartbeatArchivedDispatch(repo string, pr int, token string, now
 			s.Dispatches[key] = claim
 			return true, false
 		}
-		if claimHeld(claim, now) {
+		if claim.Live(now) {
 			return false, true
 		}
 	}
@@ -1150,6 +1361,26 @@ func (s *State) ReleaseArchivedDispatch(repo string, pr int, token string) bool 
 	return released
 }
 
+// MarkArchivedDispatchUnavailable records a provider outage on the archived
+// claim owned by token. A session can outlive the head it started on, so the
+// current round is not necessarily the claim owner.
+func (s *State) MarkArchivedDispatchUnavailable(repo string, pr int, token string, until time.Time, reason string) bool {
+	key := Key(repo, pr)
+	marked := false
+	if claim, ok := s.Dispatches[key]; ok && claim.Token == token {
+		claim.markUnavailable(until, reason)
+		s.Dispatches[key] = claim
+		marked = true
+	}
+	for i := range s.Archive {
+		r := &s.Archive[i]
+		if Key(r.Repo, r.PR) == key && r.MarkDispatchUnavailable(token, until, reason) {
+			marked = true
+		}
+	}
+	return marked
+}
+
 // RememberDispatch stores a newly granted claim independently of its round.
 func (s *State) RememberDispatch(repo string, pr int, claim DispatchClaim) {
 	if s.Dispatches == nil {
@@ -1158,28 +1389,138 @@ func (s *State) RememberDispatch(repo string, pr int, claim DispatchClaim) {
 	s.Dispatches[Key(repo, pr)] = claim
 }
 
-func claimHeld(claim DispatchClaim, now time.Time) bool {
-	return !claim.Heartbeat.IsZero() && now.UTC().Sub(claim.Heartbeat) < DispatchTTL
+// Live reports whether a session is still behind this claim: a heartbeat within
+// DispatchTTL. It is the same predicate dispatch ownership uses, exported so a
+// reader — the dashboard — cannot show a crashed watcher's claim as a running
+// session for ever.
+func (c DispatchClaim) Live(now time.Time) bool {
+	return !c.Heartbeat.IsZero() && now.UTC().Sub(c.Heartbeat) < DispatchTTL
 }
 
 // ClaimDispatch takes this round's dispatch claim, or reports why it cannot. A
 // claim past its TTL is taken over, keeping the attempt count: that session died,
 // but its attempt still happened.
 func (r *Round) ClaimDispatch(host, token string, now time.Time, maxAttempts int) (bool, string) {
+	return r.ClaimDispatchModels(host, token, now, maxAttempts, nil)
+}
+
+// ClaimDispatchModels claims a fix session and selects the first currently
+// available model in ranking order. An empty ranking is one selectable entry:
+// the agent's own default.
+func (r *Round) ClaimDispatchModels(host, token string, now time.Time, maxAttempts int, models []string) (bool, string) {
 	now = now.UTC()
 	attempts := 0
+	cursor := 0
+	unavailable := map[string]time.Time{}
+	lastFailure := ""
+	var attemptResetAt *time.Time
+	exhaustions := 0
+	var unknown unknownFields
 	if r.Dispatch != nil {
 		if r.DispatchHeld(now) {
 			return false, "another watcher is already fixing this round"
 		}
+		if r.Dispatch.Clarification != "" {
+			return false, "autofix needs clarification: " + r.Dispatch.Clarification
+		}
 		attempts = r.Dispatch.Attempts
+		cursor = r.Dispatch.ModelCursor
+		lastFailure = r.Dispatch.LastFailure
+		attemptResetAt = r.Dispatch.AttemptResetAt
+		exhaustions = r.Dispatch.Exhaustions
+		unknown = r.Dispatch.unknown
+		for model, until := range r.Dispatch.UnavailableModels {
+			if until.After(now) {
+				unavailable[model] = until.UTC()
+			}
+		}
 	}
 	if maxAttempts > 0 && attempts >= maxAttempts {
-		return false, fmt.Sprintf("%d dispatch attempts already made for this head", attempts)
+		resetAt := r.Dispatch.At.Add(dispatchAttemptCooldown(exhaustions))
+		if attemptResetAt != nil {
+			resetAt = attemptResetAt.UTC()
+		}
+		if now.Before(resetAt) {
+			return false, fmt.Sprintf(
+				"%d dispatch attempts already made in this cycle; retries resume at %s",
+				attempts, resetAt.Format(time.RFC3339),
+			)
+		}
+		attempts = 0
+		attemptResetAt = nil
+		exhaustions++
+	}
+	if len(models) == 0 {
+		models = []string{""}
+	}
+	if cursor < 0 || cursor >= len(models) {
+		cursor = 0
+	}
+	selected, selectedAt := "", -1
+	var earliest time.Time
+	for step := 0; step < len(models); step++ {
+		i := (cursor + step) % len(models)
+		model := strings.TrimSpace(models[i])
+		if until, blocked := unavailable[model]; blocked {
+			if earliest.IsZero() || until.Before(earliest) {
+				earliest = until
+			}
+			continue
+		}
+		selected, selectedAt = model, i
+		break
+	}
+	if selectedAt < 0 {
+		return false, fmt.Sprintf("all configured models are temporarily unavailable until %s", earliest.Format(time.RFC3339))
 	}
 	r.beginDispatchHold(now)
-	r.Dispatch = &DispatchClaim{Host: host, Token: token, At: now, Heartbeat: now, Attempts: attempts + 1}
+	r.Dispatch = &DispatchClaim{
+		Host: host, Token: token, At: now, Heartbeat: now,
+		Attempts: attempts + 1, Model: selected,
+		ModelCursor:       (selectedAt + 1) % len(models),
+		UnavailableModels: unavailable, LastFailure: lastFailure,
+		AttemptResetAt: attemptResetAt, Exhaustions: exhaustions,
+		unknown: unknown,
+	}
+	if maxAttempts > 0 && r.Dispatch.Attempts >= maxAttempts {
+		resetAt := now.Add(dispatchAttemptCooldown(exhaustions))
+		r.Dispatch.AttemptResetAt = &resetAt
+	}
 	return true, ""
+}
+
+func dispatchAttemptCooldown(exhaustions int) time.Duration {
+	cooldown := time.Hour
+	for i := 0; i < exhaustions && cooldown < 24*time.Hour; i++ {
+		cooldown *= 2
+	}
+	if cooldown > 24*time.Hour {
+		return 24 * time.Hour
+	}
+	return cooldown
+}
+
+// MarkDispatchUnavailable records a provider/model outage against the selected
+// claim and refunds its attempt. It deliberately leaves ModelCursor advanced,
+// so the next claim tries the next ranked model.
+func (r *Round) MarkDispatchUnavailable(token string, until time.Time, reason string) bool {
+	if r.Dispatch == nil || r.Dispatch.Token != token {
+		return false
+	}
+	r.Dispatch.markUnavailable(until, reason)
+	return true
+}
+
+func (c *DispatchClaim) markUnavailable(until time.Time, reason string) {
+	if c.UnavailableModels == nil {
+		c.UnavailableModels = map[string]time.Time{}
+	}
+	c.UnavailableModels[c.Model] = until.UTC()
+	c.LastFailure = reason
+	if c.Attempts > 0 {
+		c.Attempts--
+	}
+	c.AttemptResetAt = nil
 }
 
 // beginDispatchHold mirrors the new dispatch exclusion into queue state every
@@ -1239,6 +1580,20 @@ func (r *Round) ReleaseDispatch(token string) bool {
 		r.DispatchHoldRetryAt = nil
 	}
 	return true
+}
+
+// MarkDispatchClarification ends token's live claim while retaining a terminal
+// reason on this head. A new head gets a new Round and may dispatch normally.
+func (r *Round) MarkDispatchClarification(token, question string) bool {
+	if r.Dispatch == nil || r.Dispatch.Token != token {
+		return false
+	}
+	r.Dispatch.Clarification = strings.TrimSpace(question)
+	if r.Dispatch.Attempts > 0 {
+		r.Dispatch.Attempts--
+	}
+	r.Dispatch.AttemptResetAt = nil
+	return r.ReleaseDispatch(token)
 }
 
 // AutofixUnhealthyAfter is how many consecutive dispatch attempts may fail to
@@ -1687,6 +2042,16 @@ func (s *State) Normalize(now time.Time) {
 	}
 	if s.AutofixByHost != nil {
 		s.summarizeAutofix(now)
+	}
+	// Dispatches is the cross-archive ownership index, not attempt history.
+	// Once a claim's heartbeat expires scheduling already treats it as free, so
+	// retaining it can only grow state and let an older dashboard render a dead
+	// session forever. The round (current or archived) retains the attempt
+	// counters used by a replacement claim.
+	for key, claim := range s.Dispatches {
+		if !claim.Live(now) {
+			delete(s.Dispatches, key)
+		}
 	}
 	// Fold both hold representations before repairing the slot. The top-level
 	// mirror may be the only copy left after a pre-FireSlot-tolerance binary

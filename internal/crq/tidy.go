@@ -67,11 +67,9 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 		return result, err
 	}
 	// Which comments count as a trigger depends on who reviews, so the whole
-	// path takes a configuration value rather than reading the Service's — the
-	// effective one, fleet policy and this repository's override included.
-	// Reading this host's own would compare the comments against a command crq
-	// never posted, read every spent trigger as edited by hand, and keep them on
-	// the PR for ever.
+	// path takes a configuration value rather than reading the Service's. That
+	// is what lets per-repo reviewers substitute one here later without
+	// threading anything new through.
 	cfg := s.cfgFor(st, repo)
 	observedPosted := collectPosted(st, repo, pr)
 	if len(observedPosted.commands) == 0 {
@@ -98,6 +96,7 @@ func (s *Service) Tidy(ctx context.Context, repo string, pr int, dryRun bool) (T
 	if err != nil {
 		return result, err
 	}
+	cfg = s.cfgFor(st, repo)
 	posted := collectPosted(st, repo, pr)
 
 	// A deleted comment stays on its round for ever, so without this every later
@@ -645,7 +644,7 @@ func eventAt(e dialect.BotEvent) time.Time {
 //
 // It is best-effort by design. Deleting a comment is housekeeping, and a
 // housekeeping failure must never break the pass that did the real work.
-func (s *Service) tidyAfterPump(ctx context.Context, res PumpResult) error {
+func (s *Service) tidyAfterPump(ctx context.Context, st State, res PumpResult) error {
 	if res.Repo == "" || res.PR == 0 {
 		return nil
 	}
@@ -668,7 +667,7 @@ func (s *Service) tidyAfterPump(ctx context.Context, res PumpResult) error {
 	default:
 		return nil
 	}
-	return s.tidyProgressed(ctx, res.Repo, res.PR)
+	return s.tidyProgressed(ctx, st, res.Repo, res.PR)
 }
 
 // tidyProgressed runs a tidy pass for one PR whose round just moved, and
@@ -676,8 +675,13 @@ func (s *Service) tidyAfterPump(ctx context.Context, res PumpResult) error {
 // housekeeping failure must never break the pass that did the real work.
 // GitHub throttles are returned so autoreview can sleep through the reset
 // window instead of continuing to spend requests that are expected to fail.
-func (s *Service) tidyProgressed(ctx context.Context, repo string, pr int) error {
-	if !s.cfg.Tidy {
+//
+// The switch is resolved from the snapshot the pump decided on, not from the env
+// this process started with: CRQ_TIDY is offered as a fleet setting, and reading
+// the startup value made saving it in the dashboard change nothing on any daemon
+// while the page reported fleet-wide tidying as on.
+func (s *Service) tidyProgressed(ctx context.Context, st State, repo string, pr int) error {
+	if !s.cfgFor(st, repo).Tidy {
 		return nil
 	}
 	if _, err := s.Tidy(ctx, repo, pr, false); err != nil {

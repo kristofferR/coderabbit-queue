@@ -1,0 +1,116 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* The Operations Desk palette the mockups settled on. */
+@theme {
+  --color-bg: #f1f3f5;
+  --color-card: #ffffff;
+  --color-edge: #e3e6eb;
+  --color-edge2: #c9cfd8;
+  --color-ink: #17212d;
+  --color-mut: #5b6472;
+  --color-faint: #8b93a0;
+  --color-ok: #1f7a4d;
+  --color-ok-bg: #eaf4ee;
+  --color-ok-edge: #c7e2d2;
+  --color-warn: #8a5300;
+  --color-warn-fg: #b45d10;
+  --color-warn-bg: #fbf1e2;
+  --color-warn-edge: #ead7b4;
+  --color-bad: #b3362b;
+  --color-bad-bg: #f9ecea;
+  --color-bad-edge: #efcfcb;
+  --color-acc: #2b5faa;
+  --color-acc-bg: #ebf1fa;
+  --color-acc-edge: #c9d8ef;
+  --font-sans: "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --shadow-card: 0 1px 2px rgb(23 33 45 / 0.05), 0 7px 22px rgb(23 33 45 / 0.035);
+}
+
+html {
+  color-scheme: light;
+  background: var(--color-bg);
+}
+
+body {
+  @apply bg-bg text-ink font-sans text-sm antialiased;
+  min-width: 320px;
+  min-height: 100vh;
+  background-image:
+    linear-gradient(rgb(23 33 45 / 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(23 33 45 / 0.025) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+::selection {
+  background: #b9f4d2;
+  color: #10251a;
+}
+
+a,
+button,
+input,
+select,
+textarea {
+  transition:
+    color 120ms ease,
+    background-color 120ms ease,
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    opacity 120ms ease;
+}
+
+:where(a, button, input, select, textarea):focus-visible {
+  outline: 2px solid var(--color-acc);
+  outline-offset: 2px;
+}
+
+button:not(:disabled) {
+  cursor: pointer;
+}
+
+.data-card table {
+  min-width: max(100%, 680px);
+}
+
+.data-card tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+/* Columns that go first when the window is narrow. Cost and reason never do. */
+@media (max-width: 1150px) {
+  .c-host {
+    display: none;
+  }
+}
+@media (max-width: 940px) {
+  .c-att {
+    display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .data-card table {
+    min-width: 560px;
+  }
+
+  .data-card :is(th, td).c-actions {
+    position: sticky;
+    right: 0;
+    z-index: 1;
+    background: color-mix(in srgb, var(--color-card) 94%, transparent);
+    box-shadow: -8px 0 14px rgb(23 33 45 / 0.05);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

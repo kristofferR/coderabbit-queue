@@ -39,24 +39,32 @@ func (s *Service) SetAutofixEnabled(ctx context.Context, repo string, enabled bo
 	return AutofixSetting{Repo: repo, Enabled: enabled, Reason: reason, By: sw.By, UpdatedAt: sw.UpdatedAt}, nil
 }
 
-// ClearAutofixEnabled returns repo to the default (autofix on), reporting whether a
-// setting was there.
-func (s *Service) ClearAutofixEnabled(ctx context.Context, repo string) (bool, error) {
+// ClearAutofixEnabled returns repo to the fleet default, reporting the setting
+// that results and whether a record was there to remove.
+//
+// The resulting setting is READ BACK rather than assumed. The default is
+// whatever the fleet records, so clearing an explicit "on" under a fleet default
+// of off leaves the repository off — and a caller told "enabled: true" would
+// have the exact opposite of the policy now in force.
+func (s *Service) ClearAutofixEnabled(ctx context.Context, repo string) (AutofixSetting, bool, error) {
 	repo = NormalizeRepo(repo)
 	if !validRepoSlug(repo) {
-		return false, fmt.Errorf("repo must be owner/name")
+		return AutofixSetting{}, false, fmt.Errorf("repo must be owner/name")
 	}
 	cleared := false
-	if _, err := s.store.Update(ctx, func(st *State) error {
+	st, err := s.store.Update(ctx, func(st *State) error {
 		cleared = st.ClearAutofixSwitch(repo)
 		if !cleared {
 			return ErrNoChange
 		}
 		return nil
-	}); err != nil {
-		return false, err
+	})
+	if err != nil {
+		return AutofixSetting{}, false, err
 	}
-	return cleared, nil
+	// The state the write landed on, which is also the state Update hands back
+	// when nothing changed.
+	return AutofixSetting{Repo: repo, Enabled: st.AutofixEnabled(repo), Default: true}, cleared, nil
 }
 
 // AutofixSettings reports the autofix answer for every repository in scope, so the
@@ -81,13 +89,20 @@ func (s *Service) AutofixSettings(ctx context.Context) ([]AutofixSetting, error)
 		}
 		out = append(out, setting)
 	}
-	effective := s.fleetCfg(st)
-	watched := make([]string, 0, len(effective.AllowRepos))
-	for repo := range effective.AllowRepos {
+	cfg := s.cfg.WithFleet(st.Fleet)
+	watched := make([]string, 0, len(cfg.AllowRepos))
+	for repo := range cfg.AllowRepos {
 		watched = append(watched, repo)
 	}
 	sort.Strings(watched)
 	for _, repo := range watched {
+		add(repo)
+	}
+	// A repository enrolled from shared state is watched here whether or not
+	// this host's CRQ_REPOS lists it — watchPass builds its targets from both —
+	// so one with no explicit switch is being fixed under the fleet default
+	// while a listing built from env alone never mentioned it.
+	for _, repo := range st.EnrolledRepos() {
 		add(repo)
 	}
 	// A repository ruled on but no longer watched still shows: an "off" nobody
@@ -106,18 +121,8 @@ func validRepoSlug(repo string) bool {
 	return ok && validOwnerLogin(owner) && validNameSegment(name)
 }
 
-// maxOwnerLogin is GitHub's hard length limit for a user or organisation login.
 const maxOwnerLogin = 39
 
-// validOwnerLogin reports whether login is a GitHub user or organisation login.
-//
-// Stricter than validNameSegment on purpose: a repository NAME may hold
-// underscores and dots and may be long, a login may not, and a login may
-// neither begin nor end with a hyphen nor hold two in a row. Everything this
-// validates is looked up as /users/<login>, so a value outside those rules is
-// one no account can ever have — and recorded for the fleet, a single such
-// entry fails the whole scan on every host at once, which is precisely the
-// mistake worth catching at `crq config set` instead.
 func validOwnerLogin(login string) bool {
 	if login == "" || len(login) > maxOwnerLogin ||
 		strings.HasPrefix(login, "-") || strings.HasSuffix(login, "-") ||
@@ -134,15 +139,6 @@ func validOwnerLogin(login string) bool {
 	return true
 }
 
-// validNameSegment reports whether part is one segment a GitHub owner or
-// repository name could be.
-//
-// Same segment rules the workspace package applies to a path: "." and ".." are
-// not names. The character class is GitHub's: an owner or repository name is
-// letters, digits, hyphen, underscore and dot, so a segment holding anything
-// else — a space, a slash, a control character — is one no scan result can ever
-// normalize to. Recorded, it reads as a rule covering something while covering
-// nothing at all.
 func validNameSegment(part string) bool {
 	if part == "" || part == "." || part == ".." {
 		return false

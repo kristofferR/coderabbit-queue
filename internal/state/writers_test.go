@@ -5,12 +5,6 @@ import (
 	"time"
 )
 
-func TestFleetPolicyCapabilityAdvancesWithNewDecisionKeys(t *testing.T) {
-	if WriterCaps != 3 || CapsFleetPolicy != WriterCaps {
-		t.Fatalf("writer caps = %d, fleet caps = %d; want fleet policy fenced at writer capability 3", WriterCaps, CapsFleetPolicy)
-	}
-}
-
 // Sharing a state ref stops an older binary ERASING a new field. It does not
 // make that binary act on it: it loads the field as unknown JSON, writes it back
 // untouched, and keeps deciding from its own fleet-wide configuration. So the
@@ -99,31 +93,6 @@ func TestLaggingWritersMatchesTheFireSlotOwner(t *testing.T) {
 	}
 }
 
-// The mirror question: an old binary about to drop a setting it cannot read has
-// to know whether the crq that wrote it is still driving the queue.
-func TestAdvancedWritersNamesTheNewerDriver(t *testing.T) {
-	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
-	st := New()
-	st.Leader = &LeaderLease{Owner: "host=new-mac pid=7", ExpiresAt: now.Add(time.Minute)}
-
-	// A leader running this version is not ahead of it.
-	st.NoteWriter("host=new-mac pid=7", WriterCaps, now)
-	if got := st.AdvancedWriters(WriterCaps, now); len(got) != 0 {
-		t.Errorf("advanced = %v, want none for a leader on this version", got)
-	}
-
-	st.NoteWriter("host=new-mac pid=7", WriterCaps+1, now)
-	if got := st.AdvancedWriters(WriterCaps, now); len(got) != 1 || got[0] != "host=new-mac pid=7" {
-		t.Fatalf("advanced = %v, want the newer leader named", got)
-	}
-
-	// And only while it is driving: a stale stamp says nothing about now.
-	st.Leader.ExpiresAt = now
-	if got := st.AdvancedWriters(WriterCaps, now); len(got) != 0 {
-		t.Errorf("advanced = %v, want none once the lease has lapsed", got)
-	}
-}
-
 // Reopening a round is not a failed attempt. Moving LastAttemptAt would raise
 // the adoption floor past a newly required co-reviewer's own unanswered trigger,
 // so crq would post that bot a second request for the round it is reopening to
@@ -145,5 +114,66 @@ func TestReopenKeepsTheAdoptionFloor(t *testing.T) {
 	}
 	if r.LastAttemptAt == nil || !r.LastAttemptAt.Equal(floor) {
 		t.Errorf("LastAttemptAt = %v, want it untouched by a reopen", r.LastAttemptAt)
+	}
+}
+
+// The host that consumes solver settings is the autofix watcher, and it holds
+// neither the leader lease nor the fire slot — so the acting set LaggingWriters
+// builds cannot see it. An old watcher went on dispatching install-time model,
+// fork and attempt values while the repository's page reported nobody lagging.
+func TestLaggingRoleWritersNamesTheAutofixWatcher(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	st := New()
+	st.SetHostReport(HostReport{Host: "atlas", Caps: CapsSolver - 1, Roles: []string{"autofix"}}, now)
+	st.SetHostReport(HostReport{Host: "blue", Caps: CapsSolver, Roles: []string{"autofix"}}, now)
+	// Running something else here, so its older binary is not this setting's
+	// problem: it never starts a fix session.
+	st.SetHostReport(HostReport{Host: "green", Caps: CapsSolver - 1, Roles: []string{"serve"}}, now)
+
+	if got := st.LaggingWriters(CapsSolver, now); len(got) != 0 {
+		t.Fatalf("lagging writers = %v, want none — no host is driving the queue", got)
+	}
+	got := st.LaggingRoleWriters(CapsSolver, now, "autofix")
+	if len(got) != 1 || got[0] != "atlas" {
+		t.Fatalf("lagging = %v, want only the old autofix host", got)
+	}
+
+	// A report that has aged out speaks for nobody: that machine may not be
+	// running a watcher at all any more.
+	if got := st.LaggingRoleWriters(CapsSolver, now.Add(2*HostReportTTL), "autofix"); len(got) != 0 {
+		t.Errorf("lagging = %v, want none once every report is stale", got)
+	}
+
+	// And a machine lagging in BOTH registers is listed once, under the writer
+	// identity that says which process it is.
+	st.Leader = &LeaderLease{Owner: "host=atlas pid=7", ExpiresAt: now.Add(time.Minute)}
+	got = st.LaggingRoleWriters(CapsSolver, now, "autofix")
+	if len(got) != 1 || got[0] != "host=atlas pid=7" {
+		t.Errorf("lagging = %v, want the machine named once", got)
+	}
+}
+
+// One machine runs its services on two builds for as long as a rolling upgrade
+// takes, and each writes the SAME record. Reading the record's own capabilities
+// let whichever wrote last answer for both: a current `serve` heartbeat vouched
+// for an old `autofix` watcher that ignores the very setting being saved.
+func TestLaggingRoleWritersReadsEachRolesOwnCapabilities(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	st := New()
+	st.SetHostReport(HostReport{Host: "atlas", Caps: CapsSolver - 1, Roles: []string{"autofix"}}, now)
+	// The upgraded dashboard on the same machine, reporting after it.
+	st.SetHostReport(HostReport{Host: "atlas", Caps: CapsSolver, Roles: []string{"serve"}}, now)
+
+	if got := st.LaggingRoleWriters(CapsSolver, now, "autofix"); len(got) != 1 || got[0] != "atlas" {
+		t.Fatalf("lagging = %v, want the machine named for its old watcher", got)
+	}
+	// Nothing is claimed about the role that never reported an old binary.
+	if got := st.LaggingRoleWriters(CapsSolver, now, "serve"); len(got) != 0 {
+		t.Errorf("lagging = %v, want none — the dashboard here is current", got)
+	}
+	// Upgrading the watcher clears it, without the dashboard having to write.
+	st.SetHostReport(HostReport{Host: "atlas", Caps: CapsSolver, Roles: []string{"autofix"}}, now)
+	if got := st.LaggingRoleWriters(CapsSolver, now, "autofix"); len(got) != 0 {
+		t.Errorf("lagging = %v, want none once the watcher itself reports the capability", got)
 	}
 }

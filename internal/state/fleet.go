@@ -1,76 +1,96 @@
 package state
 
-import (
-	"sort"
-	"strings"
-	"time"
-)
+import "time"
 
-// Fleet is the policy every host in the fleet shares, keyed by setting name.
+// FleetDefaults is what every repository inherits, recorded once for the whole
+// fleet instead of in each host's env file.
 //
-// It lives HERE for the reason the per-repository overrides do, one level up:
-// a daemon on one machine and an agent on another reading different
-// configurations while writing one shared state ref is a class of divergence
-// worth not having. Per-host environment files diverge the moment somebody
-// edits one — a repository excluded on the laptop and reviewed by the server,
-// a rate-limit window one host respects and another does not — and nothing
-// says so, because each host is behaving correctly according to what it can
-// see.
+// It exists for the same reason the enrollment record does: the settings that
+// govern a fleet lived in ~/.config/crq/env on whichever machine happened to
+// run the daemon, so changing one meant editing a file per host and hoping they
+// agreed. A record here is one answer every host reads.
 //
-// A flat map rather than a struct, on purpose. One JSON member means an older
-// binary round-trips the whole thing rather than dropping settings it does not
-// know. Newly interpreted decision-changing keys still require a writer
-// capability bump so an active older driver cannot ignore them.
-type Fleet map[string]string
+// Every field is optional and absent means "keep using this host's env value",
+// so a fleet that never writes one behaves exactly as before. That is also what
+// makes the record safe to add to: a field a newer binary sets is preserved by
+// an older one through the tolerant round-trip, and simply not acted on.
+type FleetDefaults struct {
+	// CoBots/Required are the fleet's reviewer defaults, the base a per-repo
+	// override starts from. Set* distinguishes "not chosen" from "chosen to be
+	// none", which a JSON round trip would otherwise flatten.
+	CoBots      []string `json:"cobots,omitempty"`
+	Required    []string `json:"required,omitempty"`
+	SetCoBots   bool     `json:"set_cobots,omitempty"`
+	SetRequired bool     `json:"set_required,omitempty"`
 
-// FleetValue returns a fleet setting and whether it is recorded. Absent means
-// "the fleet has no opinion", which is what lets a host fall back to its own
-// environment and to crq's defaults.
-func (s *State) FleetValue(key string) (string, bool) {
-	value, ok := s.FleetConfig[key]
-	return value, ok
+	// MinInterval is the pacing floor between metered fires, as a duration
+	// string ("90s"). A string rather than a number because the unit is part of
+	// the value, and a bare integer in JSON invites reading it as the wrong one.
+	MinInterval string `json:"min_interval,omitempty"`
+
+	// WeeklyLimit is the vendor's weekly fair-use threshold. A pointer so 0 can
+	// mean "count, but forecast nothing" rather than "unset".
+	WeeklyLimit *int `json:"weekly_limit,omitempty"`
+
+	// AutofixDefault is whether a repository with no explicit switch may be
+	// fixed. Absent means yes, which is what crq has always done.
+	AutofixDefault *bool `json:"autofix_default,omitempty"`
+
+	// Solver is the fleet's fix-session default, which a repository's own record
+	// is layered over.
+	Solver SolverSettings `json:"solver,omitempty"`
+
+	// Env is the fleet's answer for any other setting, keyed exactly as the
+	// environment variable is. Kept as raw strings and re-parsed rather than
+	// decoded into fields, so a setting becomes fleet-settable without needing
+	// plumbing of its own — and so the fleet path and the env path cannot end
+	// up disagreeing about what a value means.
+	//
+	// Only settings crq lists as fleet-settable are honoured. A key an older
+	// binary does not recognise round-trips untouched.
+	Env map[string]string `json:"env,omitempty"`
+
+	By        string     `json:"by,omitempty"`
+	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+
+	// envUnknown carries members a newer binary wrote inside Env with a value
+	// shape this binary cannot parse yet.
+	envUnknown unknownFields
+	// unknown carries members a newer binary wrote inside this record. State's
+	// own carrier cannot: it sees "fleet" as a member it knows and hands the
+	// whole object to the ordinary decoder. See tolerant.go.
+	unknown unknownFields
 }
 
-// SetFleetValue records a fleet setting, replacing any earlier value.
-func (s *State) SetFleetValue(key, value string) {
-	if s.FleetConfig == nil {
-		s.FleetConfig = Fleet{}
-	}
-	s.FleetConfig[key] = value
-}
-
-// UnsetFleetValue drops a setting, returning the fleet to per-host defaults for
-// it, and reports whether one was there.
-func (s *State) UnsetFleetValue(key string) bool {
-	if _, ok := s.FleetConfig[key]; !ok {
-		return false
-	}
-	delete(s.FleetConfig, key)
-	return true
-}
-
-// FleetKeys lists the recorded settings in a stable order.
-func (s *State) FleetKeys() []string {
-	keys := make([]string, 0, len(s.FleetConfig))
-	for key := range s.FleetConfig {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
-// withFleet applies the state-backed settings the state package itself renders.
-// The full policy is interpreted by crq; MinInterval also shapes queue
-// readiness in dashboards/status, including GitStateStore's background sync.
+// Empty reports whether the record says nothing at all. A record that has been
+// emptied field by field must not keep reading as "recorded": every setting
+// would show its env value while the fleet claimed to have an answer.
 //
-// Trimmed the way crq's own fleet parser trims, because the recorded value is
-// whatever an operator typed: a stored " 5m " that queue decisions honour must
-// not leave the dashboard and status line advertising this host's interval.
-func (c StoreConfig) withFleet(s State) StoreConfig {
-	if value, ok := s.FleetValue("min-interval"); ok {
-		if interval, err := time.ParseDuration(strings.TrimSpace(value)); err == nil && interval >= 0 {
-			c.MinInterval = interval
-		}
+// A carried member counts as something said. A newer binary's fleet setting is
+// a setting this one cannot name, and answering "empty" for it would have
+// SetFleetDefaults replace the whole record with a zero value — erasing it on
+// the one path the round trip exists to survive.
+func (f FleetDefaults) Empty() bool {
+	return !f.SetCoBots && !f.SetRequired && f.MinInterval == "" &&
+		f.WeeklyLimit == nil && f.AutofixDefault == nil && f.Solver.Empty() &&
+		len(f.Env) == 0 && len(f.envUnknown) == 0 && len(f.unknown) == 0
+}
+
+// AutofixDefaultOn is the answer for a repository with no explicit switch.
+func (s *State) AutofixDefaultOn() bool {
+	if s.Fleet.AutofixDefault == nil {
+		return true
 	}
-	return c
+	return *s.Fleet.AutofixDefault
+}
+
+// SetFleetDefaults records the fleet defaults, stamping who and when.
+func (s *State) SetFleetDefaults(fd FleetDefaults, by string, now time.Time) {
+	if fd.Empty() {
+		s.Fleet = FleetDefaults{}
+		return
+	}
+	at := now.UTC()
+	fd.By, fd.UpdatedAt = by, &at
+	s.Fleet = fd
 }

@@ -17,6 +17,9 @@ type Finding struct {
 	ID        string    `json:"id"`
 	Bot       string    `json:"bot"`
 	Severity  string    `json:"severity"`
+	Scale     string    `json:"scale,omitempty"`
+	Category  string    `json:"category,omitempty"`
+	Effort    string    `json:"effort,omitempty"`
 	Path      string    `json:"path,omitempty"`
 	Line      int       `json:"line,omitempty"`
 	Title     string    `json:"title"`

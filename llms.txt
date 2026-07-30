@@ -211,21 +211,6 @@ convergence never hides a rebuttal you have not answered. Address it or decline 
 reason; the loop clears it once the bot withdraws (or you stop declining and fix it). Ambiguous bot
 replies surface too — crq errs toward showing a possible rebuttal rather than burying it.
 
-Choose which bots review one project:
-
-```bash
-crq reviewers REPO                                    # effective reviewers + budgets
-crq reviewers set REPO --bots codex --required codex  # Codex is the only required co-reviewer
-crq reviewers clear REPO                              # fleet default again
-```
-
-The primary is fleet-wide: an override chooses the CO-reviewers, so CodeRabbit is still triggered
-and still spends account quota even when it is left out of `--required`. Leaving it out means the
-round does not WAIT for it, not that it is never asked.
-
-`budget: account` means the reviewer is serialized against the shared CodeRabbit allowance;
-`budget: none` means it runs immediately. Stored in the shared state ref, so the daemon and agents
-cannot disagree. The primary reviewer is fleet-wide.
 Run the whole thing unattended — crq watches every open PR and starts a fix session for the ones
 that need one:
 
@@ -233,8 +218,9 @@ that need one:
 crq autofix install            # prompt + wrapper + service, started; --dry-run to preview
 ```
 
-Session output goes to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log`. Three dispatch attempts in a
-row that start nothing put `dispatch failing` on the dashboard and the status line.
+Session output goes to `$CRQ_WORKSPACE/logs/<owner>/<name>/<pr>-<head>-<time>.log`. Three consecutive
+failures to start a session put `dispatch failing` on the dashboard and status line. That host-health
+threshold is independent of `CRQ_DISPATCH_MAX_ATTEMPTS`, which bounds started fix sessions per head.
 
 The service does not inherit your shell. The unit names the config file the install read
 (`CRQ_CONFIG`, or `~/.config/crq/env`) and the queue's identity, and the credential has to be one
@@ -248,7 +234,7 @@ authenticate.
 crq watch [--no-dispatch] [--once] [--interval 2m] [--concurrency 0] [<repo>...] [-- <cmd>...]
 crq autofix                                  # which repositories crq may fix
 crq autofix off REPO --reason "why"          # stop fixing there; watching continues
-crq autofix on REPO          # or: crq autofix default REPO
+crq autofix on REPO | crq autofix default REPO
 ```
 
 It drives every open PR in `CRQ_REPOS` through the same `crq next` oracle and emits one JSON line
@@ -261,7 +247,7 @@ command from `CRQ_DISPATCH_CMD` (or after `--`) runs in a crq-made worktree chec
 head, with `CRQ_DISPATCH_REPO`, `CRQ_DISPATCH_PR`, `CRQ_DISPATCH_HEAD` and `CRQ_DISPATCH_FINDINGS`
 (a JSON file) in its environment. The command is run directly, not through a shell; quoted
 arguments in `CRQ_DISPATCH_CMD` are kept whole. Dispatch is bounded per head by
-`CRQ_DISPATCH_MAX_ATTEMPTS` (default 3) and uncapped in parallel unless
+`CRQ_DISPATCH_MAX_ATTEMPTS` (default 5) and uncapped in parallel unless
 `CRQ_DISPATCH_CONCURRENCY` sets a valve — fixing findings spends no account quota, so it does not
 queue. While a session holds a PR its round leaves the fire queue (and no second session is started
 for that PR, even after its own push supersedes the round): the review would be of a head about to
@@ -296,17 +282,125 @@ again — older than the head commit, or than a later force-push (a command crq'
 spent regardless, and an unreadable head keeps everything),
 and never the bots' own comments. Deletions GitHub refuses are reported in `.failed[]`.
 
+Estimate what a round costs before firing it:
+
+```bash
+crq cost REPO PR
+```
+
+`.low`/`.high` bound it in US dollars; `.exact` is true only when every reviewer's figure is a real
+number; `.unpriced[]` names reviewers crq has no pricing for, so the total is a floor;
+`.reviewers[].basis` is the sentence explaining each figure. Only two reviewers can cost anything —
+Macroscope bills per KB of diff with a 10 KB minimum (so under ~85 changed lines the $0.50 floor IS
+the price and the estimate is exact), and CodeRabbit bills per reviewed file only once the plan
+allowance is spent AND usage-based reviews are enabled — and since crq does not yet learn which,
+a spent allowance reports the primary as unpriced rather than free. Codex and Cursor Bugbot are covered by their
+own subscriptions. The diff basis is the whole head, so this is exact on a PR's first Macroscope
+review and an upper bound after that. `.prices_checked_at` is when the published figures were last
+verified against the vendors.
+
+Change how fix sessions run, per repository or fleet-wide:
+
+```bash
+crq solver REPO                                       # effective settings + where each came from
+crq solver set REPO --models opus,sonnet,haiku --effort high --attempts 5
+crq solver set REPO --severities minor,potential --ask uncertain
+crq solver set REPO --prompt "This project uses bun, never npm."
+crq solver set --fleet --effort medium                # the default every repository inherits
+crq solver set REPO --inherit models,effort,severities,ask,forks,skip-authors
+crq solver clear REPO | crq solver clear --fleet
+```
+
+`--models` is an ordered ranking. A provider/model outage parks that entry until its reported reset
+time and immediately tries the next one. These outages do not consume the attempt budget; ordinary
+failed fix sessions do, and rotate through the ranking. Exhausting a fix-attempt cycle starts an
+increasing cooldown (one hour up to one day), then automatically opens a fresh cycle. If every model
+is parked, crq waits for the earliest reset instead of permanently exhausting the PR.
+
+`--severities` limits the findings handed to an unattended agent. `--ask` controls how readily it
+stops instead of guessing: only when blocked, when confidence is low, or at the first meaningful
+ambiguity. A clarification preserves the attempt and holds the PR with the agent's concrete question.
+
+`--inherit` hands a setting back to the layer beneath. It is required for models, effort, severity
+scope, clarification policy, forks and
+skipped authors because an empty model ranking or effort means "use the agent default", `off` is a
+real fork policy, and an empty author list means "skip nobody". `--attempts 0` inherits directly.
+
+Three layers again — env, fleet, repository — with `.sources` naming which answered. The AGENT is
+not per repository: it is baked into the session script by `crq autofix install`, because switching
+between claude and codex is a different command line rather than a different flag. The selected
+model, effort and the extra prompt reach the session through its ENVIRONMENT (`CRQ_FIX_MODEL`, `CRQ_FIX_EFFORT`,
+`CRQ_FIX_PROMPT`), since the watcher's argv is fixed when it starts and one watcher handles every
+repository — so **reinstall autofix** to pick up a session script that reads them.
+
+Change what every repository inherits:
+
+```bash
+crq fleet                                          # effective defaults + where each came from
+crq fleet set --min-interval 2m --dry-run          # what it WOULD do; writes nothing
+crq fleet set --required coderabbitai,codex        # record it for every host
+crq fleet clear                                    # back to this host's env
+crq fleet adopt [--dry-run]                        # record THIS host's settings for the fleet
+crq fleet env CRQ_SETTLE 120s                      # any single setting, by env name
+crq fleet env CRQ_SETTLE --clear
+```
+
+`adopt` is for a fleet configured before any of this existed: every answer lives in one machine's
+env file, so the dashboard reports "env" beside all of them — true, and useless. It copies only what
+CAN be fleet-wide. Identity (`CRQ_REPO`, `CRQ_STATE_REF`, `CRQ_ISSUE`, `CRQ_SCOPE`) and per-host
+values (`CRQ_REPOS`, `CRQ_EXCLUDE`, `CRQ_HOST`, `CRQ_WORKSPACE`, `CRQ_DISPATCH_CMD`) are reported as
+skipped rather than silently dropped, and a value equal to the built-in default is skipped too —
+recording one would pin today's default invisibly. Credentials are never written to state at all.
+
+Three layers, least specific first: this host's env, then the fleet record, then a repository's own
+override. `.sources` says per setting which layer the current value came from, so a value reading
+`env` is this host's file alone. Always `--dry-run` a reviewer change first: adding a required
+reviewer invalidates the "this head was reviewed" marker on every completed round that never had it,
+and `.reopened` counts the rounds that would be requeued and reviewed again.
+
+Choose which projects crq reviews at all:
+
+```bash
+crq repos                                   # every repository, and where each answer came from
+crq repos REPO                              # one repository
+crq repos add REPO                          # review it (recorded in shared state)
+crq repos remove REPO --reason "<why>"      # stop; --reason is required
+crq repos default REPO                      # back to whatever this host's env says
+```
+
+`.source` is `state` (a record decided it), `env` (this host's `CRQ_REPOS`), `excluded`
+(`CRQ_EXCLUDE`, or the gate repo), `scope` (no allow-list, so all of `CRQ_SCOPE`) or `off`.
+`CRQ_EXCLUDE` wins over everything — it is a per-host kill switch. Otherwise a record wins in BOTH
+directions, and `.env_conflict` reports a record that turns off a repository a host's `CRQ_REPOS`
+still lists. `.lagging_hosts` names hosts whose binary predates enrollment records and still decides
+from its own env alone. On a host with no `CRQ_REPOS` at all, a record can only WIDEN what is
+scanned: the whole of `CRQ_SCOPE` is still searched owner-wide, and a repository enrolled from
+outside that scope is searched by name alongside it.
+
 Choose which bots review one project:
 
 ```bash
 crq reviewers REPO                                    # effective reviewers + budgets
 crq reviewers set REPO --bots codex --required codex  # Codex is the only required co-reviewer
+crq reviewers set REPO --no-primary                   # CodeRabbit does not review this project
+crq reviewers set REPO --primary                      # ...and back on
 crq reviewers clear REPO                              # fleet default again
 ```
 
-The primary is fleet-wide: an override chooses the CO-reviewers, so CodeRabbit is still triggered
-and still spends account quota even when it is left out of `--required`. Leaving it out means the
-round does not WAIT for it, not that it is never asked.
+WHICH bot is primary is fleet-wide (its markers are compiled into the classifiers), but whether it
+runs on a project is not. `--no-primary` means crq never posts its review command there, never
+spends the account quota or the fire slot on it, and never waits for its review — the co-reviewers
+resolve those rounds alone. This is the switch for a private repo on a free plan, where the metered
+reviewer produces nothing.
+
+`--no-primary` also drops the primary from the effective required set, since a reviewer that does
+not run cannot gate. It is refused when nobody else is required, because a round gating on nobody
+converges before any bot answers. `lagging_primary_off` in the output names hosts running a binary
+that predates the switch: they read the field, write it back untouched, and would still fire the
+primary there.
+
+Leaving the primary out of `--required` alone is a weaker thing: it is still asked, and still spends
+quota; the round just does not WAIT for it.
 
 `budget: account` means the reviewer is serialized against the shared CodeRabbit allowance;
 `budget: none` means it runs immediately. Stored in the shared state ref, so the daemon and agents
@@ -365,7 +459,9 @@ idempotent queue entry, so after a push either one may enqueue first and the oth
 Never start a second watcher or post a direct CodeRabbit trigger to "help" the daemon.
 
 Autoreview skips PRs authored by dependabot by default (`CRQ_AUTOREVIEW_SKIP_AUTHORS`,
-comma-separated logins; set empty to include bot PRs). Manual `crq review` ignores this filter.
+comma-separated logins; set empty to include bot PRs). The autofix watcher honours the same list —
+it drives PRs through the mutating `crq next`, so a skipped author is neither reviewed nor fixed.
+Manual `crq review` ignores this filter.
 For an intentionally low-risk PR that already had enough local review, include the hidden
 `<!-- crq:skip-autoreview -->` marker in its body before creation. Fleet autoreview skips it, while
 an explicit `crq loop` still works. Configure or disable the exact marker with

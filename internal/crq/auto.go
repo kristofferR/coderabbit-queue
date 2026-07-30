@@ -3,7 +3,6 @@ package crq
 import (
 	"context"
 	"errors"
-	"sort"
 	"strings"
 	"time"
 
@@ -25,16 +24,32 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 	// from. Spelling it out here again would let the two drift apart.
 	owner := s.cfg.WriterID()
 	token := randomToken()
+	// Report what this machine can reach before doing anything else, and again
+	// as it goes: a fleet's tool inventory is only useful if it is a fleet's,
+	// and a daemon is the only thing that knows the PATH its service runs with.
+	s.ReportHost(ctx, "autoreview")
+	// Pacing is a fleet setting, so it is resolved from the state this loop
+	// already reads rather than frozen at startup: a poll interval the dashboard
+	// records and then reports as the effective fleet value has to actually pace
+	// the daemon reading it. This host's env is the answer until the first read
+	// lands, and whenever one fails.
+	poll := s.cfg.AutoReviewPoll
 	for {
-		held, err := s.acquireLeader(ctx, owner, token)
+		state, held, err := s.acquireLeader(ctx, owner, token)
 		if err != nil {
 			if _, ok := ghapi.ThrottleWait(err); ok {
-				if cont, serr := s.sleepThrottle(ctx, opts, "leader", err); serr != nil || !cont {
+				if cont, serr := s.sleepThrottle(ctx, opts, poll, "leader", err); serr != nil || !cont {
 					return serr
 				}
 				continue
 			}
 			return err
+		}
+		// Positive only. A record of "0s" would otherwise turn every daemon in
+		// the fleet into a spin loop from one save, which is a far worse thing
+		// for one setting to be able to do than to be ignored.
+		if resolved := s.cfg.WithFleet(state.Fleet).AutoReviewPoll; resolved > 0 {
+			poll = resolved
 		}
 		if !held {
 			if opts.Once {
@@ -43,7 +58,7 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(s.cfg.AutoReviewPoll):
+			case <-time.After(poll):
 				continue
 			}
 		}
@@ -58,7 +73,7 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			// sleep out the window instead of immediately pumping and re-scanning,
 			// which would just hammer the quota. Skip Pump entirely in that case.
 			if _, ok := ghapi.ThrottleWait(passErr); ok {
-				if cont, serr := s.sleepThrottle(ctx, opts, "pass", passErr); serr != nil || !cont {
+				if cont, serr := s.sleepThrottle(ctx, opts, poll, "pass", passErr); serr != nil || !cont {
 					if opts.Once {
 						return s.finishAutoReviewOnce(ctx, token, serr)
 					}
@@ -75,11 +90,11 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 			// stop being needed, so tidying here costs one observation on a PR
 			// crq was already looking at rather than a sweep of the fleet.
 			if err == nil {
-				err = s.tidyAfterPump(ctx, pumped)
+				err = s.tidyAfterPump(ctx, state, pumped)
 			}
 			if err != nil {
 				if _, ok := ghapi.ThrottleWait(err); ok {
-					if cont, serr := s.sleepThrottle(ctx, opts, "pump", err); serr != nil || !cont {
+					if cont, serr := s.sleepThrottle(ctx, opts, poll, "pump", err); serr != nil || !cont {
 						if opts.Once {
 							return s.finishAutoReviewOnce(ctx, token, serr)
 						}
@@ -104,7 +119,7 @@ func (s *Service) AutoReview(ctx context.Context, opts AutoOptions) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(s.cfg.AutoReviewPoll):
+		case <-time.After(poll):
 		}
 	}
 }
@@ -121,13 +136,18 @@ func (s *Service) finishAutoReviewOnce(ctx context.Context, token string, err er
 // throttleBackoff bounds how long the autoreview daemon sleeps when GitHub
 // throttles it: at least one poll interval, plus a small buffer past the
 // reset, capped at an hour so a bogus reset header can't wedge the daemon.
-func (s *Service) throttleBackoff(wait time.Duration) time.Duration {
+// poll is the caller's resolved interval, so a fleet-recorded one paces the
+// backoff too.
+func (s *Service) throttleBackoff(wait, poll time.Duration) time.Duration {
+	if poll <= 0 {
+		poll = s.cfg.AutoReviewPoll
+	}
 	if wait <= 0 {
-		wait = s.cfg.AutoReviewPoll
+		wait = poll
 	}
 	wait += 5 * time.Second
-	if wait < s.cfg.AutoReviewPoll {
-		wait = s.cfg.AutoReviewPoll
+	if wait < poll {
+		wait = poll
 	}
 	if wait > time.Hour {
 		wait = time.Hour
@@ -141,9 +161,9 @@ func (s *Service) throttleBackoff(wait time.Duration) time.Duration {
 // be a throttle error (the caller checks ghapi.ThrottleWait first). It returns
 // cont=false (nil error) when opts.Once means we should stop after the wait, and a
 // non-nil error only when the context is cancelled mid-wait.
-func (s *Service) sleepThrottle(ctx context.Context, opts AutoOptions, stage string, cause error) (cont bool, err error) {
+func (s *Service) sleepThrottle(ctx context.Context, opts AutoOptions, poll time.Duration, stage string, cause error) (cont bool, err error) {
 	wait, _ := ghapi.ThrottleWait(cause)
-	wait = s.throttleBackoff(wait)
+	wait = s.throttleBackoff(wait, poll)
 	if s.log != nil {
 		s.log.Printf("autoreview: %s throttled (%v); sleeping %s before next pass", stage, cause, wait.Round(time.Second))
 	}
@@ -158,15 +178,17 @@ func (s *Service) sleepThrottle(ctx context.Context, opts AutoOptions, stage str
 	return true, nil
 }
 
-func (s *Service) acquireLeader(ctx context.Context, owner, token string) (bool, error) {
+// acquireLeader claims or extends the lease and hands back the state it read,
+// so the caller can resolve the fleet's pacing from a read it already paid for.
+func (s *Service) acquireLeader(ctx context.Context, owner, token string) (State, bool, error) {
 	state, held, err := s.renewLeader(ctx, owner, token)
 	if err != nil {
-		return false, err
+		return State{}, false, err
 	}
 	if held {
 		s.sync(ctx, state)
 	}
-	return held, nil
+	return state, held, nil
 }
 
 func (s *Service) releaseLeader(ctx context.Context, token string) error {
@@ -189,12 +211,35 @@ func (s *Service) releaseLeader(ctx context.Context, token string) error {
 	return nil
 }
 
+// leaderTTL is how long a lease survives without a heartbeat, resolved the way
+// every other fleet setting is: this host's env, then whatever the fleet
+// recorded. A lease length the dashboard displays as the fleet's answer has to
+// be the one the daemon actually renews against — otherwise saving it changes a
+// number on a page and nothing else. Non-positive is ignored, since a recorded
+// 0 would expire every lease the instant it was written.
+func (s *Service) leaderTTL(st State) time.Duration {
+	if resolved := s.cfg.WithFleet(st.Fleet).LeaderTTL; resolved > 0 {
+		return resolved
+	}
+	return s.cfg.LeaderTTL
+}
+
+// feedbackWait is how long a fired round is waited on, resolved for the same
+// reason and in the same way. The deadline is STAMPED into the round, so the
+// startup value did not merely mispace one poll: it outlived the setting on
+// every round fired after the fleet shortened or lengthened the wait.
+func (s *Service) feedbackWait(st State) time.Duration {
+	if resolved := s.cfg.WithFleet(st.Fleet).FeedbackWaitTimeout; resolved > 0 {
+		return resolved
+	}
+	return s.cfg.FeedbackWaitTimeout
+}
+
 // renewLeader claims or extends the leader lease via compare-and-swap on the
 // state ref. It does not sync the dashboard, so it's cheap enough to call as an
 // in-pass heartbeat. held is false when another live lease holder owns it.
 func (s *Service) renewLeader(ctx context.Context, owner, token string) (State, bool, error) {
 	now := time.Now().UTC()
-	expires := now.Add(s.cfg.LeaderTTL)
 	held := false
 	state, err := s.store.Update(ctx, func(st *State) error {
 		if st.Leader != nil && st.Leader.ExpiresAt.After(now) && st.Leader.Token != token {
@@ -204,7 +249,7 @@ func (s *Service) renewLeader(ctx context.Context, owner, token string) (State, 
 		st.Leader = &LeaderLease{
 			Owner:        owner,
 			Token:        token,
-			ExpiresAt:    expires,
+			ExpiresAt:    now.Add(s.leaderTTL(*st)),
 			UpdatedAt:    now,
 			Capabilities: []string{leaderCapabilityHolds},
 		}
@@ -222,36 +267,61 @@ func (s *Service) renewLeader(ctx context.Context, owner, token string) (State, 
 }
 
 func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, token string) error {
+	// Refreshed each pass. ReportHost writes nothing when nothing changed and
+	// the record is still fresh, so this is a probe, not a write.
+	s.ReportHost(ctx, "autoreview")
 	// Load the queue snapshot once per pass and reuse it across candidates: a
 	// git-backed Load is GetRef+GetCommit+GetTree+GetBlob, so reloading it per PR
 	// would burn the shared REST quota on a large scan. The heartbeat refreshes it,
 	// and enqueueBatch re-checks Contains under CAS, so a slightly stale snapshot
 	// during collection is safe.
 	//
-	// It is loaded BEFORE the targets are chosen, because the state ref is where
-	// the fleet records which repositories those are. Reading this host's own
-	// list first is what let one machine scan a repository another had excluded.
+	// It is also what says which repositories are enrolled, which is why it is
+	// read BEFORE the targets are chosen: a repository enrolled from the
+	// dashboard has to be searched on the very next pass, not after a restart.
 	state, _, err := s.store.Load(ctx)
 	if err != nil {
 		return err
 	}
-	cfg := s.fleetCfg(state)
-	// Copied, never sorted in place. Without a fleet `scope` the configuration is
-	// this host's own, so the slice shares its backing array with s.cfg.Scope and
-	// the sort below would silently reorder the operator's configured scan order
-	// — and race any concurrent reader of it. The allow-repository branch already
-	// builds its own.
-	targets := append([]string(nil), cfg.Scope...)
-	byRepo := false
-	if len(cfg.AllowRepos) > 0 {
-		targets = make([]string, 0, len(cfg.AllowRepos))
-		for repo := range cfg.AllowRepos {
-			targets = append(targets, repo)
-		}
-		byRepo = true
+	fleetCfg := s.cfg.WithFleet(state.Fleet)
+	// The scan bound is a fleet setting like the pacing above, resolved from the
+	// snapshot this pass just read rather than from the env the process started
+	// with. Positive only, for the same reason: a recorded 0 would stop the
+	// whole fleet scanning anything, silently.
+	maxScan := s.cfg.AutoReviewMaxScan
+	if resolved := fleetCfg.AutoReviewMaxScan; resolved > 0 {
+		maxScan = resolved
 	}
-	sort.Strings(targets) // stable: a pass must not depend on map iteration
+	// Owner-wide searches only when there is no allow-list at all. An allow-list
+	// with nothing left active in it scans NOTHING: falling back to CRQ_SCOPE
+	// there made every pass walk the organisation's whole open-PR result set for
+	// reviewsRepo to reject each row before the scan counter even advanced.
+	//
+	// A scope-wide host still searches its individually enrolled repositories by
+	// name — scanTargets returns the ones no owner in CRQ_SCOPE covers — so the
+	// two search shapes are mixed in one pass and each target says which it is.
+	targets, scoped := s.scanTargets(state)
+	byRepo := func(target string) bool { return !scoped || strings.Contains(target, "/") }
+	if scoped {
+		targets = append(targets, fleetCfg.Scope...)
+	}
 	var candidates []queueCandidate
+	var titles []queueCandidate
+	// The skip rules below are per-repository settings like everything else, and
+	// the enrollment preview already answers with the resolved ones. Reading
+	// s.cfg here instead made this pass enqueue — and spend the shared allowance
+	// on — pull requests the dialog had just promised would be skipped. Memoized
+	// per repository: cfgFor re-parses the merged env, and a scan sees the same
+	// repository many times over.
+	skipCfg := map[string]Config{}
+	repoSkips := func(repo string) Config {
+		cfg, ok := skipCfg[repo]
+		if !ok {
+			cfg = s.cfgFor(state, repo)
+			skipCfg[repo] = cfg
+		}
+		return cfg
+	}
 	lastBeat := time.Now()
 	for _, target := range targets {
 		// Per-target scan budget so one large scope can't consume the whole budget
@@ -260,27 +330,30 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 		// Stream results and stop once the post-filter scan budget is spent, so
 		// excluded/gate-repo results can't crowd out in-scope PRs (a fixed pre-filter
 		// limit would never reach them) while we still don't over-fetch pages.
-		err := s.gh.EachOpenPR(ctx, target, byRepo, func(pr ghapi.SearchPR) (bool, error) {
-			if scanned >= s.cfg.AutoReviewMaxScan {
+		err := s.gh.EachOpenPR(ctx, target, byRepo(target), func(pr ghapi.SearchPR) (bool, error) {
+			if scanned >= maxScan {
 				return true, nil
 			}
 			repo := NormalizeRepo(pr.Repo)
-			if repo == NormalizeRepo(s.cfg.GateRepo) || cfg.ExcludeRepos[repo] {
+			// One question, one answer: env allow/exclude, the gate repository
+			// and any enrollment record all resolve in enrollmentOf, so a scope
+			// search cannot enqueue what a by-repo search would have skipped.
+			if !s.reviewsRepo(state, repo) {
 				return false, nil
 			}
-			if len(cfg.AllowRepos) > 0 && !cfg.AllowRepos[repo] {
+			skips := repoSkips(repo)
+			if skips.SkipAuthors[dialect.NormalizeBotName(strings.ToLower(pr.Author))] {
 				return false, nil
 			}
-			if cfg.SkipAuthors[dialect.NormalizeBotName(strings.ToLower(pr.Author))] {
-				return false, nil
-			}
-			if cfg.SkipsReview(pr.Body) {
+			if skips.SkipsReview(pr.Body) {
 				return false, nil
 			}
 			scanned++
 			// Heartbeat: renew the lease partway through a long pass so a standby
 			// can't steal it mid-scan and cause brief double-leadership (#4).
-			if s.cfg.LeaderTTL > 0 && time.Since(lastBeat) >= s.cfg.LeaderTTL/2 {
+			// Half of the SAME lease length renewLeader writes, so a fleet that
+			// shortens the lease starts beating faster to match.
+			if ttl := s.leaderTTL(state); ttl > 0 && time.Since(lastBeat) >= ttl/2 {
 				st, held, herr := s.renewLeader(ctx, owner, token)
 				if herr != nil {
 					return false, herr
@@ -288,8 +361,16 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 				if !held {
 					return false, errLostLeadership
 				}
-				state = st // reuse the freshly written snapshot for later candidates
+				state = st     // reuse the freshly written snapshot for later candidates
+				clear(skipCfg) // the memo above answers for the snapshot it was built from
 				lastBeat = time.Now()
+			}
+			// A round that already exists at this head is not a candidate, so it
+			// would never reach enqueueBatch and would never learn its title.
+			// The scan already has one; recording it here is what stops every
+			// existing round reading as a bare number for ever.
+			if pr.Title != "" {
+				titles = append(titles, queueCandidate{Repo: repo, PR: pr.Number, Title: pr.Title})
 			}
 			need, head, nerr := s.needsReview(ctx, state, repo, pr.Number, opts.Incremental)
 			if nerr != nil {
@@ -305,7 +386,7 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 				return false, nil
 			}
 			if need {
-				candidates = append(candidates, queueCandidate{Repo: repo, PR: pr.Number, Head: head})
+				candidates = append(candidates, queueCandidate{Repo: repo, PR: pr.Number, Head: head, Title: pr.Title})
 			}
 			return false, nil
 		})
@@ -313,8 +394,11 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 			return err
 		}
 	}
+	// Titles first, in one write: they change nothing about scheduling, so a
+	// failure here must not stop the enqueue that does.
+	s.noteTitles(ctx, titles)
 	// One batched write for the whole pass instead of N (#2).
-	return s.enqueueBatch(ctx, candidates, cfg.FleetRevision)
+	return s.enqueueBatch(ctx, candidates)
 }
 
 // needsReview reports whether an open PR should be enqueued for review, and its
@@ -324,7 +408,18 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 // bot's last review commit differs from the head, or (first-review) the bot has
 // never reviewed and no review-done marker is present. It reads the caller's
 // preloaded state snapshot so a pass doesn't reload git-backed state per candidate.
+//
+// It announces each "yes" to the log, which is what makes an autoreview pass
+// explain the work it queued.
 func (s *Service) needsReview(ctx context.Context, state State, repo string, pr int, incremental bool) (bool, string, error) {
+	return s.reviewNeeded(ctx, state, repo, pr, incremental, s.logEnqueue)
+}
+
+// reviewNeeded is the predicate itself, with the announcement injected. The
+// enrollment preview asks exactly this question about pull requests it is not
+// enqueueing, and an "enqueue …" line from a dialog that wrote nothing is how an
+// estimate reads as an action already taken.
+func (s *Service) reviewNeeded(ctx context.Context, state State, repo string, pr int, incremental bool, announce func(repo string, pr int, head, reason string)) (bool, string, error) {
 	head, err := s.headShort(ctx, repo, pr)
 	if err != nil {
 		return false, "", err
@@ -338,7 +433,7 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 		if !r.ReviewersChanged {
 			return false, head, nil
 		}
-		s.logEnqueue(repo, pr, head, "reviewer configuration changed while the pr was closed")
+		announce(repo, pr, head, "reviewer configuration changed while the pr was closed")
 		return true, head, nil
 	}
 	reviews, err := s.gh.ListReviews(ctx, repo, pr)
@@ -374,7 +469,7 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 			}
 		}
 		if need {
-			s.logEnqueue(repo, pr, head, "no "+dialect.NormalizeBotName(missing)+" review at head")
+			announce(repo, pr, head, "no "+dialect.NormalizeBotName(missing)+" review at head")
 		}
 		return need, head, nil
 	}
@@ -397,9 +492,12 @@ func (s *Service) needsReview(ctx context.Context, state State, repo string, pr 
 	if strings.Contains(pull.Body, s.cfg.ReviewDoneMarker) {
 		return false, head, nil
 	}
-	s.logEnqueue(repo, pr, head, "never reviewed")
+	announce(repo, pr, head, "never reviewed")
 	return true, head, nil
 }
+
+// noAnnounce is reviewNeeded's announcement for a caller that is only asking.
+func noAnnounce(string, int, string, string) {}
 
 // logEnqueue records one line per autoreview enqueue decision so a runaway is
 // visible in the daemon log (repo#pr, head, and why it was queued).

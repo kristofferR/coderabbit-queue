@@ -22,6 +22,10 @@ type NextReport struct {
 	Repo   string `json:"repo"`
 	PR     int    `json:"pr"`
 	Head   string `json:"head,omitempty"`
+	// Fork is watch-only trust context. It is deliberately not part of the
+	// `crq next` wire contract: Next does not fetch the head repository, while
+	// watch already has the Pull object and must carry that fact into the CAS.
+	Fork bool `json:"-"`
 
 	// RecheckAfter is when to call `crq next` again — the ONE time field, set
 	// for both hold and wait so there is never a question of which to read. crq
@@ -174,7 +178,14 @@ func (s *Service) Next(ctx context.Context, repo string, pr int) (NextReport, er
 // settleUntil is when a convergence verdict may be trusted: the newest review
 // plus the configured quiet period. Nil when settling is disabled or nothing has
 // been observed to settle from.
-func settleUntil(feedback FeedbackReport, window time.Duration) *time.Time {
+//
+// The window comes from the configuration this report was built with, which is
+// the state-backed one blocking `crq loop` already settles on. Reading the
+// startup value here let the two forms disagree: an agent on the documented
+// `next` loop returned done before a fleet-lengthened window, or kept waiting
+// through one that had been shortened.
+func (s *Service) settleUntil(feedback FeedbackReport) *time.Time {
+	window := feedback.config.SettleWindow
 	if window <= 0 || feedback.LastEvidenceAt.IsZero() {
 		return nil
 	}
@@ -251,16 +262,22 @@ func (s *Service) nextFromState(ctx context.Context, repo string, pr int) (NextR
 	report.Dismissed = feedback.Dismissed
 
 	in := engine.NextInput{
-		Obs:           engine.Observation{Head: feedback.Head, Open: feedback.Open},
-		Completion:    engine.CompletionStatus{ReviewedBy: feedback.ReviewedBy, Done: allReviewed(feedback.ReviewedBy)},
-		Findings:      feedback.Findings,
-		Global:        s.global(st, now),
-		Primary:       s.cfg.Bot,
+		Obs:        engine.Observation{Head: feedback.Head, Open: feedback.Open},
+		Completion: engine.CompletionStatus{ReviewedBy: feedback.ReviewedBy, Done: allReviewed(feedback.ReviewedBy)},
+		Findings:   feedback.Findings,
+		Global:     s.global(st, now),
+		// The reviewer THIS report was built with, not the one this process
+		// started with. The engine uses it to tell the quota-gated reviewer from
+		// the co-reviewers, so a fleet-changed CRQ_BOT left Feedback classifying
+		// evidence under one login while the verdict was decided under another —
+		// holding a degraded round through the account-block window, and blaming
+		// an expired wait on a bot that was never the primary.
+		Primary:       feedback.config.Bot,
 		LocalWork:     report.LocalWork,
 		Deferred:      feedback.CodeRabbitDeferred,
 		DeferredUntil: feedback.DeferredUntil,
 		MinDelay:      s.cfg.PollInterval,
-		SettleUntil:   settleUntil(feedback, feedback.config.SettleWindow),
+		SettleUntil:   s.settleUntil(feedback),
 	}
 	// Only a round that still tracks THIS head may shape the verdict. A stale
 	// fired/reviewing round carries its own phase and deadline, and an elapsed

@@ -20,7 +20,9 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
   static `KnownCoReviewers()` list — Codex, Cursor Bugbot, Macroscope — each
   carrying its login, config name, check-run app slug, trigger command, and its
   wording hooks (`ClassifyComment`, `ClassifyCheck`, `ResolvedInSHA`,
-  `FindingDedupeKey`, …). The only place a bot's literal wording may appear.
+  `FindingDedupeKey`, `Price`, …). The only place a bot's literal wording may
+  appear. `pricing.go` holds the vendors' published prices and the per-bot cost
+  estimators behind `PricesCheckedAt` — money is bot knowledge like any other.
 - `internal/gh/` — GitHub REST/GraphQL transport, bot-agnostic. Owns the "GitHub
   REST quota" concept under the name **Throttle** (`ThrottleWait`/`IsThrottled`).
   The only package (besides dialect) allowed to say "rate limit".
@@ -30,18 +32,26 @@ Dependency rule (Go-enforced, no cycles): `dialect ← engine ← crq`, `state �
   credential-safe Git execution, stale-worktree pruning, and mirror migration.
   Owns persistent filesystem and process I/O for checkouts; `crq` supplies only
   configured roots and a current-token resolver.
-- `internal/state/` — persisted schema v5: one `Round` per PR, one global
-  `FireSlot`, the CodeRabbit `AccountQuota`, an `Archive` ring. Round transition
+- `internal/state/` — persisted schema v6: one `Round` per PR, one global
+  `FireSlot`, the CodeRabbit `AccountQuota`, an `Archive` ring, and the
+  per-repository records (`Repos` reviewer overrides incl. `PrimaryOff`,
+  `RepoAutofix`, `Enrolled`). `WriterCaps` is a monotonic integer bumped
+  whenever one of those records starts changing decisions, so a fleet running
+  two binary versions can name the hosts that will ignore a new one. Round transition
   methods, durable tombstones for tidied trigger comments, the CAS store, and
   dashboard rendering. `Round.CoBots` holds per-
   co-reviewer trigger bookkeeping; Codex's entry is **dual-written** to the
   legacy `Codex*` round fields because the fleet shares one state ref across
-  binary versions (`Normalize` folds them back on load). `Round` and `State` also
-  **round-trip unknown JSON members** (`tolerant.go`), so a field a newer binary
-  added survives being read and rewritten by an older one — which is what makes
-  ordinary additions safe without another dual-write or schema bump. Schema v5
-  is the deliberate exception: older v4 clients refuse it, fencing pumping
-  clients that cannot enforce state-backed fleet policy.
+  binary versions (`Normalize` folds them back on load). `State`, `Round` and
+  every record NESTED inside them — `FireSlot`, `FleetDefaults`, `SolverSettings`,
+  `RepoReviewers`, `RepoEnrollment`, `HostReport`, `ToolReport` — **round-trip unknown JSON members** (`tolerant.go`), so a
+  field a newer binary added survives being read and rewritten by an older one.
+  Nesting is why each needs its own: the carrier recognises the member by name
+  and hands the whole object to an ordinary decoder, which drops anything inside
+  it. That is what makes ordinary additions safe without another dual-write or
+  schema bump. Schema v4 deliberately fenced older v3 pumping clients that
+  could not enforce administrative holds. Schema v5 similarly fences v4
+  writers that would erase the dispatch scheduler's model and cooldown state.
 - `internal/engine/` — PURE decision logic, `now` passed in, no ctx/gh:
   `DecideFire` (the single fire owner), `Progress` (fired/reviewing round
   transitions), `Completion` (the one "is the round done?"), `BlockingFindings`

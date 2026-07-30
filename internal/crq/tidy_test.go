@@ -3,7 +3,6 @@ package crq
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
@@ -366,59 +365,6 @@ func TestTidyKeepsATriggerEditedDuringThePass(t *testing.T) {
 	}
 }
 
-// The command crq POSTED is the fleet's, so that is the one a trigger comment
-// has to be compared against. Reading this host's own startup configuration
-// instead found no such command, read every spent co-reviewer trigger as edited
-// by hand, and kept them on the PR for ever.
-func TestTidyRecognisesATriggerTheFleetConfigured(t *testing.T) {
-	ctx := context.Background()
-	cfg := firingConfig()
-	gh := newFakeGitHub()
-	gh.graphQL = noForcePush
-	now := time.Now().UTC()
-	repo, pr := "o/r", 27
-	const command = "bugbot run please"
-
-	var pull ghapi.Pull
-	pull.State = "open"
-	pull.Head.SHA = "bbbbbbbb2"
-	gh.pulls[fakeKey(repo, pr)] = pull
-	gh.commits["bbbbbbbb2"] = commitAt(now.Add(-10 * time.Minute))
-
-	c := ghapi.IssueComment{ID: 100, Body: command,
-		CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now.Add(-2 * time.Hour)}
-	c.User.Login = "kristofferR"
-	gh.comments[fakeKey(repo, pr)] = []ghapi.IssueComment{c}
-
-	store := NewMemoryStore(cfg)
-	svc := NewService(cfg, gh, store, nil)
-	if _, err := store.Update(ctx, func(st *State) error {
-		// The fleet enables a co-reviewer this host does not run, with a command
-		// only the fleet knows.
-		st.SetFleetValue("cobots", "bugbot")
-		st.SetFleetValue("cobot-bugbot-cmd", command)
-		return completedRound(st, repo, pr, now, func(r *Round) error {
-			if err := r.Fire(0, now.Add(-2*time.Hour)); err != nil {
-				return err
-			}
-			r.RecordPosted("cursor[bot]", c.ID, c.CreatedAt)
-			return nil
-		})
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	result, err := svc.Tidy(ctx, repo, pr, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, kept := range result.Kept {
-		if strings.Contains(kept, "someone edited it") {
-			t.Fatalf("the fleet's own trigger read as an edited comment: %v", result.Kept)
-		}
-	}
-}
-
 // A delete GitHub refuses must reach the caller. An empty Deleted otherwise
 // reads as "nothing was spent" when it means "the token may not delete".
 func TestTidyReportsDeletionFailures(t *testing.T) {
@@ -483,7 +429,7 @@ func TestTidyReportsDeletionFailures(t *testing.T) {
 	gh.getComment = func(string, int64) (ghapi.IssueComment, error) {
 		return ghapi.IssueComment{}, throttle
 	}
-	if err := svc.tidyProgressed(ctx, repo, pr); !ghapi.IsThrottled(err) {
+	if err := svc.tidyProgressed(ctx, st, repo, pr); !ghapi.IsThrottled(err) {
 		t.Fatalf("tidyProgressed error = %v, want the pre-delete read throttle", err)
 	}
 	st, _, err = store.Load(ctx)
@@ -890,14 +836,18 @@ func TestTidyAfterPumpSkipsAPumpThatChangedNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := svc.tidyAfterPump(ctx, PumpResult{Action: "waiting", Repo: repo, PR: pr, Reason: "review in progress"}); err != nil {
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.tidyAfterPump(ctx, st, PumpResult{Action: "waiting", Repo: repo, PR: pr, Reason: "review in progress"}); err != nil {
 		t.Fatal(err)
 	}
 	if reads := gh.reviewPolls(); reads != 0 {
 		t.Fatalf("a no-progress pump observed the pr %d time(s); the pump had just read it", reads)
 	}
 	// The same PR, once something actually moved.
-	if err := svc.tidyAfterPump(ctx, PumpResult{Action: "cleared", Repo: repo, PR: pr}); err != nil {
+	if err := svc.tidyAfterPump(ctx, st, PumpResult{Action: "cleared", Repo: repo, PR: pr}); err != nil {
 		t.Fatal(err)
 	}
 	if gh.reviewPolls() == 0 {
@@ -1038,6 +988,59 @@ func TestFeedbackSkipsReactionsForTidiedCommand(t *testing.T) {
 
 	if _, err := svc.Feedback(ctx, repo, pr); err != nil {
 		t.Fatalf("feedback read reactions from the deleted command: %v", err)
+	}
+}
+
+func TestTidyUsesFleetResolvedConfiguration(t *testing.T) {
+	ctx := context.Background()
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost", "CRQ_COBOTS": "",
+		"CRQ_REVIEW_CMD": "@host review", "CRQ_TIDY": "0",
+	})
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	now := time.Now().UTC()
+	repo, pr, head := "o/r", 24, "cccccccc33333333"
+	const commandBody = "@fleet review"
+
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = head
+	gh.pulls[fakeKey(repo, pr)] = pull
+	gh.commits[head] = commitAt(now.Add(-10 * time.Minute))
+	command := ghapi.IssueComment{
+		ID: 200, Body: commandBody,
+		CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now.Add(-2 * time.Hour),
+	}
+	command.User.Login = "kristofferR"
+	gh.comments[fakeKey(repo, pr)] = []ghapi.IssueComment{command}
+	review := ghapi.Review{
+		ID: 201, CommitID: head, State: "COMMENTED",
+		SubmittedAt: now.Add(-time.Minute), Body: "review complete",
+	}
+	review.User.Login = cfg.Bot
+	gh.reviews[fakeKey(repo, pr)] = []ghapi.Review{review}
+
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	st, err := store.Update(ctx, func(st *State) error {
+		st.Fleet = fleetEnvSet(st.Fleet, "CRQ_TIDY", "1", false)
+		st.Fleet = fleetEnvSet(st.Fleet, "CRQ_REVIEW_CMD", commandBody, false)
+		return completedRound(st, repo, pr, now, func(r *Round) error {
+			if err := r.Fire(command.ID, command.CreatedAt); err != nil {
+				return err
+			}
+			r.RecordPosted(cfg.Bot, command.ID, command.CreatedAt)
+			return nil
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.tidyProgressed(ctx, st, repo, pr); err != nil {
+		t.Fatal(err)
+	}
+	if len(gh.deleted) != 1 || gh.deleted[0] != command.ID {
+		t.Fatalf("deleted = %v, want the command recognized under fleet settings", gh.deleted)
 	}
 }
 

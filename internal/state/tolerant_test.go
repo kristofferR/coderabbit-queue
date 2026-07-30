@@ -68,6 +68,57 @@ func TestUnknownRoundFieldsSurviveARewrite(t *testing.T) {
 	}
 }
 
+func TestRenewedDispatchClaimPreservesUnknownFields(t *testing.T) {
+	var round Round
+	if err := json.Unmarshal([]byte(`{
+	  "repo":"owner/repo","pr":1,"head":"abcdef123","phase":"queued",
+	  "dispatch":{
+	    "host":"old","token":"old","at":"2026-07-26T10:00:00Z",
+	    "heartbeat":"2026-07-26T10:00:00Z",
+	    "future_dispatch_policy":{"mode":"audit"}
+	  }
+	}`), &round); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	if ok, why := round.ClaimDispatch("new", "new", now, 3); !ok {
+		t.Fatal(why)
+	}
+	raw, err := json.Marshal(round.Dispatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"future_dispatch_policy":{"mode":"audit"}`) {
+		t.Fatalf("renewed claim dropped its future field: %s", raw)
+	}
+}
+
+func TestSetEnrollmentCarriesUnknownFields(t *testing.T) {
+	var st State
+	if err := json.Unmarshal([]byte(`{
+	  "v": 4,
+	  "enrolled": {
+	    "owner/repo": {"enabled": true, "future_enrollment_policy": {"mode": "audit"}}
+	  }
+	}`), &st); err != nil {
+		t.Fatal(err)
+	}
+
+	st.SetEnrollment("owner/repo", RepoEnrollment{Enabled: false, Reason: "paused"})
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	enrolled := back["enrolled"].(map[string]any)["owner/repo"].(map[string]any)
+	if _, ok := enrolled["future_enrollment_policy"]; !ok {
+		t.Fatalf("SetEnrollment dropped a future field: %s", out)
+	}
+}
+
 // FireSlot is nested beneath a known State field, so top-level tolerance cannot
 // carry additions made to the slot itself.
 func TestUnknownFireSlotFieldsSurviveARewrite(t *testing.T) {
@@ -244,5 +295,414 @@ func TestRewritePreservesNormalizeAndLegacyFolding(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "codex_command_id") {
 		t.Errorf("the legacy dual-write must still be emitted:\n%s", out)
+	}
+}
+
+// The fleet record and the solver record nested inside it are extensible by
+// design — their own documentation promises a field a newer binary adds
+// survives an older one reading and rewriting state. They are nested beneath a
+// member State recognises, so the top-level carrier never sees them and only
+// their own round trip can keep that promise.
+func TestUnknownFleetFieldsSurviveARewrite(t *testing.T) {
+	foreign := `{
+	  "v": 3, "rev": 7, "next_seq": 9,
+	  "fleet": {
+	    "min_interval": "90s",
+	    "future_pacing": {"burst": 3},
+	    "solver": {"model": "opus", "future_solver_flag": "sandbox"}
+	  },
+	  "repo_solver": {
+	    "owner/repo": {"effort": "high", "future_repo_flag": true}
+	  },
+	  "account": {"scope": "owner"}
+	}`
+
+	var st State
+	if err := json.Unmarshal([]byte(foreign), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Fleet.MinInterval != "90s" || st.Fleet.Solver.Model != "opus" {
+		t.Fatalf("known fields must still decode: %+v", st.Fleet)
+	}
+
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	fleet, _ := back["fleet"].(map[string]any)
+	if fleet == nil {
+		t.Fatalf("the fleet record vanished:\n%s", out)
+	}
+	pacing, _ := fleet["future_pacing"].(map[string]any)
+	if pacing == nil || pacing["burst"] != float64(3) {
+		t.Errorf("carried fleet member lost its content: %#v", fleet["future_pacing"])
+	}
+	solver, _ := fleet["solver"].(map[string]any)
+	if solver == nil || solver["future_solver_flag"] != "sandbox" {
+		t.Errorf("carried solver member was dropped: %#v", fleet["solver"])
+	}
+	repos, _ := back["repo_solver"].(map[string]any)
+	own, _ := repos["owner/repo"].(map[string]any)
+	if own == nil || own["future_repo_flag"] != true {
+		t.Errorf("a repository's own solver record dropped a member: %#v", own)
+	}
+}
+
+// The records that have been recognised the LONGEST are the ones this matters
+// most for: every schema-v4 binary knows "account", "cobots" and "dispatches",
+// so each hands the value to an ordinary decoder and drops whatever a newer
+// binary put inside it — the weekly fire log, a co-reviewer's answer, a
+// session's own detail. Being old is not the same as being closed.
+func TestUnknownMembersOfLongKnownRecordsSurviveARewrite(t *testing.T) {
+	foreign := `{
+	  "v": 4, "rev": 3, "next_seq": 2,
+	  "rounds": {
+	    "owner/repo#1": {
+	      "repo": "owner/repo", "pr": 1, "head": "abcdef123", "seq": 1,
+	      "phase": "reviewing", "enqueued_at": "2026-07-26T12:00:00Z",
+	      "cobots": {
+	        "chatgpt-codex-connector": {
+	          "command_id": 7, "answered_at": "2026-07-26T12:03:00Z",
+	          "future_bot_detail": {"verdict": "clean"}
+	        }
+	      }
+	    }
+	  },
+	  "dispatches": {
+	    "owner/repo#1": {"host": "mac", "attempts": 1, "future_session_detail": "pid=42"}
+	  },
+	  "account": {
+	    "scope": "owner",
+	    "fires": ["2026-07-26T11:00:00Z"],
+	    "future_quota_detail": {"window": "week"}
+	  }
+	}`
+
+	var st State
+	if err := json.Unmarshal([]byte(foreign), &st); err != nil {
+		t.Fatal(err)
+	}
+	round := st.Rounds["owner/repo#1"]
+	if len(st.Account.Fires) != 1 || round.Co(codexCoBotKey).CommandID != 7 {
+		t.Fatalf("known fields must still decode: %+v", st.Account)
+	}
+
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	account, _ := back["account"].(map[string]any)
+	quota, _ := account["future_quota_detail"].(map[string]any)
+	if quota == nil || quota["window"] != "week" {
+		t.Errorf("the account quota dropped a member: %#v", account)
+	}
+	rounds, _ := back["rounds"].(map[string]any)
+	written, _ := rounds["owner/repo#1"].(map[string]any)
+	cobots, _ := written["cobots"].(map[string]any)
+	codex, _ := cobots["chatgpt-codex-connector"].(map[string]any)
+	detail, _ := codex["future_bot_detail"].(map[string]any)
+	if detail == nil || detail["verdict"] != "clean" {
+		t.Errorf("a co-reviewer's entry dropped a member: %#v", codex)
+	}
+	dispatches, _ := back["dispatches"].(map[string]any)
+	claim, _ := dispatches["owner/repo#1"].(map[string]any)
+	if claim == nil || claim["future_session_detail"] != "pid=42" {
+		t.Errorf("a dispatch claim dropped a member: %#v", claim)
+	}
+}
+
+// A repository's reviewer override is nested the same way the fleet record is:
+// State recognises "repos" by name and hands each value to an ordinary decoder,
+// so only the record itself can carry a member a newer binary added inside it.
+// Without this, an old binary erased PrimaryOff on its next write and the
+// repository silently resumed metered primary reviews.
+func TestUnknownRepoOverrideFieldsSurviveARewrite(t *testing.T) {
+	foreign := `{
+	  "v": 4, "rev": 3, "next_seq": 1,
+	  "repos": {
+	    "owner/repo": {
+	      "cobots": ["codex"], "set_cobots": true,
+	      "primary_off": true,
+	      "future_reviewer_flag": {"mode": "strict"}
+	    }
+	  },
+	  "account": {"scope": "owner"}
+	}`
+
+	var st State
+	if err := json.Unmarshal([]byte(foreign), &st); err != nil {
+		t.Fatal(err)
+	}
+	ov, ok := st.RepoOverride("owner/repo")
+	if !ok || !ov.PrimaryOff || !ov.SetCoBots {
+		t.Fatalf("known fields must still decode: %+v", ov)
+	}
+
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	repos, _ := back["repos"].(map[string]any)
+	own, _ := repos["owner/repo"].(map[string]any)
+	if own == nil {
+		t.Fatalf("the override vanished:\n%s", out)
+	}
+	if own["primary_off"] != true {
+		t.Errorf("primary_off was not written back: %#v", own)
+	}
+	carried, _ := own["future_reviewer_flag"].(map[string]any)
+	if carried == nil || carried["mode"] != "strict" {
+		t.Errorf("a member this binary does not know was dropped: %#v", own["future_reviewer_flag"])
+	}
+}
+
+func TestUnknownEnrollmentFieldsSurviveARewrite(t *testing.T) {
+	foreign := `{
+	  "v": 4, "rev": 3, "next_seq": 1,
+	  "enrolled": {
+	    "owner/repo": {
+	      "enabled": false, "reason": "paused for the quarter",
+	      "future_enroll_flag": {"until": "2030-01-01"}
+	    }
+	  },
+	  "account": {"scope": "owner"}
+	}`
+
+	var st State
+	if err := json.Unmarshal([]byte(foreign), &st); err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := st.Enrollment("owner/repo")
+	if !ok || rec.Enabled || rec.Reason != "paused for the quarter" {
+		t.Fatalf("known fields must still decode: %+v", rec)
+	}
+
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	enrolled, _ := back["enrolled"].(map[string]any)
+	own, _ := enrolled["owner/repo"].(map[string]any)
+	if own == nil {
+		t.Fatalf("the enrollment record vanished:\n%s", out)
+	}
+	if own["reason"] != "paused for the quarter" {
+		t.Errorf("reason was not written back: %#v", own)
+	}
+	carried, _ := own["future_enroll_flag"].(map[string]any)
+	if carried == nil || carried["until"] != "2030-01-01" {
+		t.Errorf("a member this binary does not know was dropped: %#v", own["future_enroll_flag"])
+	}
+}
+
+func TestUnknownAutofixSwitchFieldsSurviveReplacement(t *testing.T) {
+	foreign := `{
+	  "v": 6, "rev": 3, "next_seq": 1,
+	  "repo_autofix": {
+	    "owner/repo": {
+	      "enabled": true,
+	      "future_fix_policy": {"sandbox": "strict"}
+	    }
+	  }
+	}`
+	var st State
+	if err := json.Unmarshal([]byte(foreign), &st); err != nil {
+		t.Fatal(err)
+	}
+	st.SetAutofixSwitch("owner/repo", RepoAutofixSwitch{Enabled: false, Reason: "paused"})
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	switches, _ := back["repo_autofix"].(map[string]any)
+	sw, _ := switches["owner/repo"].(map[string]any)
+	future, _ := sw["future_fix_policy"].(map[string]any)
+	if sw["enabled"] != false || future["sandbox"] != "strict" {
+		t.Fatalf("replaced switch lost known or future fields: %#v", sw)
+	}
+}
+
+// A host report is nested twice over: State recognises "host_reports" and hands
+// each record to an ordinary decoder, which in turn hands each tool probe to
+// another. So neither the map nor the report above it can carry a member a
+// newer binary added inside them — only the records themselves can.
+func TestUnknownHostReportFieldsSurviveARewrite(t *testing.T) {
+	foreign := `{
+	  "v": 4, "rev": 3, "next_seq": 1,
+	  "host_reports": {
+	    "atlas": {
+	      "host": "atlas", "version": "1.2.3", "caps": 6,
+	      "roles": ["autofix"],
+	      "tools": [{"name": "claude", "path": "/usr/bin/claude", "future_tool_flag": "sandboxed"}],
+	      "at": "2026-07-26T12:00:00Z",
+	      "future_host_flag": {"gpu": true}
+	    }
+	  },
+	  "account": {"scope": "owner"}
+	}`
+
+	var st State
+	if err := json.Unmarshal([]byte(foreign), &st); err != nil {
+		t.Fatal(err)
+	}
+	rec := st.HostReports["atlas"]
+	if rec.Version != "1.2.3" || rec.Caps != 6 || len(rec.Tools) != 1 || rec.Tools[0].Path != "/usr/bin/claude" {
+		t.Fatalf("known fields must still decode: %+v", rec)
+	}
+
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	reports, _ := back["host_reports"].(map[string]any)
+	atlas, _ := reports["atlas"].(map[string]any)
+	if atlas == nil {
+		t.Fatalf("the host report vanished:\n%s", out)
+	}
+	carried, _ := atlas["future_host_flag"].(map[string]any)
+	if carried == nil || carried["gpu"] != true {
+		t.Errorf("a report member this binary does not know was dropped: %#v", atlas["future_host_flag"])
+	}
+	tools, _ := atlas["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("the tool probes vanished: %#v", atlas["tools"])
+	}
+	tool, _ := tools[0].(map[string]any)
+	if tool["future_tool_flag"] != "sandboxed" {
+		t.Errorf("a tool member this binary does not know was dropped: %#v", tool)
+	}
+}
+
+// Round-tripping is only half of it. A host's self-report is CONSTRUCTED fresh
+// on every heartbeat, so however carefully the load preserved a newer binary's
+// members, the next report by an older service on the same machine replaced the
+// record with a value carrying none — erasing them on a timer, at both levels of
+// nesting.
+func TestAnOlderHeartbeatKeepsANewerBinarysHostMembers(t *testing.T) {
+	foreign := `{
+	  "v": 4, "rev": 3, "next_seq": 1,
+	  "host_reports": {
+	    "atlas": {
+	      "host": "atlas", "version": "9.9.9", "caps": 99,
+	      "roles": ["autofix"],
+	      "role_seen": {"autofix": "2026-07-26T11:55:00Z"},
+	      "role_tools": {"autofix": [{"name": "claude", "path": "/new/claude", "future_tool_flag": "sandboxed"}]},
+	      "at": "2026-07-26T11:55:00Z",
+	      "future_host_flag": {"gpu": true}
+	    }
+	  },
+	  "account": {"scope": "owner"}
+	}`
+
+	var st State
+	if err := json.Unmarshal([]byte(foreign), &st); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	// The same machine's older service, reporting what IT can see.
+	st.SetHostReport(HostReport{
+		Host: "atlas", Version: "1.0.0", Caps: 1, Roles: []string{"autofix"},
+		Tools: []ToolReport{{Name: "claude", Path: "/old/claude"}},
+	}, now)
+
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	reports, _ := back["host_reports"].(map[string]any)
+	atlas, _ := reports["atlas"].(map[string]any)
+	if atlas == nil {
+		t.Fatalf("the host report vanished:\n%s", out)
+	}
+	// The probe itself is the reporter's to state — a path that changed changed.
+	if atlas["version"] != "1.0.0" {
+		t.Errorf("version = %#v, want the reporting binary's own", atlas["version"])
+	}
+	carried, _ := atlas["future_host_flag"].(map[string]any)
+	if carried == nil || carried["gpu"] != true {
+		t.Errorf("a report member this binary does not know was erased by a heartbeat: %#v", atlas)
+	}
+	roleTools, _ := atlas["role_tools"].(map[string]any)
+	probed, _ := roleTools["autofix"].([]any)
+	if len(probed) != 1 {
+		t.Fatalf("the role's probes vanished: %#v", roleTools)
+	}
+	tool, _ := probed[0].(map[string]any)
+	if tool["path"] != "/old/claude" {
+		t.Errorf("path = %#v, want the fresh probe's answer", tool["path"])
+	}
+	if tool["future_tool_flag"] != "sandboxed" {
+		t.Errorf("a tool member this binary does not know was erased by a re-probe: %#v", tool)
+	}
+}
+
+// Carrying a member is not enough on its own: a record whose last RECOGNISED
+// field is cleared must still read as recorded, or the writer that treats
+// "empty" as "delete this" erases the newer binary's setting on the one path
+// the round trip exists to survive.
+func TestClearingTheLastKnownFieldKeepsACarriedMember(t *testing.T) {
+	foreign := `{
+	  "v": 4, "rev": 2, "next_seq": 1,
+	  "fleet": {
+	    "min_interval": "90s",
+	    "future_pacing": {"burst": 3},
+	    "solver": {"model": "opus", "future_solver_flag": "sandbox"}
+	  }
+	}`
+
+	var st State
+	if err := json.Unmarshal([]byte(foreign), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Fleet.Solver.Empty() {
+		t.Error("a solver record carrying a newer binary's member is not empty")
+	}
+	if st.Fleet.Empty() {
+		t.Error("fleet defaults carrying a newer binary's member are not empty")
+	}
+
+	// An operator clearing every setting THIS build knows, field by field.
+	fd := st.Fleet
+	fd.MinInterval = ""
+	fd.Solver.Model = ""
+	if fd.Solver.Empty() || fd.Empty() {
+		t.Fatalf("clearing the known fields must not empty a carrying record: %+v", fd)
+	}
+	st.SetFleetDefaults(fd, "atlas", time.Now())
+
+	out, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "future_pacing") || !strings.Contains(string(out), "future_solver_flag") {
+		t.Errorf("a carried member was erased by clearing the fields around it:\n%s", out)
 	}
 }

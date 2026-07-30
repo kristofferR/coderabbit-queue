@@ -1,6 +1,7 @@
 package state
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -64,11 +65,81 @@ func TestDispatchClaim(t *testing.T) {
 	} else if why == "" {
 		t.Error("the bound's refusal must say why")
 	}
+	if ok, why := round.ClaimDispatch("host-c", "tok-recovered", stale.Add(time.Hour+time.Second), 3); !ok {
+		t.Fatalf("the attempt bound permanently dead-lettered the head: %s", why)
+	}
+	if round.Dispatch.Attempts != 1 || round.Dispatch.Exhaustions != 1 {
+		t.Fatalf("recovered cycle = %#v, want attempt 1 after one cooldown", round.Dispatch)
+	}
 
 	// A new head is a fresh start: the previous attempt achieved something.
 	fresh := &Round{Repo: "o/r", PR: 1, Head: "bbbbbbbb2"}
 	if ok, _ := fresh.ClaimDispatch("host-c", "tok-e", stale, 3); !ok {
 		t.Error("a new head must be dispatchable again")
+	}
+}
+
+func TestNormalizePrunesExpiredDispatchIndex(t *testing.T) {
+	now := time.Now().UTC()
+	st := New()
+	st.RememberDispatch("o/r", 1, DispatchClaim{
+		Host: "dead", Token: "old", At: now.Add(-time.Hour), Heartbeat: now.Add(-time.Hour), Attempts: 3,
+	})
+	st.RememberDispatch("o/r", 2, DispatchClaim{
+		Host: "live", Token: "new", At: now.Add(-time.Minute), Heartbeat: now.Add(-time.Minute), Attempts: 1,
+	})
+
+	st.Normalize(now)
+
+	if _, ok := st.Dispatches[Key("o/r", 1)]; ok {
+		t.Fatal("expired cross-archive dispatch index survived normalization")
+	}
+	if _, ok := st.Dispatches[Key("o/r", 2)]; !ok {
+		t.Fatal("live dispatch index was pruned")
+	}
+}
+
+func TestDispatchModelFallbackRefundsProviderOutages(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	reset := now.Add(time.Hour)
+	round := &Round{Repo: "o/r", PR: 1, Head: "aaaaaaaa1"}
+	models := []string{"opus", "sonnet"}
+
+	if ok, why := round.ClaimDispatchModels("host", "one", now, 5, models); !ok {
+		t.Fatal(why)
+	}
+	if round.Dispatch.Model != "opus" || round.Dispatch.Attempts != 1 {
+		t.Fatalf("first claim = %#v, want opus attempt 1", round.Dispatch)
+	}
+	if !round.MarkDispatchUnavailable("one", reset, "provider unavailable") {
+		t.Fatal("owner could not mark its selected model unavailable")
+	}
+	round.ReleaseDispatch("one")
+	if round.Dispatch.Attempts != 0 {
+		t.Fatalf("provider outage spent an attempt: %#v", round.Dispatch)
+	}
+
+	if ok, why := round.ClaimDispatchModels("host", "two", now.Add(time.Minute), 5, models); !ok {
+		t.Fatal(why)
+	}
+	if round.Dispatch.Model != "sonnet" || round.Dispatch.Attempts != 1 {
+		t.Fatalf("fallback claim = %#v, want sonnet attempt 1", round.Dispatch)
+	}
+	if !round.MarkDispatchUnavailable("two", reset.Add(time.Hour), "provider unavailable") {
+		t.Fatal("fallback could not be marked unavailable")
+	}
+	round.ReleaseDispatch("two")
+
+	if ok, why := round.ClaimDispatchModels("host", "three", now.Add(2*time.Minute), 5, models); ok {
+		t.Fatal("all parked models should wait")
+	} else if why == "" {
+		t.Fatal("the wait must explain itself")
+	}
+	if ok, why := round.ClaimDispatchModels("host", "four", reset.Add(time.Second), 5, models); !ok {
+		t.Fatalf("expired model outage permanently blocked the head: %s", why)
+	}
+	if round.Dispatch.Model != "opus" {
+		t.Fatalf("model after reset = %q, want opus", round.Dispatch.Model)
 	}
 }
 
@@ -278,5 +349,28 @@ func TestHeartbeatSeparatesSupersededFromStolen(t *testing.T) {
 	// A claim that expired is not somebody else working: nothing is running.
 	if ok, taken := stolen.HeartbeatDispatch("tok-a", now.Add(2*DispatchTTL)); ok || taken {
 		t.Errorf("expired claim gave ok=%v taken=%v, want a benign miss", ok, taken)
+	}
+}
+
+func TestDispatchClarificationStopsOnlyTheCurrentHead(t *testing.T) {
+	now := time.Date(2026, 7, 29, 8, 0, 0, 0, time.UTC)
+	round := Round{Repo: "o/r", PR: 1, Head: "aaaaaaaa1", Phase: PhaseQueued}
+	if ok, why := round.ClaimDispatch("host", "tok", now, 3); !ok {
+		t.Fatalf("claim: %s", why)
+	}
+	if !round.MarkDispatchClarification("tok", "Which behavior should remain?") {
+		t.Fatal("clarification did not release its claim")
+	}
+	if round.DispatchHeld(now) {
+		t.Fatal("clarification left a live dispatch claim")
+	}
+	if ok, why := round.ClaimDispatch("host", "next", now.Add(time.Minute), 3); ok ||
+		!strings.Contains(why, "Which behavior should remain?") {
+		t.Fatalf("repeat claim = ok %v reason %q, want the clarification to stay terminal", ok, why)
+	}
+
+	fresh := Round{Repo: "o/r", PR: 1, Head: "bbbbbbbb2", Phase: PhaseQueued}
+	if ok, why := fresh.ClaimDispatch("host", "fresh", now.Add(time.Minute), 3); !ok {
+		t.Fatalf("new head was stopped by the old clarification: %s", why)
 	}
 }

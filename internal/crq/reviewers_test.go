@@ -3,6 +3,7 @@ package crq
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
@@ -169,6 +170,25 @@ func TestDerivationLosesNothing(t *testing.T) {
 		}
 	})
 
+	t.Run("a disabled registry primary does not return as a co-reviewer", func(t *testing.T) {
+		cfg := isolatedConfig(t, map[string]string{
+			"CRQ_BOT":           "chatgpt-codex-connector[bot]",
+			"CRQ_REQUIRED_BOTS": "chatgpt-codex-connector[bot],cursor[bot]",
+		})
+		got := cfg.ForRepo(RepoReviewers{PrimaryOff: true})
+		if _, ok := got.Primary(); ok {
+			t.Fatal("Primary() found a registry-backed primary after the repository disabled it")
+		}
+		for _, reviewer := range got.Reviewers {
+			if sameBot(reviewer.Login, cfg.Bot) {
+				t.Fatalf("reviewers = %+v, want the disabled primary absent rather than rebuilt as a co-reviewer", got.Reviewers)
+			}
+		}
+		if !hasLogin(got.RequiredBots, "cursor[bot]") {
+			t.Fatalf("required = %v, want the remaining co-reviewer to keep gating", got.RequiredBots)
+		}
+	})
+
 	t.Run("a primary that is also a registry bot is asked once", func(t *testing.T) {
 		// Appearing once in Reviewers is not enough: CoBots still drives the
 		// co-reviewer trigger post, so an entry left there means DecideFire posts
@@ -197,22 +217,20 @@ func TestDerivationLosesNothing(t *testing.T) {
 		}
 	})
 
-	t.Run("an omitted primary contributes no findings", func(t *testing.T) {
-		// Leaving the primary out of CRQ_REQUIRED_BOTS is how an operator says
-		// "do not wait for CodeRabbit here". Deriving feedback from every reviewer
-		// put it back, so its findings would return code 10 and start a new round
-		// over a reviewer nobody asked for.
+	t.Run("an optional primary still contributes findings", func(t *testing.T) {
+		// Leaving the primary out of CRQ_REQUIRED_BOTS says not to wait for it.
+		// It does not make findings from a review that DID run disappear.
 		cfg := isolatedConfig(t, map[string]string{
 			"CRQ_REQUIRED_BOTS": "chatgpt-codex-connector[bot]",
 		})
+		found := false
 		for _, login := range cfg.FeedbackBots {
 			if login == cfg.Bot {
-				t.Errorf("FeedbackBots = %v, want the omitted primary excluded", cfg.FeedbackBots)
+				found = true
 			}
 		}
-		// The co-reviewers it did ask for are still there.
-		if len(cfg.FeedbackBots) == 0 {
-			t.Error("FeedbackBots is empty; the required co-reviewer must still report")
+		if !found {
+			t.Errorf("FeedbackBots = %v, want the optional primary surfaced", cfg.FeedbackBots)
 		}
 	})
 
@@ -275,4 +293,28 @@ func TestForRepoOverridesEveryDerivedView(t *testing.T) {
 			t.Error("excluding every co-reviewer must not remove the primary")
 		}
 	})
+}
+
+// Deciding and committing are two steps, and BOTH layers that name reviewers
+// can move between them. The repository override was already revalidated inside
+// the CAS; the fleet record was not, so an operator changing the fleet primary
+// or its co-reviewers could have their save report success and still be
+// overtaken by an in-flight decision posting the commands they had just
+// replaced.
+func TestAFleetReviewerChangeInvalidatesADecisionInFlight(t *testing.T) {
+	now := time.Date(2026, 7, 28, 9, 0, 0, 0, time.UTC)
+	st := &State{}
+	cfg := firingConfig().WithFleet(st.Fleet)
+	if reviewersChanged(st, "o/repo", cfg) {
+		t.Fatal("nothing has been recorded, so nothing has changed")
+	}
+
+	st.SetFleetDefaults(FleetDefaults{CoBots: []string{"codex"}, SetCoBots: true}, "atlas", now)
+	if !reviewersChanged(st, "o/repo", cfg) {
+		t.Error("a fleet co-reviewer change must invalidate a decision made before it")
+	}
+	// And the configuration built from the new record commits against it.
+	if reviewersChanged(st, "o/repo", firingConfig().WithFleet(st.Fleet)) {
+		t.Error("the decision made from the current record must still commit")
+	}
 }

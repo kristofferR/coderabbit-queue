@@ -89,10 +89,7 @@ func TestOpenThreadsNamesAConfiguredFeedbackBot(t *testing.T) {
 	}
 }
 
-// The same, for a reviewer only the FLEET names. `crq feedback` already reads
-// its findings through the effective configuration, so listing its thread as a
-// human's would have the two commands disagree about the same thread.
-func TestOpenThreadsNamesAFleetFeedbackBot(t *testing.T) {
+func TestOpenThreadsUsesFleetConfiguredFeedbackBots(t *testing.T) {
 	gh := newFakeGitHub()
 	gh.graphQL = func(query string, _ map[string]any, out any) error {
 		if !strings.Contains(query, "reviewThreads") {
@@ -101,30 +98,28 @@ func TestOpenThreadsNamesAFleetFeedbackBot(t *testing.T) {
 		return json.Unmarshal([]byte(`{"repository":{"pullRequest":{"reviewThreads":{
 		  "pageInfo":{"hasNextPage":false,"endCursor":""},
 		  "nodes":[{"id":"T_fleet","isResolved":false,"isOutdated":false,"path":"a.go","line":1,
-		    "comments":{"totalCount":1,"nodes":[{"body":"### Nil deref\n\n**High Severity**\n\nDetail.",
-		      "author":{"login":"reviewdog[bot]"}}]}}]
+		    "comments":{"totalCount":1,"nodes":[{"body":"### Fleet finding","author":{"login":"reviewdog[bot]"}}]}}]
 		}}}}`), out)
 	}
-	ctx := context.Background()
-	cfg := firingConfig()
+	cfg, err := BuildConfig(map[string]string{"CRQ_REPO": "o/gate", "CRQ_ISSUE": "1"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	store := NewMemoryStore(cfg)
-	if _, err := store.Update(ctx, func(st *State) error {
-		st.SetFleetValue("feedback-bots", "coderabbitai[bot],reviewdog[bot]")
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.Fleet.Env = map[string]string{"CRQ_FEEDBACK_BOTS": "reviewdog[bot]"}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	svc := NewService(cfg, gh, store, nil)
 
-	threads, err := svc.OpenThreads(ctx, "o/r", 1)
+	threads, err := svc.OpenThreads(context.Background(), "o/r", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(threads) != 1 {
-		t.Fatalf("got %d threads, want the fleet reviewer's", len(threads))
-	}
-	if threads[0].Bot != "reviewdog" || threads[0].Author != "" {
-		t.Errorf("thread = %+v, want the fleet's feedback bot named as a bot", threads[0])
+	if len(threads) != 1 || threads[0].Bot != "reviewdog" || threads[0].Author != "" {
+		t.Fatalf("thread = %+v, want the fleet-configured reviewer named as a bot", threads)
 	}
 }
 

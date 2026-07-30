@@ -43,13 +43,42 @@ func joinScope(scope []string) string {
 	return strings.Join(scope, ",")
 }
 
-func dashboardLoc(cfg StoreConfig) *time.Location {
-	if cfg.Timezone != "" {
-		if loc, err := time.LoadLocation(cfg.Timezone); err == nil {
+// dashboardLoc is the zone this issue renders its times in.
+//
+// The fleet record is asked first, and this host's CRQ_TZ only stands in for it.
+// The issue is one shared artifact, so "how times are rendered" is a fleet
+// answer by nature: taken from the rendering host's startup environment alone,
+// a timezone saved from the settings page was reported as in force while every
+// sync went on writing the zone of whichever machine happened to run it.
+func dashboardLoc(st State, cfg StoreConfig) *time.Location {
+	for _, name := range []string{st.Fleet.Env["CRQ_TZ"], cfg.Timezone} {
+		if name = strings.TrimSpace(name); name == "" {
+			continue
+		}
+		if loc, err := time.LoadLocation(name); err == nil {
 			return loc
 		}
 	}
 	return time.UTC
+}
+
+// dashboardInterval is the pacing the queue is actually kept at: the fleet's
+// recorded floor when there is one, and the rendering process's own
+// configuration otherwise.
+//
+// Same reasoning as dashboardLoc, and the same failure. This issue is written by
+// whichever host happens to save state, so reading its startup environment made
+// ReadyAt, the queue's order and the "next at" headline advertise a fire time
+// Pump — which resolves the setting from the record — does not follow.
+func dashboardInterval(st State, cfg StoreConfig) time.Duration {
+	// The typed field first: it is the refinement the generic env layer is
+	// merged under, which is the precedence the configuration itself applies.
+	for _, text := range []string{st.Fleet.MinInterval, st.Fleet.Env["CRQ_MIN_INTERVAL"]} {
+		if d, err := time.ParseDuration(strings.TrimSpace(text)); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return cfg.MinInterval
 }
 
 func fmtStamp(t *time.Time, loc *time.Location) string {
@@ -272,10 +301,9 @@ func hostCell(writer string) string {
 // RenderDashboard renders the human-facing dashboard for the current state:
 // rounds by phase instead of v2's queue/fired/awaiting maps.
 func RenderDashboard(st State, cfg StoreConfig) string {
-	cfg = cfg.withFleet(st)
-	loc := dashboardLoc(cfg)
+	loc := dashboardLoc(st, cfg)
 	now := time.Now().UTC()
-	queue := st.Queue(now, cfg.MinInterval)
+	queue := st.Queue(now, dashboardInterval(st, cfg))
 	inFlight := inFlightRounds(st)
 	held := heldRounds(st)
 	slot := st.SlotRound()
@@ -332,8 +360,12 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 	} else {
 		fmt.Fprintf(&b, "| **CodeRabbit quota** | ✅ not currently blocked |\n")
 	}
-	if cfg.CoReviewers != "" || hasCoReviewerOverrides(st) {
-		fmt.Fprintf(&b, "| **Co-reviewers** | %s |\n", coReviewerCell(st, cfg.CoReviewers))
+	coReviewers := cfg.CoReviewers
+	if cfg.ResolveCoReviewers != nil {
+		coReviewers = cfg.ResolveCoReviewers(st.Fleet)
+	}
+	if coReviewers != "" {
+		fmt.Fprintf(&b, "| **Co-reviewers** | %s |\n", coReviewerCell(st, coReviewers))
 	}
 	fmt.Fprintf(&b, "| **Last review fired** | %s |\n", fmtStamp(st.LastFired, loc))
 	if st.Autofix.Unhealthy() {
@@ -427,7 +459,6 @@ func RenderDashboard(st State, cfg StoreConfig) string {
 // count is the WHOLE queue, cooling-down rounds included: a state whose only
 // work is not yet fire-eligible is queued, never idle.
 func RenderTitle(st State, cfg StoreConfig) string {
-	cfg = cfg.withFleet(st)
 	now := time.Now().UTC()
 	queue := len(st.Queue(now, cfg.MinInterval))
 	held := len(heldRounds(st))
@@ -485,14 +516,14 @@ func cell(v string) string {
 // labelled, and the repositories that differ are named beside it.
 func coReviewerCell(st State, fleet string) string {
 	overrides := make([]string, 0, len(st.Repos))
-	for repo, settings := range st.Repos {
-		if !settings.SetCoBots {
+	for repo, override := range st.Repos {
+		if !override.SetCoBots {
 			continue
 		}
 		overrides = append(overrides, repo)
 	}
 	if len(overrides) == 0 {
-		return dash(fleet) + " _(fleet default)_"
+		return fleet + " _(fleet default)_"
 	}
 	sort.Strings(overrides)
 	// Named, not just counted: "3 repositories differ" sends the reader to the
@@ -503,17 +534,8 @@ func coReviewerCell(st State, fleet string) string {
 	if len(listed) > show {
 		listed, suffix = listed[:show], fmt.Sprintf(" +%d more", len(overrides)-show)
 	}
-	return fmt.Sprintf("%s _(fleet default; %s override%s)_", dash(fleet),
+	return fmt.Sprintf("%s _(fleet default; %s override%s)_", fleet,
 		strings.Join(listed, ", ")+suffix, plural(len(overrides)))
-}
-
-func hasCoReviewerOverrides(st State) bool {
-	for _, settings := range st.Repos {
-		if settings.SetCoBots {
-			return true
-		}
-	}
-	return false
 }
 
 func plural(n int) string {

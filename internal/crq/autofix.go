@@ -22,34 +22,40 @@ import (
 //go:embed dispatch/fix-prompt.txt
 var fixPrompt string
 
-// HostOnlyAutofixWarning labels a preview built from this host's own
-// configuration because fleet state could not be read. Shared so every path
-// that can only offer that answer says the same thing about it.
-const HostOnlyAutofixWarning = "GitHub fleet state is unavailable; this host-only preview may differ from an authenticated install"
-
 // AutofixInstall describes what an install would do, so --dry-run can print it and
 // the result can be reported.
 type AutofixInstall struct {
-	Platform     string `json:"platform"`
-	Prompt       string `json:"prompt"`
-	Wrapper      string `json:"wrapper"`
-	Unit         string `json:"unit"`
-	LogDir       string `json:"log_dir"`
-	Workspace    string `json:"workspace,omitempty"`
-	Agent        string `json:"agent"`
-	PolicySource string `json:"policy_source"`
-	Warning      string `json:"warning,omitempty"`
-	// Invocation is the exact command the wrapper runs, so --dry-run shows what
-	// the fix session will actually be — including the model, which is the
-	// agent's business and not crq's to hardcode.
-	Invocation string   `json:"invocation,omitempty"`
-	Repos      []string `json:"repos"`
-	Commands   []string `json:"commands"`
+	Platform string `json:"platform"`
+	Prompt   string `json:"prompt"`
+	// Binary is the crq the unit runs. There is no wrapper script and no
+	// session script: the unit runs `crq watch -- crq fix-session`, so one
+	// binary starts the watcher and one binary runs each session. Two generated
+	// bash files used to sit in between, which meant three things had to agree
+	// about the configuration and two of them were text on disk no test ever
+	// ran — a setting reached a fleet only after every host reinstalled, and
+	// nothing said which had not.
+	Binary    string `json:"binary"`
+	Unit      string `json:"unit"`
+	LogDir    string `json:"log_dir"`
+	Workspace string `json:"workspace,omitempty"`
+	Agent     string `json:"agent"`
+	// Invocation is the exact command the unit runs, so --dry-run shows it.
+	Invocation string `json:"invocation,omitempty"`
+	// AgentArgs are the operator's extra arguments, passed to the session
+	// through the unit's environment.
+	AgentArgs []string `json:"agent_args,omitempty"`
+	Repos     []string `json:"repos"`
+	Commands  []string `json:"commands"`
 	// Retire is the pre-rename watcher this install shuts down, when one is
 	// still on disk. Empty when there is nothing to retire.
-	Retire  string `json:"retire,omitempty"`
-	DryRun  bool   `json:"dry_run,omitempty"`
-	Started bool   `json:"started,omitempty"`
+	Retire string `json:"retire,omitempty"`
+	DryRun bool   `json:"dry_run,omitempty"`
+	// SkipAuthCheck installs without proving the service can authenticate. For
+	// the one case the check cannot decide: a macOS host reached over SSH,
+	// where gh's keychain is readable by the GUI-domain agent and not by this
+	// session.
+	SkipAuthCheck bool `json:"skip_auth_check,omitempty"`
+	Started       bool `json:"started,omitempty"`
 }
 
 // InstallAutofix sets up unattended autofix: the prompt, a wrapper, a
@@ -60,49 +66,13 @@ type AutofixInstall struct {
 // files, remember `loginctl enable-linger`, and get the environment right — and
 // a setup people get wrong is a setup that silently does nothing, which is the
 // failure this whole feature is about.
-func (s *Service) InstallAutofix(ctx context.Context, agent string, agentArgs []string, repos []string, dryRun bool) (AutofixInstall, error) {
+func (s *Service) InstallAutofix(ctx context.Context, agent string, agentArgs []string, repos []string, dryRun, skipAuth bool) (AutofixInstall, error) {
 	effectiveDryRun := dryRun || s.cfg.DryRun
-	st, _, err := s.store.Load(ctx)
-	if err != nil {
-		// A dry run is documented as a preview, so a state ref this host cannot
-		// read downgrades it to the host's own plan rather than failing — the
-		// warning is what keeps it from being mistaken for the fleet's. A real
-		// install has no such fallback: writing a unit from policy the fleet may
-		// disagree with is the divergence this whole mechanism exists to end.
-		if !effectiveDryRun {
-			return AutofixInstall{}, err
-		}
-		plan, perr := AutofixPlan(s.cfg, agent, agentArgs, repos, true)
-		if perr != nil {
-			return AutofixInstall{}, perr
-		}
-		plan.PolicySource = "host"
-		plan.Warning = HostOnlyAutofixWarning
-		return plan, nil
-	}
-	effective := s.fleetCfg(st)
-	plan, err := AutofixPlan(effective, agent, agentArgs, repos, effectiveDryRun)
-	plan.PolicySource = "fleet"
+	plan, err := AutofixPlan(s.cfg, agent, agentArgs, repos, effectiveDryRun, skipAuth)
 	if err != nil || effectiveDryRun {
 		return plan, err
 	}
-	return s.applyAutofix(ctx, plan, s.autofixFallbackConfig(repos), repos)
-}
-
-// autofixFallbackConfig is what the unit should carry for settings the fleet may
-// later unset. Fleet policy is overlaid from state at runtime; baking today's
-// effective values into the service would make them survive after that policy
-// was removed. Explicit install repositories remain this host's chosen fallback.
-func (s *Service) autofixFallbackConfig(repos []string) Config {
-	cfg := s.cfg
-	if len(repos) == 0 {
-		return cfg
-	}
-	cfg.AllowRepos = make(map[string]bool, len(repos))
-	for _, repo := range repos {
-		cfg.AllowRepos[repo] = true
-	}
-	return cfg
+	return s.applyAutofix(ctx, plan)
 }
 
 // AutofixPlan computes what an install WOULD write and run, from configuration
@@ -112,7 +82,7 @@ func (s *Service) autofixFallbackConfig(repos []string) Config {
 // as a preview and must work for somebody who has not authenticated yet: the
 // plan reads no GitHub state, so requiring a token to see it turned the one
 // command for inspecting the setup into another thing to set up first.
-func AutofixPlan(cfg Config, agent string, agentArgs []string, repos []string, dryRun bool) (AutofixInstall, error) {
+func AutofixPlan(cfg Config, agent string, agentArgs []string, repos []string, dryRun, skipAuth bool) (AutofixInstall, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return AutofixInstall{}, err
@@ -141,23 +111,20 @@ func AutofixPlan(cfg Config, agent string, agentArgs []string, repos []string, d
 		// records: map order would make two identical installs disagree.
 		repos = sortedRepoList(cfg.AllowRepos)
 	}
-	if len(repos) == 0 {
-		return AutofixInstall{}, fmt.Errorf("no repositories to watch: pass them, or set CRQ_REPOS")
-	}
-
 	// The service writes its output here. systemd refuses to start a unit whose
 	// StandardOutput path cannot be opened (209/STDOUT), so the directory has to
 	// exist before the unit does — a service that will not start is exactly the
 	// silent nothing this command exists to prevent.
 	logDir := filepath.Join(home, ".local", "state", "crq")
 	plan := AutofixInstall{
-		Platform: runtime.GOOS,
-		LogDir:   logDir,
-		Prompt:   filepath.Join(home, ".local", "share", "crq", "fix-prompt.txt"),
-		Wrapper:  filepath.Join(home, ".local", "bin", "crq-autofix"),
-		Agent:    agent,
-		Repos:    repos,
-		DryRun:   dryRun,
+		Platform:      runtime.GOOS,
+		LogDir:        logDir,
+		Prompt:        filepath.Join(home, ".local", "share", "crq", "fix-prompt.txt"),
+		Agent:         agent,
+		AgentArgs:     agentArgs,
+		Repos:         repos,
+		DryRun:        dryRun,
+		SkipAuthCheck: skipAuth,
 	}
 	if root := strings.TrimSpace(cfg.WorkspaceRoot); root != "" {
 		plan.Workspace, err = filepath.Abs(root)
@@ -198,32 +165,37 @@ func AutofixPlan(cfg Config, agent string, agentArgs []string, repos []string, d
 			plan.Commands = append([]string{"systemctl --user disable --now crq-drain"}, plan.Commands...)
 		}
 	}
-	invocation, err := agentInvocation(agent, plan.Prompt, agentArgs)
+	self, err := os.Executable()
 	if err != nil {
-		return plan, err
+		return plan, fmt.Errorf("resolving the crq binary: %w", err)
 	}
-	plan.Invocation = invocation
-
+	if resolved, rerr := filepath.EvalSymlinks(self); rerr == nil {
+		self = resolved
+	}
+	plan.Binary = self
+	// What the unit runs, shown by --dry-run: one binary starting the watcher,
+	// and the same binary running each session.
+	plan.Invocation = strings.Join(autofixArgv(plan), " ")
 	return plan, nil
 }
 
+// autofixArgv is the unit's command line: the watcher, told to dispatch each
+// fix session by running crq again.
+func autofixArgv(plan AutofixInstall) []string {
+	return []string{plan.Binary, "watch", "--", plan.Binary, "fix-session"}
+}
+
 // applyAutofix writes the plan to disk and starts the service.
-func (s *Service) applyAutofix(ctx context.Context, plan AutofixInstall, cfg Config, repos []string) (AutofixInstall, error) {
-	invocation, logDir := plan.Invocation, plan.LogDir
-	self, err := os.Executable()
-	if err != nil {
-		return plan, err
-	}
-	if err := autofixCanAuthenticate(ctx); err != nil {
-		return plan, err
+func (s *Service) applyAutofix(ctx context.Context, plan AutofixInstall) (AutofixInstall, error) {
+	logDir := plan.LogDir
+	if !plan.SkipAuthCheck {
+		if err := serviceCanAuthenticate(ctx, "autofix"); err != nil {
+			return plan, err
+		}
 	}
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return plan, err
 	}
-
-	// Known agents receive their non-interactive flags. Any other executable is
-	// treated as a self-contained prompt-taking wrapper.
-	wrapper := autofixWrapper(self, invocation, repos)
 
 	for _, f := range []struct {
 		path string
@@ -231,8 +203,7 @@ func (s *Service) applyAutofix(ctx context.Context, plan AutofixInstall, cfg Con
 		mode os.FileMode
 	}{
 		{plan.Prompt, fixPrompt, 0o644},
-		{plan.Wrapper, wrapper, 0o755},
-		{plan.Unit, autofixUnitFor(cfg, plan), 0o644},
+		{plan.Unit, s.autofixUnit(plan), 0o644},
 	} {
 		if err := os.MkdirAll(filepath.Dir(f.path), 0o755); err != nil {
 			return plan, err
@@ -279,23 +250,6 @@ func (s *Service) applyAutofix(ctx context.Context, plan AutofixInstall, cfg Con
 	}
 	plan.Started = true
 	return plan, nil
-}
-
-func autofixWrapper(self, invocation string, repos []string) string {
-	watchArgs := make([]string, 0, len(repos))
-	for _, repo := range repos {
-		watchArgs = append(watchArgs, shellQuote(repo))
-	}
-	watch := strings.Join(watchArgs, " ")
-	if watch != "" {
-		watch += " "
-	}
-	return fmt.Sprintf(`#!/usr/bin/env bash
-# Installed by "crq autofix install". Runs autofix: crq decides, and a
-# fix session is started for each PR that needs one.
-set -uo pipefail
-exec %s watch %s-- %s
-`, shellQuote(self), watch, invocation)
 }
 
 func writeAutofixFile(path, body string, mode os.FileMode) error {
@@ -361,7 +315,7 @@ func launchdJobAbsent(command string, output []byte) bool {
 	return strings.Contains(text, "no such process") || strings.Contains(text, "could not find service")
 }
 
-// autofixCanAuthenticate reports whether the SERVICE will find a GitHub
+// serviceCanAuthenticate reports whether the named SERVICE will find a GitHub
 // credential — which is not the same question as whether this shell has one.
 //
 // crq resolves a token from GITHUB_TOKEN/GH_TOKEN or `gh auth token`, and the
@@ -371,7 +325,15 @@ func launchdJobAbsent(command string, output []byte) bool {
 // nothing this command exists to prevent. Writing the token into the unit is not
 // the answer — that file is readable by every local user — so the credential has
 // to be one the service can resolve itself.
-func autofixCanAuthenticate(ctx context.Context) error {
+// A macOS host is the case this cannot decide for itself: gh keeps its token in
+// the login keychain, which a launchd agent in the GUI domain can read and an
+// SSH session cannot. Over SSH, `gh auth status` there reports the account by
+// name and the token as invalid — which is also exactly what a genuinely
+// expired token looks like. Since the two are indistinguishable from outside
+// that session, the escape hatch is an explicit flag rather than a guess: an
+// operator typing --skip-auth-check has made a claim, which is not the silent
+// nothing this check exists to prevent.
+func serviceCanAuthenticate(ctx context.Context, service string) error {
 	if path := ConfigPath(); path != "" {
 		values, err := readEnvFile(path)
 		if err == nil {
@@ -389,7 +351,7 @@ func autofixCanAuthenticate(ctx context.Context) error {
 	if out, err := cmd.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
 		return nil
 	}
-	return fmt.Errorf("the autofix service would have no GitHub credential: a service does not inherit this shell's GITHUB_TOKEN/GH_TOKEN. Run 'gh auth login', or put the token in %s, then install again", ConfigPath())
+	return fmt.Errorf("the %s service would have no GitHub credential: a service does not inherit this shell's GITHUB_TOKEN/GH_TOKEN. Run 'gh auth login', or put the token in %s, then install again", service, ConfigPath())
 }
 
 // autofixPath is the PATH the service runs with: this shell's, plus wherever crq
@@ -410,7 +372,7 @@ func autofixPath(plan AutofixInstall) string {
 		seen[dir] = true
 		dirs = append(dirs, dir)
 	}
-	paths := []string{plan.Wrapper, plan.Agent}
+	paths := []string{plan.Binary, plan.Agent}
 	if self, err := os.Executable(); err == nil {
 		paths = append(paths, self) // the session runs `crq resolve` itself
 	}
@@ -436,105 +398,66 @@ func autofixPath(plan AutofixInstall) string {
 // wrong still reports Started, and the watcher then loads a different queue, or
 // none.
 func (s *Service) autofixEnv(plan AutofixInstall) map[string]string {
-	return autofixEnvFor(s.cfg, plan)
-}
-
-func autofixEnvFor(cfg Config, plan AutofixInstall) map[string]string {
-	// Only an operator's OWN list travels. When it was derived from who reviews,
-	// writing the currently derived logins out makes the service read them back
-	// as an explicit choice, frozen: a later fleet `cobots` change that enables
-	// an optional reviewer would then never reach the surfaced set, and a round
-	// could converge without ever showing that bot's findings. Empty is the
-	// environment's "unset" — the same reasoning, and the same encoding, as the
-	// implicit co-reviewer trigger below.
-	feedbackBots := ""
-	if cfg.FeedbackBotsExplicit {
-		feedbackBots = strings.Join(cfg.FeedbackBots, ",")
-	}
 	env := map[string]string{
-		"CRQ_REPOS": strings.Join(sortedRepoList(cfg.AllowRepos), ","),
+		"CRQ_REPOS": strings.Join(plan.Repos, ","),
 		// The denylist travels with the allowlist. Carrying one and not the other
 		// installs a service that watches a repository the operator excluded.
-		"CRQ_EXCLUDE":                strings.Join(sortedRepoList(cfg.ExcludeRepos), ","),
-		"CRQ_SCOPE":                  strings.Join(cfg.Scope, ","),
-		"CRQ_WATCH_INTERVAL":         cfg.WatchInterval.String(),
-		"CRQ_DISPATCH_MAX_ATTEMPTS":  fmt.Sprint(cfg.DispatchMaxAttempts),
-		"CRQ_DISPATCH_CONCURRENCY":   fmt.Sprint(cfg.DispatchConcurrency),
-		"CRQ_DISPATCH_FORKS":         strconv.FormatBool(cfg.DispatchForks),
-		"CRQ_AUTOREVIEW_SKIP_MARKER": cfg.SkipMarker,
-		"CRQ_BOT":                    cfg.Bot,
-		"CRQ_REQUIRED_BOTS":          strings.Join(cfg.RequiredBots, ","),
-		"CRQ_FEEDBACK_BOTS":          feedbackBots,
-		"CRQ_REVIEW_CMD":             cfg.ReviewCommand,
-		"CRQ_RATELIMIT_CMD":          cfg.RateLimitCommand,
-		"CRQ_RL_MARKER":              cfg.RateLimitMarker,
-		"CRQ_CAL_REPLY_MARKER":       cfg.CalibrationMarker,
-		"CRQ_REVIEW_DONE_MARKER":     cfg.ReviewDoneMarker,
-		"CRQ_COMPLETION_MARKER":      cfg.CompletionMarker,
-		"CRQ_MIN_INTERVAL":           cfg.MinInterval.String(),
-		"CRQ_INFLIGHT_TIMEOUT":       cfg.InflightTimeout.String(),
-		"CRQ_POLL":                   cfg.PollInterval.String(),
-		"CRQ_FEEDBACK_WAIT_TIMEOUT":  cfg.FeedbackWaitTimeout.String(),
-		"CRQ_SETTLE":                 cfg.SettleWindow.String(),
+		"CRQ_EXCLUDE":                strings.Join(sortedRepoList(s.cfg.ExcludeRepos), ","),
+		"CRQ_SCOPE":                  strings.Join(s.cfg.Scope, ","),
+		"CRQ_WATCH_INTERVAL":         s.cfg.WatchInterval.String(),
+		"CRQ_DISPATCH_MAX_ATTEMPTS":  fmt.Sprint(s.cfg.DispatchMaxAttempts),
+		"CRQ_DISPATCH_CONCURRENCY":   fmt.Sprint(s.cfg.DispatchConcurrency),
+		"CRQ_DISPATCH_FORKS":         strconv.FormatBool(s.cfg.DispatchForks),
+		"CRQ_AUTOREVIEW_SKIP_MARKER": s.cfg.SkipMarker,
+		// The session reads these; there is no script holding them any more.
+		"CRQ_FIX_AGENT": plan.Agent,
+		// Quoted, not space-joined: the session splits this back into argv, and
+		// an argument the operator quoted once must not be split a second time.
+		"CRQ_FIX_ARGS":              JoinArgv(plan.AgentArgs),
+		"CRQ_FIX_PROMPT_FILE":       plan.Prompt,
+		"CRQ_BOT":                   s.cfg.Bot,
+		"CRQ_REQUIRED_BOTS":         strings.Join(s.cfg.RequiredBots, ","),
+		"CRQ_FEEDBACK_BOTS":         "",
+		"CRQ_REVIEW_CMD":            s.cfg.ReviewCommand,
+		"CRQ_RATELIMIT_CMD":         s.cfg.RateLimitCommand,
+		"CRQ_RL_MARKER":             s.cfg.RateLimitMarker,
+		"CRQ_CAL_REPLY_MARKER":      s.cfg.CalibrationMarker,
+		"CRQ_REVIEW_DONE_MARKER":    s.cfg.ReviewDoneMarker,
+		"CRQ_COMPLETION_MARKER":     s.cfg.CompletionMarker,
+		"CRQ_MIN_INTERVAL":          s.cfg.MinInterval.String(),
+		"CRQ_INFLIGHT_TIMEOUT":      s.cfg.InflightTimeout.String(),
+		"CRQ_POLL":                  s.cfg.PollInterval.String(),
+		"CRQ_FEEDBACK_WAIT_TIMEOUT": s.cfg.FeedbackWaitTimeout.String(),
+		"CRQ_SETTLE":                s.cfg.SettleWindow.String(),
 		// The quota timings belong here for the same reason as every other
 		// setting: the service does not inherit the shell that installed it. A
 		// deliberately longer fallback set only in that shell was folded into
 		// this config, written into no unit, and then silently replaced by the
 		// default — so the watcher retried a review command earlier than
 		// configured for every account block it could not parse a window from.
-		"CRQ_CALIBRATE_TTL": cfg.CalibrationTTL.String(),
-		"CRQ_RL_FALLBACK":   cfg.RateLimitFallback.String(),
+		"CRQ_CALIBRATE_TTL": s.cfg.CalibrationTTL.String(),
+		"CRQ_RL_FALLBACK":   s.cfg.RateLimitFallback.String(),
 		"PATH":              autofixPath(plan),
 	}
-	if cfg.RateLimitCoDegrade {
+	if s.cfg.FeedbackBotsExplicit {
+		env["CRQ_FEEDBACK_BOTS"] = strings.Join(s.cfg.FeedbackBots, ",")
+	}
+	if s.cfg.RateLimitCoDegrade {
 		env["CRQ_RL_CO_DEGRADE"] = "1"
 	} else {
 		env["CRQ_RL_CO_DEGRADE"] = "0"
 	}
-	coNames := make([]string, 0, len(cfg.CoBots))
-	for _, co := range cfg.CoBots {
+	coNames := make([]string, 0, len(s.cfg.CoBots))
+	for _, co := range s.cfg.CoBots {
 		coNames = append(coNames, co.Name)
-	}
-	written := map[string]bool{}
-	writeCoBot := func(co CoBotConfig) {
-		key := strings.ToUpper(co.Name)
-		if written[key] {
-			return
-		}
-		written[key] = true
-		prefix := "CRQ_COBOT_" + key
+		prefix := "CRQ_COBOT_" + strings.ToUpper(co.Name)
 		env[prefix+"_CMD"] = co.Command
-		// The explicitness bit has to survive the install, not just the mode. An
-		// implicit trigger is the registry default for how the bot is REQUIRED,
-		// recomputed whenever that changes; writing it out as a value makes the
-		// service read it back as an operator's explicit choice, and a later
-		// fleet `required-bots` change can then no longer promote the bot to its
-		// required trigger — leaving a required reviewer that is never commanded
-		// and a round that waits for it forever. Empty is the environment's
-		// "unset", and it is written rather than omitted so an inherited variable
-		// cannot supply an explicitness the installing host did not have.
-		trigger := ""
+		env[prefix+"_TRIGGER"] = ""
 		if co.TriggerExplicit {
-			trigger = string(co.Trigger)
+			env[prefix+"_TRIGGER"] = string(co.Trigger)
 		}
-		env[prefix+"_TRIGGER"] = trigger
 		env[prefix+"_REQUIRED"] = strconv.FormatBool(co.Required)
 		env[prefix+"_GRACE"] = co.SelfHealGrace.String()
-	}
-	// The enabled entries first: they carry the requiredness this host resolved,
-	// and with it the trigger mode that requiredness implies.
-	for _, co := range cfg.CoBots {
-		writeCoBot(co)
-	}
-	// Then the registry-wide fallbacks for the bots this host has switched off.
-	// A command, trigger or grace set for one of those is still the value this
-	// host would drive it with the moment something enables it — a per-repo
-	// reviewer override, or a fleet `cobots` change that names the bot without
-	// naming its per-bot keys. Carrying only the enabled set left the service
-	// running that bot on registry defaults while the installing shell's preview
-	// showed the host's own.
-	for _, co := range cfg.KnownCoBots {
-		writeCoBot(co)
 	}
 	// Explicitly carry an empty set: omitting this key would re-enable every
 	// default co-reviewer when the service starts.
@@ -544,7 +467,7 @@ func autofixEnvFor(cfg Config, plan AutofixInstall) map[string]string {
 	// or dispatch silently falls back to another filesystem.
 	workspace := plan.Workspace
 	if workspace == "" {
-		workspace = cfg.WorkspaceRoot
+		workspace = s.cfg.WorkspaceRoot
 	}
 	if workspace != "" {
 		env["CRQ_WORKSPACE"] = workspace
@@ -556,28 +479,24 @@ func autofixEnvFor(cfg Config, plan AutofixInstall) map[string]string {
 	// the dashboard, and the PR the account quota is probed on. Without the first
 	// two, the watcher cannot even load state — or loads a queue nobody else is
 	// using, which looks exactly like an idle fleet.
-	if cfg.GateRepo != "" {
-		env["CRQ_REPO"] = cfg.GateRepo
+	if s.cfg.GateRepo != "" {
+		env["CRQ_REPO"] = s.cfg.GateRepo
 	}
-	if cfg.StateRef != "" {
-		env["CRQ_STATE_REF"] = cfg.StateRef
+	if s.cfg.StateRef != "" {
+		env["CRQ_STATE_REF"] = s.cfg.StateRef
 	}
-	if cfg.DashboardIssue > 0 {
-		env["CRQ_ISSUE"] = fmt.Sprint(cfg.DashboardIssue)
+	if s.cfg.DashboardIssue > 0 {
+		env["CRQ_ISSUE"] = fmt.Sprint(s.cfg.DashboardIssue)
 	}
-	if cfg.CalibrationPR > 0 {
-		env["CRQ_CAL_PR"] = fmt.Sprint(cfg.CalibrationPR)
+	if s.cfg.CalibrationPR > 0 {
+		env["CRQ_CAL_PR"] = fmt.Sprint(s.cfg.CalibrationPR)
 	}
 	return env
 }
 
 // autofixUnit renders the platform's service definition.
 func (s *Service) autofixUnit(plan AutofixInstall) string {
-	return autofixUnitFor(s.cfg, plan)
-}
-
-func autofixUnitFor(cfg Config, plan AutofixInstall) string {
-	env := autofixEnvFor(cfg, plan)
+	env := s.autofixEnv(plan)
 	// Sorted: the unit is a file on disk that a re-install rewrites, and map order
 	// would make every rewrite a different file for the same configuration.
 	keys := make([]string, 0, len(env))
@@ -596,7 +515,7 @@ func autofixUnitFor(cfg Config, plan AutofixInstall) string {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 	<key>Label</key><string>no.kristofferr.crq-autofix</string>
-	<key>ProgramArguments</key><array><string>%s</string></array>
+	<key>ProgramArguments</key><array>%s</array>
 	<key>EnvironmentVariables</key><dict>
 %s	</dict>
 	<key>RunAtLoad</key><true/>
@@ -604,7 +523,7 @@ func autofixUnitFor(cfg Config, plan AutofixInstall) string {
 	<key>StandardOutPath</key><string>%s/autofix.log</string>
 	<key>StandardErrorPath</key><string>%s/autofix.err</string>
 </dict></plist>
-`, html.EscapeString(plan.Wrapper), entries.String(),
+`, plistArgv(autofixArgv(plan)), entries.String(),
 			html.EscapeString(logDir), html.EscapeString(logDir))
 	}
 	var lines strings.Builder
@@ -631,7 +550,7 @@ StandardError=append:%s/autofix.err
 
 [Install]
 WantedBy=default.target
-`, lines.String(), systemdExecWord(plan.Wrapper), logDir, logDir)
+`, lines.String(), systemdExecLine(autofixArgv(plan)), logDir, logDir)
 }
 
 // systemdExecWord makes one literal word for an ExecStart command line.
@@ -640,36 +559,6 @@ WantedBy=default.target
 func systemdExecWord(word string) string {
 	word = strings.NewReplacer("$", "$$", "%", "%%").Replace(word)
 	return strconv.Quote(word)
-}
-
-// agentInvocation renders the shell words that run one fix session.
-//
-// crq knows how to CALL the agents it ships support for, and nothing about which
-// model they should use — that belongs in the agent's own configuration or in
-// --agent-args, not baked into a queue. Both known agents are given the two
-// things a session needs: the prompt, and permission to act without a human
-// there to approve each step.
-func agentInvocation(agent, promptPath string, extra []string) (string, error) {
-	quoted := make([]string, 0, len(extra))
-	for _, a := range extra {
-		quoted = append(quoted, shellQuote(a))
-	}
-	args := strings.Join(quoted, " ")
-	switch filepath.Base(agent) {
-	case "claude":
-		// stream-json so the session log fills as it works rather than only at
-		// the end, where a hung session would leave an empty file.
-		return fmt.Sprintf(`%s -p "$(cat %s)" --permission-mode bypassPermissions --output-format stream-json --verbose %s`,
-			shellQuote(agent), shellQuote(promptPath), args), nil
-	case "codex":
-		// exec is codex's non-interactive form; the prompt is its final
-		// positional argument. --skip-git-repo-check because the session runs in
-		// a detached worktree crq created.
-		return fmt.Sprintf(`%s exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox %s "$(cat %s)"`,
-			shellQuote(agent), args, shellQuote(promptPath)), nil
-	default:
-		return fmt.Sprintf(`%s %s "$(cat %s)"`, shellQuote(agent), args, shellQuote(promptPath)), nil
-	}
 }
 
 // shellQuote makes one literal POSIX shell word. The generated wrapper is Bash,
@@ -689,4 +578,22 @@ func sortedRepoList(set map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// plistArgv renders a command line as launchd's ProgramArguments entries.
+func plistArgv(argv []string) string {
+	var b strings.Builder
+	for _, a := range argv {
+		fmt.Fprintf(&b, "<string>%s</string>", html.EscapeString(a))
+	}
+	return b.String()
+}
+
+// systemdExecLine renders a command line for ExecStart, one literal word each.
+func systemdExecLine(argv []string) string {
+	words := make([]string, 0, len(argv))
+	for _, a := range argv {
+		words = append(words, systemdExecWord(a))
+	}
+	return strings.Join(words, " ")
 }

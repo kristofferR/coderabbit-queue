@@ -110,6 +110,186 @@ func TestWatchDispatchesAFixSessionWithItsContext(t *testing.T) {
 	})
 }
 
+func TestStandaloneDispatchKeepsClarificationTerminal(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.AllowRepos = map[string]bool{repo: true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	report := NextReport{Repo: repo, PR: 5, Head: sha, Action: "fix"}
+	seedRound(t, store, cfg, repo, 5, sha, PhaseQueued, time.Now().UTC(), 0)
+
+	script := filepath.Join(t.TempDir(), "session.sh")
+	body := "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"result\",\"result\":\"" +
+		clarificationMarker + " Which behavior should remain?\"}'\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := newDispatchPool(0)
+	if ok, why := svc.startDispatch(context.Background(), WatchOptions{
+		Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 3,
+	}, pool, report); !ok {
+		t.Fatalf("dispatch did not run: %s", why)
+	}
+	pool.wait()
+
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	round := st.Round(repo, 5)
+	if round == nil || round.Dispatch == nil ||
+		round.Dispatch.Clarification != "Which behavior should remain?" {
+		t.Fatalf("clarification marker = %#v, want the question retained on this head", round)
+	}
+	if ok, why, byDesign := svc.claimDispatch(context.Background(), report, "again", 3); ok ||
+		!byDesign || !strings.Contains(why, "Which behavior should remain?") {
+		t.Fatalf("repeat dispatch = ok %v byDesign %v reason %q", ok, byDesign, why)
+	}
+}
+
+func TestProviderOutageUsesFallbackWithoutSpendingAnAttempt(t *testing.T) {
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.WorkspaceRoot = t.TempDir()
+	cfg.AllowRepos = map[string]bool{repo: true}
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	store := NewMemoryStore(cfg)
+	switchable := &loadSwitchStore{StateStore: store}
+	svc := NewService(cfg, gh, switchable, nil)
+	if _, err := svc.SetSolver(context.Background(), repo, SolverChange{
+		Models: []string{"opus", "sonnet"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, repo, 18, sha, PhaseQueued, time.Now().UTC(), 0)
+
+	record := filepath.Join(t.TempDir(), "models")
+	script := filepath.Join(t.TempDir(), "agent.sh")
+	body := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$CRQ_FIX_MODEL\" >> " + record + "\n" +
+		"if test \"$CRQ_FIX_MODEL\" = opus; then\n" +
+		"  printf '%s\\n' '{\"type\":\"result\",\"error\":\"rate_limit\",\"resetsAt\":4102444800}'\n" +
+		"  exit 1\n" +
+		"fi\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	report := NextReport{Repo: repo, PR: 18, Head: sha, Action: "fix"}
+	opts := WatchOptions{Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 5}
+
+	var claimedModel string
+	if ok, why, _, model := svc.claimDispatchModels(context.Background(), &report, "first", 5); !ok {
+		t.Fatalf("first claim: %s", why)
+	} else if model != "opus" {
+		t.Fatalf("first claim returned model %q, want opus", model)
+	} else {
+		claimedModel = model
+	}
+	// The selected model belongs to the successful claim. A later state-ref
+	// outage must not replace it with this host's startup default.
+	switchable.unreadable = true
+	if ok, why := svc.dispatchWithStart(context.Background(), opts, report, "first", claimedModel, nil); ok || !strings.Contains(why, "temporarily unavailable") {
+		t.Fatalf("provider outage = ok %v reason %q", ok, why)
+	}
+	st, _, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Round(repo, 18).Dispatch.Attempts; got != 0 {
+		t.Fatalf("provider outage spent %d attempts, want 0", got)
+	}
+
+	if ok, why, _, model := svc.claimDispatchModels(context.Background(), &report, "second", 5); !ok {
+		t.Fatalf("fallback claim: %s", why)
+	} else if model != "sonnet" {
+		t.Fatalf("fallback claim returned model %q, want sonnet", model)
+	} else {
+		claimedModel = model
+	}
+	if ok, why := svc.dispatchWithStart(context.Background(), opts, report, "second", claimedModel, nil); !ok {
+		t.Fatalf("fallback did not run: %s", why)
+	}
+	models, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(models)); got != "opus\nsonnet" {
+		t.Fatalf("models tried = %q, want ranked fallback", got)
+	}
+	st, _, err = store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Round(repo, 18).Dispatch.Attempts; got != 1 {
+		t.Fatalf("successful fallback left %d attempts, want only its real attempt", got)
+	}
+}
+
+func TestProviderOutageReleasesAnArchivedDispatchClaim(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	now := time.Now().UTC()
+	const (
+		repo  = "o/repo"
+		pr    = 18
+		token = "session"
+	)
+	if _, err := store.Update(ctx, func(st *State) error {
+		round, err := st.NewRound(repo, pr, "aaaaaaaa1", now)
+		if err != nil {
+			return err
+		}
+		if ok, why := round.ClaimDispatchModels("host", token, now, 5, []string{"opus"}); !ok {
+			return errors.New(why)
+		}
+		st.RememberDispatch(repo, pr, *round.Dispatch)
+		st.PutRound(*round)
+		_, err = st.Supersede(repo, pr, "bbbbbbbb2", now.Add(time.Minute))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	retryAt := now.Add(time.Hour)
+	svc.releaseDispatchUnavailable(ctx, NextReport{Repo: repo, PR: pr}, token, dialect.AgentFailure{
+		RetryAt: retryAt, Reason: "provider unavailable",
+	})
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.ArchivedDispatchHeld(repo, pr, now.Add(2*time.Minute)) {
+		t.Fatal("provider outage left the archived claim live")
+	}
+	for _, round := range st.Archive {
+		if round.Repo != repo || round.PR != pr || round.Dispatch == nil {
+			continue
+		}
+		if got := round.Dispatch.UnavailableModels["opus"]; !got.Equal(retryAt) {
+			t.Fatalf("archived outage = %s, want %s", got, retryAt)
+		}
+		if round.Dispatch.Attempts != 0 {
+			t.Fatalf("archived outage spent %d attempts, want 0", round.Dispatch.Attempts)
+		}
+		return
+	}
+	t.Fatal("no archived dispatch claim found")
+}
+
 // Dispatching is the default, so a machine with no fix agent configured must
 // still be able to watch: refusing to start would make the default setting
 // break the plain command. It observes instead — and says so, because an autofix watcher
@@ -520,6 +700,47 @@ func TestWatchPassRotatesSoNoPRIsStarved(t *testing.T) {
 	}
 }
 
+func TestWatchPassVisitsPrioritizedPRBeforeFairnessRotation(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/r": true}
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	for _, pr := range []int{1, 2, 3, 4} {
+		var p ghapi.Pull
+		p.State = "open"
+		p.Number = pr
+		p.Head.SHA = "aaaaaaaa1"
+		gh.pulls[fakeKey("o/r", pr)] = p
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, "o/r", 4, "aaaaaaaa1", PhaseQueued, time.Now().UTC(), 0)
+	if err := svc.Prioritize(context.Background(), "o/r", 4); err != nil {
+		t.Fatal(err)
+	}
+
+	var order []int
+	if err := svc.watchPass(context.Background(), WatchOptions{}, newDispatchPool(4), func(e WatchEvent) error {
+		order = append(order, e.PR)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(order) == 0 || order[0] != 4 {
+		t.Fatalf("visit order = %v, want prioritized PR 4 first", order)
+	}
+}
+
+func TestPrioritizeDryRunDoesNotReportAMutation(t *testing.T) {
+	cfg := firingConfig()
+	cfg.DryRun = true
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+	err := svc.Prioritize(context.Background(), "o/r", 4)
+	if err == nil || !strings.Contains(err.Error(), "dry run") {
+		t.Fatalf("dry-run prioritize error = %v, want an explicit non-success outcome", err)
+	}
+}
+
 // A session that commits its fixes but does not push them leaves a clean working
 // tree, and deleting that worktree destroys the only copy of the fix.
 func TestDispatchKeepsACommittedButUnpushedFix(t *testing.T) {
@@ -689,7 +910,7 @@ type dashboardCountingStore struct {
 	syncs []State
 }
 
-func (s *dashboardCountingStore) SyncDashboard(_ context.Context, state State, _ StoreConfig) error {
+func (s *dashboardCountingStore) SyncDashboard(_ context.Context, state State) error {
 	s.syncs = append(s.syncs, cloneState(state))
 	return nil
 }
@@ -798,35 +1019,6 @@ func TestClaimDispatchRechecksRepositoryAutofixSwitch(t *testing.T) {
 	}
 	if !byDesign {
 		t.Errorf("autofix refusal %q counted as a dispatcher failure", why)
-	}
-	st, _, err := store.Load(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if round := st.Round(report.Repo, report.PR); round != nil && round.Dispatch != nil {
-		t.Errorf("refused claim mutated the round: %+v", round)
-	}
-}
-
-func TestClaimDispatchRechecksFleetExclusion(t *testing.T) {
-	ctx := context.Background()
-	cfg := firingConfig()
-	store := NewMemoryStore(cfg)
-	svc := NewService(cfg, newFakeGitHub(), store, nil)
-	report := NextReport{
-		Repo: "owner/thing", PR: 12, Head: "aaaaaaaa1", Action: "fix",
-		Findings: []dialect.Finding{{ID: "f1", Commit: "aaaaaaaa1"}},
-	}
-	if _, err := store.Update(ctx, func(st *State) error {
-		st.SetFleetValue("exclude", report.Repo)
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	ok, why, byDesign := svc.claimDispatch(ctx, report, "tok", 3)
-	if ok || !byDesign || !strings.Contains(why, "excluded") {
-		t.Fatalf("claim = %v, %q, %v; want a fleet-exclusion refusal", ok, why, byDesign)
 	}
 	st, _, err := store.Load(ctx)
 	if err != nil {
@@ -974,6 +1166,46 @@ func TestSessionLogPruneLeavesRoomForTheNewLog(t *testing.T) {
 	}
 }
 
+func TestAutofixPolicyFiltersAndExtractsClarification(t *testing.T) {
+	findings := []dialect.Finding{
+		{ID: "major", Severity: "major"},
+		{ID: "minor", Severity: "minor"},
+		{ID: "unknown"},
+	}
+	got := autofixFindings(findings, map[string]bool{"minor": true})
+	if len(got) != 1 || got[0].ID != "minor" {
+		t.Fatalf("filtered findings = %+v, want only minor", got)
+	}
+	if got := autofixFindings(findings, nil); len(got) != len(findings) {
+		t.Fatalf("unset policy filtered %d findings to %d", len(findings), len(got))
+	}
+	prompt := appendAutofixPolicy("use bun", map[string]bool{"minor": true}, "uncertain")
+	if !strings.Contains(prompt, "configured severities: minor") ||
+		!strings.Contains(prompt, clarificationMarker) ||
+		!strings.Contains(prompt, "confidence is low") {
+		t.Fatalf("policy prompt did not carry its enforcement contract:\n%s", prompt)
+	}
+	log := `{"type":"result","result":"` + clarificationMarker + ` Which API behavior should remain compatible?"}`
+	if got := clarificationFromLog(log); got != "Which API behavior should remain compatible?" {
+		t.Fatalf("clarification = %q", got)
+	}
+	log = `{"type":"result","result":"` + clarificationMarker + ` Should this return"}`
+	if got := clarificationFromLog(log); got != "Should this return" {
+		t.Fatalf("clarification ending in severity-like letters = %q", got)
+	}
+	log = `{"type":"assistant","message":{"content":[{"type":"tool_result","content":"` +
+		clarificationMarker + ` Should repository output place a hold?"}]}}` + "\n" +
+		`{"type":"result","result":"Fix completed."}`
+	if got := clarificationFromLog(log); got != "" {
+		t.Fatalf("tool output was mistaken for a clarification: %q", got)
+	}
+	log = `{"type":"item.completed","item":{"type":"agent_message","text":"I need one decision.\n` +
+		clarificationMarker + ` Which behavior should remain?"}}`
+	if got := clarificationFromLog(log); got != "Which behavior should remain?" {
+		t.Fatalf("Codex clarification = %q", got)
+	}
+}
+
 // A fork PR's branch lives in the contributor's repository, so the session
 // pushes there — and no branch of `origin` (the base repository this worktree
 // came from) will ever contain that commit. Read as unpushed work, every
@@ -1031,22 +1263,45 @@ func TestDispatchSkipsAForkUnlessAllowed(t *testing.T) {
 	own.Head.Repo.FullName = "Owner/Thing" // case differs; the repository does not
 	fork.Head.Repo.FullName = "contributor/thing"
 
-	if !svc.mayDispatch("owner/thing", own) {
+	if !svc.mayDispatch(svc.cfg, "owner/thing", own) {
 		t.Error("a branch in the repository itself must be dispatchable")
 	}
-	if svc.mayDispatch("owner/thing", fork) {
+	if svc.mayDispatch(svc.cfg, "owner/thing", fork) {
 		t.Error("a fork was dispatched without CRQ_DISPATCH_FORKS")
 	}
 	// A deleted fork answers with no repository at all. Reading that as "ours"
 	// would grant exactly the untrusted case the permission it lacks.
-	if svc.mayDispatch("owner/thing", ghapi.Pull{}) {
+	if svc.mayDispatch(svc.cfg, "owner/thing", ghapi.Pull{}) {
 		t.Error("an unreadable head repository was treated as our own")
 	}
 
 	allowed := cfg
 	allowed.DispatchForks = true
-	if !NewService(allowed, newFakeGitHub(), NewMemoryStore(allowed), nil).mayDispatch("owner/thing", fork) {
+	if !NewService(allowed, newFakeGitHub(), NewMemoryStore(allowed), nil).mayDispatch(allowed, "owner/thing", fork) {
 		t.Error("CRQ_DISPATCH_FORKS did not allow a fork")
+	}
+}
+
+func TestForkPolicyIsRecheckedInsideTheClaim(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/thing": true}
+	cfg.DispatchForks = true // the pass-level snapshot was permissive
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	ctx := context.Background()
+	report := NextReport{
+		Repo: "owner/thing", PR: 9, Head: "aaaaaaaa1", Action: "fix", Fork: true,
+	}
+	seedRound(t, store, cfg, report.Repo, report.PR, report.Head, PhaseQueued, time.Now().UTC(), 0)
+
+	off := false
+	if _, err := svc.SetSolver(ctx, report.Repo, SolverChange{Forks: &off}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, why, byDesign := svc.claimDispatch(ctx, report, "token", 5); ok {
+		t.Fatal("a stale permissive fork decision started a session after policy was turned off")
+	} else if !byDesign || !strings.Contains(why, "current solver policy") {
+		t.Fatalf("claim refusal = %q byDesign=%v", why, byDesign)
 	}
 }
 
@@ -1095,20 +1350,14 @@ func dispatchOn() *bool {
 func TestWatchHonoursTheExcludedRepositories(t *testing.T) {
 	cfg := firingConfig()
 	cfg.AllowRepos = map[string]bool{"owner/kept": true, "owner/gone": true}
+	cfg.ExcludeRepos = map[string]bool{"owner/gone": true}
 	gh := newFakeGitHub()
 	for _, repo := range []string{"owner/kept", "owner/gone"} {
 		var pull ghapi.Pull
 		pull.State, pull.Number, pull.Head.SHA = "open", 1, "aaaaaaaa1"
 		gh.pulls[fakeKey(repo, 1)] = pull
 	}
-	store := NewMemoryStore(cfg)
-	if _, err := store.Update(context.Background(), func(st *State) error {
-		st.SetFleetValue("exclude", "owner/gone")
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	svc := NewService(cfg, gh, store, nil)
+	svc := NewService(cfg, gh, NewMemoryStore(cfg), nil)
 
 	var seen []string
 	if err := svc.watchPass(context.Background(), WatchOptions{}, newDispatchPool(0),
@@ -1125,151 +1374,401 @@ func TestWatchHonoursTheExcludedRepositories(t *testing.T) {
 	}
 }
 
-// loadHookedStore runs a hook once, immediately AFTER the first Load returns —
-// the window between a pass reading the fleet policy and acting on the
-// candidates it collected under it.
-type loadHookedStore struct {
+// `crq watch --max-attempts N` has to mean N. The per-repository budget is
+// resolved from the RECORD, not from the merged configuration: that always
+// carries a positive default, so reading it there accepted the flag and then
+// silently replaced it with 3 on every ordinary setup.
+func TestDispatchAttemptBudgetPrefersTheRecordedValue(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	repo := "owner/thing"
+	sha := originRepo(t, filepath.Join(base, repo))
+	t.Setenv("CRQ_REMOTE_BASE", base)
+
+	cfg := firingConfig()
+	cfg.DispatchMaxAttempts = 3
+	cfg.WorkspaceRoot = t.TempDir()
+	gh := newFakeGitHub()
+	gh.graphQL = noForcePush
+	var pull ghapi.Pull
+	pull.State = "open"
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey(repo, 9)] = pull
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	seedRound(t, store, cfg, repo, 9, sha, PhaseQueued, time.Now().UTC(), 0)
+	spendAttempts(t, store, repo, 9, 3)
+
+	report := NextReport{Repo: repo, PR: 9, Head: sha, Action: "fix"}
+	script := filepath.Join(t.TempDir(), "fix.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nothing recorded: this run's own limit is the one in force.
+	pool := newDispatchPool(0)
+	ok, why := svc.startDispatch(ctx, WatchOptions{Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 5}, pool, report)
+	pool.wait()
+	if !ok {
+		t.Fatalf("dispatch refused with --max-attempts 5 after 3 attempts: %s", why)
+	}
+
+	// A recorded value still outranks it: the budget belongs to the project.
+	spendAttempts(t, store, repo, 9, 1)
+	if _, err := svc.SetSolver(ctx, repo, SolverChange{MaxAttempts: intptr(2)}); err != nil {
+		t.Fatal(err)
+	}
+	pool = newDispatchPool(0)
+	ok, why = svc.startDispatch(ctx, WatchOptions{Dispatch: dispatchOn(), Command: []string{script}, MaxAttempts: 5}, pool, report)
+	pool.wait()
+	if ok {
+		t.Fatal("dispatch ran past the repository's recorded budget of 2")
+	}
+	if !strings.Contains(why, "dispatch attempts already made") {
+		t.Errorf("refusal = %q, want the attempt bound to be the reason", why)
+	}
+}
+
+// spendAttempts records n finished dispatch attempts on a round, the way a
+// session that ran and released its claim leaves it.
+func spendAttempts(t *testing.T, store StateStore, repo string, pr, n int) {
+	t.Helper()
+	_, err := store.Update(context.Background(), func(st *State) error {
+		r := st.Round(repo, pr)
+		if r == nil {
+			t.Fatalf("no round for %s#%d", repo, pr)
+		}
+		for i := 0; i < n; i++ {
+			if ok, why := r.ClaimDispatch("host", "tok", time.Now().UTC(), 0); !ok {
+				t.Fatalf("seeding attempt %d: %s", i, why)
+			}
+			r.ReleaseDispatch("tok")
+		}
+		st.PutRound(*r)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// "Stop reviewing" has to stop a fix session too, and it has to stop one that
+// is being granted right now. The pass reads enrollment once and best-effort,
+// so a click landing after that read — or a read that failed — would otherwise
+// let a coding agent start on a repository somebody just turned off.
+func TestDispatchRefusesADisabledRepositoryUnderTheClaim(t *testing.T) {
+	ctx := context.Background()
+	repo := "owner/thing"
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{repo: true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	seedRound(t, store, cfg, repo, 9, "abcdef123", PhaseQueued, time.Now().UTC(), 0)
+
+	// Disabled AFTER the pass would have read enrollment, which is the window.
+	if _, err := svc.SetEnrollment(ctx, repo, false, "stopped from the dashboard"); err != nil {
+		t.Fatal(err)
+	}
+	claimed, why, byDesign := svc.claimDispatch(ctx,
+		NextReport{Repo: repo, PR: 9, Head: "abcdef123", Action: "fix"}, "tok", 3)
+	if claimed {
+		t.Fatal("a fix session was granted for a repository crq is not reviewing")
+	}
+	if !byDesign {
+		t.Errorf("refusal %q must count as the gate working, not as a dispatcher failure", why)
+	}
+	if !strings.Contains(why, "not reviewing") {
+		t.Errorf("refusal = %q, want enrollment named as the reason", why)
+	}
+}
+
+// Enrollment is a fleet-wide record and autoreview already builds its scan list
+// from it. The watcher read only CRQ_REPOS, so a repository enrolled from the
+// dashboard was reviewed but never watched — its findings arrived and no fix
+// session ever started — until somebody edited an env file on this host and
+// reinstalled the service.
+func TestWatchTargetsIncludeRepositoriesEnrolledFromTheDashboard(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"owner/known": true}
+	gh := newFakeGitHub()
+	for _, repo := range []string{"owner/known", "owner/enrolled"} {
+		var pull ghapi.Pull
+		pull.State, pull.Number, pull.Head.SHA = "open", 1, "aaaaaaaa1"
+		gh.pulls[fakeKey(repo, 1)] = pull
+	}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := svc.SetEnrollment(ctx, "owner/enrolled", true, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[string]bool{}
+	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0),
+		func(e WatchEvent) error { seen[NormalizeRepo(e.Repo)] = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !seen["owner/enrolled"] {
+		t.Errorf("watched %v, want the repository the record enrolled", seen)
+	}
+	if !seen["owner/known"] {
+		t.Errorf("watched %v, want this host's own list still honoured", seen)
+	}
+}
+
+func TestWatchTargetsIncludeMigratedFleetAllowList(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":  "owner/gate",
+		"CRQ_REPOS": "owner/startup",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gh := newFakeGitHub()
+	for _, repo := range []string{"owner/startup", "owner/migrated"} {
+		var pull ghapi.Pull
+		pull.State, pull.Number, pull.Head.SHA = "open", 1, "aaaaaaaa1"
+		gh.pulls[fakeKey(repo, 1)] = pull
+	}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Fleet.Env = map[string]string{"CRQ_REPOS": "owner/migrated"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(cfg, gh, store, nil)
+
+	seen := map[string]bool{}
+	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0),
+		func(e WatchEvent) error { seen[NormalizeRepo(e.Repo)] = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !seen["owner/migrated"] {
+		t.Errorf("watched %v, want the repository from the migrated fleet allow-list", seen)
+	}
+	if seen["owner/startup"] {
+		t.Errorf("watched %v, startup allow-list should be replaced by the migrated fleet policy", seen)
+	}
+}
+
+// The fork switch is not a refinement of a setting; it is the line between
+// running an agent over the operator's own code and over a stranger's. When the
+// shared record cannot be read, falling back to a permissive host value would
+// re-enable fork dispatches at precisely the moment the safety policy is
+// unavailable, so the fallback denies them instead.
+func TestForkDispatchFallsBackClosedWhenTheRecordCannotBeRead(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.DispatchForks = true // this host's env says yes
+	svc := NewService(cfg, newFakeGitHub(), unreadableStore{NewMemoryStore(cfg)}, nil)
+
+	var fork ghapi.Pull
+	fork.Head.Repo.FullName = "contributor/thing"
+	if svc.mayDispatch(svc.repoCfg(ctx, "owner/thing"), "owner/thing", fork) {
+		t.Error("a fork was dispatched on a permissive env value while the shared policy was unreadable")
+	}
+	// Everything else still falls back to the host's configuration: an
+	// unreadable setting must not stop crq fixing its own branches.
+	var own ghapi.Pull
+	own.Head.Repo.FullName = "owner/thing"
+	if !svc.mayDispatch(svc.repoCfg(ctx, "owner/thing"), "owner/thing", own) {
+		t.Error("an own-repository pull request must still be dispatchable")
+	}
+}
+
+// unreadableStore is a state ref that cannot be read — a transient outage, a
+// revoked token, a ref that has not been created yet.
+type unreadableStore struct{ StateStore }
+
+func (unreadableStore) Load(context.Context) (State, Revision, error) {
+	return State{}, Revision{}, errors.New("state ref unreadable")
+}
+
+type loadSwitchStore struct {
 	StateStore
-	hook func()
+	unreadable bool
 }
 
-func (l *loadHookedStore) Load(ctx context.Context) (State, Revision, error) {
-	st, rev, err := l.StateStore.Load(ctx)
-	if l.hook != nil {
-		hook := l.hook
-		l.hook = nil
-		hook()
+func (s *loadSwitchStore) Load(ctx context.Context) (State, Revision, error) {
+	if s.unreadable {
+		return State{}, Revision{}, errors.New("state ref unreadable")
 	}
-	return st, rev, err
+	return s.StateStore.Load(ctx)
 }
 
-// A fleet-wide scan is long, and `Next` is a mutating oracle that does not
-// enforce the body marker itself. Reusing the policy read at the top of the
-// pass therefore spent a metered review on every candidate still to come after
-// the fleet opted them out.
-func TestWatchRereadsTheSkipMarkerBeforeEachCandidate(t *testing.T) {
+func TestWatchPassStopsWhenSharedStateCannotBeRead(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/r": true}
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: "o/r", Number: 1}}
+	svc := NewService(cfg, gh, unreadableStore{NewMemoryStore(cfg)}, nil)
+
+	err := svc.watchPass(context.Background(), WatchOptions{}, newDispatchPool(0), nil)
+	if err == nil || !strings.Contains(err.Error(), "loading shared state") {
+		t.Fatalf("watchPass error = %v, want shared-state load failure", err)
+	}
+}
+
+// A solver record that names an author to skip has to reach the watcher too.
+// Next is a MUTATING oracle — it enqueues, it can fire, and it can start a fix
+// session that runs an agent with approvals bypassed — so a watcher that
+// checked only the skip marker reviewed and executed against pull requests the
+// per-repository setting had just excluded.
+func TestWatchHonoursTheSkipAuthorList(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
-	cfg.AllowRepos = map[string]bool{"owner/repo": true}
+	cfg.AllowRepos = map[string]bool{"o/r": true}
 	gh := newFakeGitHub()
-	var pull ghapi.Pull
-	pull.State, pull.Number, pull.Head.SHA = "open", 1, "aaaaaaaa1"
-	pull.Body = "Tiny change.\n\n<!-- fleet-marker -->"
-	gh.pulls[fakeKey("owner/repo", 1)] = pull
-
+	var bot ghapi.Pull
+	bot.State = "open"
+	bot.Number = 9
+	bot.Head.SHA = "abcdef1234567890"
+	bot.User.Login = "dependabot[bot]"
+	gh.pulls[fakeKey("o/r", 9)] = bot
+	var human ghapi.Pull
+	human.State = "open"
+	human.Number = 10
+	human.Head.SHA = "beefbeef12345678"
+	human.User.Login = "kristofferR"
+	gh.pulls[fakeKey("o/r", 10)] = human
 	store := NewMemoryStore(cfg)
-	hooked := &loadHookedStore{StateStore: store}
-	svc := NewService(cfg, gh, hooked, nil)
-	hooked.hook = func() {
-		if err := svc.SetFleetConfig(ctx, "skip-marker", "<!-- fleet-marker -->"); err != nil {
-			t.Error(err)
-		}
-	}
+	svc := NewService(cfg, gh, store, nil)
 
-	var seen []WatchEvent
-	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0),
-		func(e WatchEvent) error { seen = append(seen, e); return nil }); err != nil {
+	if _, err := svc.SetSolver(ctx, "o/r", SolverChange{SkipAuthors: []string{"dependabot[bot]"}}); err != nil {
 		t.Fatal(err)
 	}
-	if len(seen) != 1 || seen[0].Action != "skipped" {
-		t.Fatalf("events = %+v, want the marker adopted mid-pass to skip the candidate", seen)
+
+	var events []WatchEvent
+	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0), func(event WatchEvent) error {
+		events = append(events, event)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var skipped *WatchEvent
+	for i := range events {
+		if events[i].PR == 9 {
+			skipped = &events[i]
+		}
+	}
+	if skipped == nil || skipped.Action != "skipped" || skipped.Reason == "" {
+		t.Fatalf("events = %#v, want the skipped author explained", events)
 	}
 	st, _, err := store.Load(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if round := st.Round("owner/repo", 1); round != nil {
-		t.Fatalf("round = %+v, want an opted-out PR never queued", round)
+	if st.Round("o/r", 9) != nil {
+		t.Error("a skipped author's pull request was passed to the mutating Next oracle")
+	}
+	if st.Round("o/r", 10) == nil {
+		t.Error("the rest of the repository must still be watched")
 	}
 }
 
-// The candidates are gathered under the policy the pass started with, and `Next`
-// treats its target as a manual request — so a repository the fleet dropped
-// mid-pass still had its PRs enqueued and reviewed by the pass that was already
-// running, in a repository crq no longer watches.
-func TestWatchRereadsTheRepositoryListBeforeEachCandidate(t *testing.T) {
+// The attempt budget is fleet-settable, and the settings editor saves it into
+// the generic fleet map. A claim that consulted only the typed solver record
+// went on enforcing this host's number while the dashboard reported the
+// fleet's — with no later state read able to change it.
+func TestRecordedMaxAttemptsReadsBothRecords(t *testing.T) {
 	ctx := context.Background()
-	cfg := firingConfig()
-	cfg.AllowRepos = map[string]bool{"owner/repo": true}
-	gh := newFakeGitHub()
-	var pull ghapi.Pull
-	pull.State, pull.Number, pull.Head.SHA = "open", 1, "aaaaaaaa1"
-	gh.pulls[fakeKey("owner/repo", 1)] = pull
-
-	store := NewMemoryStore(cfg)
-	hooked := &loadHookedStore{StateStore: store}
-	svc := NewService(cfg, gh, hooked, nil)
-	hooked.hook = func() {
-		if err := svc.SetFleetConfig(ctx, "repos", "owner/other"); err != nil {
-			t.Error(err)
-		}
-	}
-
-	var seen []WatchEvent
-	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0),
-		func(e WatchEvent) error { seen = append(seen, e); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	if len(seen) != 0 {
-		t.Fatalf("events = %+v, want no work in a repository the fleet dropped mid-pass", seen)
-	}
-	st, _, err := store.Load(ctx)
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost", "CRQ_COBOTS": "",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if round := st.Round("owner/repo", 1); round != nil {
-		t.Fatalf("round = %+v, want an unwatched repository never queued", round)
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	// Nothing recorded: this run's own flag stands, which is the whole reason a
+	// RECORDED value is asked for rather than a resolved one.
+	if got := svc.recordedMaxAttempts(ctx, "o/r", 7); got != 7 {
+		t.Errorf("attempts = %d, want this run's own 7", got)
+	}
+	if _, err := svc.SetEnv(ctx, "CRQ_DISPATCH_MAX_ATTEMPTS", "9", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.recordedMaxAttempts(ctx, "o/r", 7); got != 9 {
+		t.Errorf("attempts = %d, want the fleet's recorded 9", got)
+	}
+	// The per-repository record is more specific and wins outright.
+	if _, err := svc.SetSolver(ctx, "o/r", SolverChange{MaxAttempts: intptr(2)}); err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.recordedMaxAttempts(ctx, "o/r", 7); got != 2 {
+		t.Errorf("attempts = %d, want the repository's 2", got)
+	}
+	if got := svc.recordedMaxAttempts(ctx, "o/other", 7); got != 9 {
+		t.Errorf("attempts = %d, want another repository still on the fleet's 9", got)
 	}
 }
 
-// Emptying the list is the same removal. `crq watch` has no scope fallback — a
-// pass with no repositories of its own refuses to run at all — so an emptied
-// list left the candidates of the pass already running as the only repositories
-// crq would ever act on, each one no longer covered by the live policy.
-func TestWatchDropsCandidatesWhenTheRepositoryListIsEmptied(t *testing.T) {
+func TestDispatchClaimResolvesCurrentSolverSettingsInsideCAS(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
-	cfg.AllowRepos = map[string]bool{"owner/repo": true}
-	gh := newFakeGitHub()
-	var pull ghapi.Pull
-	pull.State, pull.Number, pull.Head.SHA = "open", 1, "aaaaaaaa1"
-	gh.pulls[fakeKey("owner/repo", 1)] = pull
-
+	cfg.FixModels = []string{"old-model"}
+	cfg.FixModel = "old-model"
 	store := NewMemoryStore(cfg)
-	hooked := &loadHookedStore{StateStore: store}
-	svc := NewService(cfg, gh, hooked, nil)
+	repo, pr, head := "o/r", 19, "abcdef123"
+	seedRound(t, store, cfg, repo, pr, head, PhaseQueued, time.Now().UTC(), 0)
+
+	hooked := &hookedStore{StateStore: store}
 	hooked.hook = func() {
-		if err := svc.SetFleetConfig(ctx, "repos", ""); err != nil {
+		if _, err := store.Update(ctx, func(st *State) error {
+			sv := st.EffectiveSolver(repo)
+			sv.Models, sv.SetModels, sv.Model = []string{"new-model"}, true, "new-model"
+			sv.MaxAttempts = intptr(1)
+			st.SetSolver(repo, sv, "operator", time.Now().UTC())
+			return nil
+		}); err != nil {
 			t.Error(err)
 		}
 	}
+	svc := NewService(cfg, newFakeGitHub(), hooked, nil)
+	report := NextReport{Repo: repo, PR: pr, Head: head, Action: "fix"}
 
-	var seen []WatchEvent
-	if err := svc.watchPass(ctx, WatchOptions{}, newDispatchPool(0),
-		func(e WatchEvent) error { seen = append(seen, e); return nil }); err != nil {
-		t.Fatal(err)
+	ok, why, _, model := svc.claimDispatchModels(ctx, &report, "first", 5)
+	if !ok {
+		t.Fatalf("first claim: %s", why)
 	}
-	if len(seen) != 0 {
-		t.Fatalf("events = %+v, want no work once the fleet's list is emptied mid-pass", seen)
+	if model != "new-model" {
+		t.Fatalf("selected model = %q, want the ranking written immediately before the CAS", model)
 	}
-	st, _, err := store.Load(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if round := st.Round("owner/repo", 1); round != nil {
-		t.Fatalf("round = %+v, want an unwatched repository never queued", round)
+	svc.releaseDispatch(ctx, report, "first", true)
+
+	if ok, why, byDesign, _ := svc.claimDispatchModels(ctx, &report, "second", 5); ok {
+		t.Fatal("a second claim exceeded the current one-attempt limit")
+	} else if !byDesign || !strings.Contains(why, "attempt") {
+		t.Fatalf("second claim = byDesign %v reason %q, want the current attempt limit", byDesign, why)
 	}
 }
 
-// A repository named on the command line is the operator's own request and
-// outranks the fleet's list, emptied or not — only the exclusion overrides it.
-func TestWatchesRepoHonoursExplicitTargetsAndExclusion(t *testing.T) {
-	empty := Config{}
-	if !watchesRepo(empty, []string{"owner/repo"}, "owner/repo") {
-		t.Error("an explicitly requested repository must stay watched with no fleet list")
+func TestDispatchClaimFiltersFindingsWithCurrentSeverityPolicy(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/r": true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	repo, pr, head := "o/r", 29, "abcdef123"
+	if _, err := svc.SetSolver(ctx, repo, SolverChange{Severities: []string{"minor"}}); err != nil {
+		t.Fatal(err)
 	}
-	excluded := Config{ExcludeRepos: map[string]bool{"owner/repo": true}}
-	if watchesRepo(excluded, []string{"owner/repo"}, "owner/repo") {
-		t.Error("exclusion outranks an explicit target")
+	seedRound(t, store, cfg, repo, pr, head, PhaseQueued, time.Now().UTC(), 0)
+	report := NextReport{
+		Repo: repo, PR: pr, Head: head, Action: "fix",
+		Findings: []dialect.Finding{
+			{ID: "major", Severity: "major"},
+			{ID: "minor", Severity: "minor"},
+		},
+	}
+
+	ok, why, _, _ := svc.claimDispatchModels(ctx, &report, "severity-token", 5)
+	if !ok {
+		t.Fatalf("claim refused: %s", why)
+	}
+	if len(report.Findings) != 1 || report.Findings[0].Severity != "minor" {
+		t.Fatalf("claimed findings = %+v, want only the severity allowed by the claiming state revision", report.Findings)
 	}
 }

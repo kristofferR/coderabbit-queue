@@ -2,12 +2,14 @@ package gh
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -699,5 +701,309 @@ func TestListCheckRunsRidesETagCache(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&conditional); got != 1 {
 		t.Fatalf("the second call must carry If-None-Match, got %d conditional requests", got)
+	}
+}
+
+// The repository picker offers what is in scope, and /users/{owner}/repos lists
+// only PUBLIC repositories whoever asks. A personal account is the ordinary
+// case for the private workflow, so the picker showed a partial list — or an
+// empty one — while claiming to show everything in scope. Only the
+// authenticated-user endpoint answers for private repositories owned by the
+// token and for private repositories it collaborates on under another user.
+func TestListOwnerReposUsesTheAuthenticatedEndpointForPersonalAccounts(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "t")
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/user":
+			_, _ = w.Write([]byte(`{"login":"alice"}`))
+		case "/users/alice", "/users/bob":
+			_, _ = w.Write([]byte(`{"type":"User"}`))
+		case "/user/repos":
+			paths = append(paths, r.URL.String())
+			_, _ = w.Write([]byte(`[
+				{"full_name":"alice/private","private":true},
+				{"full_name":"bob/private","private":true}
+			]`))
+		case "/users/bob/repos":
+			paths = append(paths, r.URL.String())
+			_, _ = w.Write([]byte(`[
+				{"full_name":"bob/public"},
+				{"full_name":"bob/private","private":false}
+			]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 2, maxWait: time.Second, backoffBase: time.Millisecond, networkMaxWait: time.Second}
+
+	own, err := g.ListOwnerRepos(context.Background(), "alice", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(own) != 1 || own[0].FullName != "alice/private" || !own[0].Private {
+		t.Fatalf("repos = %+v, want the token's own private repository", own)
+	}
+	if len(paths) != 1 || !strings.Contains(paths[0], "affiliation=owner,collaborator") ||
+		!strings.Contains(paths[0], "per_page=100") {
+		t.Fatalf("requested %q, want the authenticated endpoint with both query halves intact", paths)
+	}
+
+	// Another personal owner is filtered from the authenticated list, which
+	// includes private repositories on which the viewer collaborates.
+	other, err := g.ListOwnerRepos(context.Background(), "bob", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(other) != 2 {
+		t.Fatalf("repos = %+v, want the public and private collaborator repositories", other)
+	}
+	byName := map[string]Repo{}
+	for _, repo := range other {
+		byName[repo.FullName] = repo
+	}
+	if !byName["bob/private"].Private || byName["bob/public"].Private {
+		t.Fatalf("repos = %+v, want deduplicated public plus authenticated-private metadata", other)
+	}
+	if len(paths) != 3 ||
+		!strings.HasPrefix(paths[1], "/users/bob/repos?per_page=100") ||
+		!strings.HasPrefix(paths[2], "/user/repos?affiliation=owner,collaborator") {
+		t.Fatalf("requested %q, want both public and authenticated endpoints for another personal owner", paths)
+	}
+}
+
+func TestListOwnerReposCanReadOneSentinelPastTenPages(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "t")
+	pages := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/user":
+			_, _ = w.Write([]byte(`{"login":"alice"}`))
+		case "/users/alice":
+			_, _ = w.Write([]byte(`{"type":"User"}`))
+		case "/user/repos":
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			pages = max(pages, page)
+			count := 100
+			if page == 11 {
+				count = 1
+			}
+			repos := make([]Repo, 0, count)
+			for i := 0; i < count; i++ {
+				repos = append(repos, Repo{FullName: "alice/repo-" + strconv.Itoa((page-1)*100+i)})
+			}
+			_ = json.NewEncoder(w).Encode(repos)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 2, maxWait: time.Second, backoffBase: time.Millisecond, networkMaxWait: time.Second}
+
+	repos, err := g.ListOwnerRepos(context.Background(), "alice", 1001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 1001 || pages != 11 {
+		t.Fatalf("repos=%d pages=%d, want the one-row sentinel from page 11", len(repos), pages)
+	}
+}
+
+func TestListOwnerReposPaginatesPastNonOwnerRows(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "t")
+	pages := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/user":
+			_, _ = w.Write([]byte(`{"login":"alice"}`))
+		case "/users/alice":
+			_, _ = w.Write([]byte(`{"type":"User"}`))
+		case "/user/repos":
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			pages = max(pages, page)
+			if page == 1 {
+				repos := make([]Repo, 100)
+				for i := range repos {
+					repos[i].FullName = "other/repo-" + strconv.Itoa(i)
+				}
+				_ = json.NewEncoder(w).Encode(repos)
+				return
+			}
+			_ = json.NewEncoder(w).Encode([]Repo{{FullName: "alice/private-old"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 2, maxWait: time.Second, backoffBase: time.Millisecond, networkMaxWait: time.Second}
+
+	repos, err := g.ListOwnerRepos(context.Background(), "alice", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 1 || repos[0].FullName != "alice/private-old" || pages != 2 {
+		t.Fatalf("repos=%+v pages=%d, want the owner match from page 2", repos, pages)
+	}
+}
+
+// "crq cannot read who this token is" is cached for the process, because a
+// token without the scope will not grow one. A 500 or a timeout is not that
+// answer — caching it kept every later repository picker on the public-only
+// listing, which omits the caller's own private repositories, long after GitHub
+// came back.
+func TestViewerLoginRetriesAfterATransientFailureButNotARefusal(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "t")
+	var down int32 = 1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/user" {
+			http.NotFound(w, r)
+			return
+		}
+		if atomic.LoadInt32(&down) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"message":"unavailable"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"login":"kristofferR"}`))
+	}))
+	defer srv.Close()
+
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 1, maxWait: time.Millisecond, backoffBase: time.Millisecond, networkMaxWait: time.Millisecond}
+	if got, err := g.viewerLogin(context.Background()); err == nil || got != "" {
+		t.Fatalf("viewerLogin = %q, err %v, want the transient failure propagated", got, err)
+	}
+	atomic.StoreInt32(&down, 0)
+	if got, err := g.viewerLogin(context.Background()); err != nil || got != "kristofferR" {
+		t.Errorf("viewerLogin = %q, err %v, want the identity once GitHub answers again", got, err)
+	}
+
+	// A refusal IS an answer, and asking again every time would spend quota on
+	// a question whose answer cannot change within the process.
+	var denials int32
+	denied := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&denials, 1)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+	}))
+	defer denied.Close()
+	d := &GitHub{token: "t", httpClient: denied.Client(), apiBase: denied.URL, maxRetries: 1, maxWait: time.Millisecond, backoffBase: time.Millisecond, networkMaxWait: time.Millisecond}
+	if got, err := d.viewerLogin(context.Background()); err != nil || got != "" {
+		t.Fatalf("viewerLogin = %q, err %v, want none from a refused token", got, err)
+	}
+	// Counted from here: send retries a 401 once with a refreshed token, so the
+	// question is whether a SECOND call asks again, not how many requests the
+	// first one took.
+	asked := atomic.LoadInt32(&denials)
+	if got, err := d.viewerLogin(context.Background()); err != nil || got != "" {
+		t.Fatalf("viewerLogin = %q, err %v, want none from a refused token", got, err)
+	}
+	if got := atomic.LoadInt32(&denials); got != asked {
+		t.Errorf("asked %d more times, want the refusal remembered", got-asked)
+	}
+}
+
+func TestViewerLoginDoesNotOverwriteConcurrentIdentity(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "t")
+	firstEntered := make(chan struct{})
+	secondEntered := make(chan struct{})
+	releaseDenied := make(chan struct{})
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		switch atomic.AddInt32(&calls, 1) {
+		case 1:
+			close(firstEntered)
+			<-secondEntered
+			_, _ = w.Write([]byte(`{"login":"alice"}`))
+		case 2:
+			close(secondEntered)
+			<-releaseDenied
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+		}
+	}))
+	defer srv.Close()
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 1, maxWait: time.Millisecond, backoffBase: time.Millisecond, networkMaxWait: time.Millisecond}
+
+	var firstLogin string
+	var firstErr error
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		firstLogin, firstErr = g.viewerLogin(t.Context())
+	}()
+	<-firstEntered
+	secondResult := make(chan struct {
+		login string
+		err   error
+	}, 1)
+	go func() {
+		login, err := g.viewerLogin(t.Context())
+		secondResult <- struct {
+			login string
+			err   error
+		}{login, err}
+	}()
+	wg.Wait()
+	close(releaseDenied)
+	second := <-secondResult
+
+	if firstErr != nil || firstLogin != "alice" {
+		t.Fatalf("successful viewer lookup = %q, %v", firstLogin, firstErr)
+	}
+	if second.err != nil || second.login != "alice" {
+		t.Fatalf("concurrent refusal returned %q, %v; want cached identity", second.login, second.err)
+	}
+	if got, err := g.viewerLogin(t.Context()); err != nil || got != "alice" {
+		t.Fatalf("cached viewer = %q, %v; successful identity was overwritten", got, err)
+	}
+}
+
+func TestViewerLoginConcurrentIdentityReplacesRefusal(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "t")
+	successEntered := make(chan struct{})
+	releaseSuccess := make(chan struct{})
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		switch atomic.AddInt32(&calls, 1) {
+		case 1:
+			close(successEntered)
+			<-releaseSuccess
+			_, _ = w.Write([]byte(`{"login":"alice"}`))
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+		}
+	}))
+	defer srv.Close()
+	g := &GitHub{token: "t", httpClient: srv.Client(), apiBase: srv.URL, maxRetries: 1, maxWait: time.Millisecond, backoffBase: time.Millisecond, networkMaxWait: time.Millisecond}
+
+	successResult := make(chan struct {
+		login string
+		err   error
+	}, 1)
+	go func() {
+		login, err := g.viewerLogin(t.Context())
+		successResult <- struct {
+			login string
+			err   error
+		}{login, err}
+	}()
+	<-successEntered
+	if login, err := g.viewerLogin(t.Context()); err != nil || login != "" {
+		t.Fatalf("concurrent refusal = %q, %v; want an unreadable identity", login, err)
+	}
+	close(releaseSuccess)
+	success := <-successResult
+
+	if success.err != nil || success.login != "alice" {
+		t.Fatalf("successful viewer lookup = %q, %v", success.login, success.err)
+	}
+	if got, err := g.viewerLogin(t.Context()); err != nil || got != "alice" {
+		t.Fatalf("cached viewer = %q, %v; successful identity did not replace refusal", got, err)
 	}
 }

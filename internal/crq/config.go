@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -54,12 +55,37 @@ type Config struct {
 	// Bot / RequiredBots / FeedbackBots / CoBots above are DERIVED from it and
 	// kept only so existing consumers keep compiling; new code should read this.
 	Reviewers []Reviewer
+	// PrimaryOff is set by ForRepo when a repository turned the metered primary
+	// off. It is never a fleet setting: CRQ_BOT always names one, and "the fleet
+	// has no primary" is expressed by requiring nobody, not by this.
+	PrimaryOff bool
 	// WatchInterval paces `crq watch`; DispatchCommand is the fix session it
 	// runs with --dispatch, argv-style; DispatchMaxAttempts bounds dispatches per
 	// head so a fix that keeps not working stops.
-	WatchInterval       time.Duration
-	DispatchCommand     []string
+	WatchInterval   time.Duration
+	DispatchCommand []string
+	// FixAgent is the agent binary a fix session execs, chosen at install time
+	// and exported to the autofix unit as CRQ_FIX_AGENT. It is per HOST, not per
+	// repository: switching between claude and codex is a different command line
+	// rather than a different flag. Empty on a machine that runs no fix sessions,
+	// which is not the same as any particular agent.
+	FixAgent            string
 	DispatchMaxAttempts int
+	// FixModels/FixEffort/FixPrompt are the per-repository solver settings, put
+	// into the fix session's ENVIRONMENT rather than its argv. Argv is fixed
+	// when the watcher starts; the environment is built per dispatch, which is
+	// the only layer that can differ between two repositories the same watcher
+	// is handling.
+	FixModels []string
+	// FixModel is the preferred entry, retained for the session environment and
+	// older callers that only understand one model.
+	FixModel  string
+	FixEffort string
+	FixPrompt string
+	// FixSeverities is the set of finding severities a session may act on.
+	// FixAskMode controls when it should stop and surface a clarification.
+	FixSeverities map[string]bool
+	FixAskMode    string
 	// DispatchForks allows fix sessions on pull requests whose head branch lives
 	// in another repository. Off by default: a session runs an agent over that
 	// branch's code with approvals bypassed and a write token in reach.
@@ -84,16 +110,13 @@ type Config struct {
 	// OverrideAt is when the per-repo reviewer override this configuration was
 	// built from was last written, so a fire can tell whether it still holds.
 	OverrideAt *time.Time
-	// FleetRevision identifies the fleet policy snapshot this configuration was
-	// built from. Like OverrideAt, it is revalidated inside the CAS mutation
-	// that commits a decision.
-	FleetRevision string
-	// ExplicitFleetEnv records fleet-owned variables supplied by either the
-	// config file or the process environment, under the name the host actually
-	// used — a legacy alias or per-bot key counts, since the fleet overrides it
-	// just the same. LoadConfig does not export normal config-file values, so
-	// os.Getenv alone cannot detect that divergence.
-	ExplicitFleetEnv  map[string]bool
+	// FleetAt is the same fact one layer up: when the fleet defaults this
+	// configuration was built from were last written. Both are needed, because
+	// either layer can name the primary, the co-reviewers or the required set —
+	// and a fire revalidating only the repository override would post the old
+	// commands on the authority of fleet settings that were replaced while it
+	// was deciding.
+	FleetAt           *time.Time
 	RateLimitCommand  string
 	RateLimitMarker   string
 	CalibrationMarker string
@@ -112,6 +135,11 @@ type Config struct {
 	RateLimitFallback time.Duration
 	AutoReviewPoll    time.Duration
 	AutoReviewMaxScan int
+	// WeeklyReviewLimit is the vendor's weekly fair-use threshold, past which
+	// reviews are throttled to roughly one an hour. Configurable because it is
+	// plan-dependent (60 on Pro, 90 on Pro+) and no API reports it; 0 disables
+	// the forecast without disabling the count.
+	WeeklyReviewLimit int
 	LeaderTTL         time.Duration
 	FiredMax          int
 	// Tidy removes crq's own spent review-trigger comments as rounds progress.
@@ -131,6 +159,34 @@ type Config struct {
 	// (return their findings promptly, keep CodeRabbit queued for the window)
 	// instead of waiting the block out. CRQ_RL_CO_DEGRADE, default on.
 	RateLimitCoDegrade bool
+
+	// env is the map this configuration was parsed from, so WithFleet can
+	// re-parse it with the fleet's overrides layered on.
+	env map[string]string
+}
+
+// fixAgent is the agent this host's fix sessions would exec: the one the
+// autofix install chose, or the first word of a legacy CRQ_DISPATCH_CMD. Empty
+// on a machine that runs none.
+func (c Config) fixAgent() string {
+	if c.FixAgent != "" {
+		return c.FixAgent
+	}
+	if len(c.DispatchCommand) > 0 {
+		return c.DispatchCommand[0]
+	}
+	return ""
+}
+
+// Env is a copy of the environment this configuration was parsed from, for
+// callers that need to show or compare it. A copy, because handing out the map
+// would let a caller change a parsed configuration by mutating its input.
+func (c Config) Env() map[string]string {
+	out := make(map[string]string, len(c.env))
+	for k, v := range c.env {
+		out[k] = v
+	}
+	return out
 }
 
 // ConfigPath is the file crq reads its settings from: CRQ_CONFIG, or
@@ -191,7 +247,17 @@ func LoadConfig() (Config, error) {
 			env[k] = v
 		}
 	}
+	return BuildConfig(env)
+}
 
+// BuildConfig parses one env map into a configuration.
+//
+// Split out of LoadConfig so the SAME parse can be re-run over a merged map:
+// this host's environment with the fleet's recorded overrides layered on top.
+// Re-parsing rather than patching individual fields is what makes any setting
+// fleet-settable without each one needing its own plumbing — and what stops the
+// two paths ever disagreeing about what a value means.
+func BuildConfig(env map[string]string) (Config, error) {
 	host, _ := os.Hostname()
 	bot := stringEnv(env, "CRQ_BOT", "coderabbitai[bot]")
 	requiredBots := listEnv(env, "CRQ_REQUIRED_BOTS", bot)
@@ -225,41 +291,59 @@ func LoadConfig() (Config, error) {
 	for _, cb := range coBots {
 		coLogins = append(coLogins, cb.Login)
 	}
+	fixSeverities := severitySet(stringEnv(env, "CRQ_FIX_SEVERITIES", strings.Join(dialect.KnownSeverities(), ",")))
+	for severity := range fixSeverities {
+		if !dialect.IsSeverity(severity) {
+			return Config{}, fmt.Errorf("CRQ_FIX_SEVERITIES: severity %q is not one of %s",
+				severity, strings.Join(dialect.KnownSeverities(), ", "))
+		}
+	}
 	cfg := Config{
-		GateRepo:            env["CRQ_REPO"],
-		DashboardIssue:      intEnv(env, "CRQ_ISSUE", 0),
-		CalibrationPR:       intEnv(env, "CRQ_CAL_PR", 0),
-		Scope:               listEnv(env, "CRQ_SCOPE", ownerOf(env["CRQ_REPO"])),
-		AllowRepos:          repoSet(env["CRQ_REPOS"]),
-		ExcludeRepos:        repoSet(env["CRQ_EXCLUDE"]),
-		SkipAuthors:         authorSet(stringEnvAllowEmpty(env, "CRQ_AUTOREVIEW_SKIP_AUTHORS", "dependabot[bot]")),
-		SkipMarker:          stringEnvAllowEmpty(env, "CRQ_AUTOREVIEW_SKIP_MARKER", "<!-- crq:skip-autoreview -->"),
-		StateRef:            stringEnv(env, "CRQ_STATE_REF", "crq-state-v3"),
-		Bot:                 bot,
-		RequiredBots:        requiredBots,
-		CoBots:              coBots,
-		FeedbackBots:        listEnv(env, "CRQ_FEEDBACK_BOTS", strings.Join(unionBots(requiredBots, coLogins), ",")),
-		ReviewCommand:       stringEnv(env, "CRQ_REVIEW_CMD", "@coderabbitai review"),
-		RateLimitCommand:    stringEnv(env, "CRQ_RATELIMIT_CMD", dialect.DefaultRateLimitCommand),
-		RateLimitMarker:     stringEnv(env, "CRQ_RL_MARKER", dialect.DefaultRateLimitMarker),
-		CalibrationMarker:   stringEnv(env, "CRQ_CAL_REPLY_MARKER", "auto-generated reply by CodeRabbit"),
-		ReviewDoneMarker:    stringEnv(env, "CRQ_REVIEW_DONE_MARKER", "summarize by coderabbit.ai"),
-		CompletionMarker:    stringEnvAllowEmpty(env, "CRQ_COMPLETION_MARKER", "Review finished"),
-		Host:                stringEnv(env, "CRQ_HOST", host),
-		Timezone:            env["CRQ_TZ"],
-		MinInterval:         durationEnv(env, "CRQ_MIN_INTERVAL", 90*time.Second),
-		InflightTimeout:     durationEnv(env, "CRQ_INFLIGHT_TIMEOUT", 15*time.Minute),
-		PollInterval:        durationEnv(env, "CRQ_POLL", 15*time.Second),
-		WaitTimeout:         durationEnv(env, "CRQ_WAIT_TIMEOUT", 0),
-		CalibrationTTL:      durationEnv(env, "CRQ_CALIBRATE_TTL", 2*time.Minute),
-		RateLimitFallback:   durationEnv(env, "CRQ_RL_FALLBACK", 15*time.Minute),
-		AutoReviewPoll:      durationEnv(env, "CRQ_AUTOREVIEW_POLL", time.Minute),
-		AutoReviewMaxScan:   intEnv(env, "CRQ_AUTOREVIEW_MAX_SCAN", 400),
+		GateRepo:          env["CRQ_REPO"],
+		DashboardIssue:    intEnv(env, "CRQ_ISSUE", 0),
+		CalibrationPR:     intEnv(env, "CRQ_CAL_PR", 0),
+		Scope:             listEnv(env, "CRQ_SCOPE", ownerOf(env["CRQ_REPO"])),
+		AllowRepos:        repoSet(env["CRQ_REPOS"]),
+		ExcludeRepos:      repoSet(env["CRQ_EXCLUDE"]),
+		SkipAuthors:       authorSet(stringEnvAllowEmpty(env, "CRQ_AUTOREVIEW_SKIP_AUTHORS", "dependabot[bot]")),
+		SkipMarker:        stringEnvAllowEmpty(env, "CRQ_AUTOREVIEW_SKIP_MARKER", "<!-- crq:skip-autoreview -->"),
+		StateRef:          stringEnv(env, "CRQ_STATE_REF", "crq-state-v3"),
+		Bot:               bot,
+		RequiredBots:      requiredBots,
+		CoBots:            coBots,
+		FeedbackBots:      listEnv(env, "CRQ_FEEDBACK_BOTS", strings.Join(unionBots(requiredBots, coLogins), ",")),
+		ReviewCommand:     stringEnv(env, "CRQ_REVIEW_CMD", "@coderabbitai review"),
+		RateLimitCommand:  stringEnv(env, "CRQ_RATELIMIT_CMD", dialect.DefaultRateLimitCommand),
+		RateLimitMarker:   stringEnv(env, "CRQ_RL_MARKER", dialect.DefaultRateLimitMarker),
+		CalibrationMarker: stringEnv(env, "CRQ_CAL_REPLY_MARKER", "auto-generated reply by CodeRabbit"),
+		ReviewDoneMarker:  stringEnv(env, "CRQ_REVIEW_DONE_MARKER", "summarize by coderabbit.ai"),
+		CompletionMarker:  stringEnvAllowEmpty(env, "CRQ_COMPLETION_MARKER", "Review finished"),
+		Host:              stringEnv(env, "CRQ_HOST", host),
+		Timezone:          env["CRQ_TZ"],
+		MinInterval:       durationEnv(env, "CRQ_MIN_INTERVAL", 90*time.Second),
+		InflightTimeout:   durationEnv(env, "CRQ_INFLIGHT_TIMEOUT", 15*time.Minute),
+		PollInterval:      durationEnv(env, "CRQ_POLL", 15*time.Second),
+		WaitTimeout:       durationEnv(env, "CRQ_WAIT_TIMEOUT", 0),
+		CalibrationTTL:    durationEnv(env, "CRQ_CALIBRATE_TTL", 2*time.Minute),
+		RateLimitFallback: durationEnv(env, "CRQ_RL_FALLBACK", 15*time.Minute),
+		AutoReviewPoll:    durationEnv(env, "CRQ_AUTOREVIEW_POLL", time.Minute),
+		AutoReviewMaxScan: intEnv(env, "CRQ_AUTOREVIEW_MAX_SCAN", 400),
+		// The vendor's weekly fair-use threshold, past which reviews are
+		// throttled to roughly one an hour. Configurable because it is
+		// plan-dependent (60 on Pro, 90 on Pro+) and there is no API to ask.
+		WeeklyReviewLimit:   intEnv(env, "CRQ_WEEKLY_LIMIT", 60),
 		LeaderTTL:           durationEnv(env, "CRQ_LEADER_TTL", 3*time.Minute),
 		FiredMax:            intEnv(env, "CRQ_FIRED_MAX", 500),
 		WatchInterval:       durationEnv(env, "CRQ_WATCH_INTERVAL", 2*time.Minute),
 		DispatchCommand:     SplitArgv(env["CRQ_DISPATCH_CMD"]),
-		DispatchMaxAttempts: positiveIntEnv(env, "CRQ_DISPATCH_MAX_ATTEMPTS", 3),
+		FixAgent:            strings.TrimSpace(env["CRQ_FIX_AGENT"]),
+		FixModels:           configuredModels(env["CRQ_FIX_MODELS"], env["CRQ_FIX_MODEL"]),
+		FixModel:            strings.TrimSpace(env["CRQ_FIX_MODEL"]),
+		FixEffort:           strings.TrimSpace(env["CRQ_FIX_EFFORT"]),
+		FixPrompt:           strings.TrimSpace(env["CRQ_FIX_PROMPT"]),
+		FixSeverities:       fixSeverities,
+		FixAskMode:          askModeEnv(env["CRQ_FIX_ASK"]),
+		DispatchMaxAttempts: positiveIntEnv(env, "CRQ_DISPATCH_MAX_ATTEMPTS", 5),
 		DispatchForks:       boolEnv(env, "CRQ_DISPATCH_FORKS", false),
 		DispatchConcurrency: intEnv(env, "CRQ_DISPATCH_CONCURRENCY", 0),
 		WorkspaceRoot:       env["CRQ_WORKSPACE"],
@@ -271,21 +355,16 @@ func LoadConfig() (Config, error) {
 
 		RateLimitCoDegrade: stringEnv(env, "CRQ_RL_CO_DEGRADE", stringEnv(env, "CRQ_RL_CODEX_DEGRADE", "1")) != "0",
 	}
-	cfg.ExplicitFleetEnv = map[string]bool{}
-	for _, setting := range fleetSettings() {
-		for _, name := range setting.envNames() {
-			if _, ok := env[name]; ok {
-				cfg.ExplicitFleetEnv[name] = true
-			}
-		}
-	}
+	// Kept so a fleet record can be layered over it and the whole thing
+	// re-parsed. Unexported: it is an input, not part of the configuration.
+	cfg.env = maps.Clone(env)
 	if len(cfg.Scope) == 0 && cfg.GateRepo != "" {
 		cfg.Scope = []string{ownerOf(cfg.GateRepo)}
 	}
 	// Built here, after the command is resolved, because the primary's trigger is
 	// part of describing it.
 	cfg.KnownCoBots = parseAllCoBots(env)
-	cfg.Reviewers = buildReviewers(cfg.Bot, cfg.ReviewCommand, requiredBots, coBots)
+	cfg.Reviewers = buildReviewers(cfg.Bot, cfg.ReviewCommand, requiredBots, coBots, false)
 	// The legacy lists are now VIEWS of cfg.Reviewers rather than parallel
 	// parses, so they cannot answer differently from it. An explicit
 	// CRQ_FEEDBACK_BOTS still wins: it is the one list an operator may widen
@@ -297,13 +376,55 @@ func LoadConfig() (Config, error) {
 	explicitFeedback := strings.TrimSpace(env["CRQ_FEEDBACK_BOTS"]) != ""
 	cfg.FeedbackBotsExplicit = explicitFeedback
 	if !explicitFeedback {
-		// Everyone except a primary the operator deliberately left out of
-		// CRQ_REQUIRED_BOTS. That omission is how you say "do not wait for
-		// CodeRabbit here", and surfacing its findings anyway would put the round
-		// back to work over a reviewer nobody asked for.
-		cfg.FeedbackBots = cfg.reviewerLogins(func(r Reviewer) bool { return r.Required || !r.Metered() })
+		// Requiredness decides convergence, not visibility. An optional reviewer
+		// still ran and its unresolved findings are still work; hiding them made
+		// the dashboard claim two open threads on a PR where GitHub had seventy.
+		// PrimaryOff and co-reviewer selection remove reviewers from this list
+		// structurally, while an explicit CRQ_FEEDBACK_BOTS remains the escape
+		// hatch for fleets that intentionally want a narrower feed.
+		cfg.FeedbackBots = cfg.reviewerLogins(func(Reviewer) bool { return true })
+	}
+	if len(cfg.FixModels) > 0 {
+		cfg.FixModel = cfg.FixModels[0]
 	}
 	return cfg, nil
+}
+
+func severitySet(raw string) map[string]bool {
+	out := map[string]bool{}
+	for _, severity := range strings.Split(raw, ",") {
+		severity = strings.ToLower(strings.TrimSpace(severity))
+		if severity != "" {
+			out[severity] = true
+		}
+	}
+	return out
+}
+
+func askModeEnv(raw string) string {
+	switch mode := strings.ToLower(strings.TrimSpace(raw)); mode {
+	case "uncertain", "ambiguous":
+		return mode
+	default:
+		return "blocked"
+	}
+}
+
+func configuredModels(ranked, legacy string) []string {
+	raw := ranked
+	if strings.TrimSpace(raw) == "" {
+		raw = legacy
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	for _, model := range strings.Split(raw, ",") {
+		model = strings.TrimSpace(model)
+		if model != "" && !seen[model] {
+			seen[model] = true
+			out = append(out, model)
+		}
+	}
+	return out
 }
 
 func (c Config) RequireState() error {
@@ -487,7 +608,18 @@ func parseAllCoBots(env map[string]string) []CoBotConfig {
 func parseCoBots(env map[string]string, requiredBots []string) ([]CoBotConfig, error) {
 	enabled := map[string]bool{}
 	var unknown []string
-	for _, item := range splitList(stringEnvAllowEmpty(env, "CRQ_COBOTS", "codex,bugbot,macroscope")) {
+	// Preserve the pre-registry contract: absent means every built-in
+	// co-reviewer, while explicitly empty disables all. Treating both as empty
+	// silently disabled working reviewers on upgrade.
+	items := []string{}
+	if raw, exists := env["CRQ_COBOTS"]; exists {
+		items = splitList(raw)
+	} else {
+		for _, co := range dialect.KnownCoReviewers() {
+			items = append(items, co.Name)
+		}
+	}
+	for _, item := range items {
 		co, ok := dialect.CoReviewerByName(item)
 		if !ok {
 			// Refuse rather than skip: silently dropping a typo disables the
@@ -669,6 +801,38 @@ func SplitArgv(value string) []string {
 		argv = append(argv, arg.String())
 	}
 	return argv
+}
+
+// JoinArgv renders argv as the single string SplitArgv reads back UNCHANGED.
+//
+// It exists because argv makes a round trip through a service unit's
+// environment: an install parses the operator's `--agent-args` into arguments,
+// writes them into the unit as one value, and the session splits them again.
+// Joining on spaces loses the boundaries — `--config "value with space"` came
+// back as three arguments — so every installed session either failed on its
+// first flag or ran with the wrong option.
+func JoinArgv(argv []string) string {
+	parts := make([]string, 0, len(argv))
+	for _, arg := range argv {
+		parts = append(parts, quoteArg(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+// quoteArg wraps one argument so SplitArgv yields it whole.
+//
+// SplitArgv has no escape character — a quote merely toggles — so an argument
+// containing both quote styles is emitted as adjacent quoted runs with nothing
+// between them, which SplitArgv concatenates back into one argument.
+func quoteArg(arg string) string {
+	if arg != "" && !strings.ContainsAny(arg, " \t\n\r\"'") {
+		return arg
+	}
+	parts := strings.Split(arg, `"`)
+	for i, part := range parts {
+		parts[i] = `"` + part + `"`
+	}
+	return strings.Join(parts, `'"'`)
 }
 
 // processRun distinguishes this RUN of crq from an earlier one that happened to

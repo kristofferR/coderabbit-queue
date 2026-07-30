@@ -90,6 +90,16 @@ type CoReviewerStatus struct {
 }
 
 func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackReport, error) {
+	return s.feedback(ctx, repo, pr, true)
+}
+
+// FeedbackReadOnly observes a pull request without persisting incidental
+// account-quota evidence. It is the dashboard's read-only path.
+func (s *Service) FeedbackReadOnly(ctx context.Context, repo string, pr int) (FeedbackReport, error) {
+	return s.feedback(ctx, repo, pr, false)
+}
+
+func (s *Service) feedback(ctx context.Context, repo string, pr int, persist bool) (FeedbackReport, error) {
 	repo = NormalizeRepo(repo)
 	now := s.clock()
 	st, _, err := s.store.Load(ctx)
@@ -115,10 +125,12 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	// away, and the next fire went out inside a window the bot had already
 	// stated. It is the one write on this path, it happens once per notice rather
 	// than once per poll, and all it can do is stop a review.
-	if updated, err := s.recordObservedBlock(ctx, obs, st, now); err != nil {
-		return FeedbackReport{}, fmt.Errorf("recording the account block observed on %s: %w", QueueKey(repo, pr), err)
-	} else if updated != nil {
-		st = *updated
+	if persist {
+		if updated, err := s.recordObservedBlock(ctx, cfg, obs, st, now); err != nil {
+			return FeedbackReport{}, fmt.Errorf("recording the account block observed on %s: %w", QueueKey(repo, pr), err)
+		} else if updated != nil {
+			st = *updated
+		}
 	}
 	pull := obs.pull
 	head := ""
@@ -188,7 +200,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 	report.CoReviewers = coReviewerStatuses(cfg, obs.eng, verdictCutoff)
 	if why := engine.PrimaryUnavailableReason(obs.eng, cfg.policy(), head); why != "" {
 		report.PrimaryUnavailable = true
-		report.PrimaryUnavailableReason = s.cfg.Bot + " " + why
+		report.PrimaryUnavailableReason = cfg.Bot + " " + why
 	}
 
 	// extractBots is the broader set whose findings we surface — a superset that
@@ -218,7 +230,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		// before that round belongs to the previous head. Unresolved threads are
 		// still surfaced below across commits, while thread-less body findings
 		// must be re-reported by the current round instead of trapping the loop.
-		if anchorOK && s.cfg.isConfiguredBot(login) &&
+		if anchorOK && cfg.isConfiguredBot(login) &&
 			(head == "" || !strings.HasPrefix(review.CommitID, head)) &&
 			!notBefore(review.SubmittedAt, anchorCutoff) {
 			continue
@@ -338,10 +350,10 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 			}
 			report.Findings = append(report.Findings, dialect.Finding{
 				Bot:       comment.User.Login,
-				Severity:  dialect.SeverityOf(comment.Body),
+				Severity:  dialect.SeverityFor(comment.User.Login, comment.Body),
 				Path:      comment.Path,
 				Line:      firstPositive(comment.Line, comment.OriginalLine),
-				Title:     dialect.TitleOf(comment.Body),
+				Title:     dialect.ReviewTitleFor(comment.User.Login, comment.Body),
 				Body:      strings.TrimSpace(comment.Body),
 				CommentID: comment.ID,
 				ReviewID:  comment.PullRequestReviewID,
@@ -392,7 +404,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		if !dialect.InBots(extractBots, comment.User.Login) {
 			continue
 		}
-		if s.cr.IsReviewSkipped(comment.Body) && s.cfg.isConfiguredBot(comment.User.Login) &&
+		if s.cr.IsReviewSkipped(comment.Body) && cfg.isConfiguredBot(comment.User.Login) &&
 			skipAppliesToHead(comment.Body, head) &&
 			!skipPredatesHead(comment, headCutoffOf) {
 			// Checked BEFORE the rate-limit guard below: the skip notice embeds
@@ -436,7 +448,7 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		if _, ok := coEventKinds[comment.ID]; ok {
 			continue
 		}
-		if s.cfg.isConfiguredBot(comment.User.Login) {
+		if cfg.isConfiguredBot(comment.User.Login) {
 			continue
 		}
 		if dialect.IsNonActionableText(comment.Body) {
@@ -447,8 +459,8 @@ func (s *Service) Feedback(ctx context.Context, repo string, pr int) (FeedbackRe
 		}
 		report.Findings = append(report.Findings, dialect.Finding{
 			Bot:       comment.User.Login,
-			Severity:  dialect.SeverityOf(comment.Body),
-			Title:     dialect.TitleOf(comment.Body),
+			Severity:  dialect.SeverityFor(comment.User.Login, comment.Body),
+			Title:     dialect.ReviewTitleFor(comment.User.Login, comment.Body),
 			Body:      strings.TrimSpace(comment.Body),
 			CommentID: comment.ID,
 			URL:       comment.URL,
@@ -667,7 +679,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			if allReviewed(report.ReviewedBy) {
 				report.Reason = "all required reviewers finished; address findings, push once, and resolve threads"
 				s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending, &report.config)
-			} else if report.CodeRabbitDeferred && engine.DoneExceptWithEvidence(report.ReviewedBy, s.cfg.Bot, dialect.CodexBotLogin) {
+			} else if report.CodeRabbitDeferred && engine.DoneExceptWithEvidence(report.ReviewedBy, report.config.Bot, dialect.CodexBotLogin) {
 				// Degraded round: every required bot except the rate-limited
 				// CodeRabbit has finished. These findings are this round's work —
 				// fixing and pushing is exactly right; the CodeRabbit review stays
@@ -702,6 +714,10 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			if settledAt.IsZero() {
 				settledAt = s.clock()
 			}
+			// report.config, not s.cfg: every setting the wait is paced by is
+			// fleet-settable, and this loop re-resolves it against the state ref
+			// on each poll. Reading the startup env would keep an in-flight wait
+			// running on a cadence the dashboard has already replaced.
 			if report.config.SettleWindow <= 0 || s.clock().Sub(settledAt) >= report.config.SettleWindow {
 				if report.Converged {
 					s.completeWaitRound(ctx, repo, pr, head, report.PrimaryAckPending, &report.config)
@@ -748,7 +764,7 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 		// exits promptly, and if Codex never answers the round degrades
 		// gracefully back to riding out the window.)
 		if blockedUntil != nil && !report.CodeRabbitDeferred {
-			extended := extendDeadlineForBlock(deadline, blockedUntil, now, s.cfg.FeedbackWaitTimeout)
+			extended := extendDeadlineForBlock(deadline, blockedUntil, now, report.config.FeedbackWaitTimeout)
 			if extended.After(deadline) {
 				deadline = extended
 				s.pushWaitDeadline(ctx, repo, pr, head, deadline)
@@ -770,13 +786,13 @@ func (s *Service) Loop(ctx context.Context, repo string, pr int) (FeedbackReport
 			return report, 2, nil
 		}
 		if s.log != nil && time.Since(lastLog) >= 30*time.Second {
-			activeElapsed := feedbackWaitElapsed(deadline, s.cfg.FeedbackWaitTimeout, now)
+			activeElapsed := feedbackWaitElapsed(deadline, report.config.FeedbackWaitTimeout, now)
 			if blockedUntil != nil && report.CodeRabbitDeferred {
-				s.log.Printf("%s#%d degraded to codex-only — coderabbit rate-limited until %s; waiting for codex on %s (%s / %s)", repo, pr, blockedUntil.UTC().Format(time.RFC3339), report.Head, activeElapsed.Round(time.Second), s.cfg.FeedbackWaitTimeout)
+				s.log.Printf("%s#%d degraded to codex-only — coderabbit rate-limited until %s; waiting for codex on %s (%s / %s)", repo, pr, blockedUntil.UTC().Format(time.RFC3339), report.Head, activeElapsed.Round(time.Second), report.config.FeedbackWaitTimeout)
 			} else if blockedUntil != nil {
-				s.log.Printf("%s#%d queued — account blocked until %s; waiting, not counting it against the %s review wait (%s active)", repo, pr, blockedUntil.UTC().Format(time.RFC3339), s.cfg.FeedbackWaitTimeout, activeElapsed.Round(time.Second))
+				s.log.Printf("%s#%d queued — account blocked until %s; waiting, not counting it against the %s review wait (%s active)", repo, pr, blockedUntil.UTC().Format(time.RFC3339), report.config.FeedbackWaitTimeout, activeElapsed.Round(time.Second))
 			} else {
-				s.log.Printf("%s#%d waiting for review feedback on %s — reviewed %s (%s / %s)", repo, pr, report.Head, reviewedSummary(report.ReviewedBy), activeElapsed.Round(time.Second), s.cfg.FeedbackWaitTimeout)
+				s.log.Printf("%s#%d waiting for review feedback on %s — reviewed %s (%s / %s)", repo, pr, report.Head, reviewedSummary(report.ReviewedBy), activeElapsed.Round(time.Second), report.config.FeedbackWaitTimeout)
 			}
 			lastLog = time.Now()
 		}
@@ -813,7 +829,7 @@ func (s *Service) ensureWaitDeadline(ctx context.Context, repo string, pr int, h
 		if r.FiredAt != nil {
 			start = r.FiredAt.UTC()
 		}
-		dl := start.Add(s.cfg.FeedbackWaitTimeout)
+		dl := start.Add(s.feedbackWait(*st))
 		r.WaitDeadline = &dl
 		st.PutRound(*r)
 		changed = true
@@ -830,7 +846,7 @@ func (s *Service) ensureWaitDeadline(ctx context.Context, repo string, pr int, h
 	}
 	// The round is no longer a wait (completed/none): synthesize a transient
 	// deadline so the loop still bounds its poll.
-	return s.clock().Add(s.cfg.FeedbackWaitTimeout), nil
+	return s.clock().Add(s.feedbackWait(updated)), nil
 }
 
 // pushWaitDeadline moves the fired/reviewing round's wait deadline later (never
@@ -864,15 +880,6 @@ func (s *Service) pushWaitDeadline(ctx context.Context, repo string, pr int, hea
 	}
 }
 
-// inflightTimeout is the in-flight window in force: the fleet's when the caller
-// decided from a fleet configuration, this host's when it had none.
-func (s *Service) inflightTimeout(cfg *Config) time.Duration {
-	if cfg != nil {
-		return cfg.InflightTimeout
-	}
-	return s.cfg.InflightTimeout
-}
-
 // completeWaitRound ends the wait by completing the fired/reviewing round. The
 // completed round remains as the "this head was reviewed" dedup marker, so a
 // subsequent enqueue/needsReview at the same head is deduped rather than re-fired.
@@ -898,7 +905,7 @@ func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, he
 		if head != "" && r.Head != head {
 			return ErrNoChange
 		}
-		if cfg != nil && overrideChanged(st, repo, *cfg) {
+		if cfg != nil && reviewersChanged(st, repo, *cfg) {
 			return ErrNoChange
 		}
 		if holdUnacked && st.FireSlot != nil && st.FireSlot.Key == QueueKey(repo, pr) {
@@ -907,12 +914,18 @@ func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, he
 			// advance that follows archives this round, and the slot would be
 			// released with the command it was taken for still unanswered. So
 			// record the hold on the slot itself, where it survives the supersede.
-			// Bounded by the in-flight window, the deadline Progress gives up at —
-			// the FLEET's, revalidated just above, not this host's. A host whose
-			// local value is shorter would otherwise drop the hold while Progress
-			// is still waiting on the command, letting another metered review fire.
+			// Bounded by the in-flight window, the deadline Progress gives up at
+			// — and read from the SAME resolved configuration Progress uses, not
+			// from the env this process started with. A fleet that lengthened the
+			// timeout would otherwise have the slot released here while the
+			// command was still in flight, and one that shortened it would hold
+			// the fleet for a window nothing is waiting out.
 			if r.FiredAt != nil {
-				until := r.FiredAt.UTC().Add(s.inflightTimeout(cfg))
+				inflight := s.cfg.InflightTimeout
+				if cfg != nil {
+					inflight = cfg.InflightTimeout
+				}
+				until := r.FiredAt.UTC().Add(inflight)
 				if until.After(s.clock()) && (st.FireSlot.HoldUntil == nil || st.FireSlot.HoldUntil.Before(until)) {
 					st.HoldSlotUntil(until)
 					changed = true
@@ -921,10 +934,11 @@ func (s *Service) completeWaitRound(ctx context.Context, repo string, pr int, he
 			}
 			return ErrNoChange
 		}
+		ownerToken := r.Token
 		if err := r.Complete(); err != nil {
 			return err
 		}
-		releaseSlot(st, QueueKey(repo, pr), r.Token)
+		releaseSlot(st, QueueKey(repo, pr), ownerToken)
 		st.PutRound(*r)
 		changed = true
 		return nil
@@ -1342,10 +1356,10 @@ func threadFindings(thread reviewThread, bots map[string]struct{}) []dialect.Fin
 		}
 		out = append(out, dialect.Finding{
 			Bot:       comment.Author.Login,
-			Severity:  dialect.SeverityOf(comment.Body),
+			Severity:  dialect.SeverityFor(comment.Author.Login, comment.Body),
 			Path:      firstNonEmpty(thread.Path, comment.Path),
 			Line:      firstPositive(thread.Line, comment.Line, comment.OriginalLine),
-			Title:     dialect.TitleOf(comment.Body),
+			Title:     dialect.ReviewTitleFor(comment.Author.Login, comment.Body),
 			Body:      strings.TrimSpace(comment.Body),
 			ThreadID:  thread.ID,
 			CommentID: comment.DatabaseID,
@@ -1389,6 +1403,19 @@ func dedupeFindings(in []dialect.Finding, suppressPromptAt, settledStableIDs map
 	for _, finding := range in {
 		finding.Body = strings.TrimSpace(finding.Body)
 		finding.Title = strings.TrimSpace(finding.Title)
+		labels := dialect.ReviewLabelsFor(finding.Bot, finding.Body)
+		if labels.Category != "" {
+			finding.Category = labels.Category
+		}
+		if labels.Severity != "" {
+			finding.Severity = labels.Severity
+		}
+		if labels.Scale != "" {
+			finding.Scale = labels.Scale
+		}
+		if labels.Effort != "" {
+			finding.Effort = labels.Effort
+		}
 		if !dialect.IsActionableFinding(finding) {
 			continue
 		}

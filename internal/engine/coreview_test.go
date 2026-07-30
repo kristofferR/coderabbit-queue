@@ -13,6 +13,58 @@ const (
 	macroLogin  = dialect.MacroscopeLogin
 )
 
+func TestCoReviewerActiveIgnoresHeadScope(t *testing.T) {
+	cases := []struct {
+		name string
+		obs  Observation
+		want bool
+	}{
+		{
+			name: "review on an earlier head",
+			obs:  Observation{Head: "new", Reviews: []ReviewSeen{{Bot: bugbotLogin, Commit: "old"}}},
+			want: true,
+		},
+		{
+			name: "classified comment",
+			obs:  Observation{Head: "new", Events: []dialect.BotEvent{{Bot: bugbotLogin}}},
+			want: true,
+		},
+		{
+			name: "comment attributed to reviewer",
+			obs:  Observation{Head: "new", Events: []dialect.BotEvent{{Bot: macroLogin, For: bugbotLogin}}},
+			want: true,
+		},
+		{
+			name: "trigger command attributed to reviewer",
+			obs: Observation{Head: "new", Events: []dialect.BotEvent{{
+				Kind: dialect.EvCoCommand, Bot: "human", For: bugbotLogin,
+			}}},
+		},
+		{
+			name: "explicit attribution takes precedence over author",
+			obs:  Observation{Head: "new", Events: []dialect.BotEvent{{Bot: bugbotLogin, For: macroLogin}}},
+		},
+		{
+			name: "check activity",
+			obs:  Observation{Head: "new", Checks: []CheckSeen{{Bot: bugbotLogin}}},
+			want: true,
+		},
+		{
+			name: "different reviewer",
+			obs:  Observation{Head: "new", Reviews: []ReviewSeen{{Bot: macroLogin, Commit: "old"}}},
+		},
+		{name: "no activity", obs: Observation{Head: "new"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := CoReviewerActive(tc.obs, bugbotLogin); got != tc.want {
+				t.Fatalf("CoReviewerActive = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestDecideCoPostTriggerMatrix is the trigger-mode decision matrix:
 // never/selfheal/always crossed with the bot's observed activity, plus the
 // mode-independent guards (already commanded, live command, head evidence,
@@ -45,7 +97,7 @@ func TestDecideCoPostTriggerMatrix(t *testing.T) {
 	}{
 		{name: "never posts nothing even when silent", cp: policy(TriggerNever), obs: obsWith(CoSeen{}), anchor: staleAnchor, want: false},
 		{name: "always posts for a silent bot", cp: policy(TriggerAlways), obs: obsWith(CoSeen{}), want: true},
-		{name: "always defers to auto-review", cp: policy(TriggerAlways), obs: obsWith(CoSeen{AutoActive: true}), want: false},
+		{name: "always overrides historical auto-review activity", cp: policy(TriggerAlways), obs: obsWith(CoSeen{AutoActive: true}), want: true},
 		{name: "always respects a live command", cp: policy(TriggerAlways), obs: obsWith(CoSeen{}), commandPresent: true, want: false},
 		{name: "always respects the recorded round command", cp: policy(TriggerAlways), round: commanded, obs: obsWith(CoSeen{}), want: false},
 		{
@@ -66,7 +118,14 @@ func TestDecideCoPostTriggerMatrix(t *testing.T) {
 			obs:  obsWith(CoSeen{}, CheckSeen{Bot: macroLogin, Verdict: dialect.CheckDone, CompletedAt: now}),
 			want: true,
 		},
+		{
+			name: "always posts when checks are unreadable",
+			cp:   policy(TriggerAlways),
+			obs:  obsWith(CoSeen{ChecksUnknown: true}),
+			want: true,
+		},
 		{name: "selfheal stays quiet for an inactive bot", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{}), anchor: staleAnchor, want: false},
+		{name: "selfheal stays quiet when checks are unreadable", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true, ChecksUnknown: true}), anchor: staleAnchor, want: false},
 		{name: "selfheal posts for an active bot that missed the head past grace", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true}), anchor: staleAnchor, want: true},
 		{name: "selfheal counts round activity as active", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{ActiveThisRound: true}), anchor: staleAnchor, want: true},
 		{name: "selfheal waits out the grace period", cp: policy(TriggerSelfHeal), obs: obsWith(CoSeen{AutoActive: true}), anchor: freshAnchor, want: false},
@@ -328,13 +387,13 @@ func TestSummaryOnlyPlanRunsCoReviewersAlone(t *testing.T) {
 		}
 	})
 
-	t.Run("waits bounded for an auto-reviewing codex", func(t *testing.T) {
+	t.Run("always mode commands an historically auto-reviewing codex", func(t *testing.T) {
 		d := DecideFire(free, queued, obs([]dialect.BotEvent{notice}, nil, CoSeen{AutoActive: true}), now, p)
-		if d.Verdict != FireCoReviewWait {
-			t.Fatalf("verdict = %v (%s), want FireCoReviewWait", d.Verdict, d.Reason)
+		if d.Verdict != FireCoOnly {
+			t.Fatalf("verdict = %v (%s), want FireCoOnly", d.Verdict, d.Reason)
 		}
-		if len(d.PostCo) != 0 {
-			t.Fatalf("PostCo = %v, want no post for an auto-reviewing bot", d.PostCo)
+		if len(d.PostCo) != 1 {
+			t.Fatalf("PostCo = %v, want one explicit always-mode post", d.PostCo)
 		}
 	})
 
@@ -447,7 +506,10 @@ func TestReviewSkippedRunsCoReviewersInsteadOfFiring(t *testing.T) {
 		RequiredBots: []string{"coderabbitai[bot]", dialect.CodexBotLogin},
 		CoReviewers:  []CoReviewerPolicy{{Login: dialect.CodexBotLogin, Command: "@codex review", Trigger: TriggerAlways}}}
 	obs := Observation{Head: head, Open: true,
-		Events: []dialect.BotEvent{skippedEvent("56150a0423a243224b03f355c3a3ba6941011b5b", now)}}
+		Events: []dialect.BotEvent{skippedEvent("56150a0423a243224b03f355c3a3ba6941011b5b", now)},
+		Co: map[string]CoSeen{
+			dialect.NormalizeBotName(dialect.CodexBotLogin): {ChecksUnknown: true},
+		}}
 
 	// Even with a free slot and no block, crq must not fire CodeRabbit.
 	d := DecideFire(Global{SlotFree: true}, queued, obs, now, p)

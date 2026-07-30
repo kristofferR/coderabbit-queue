@@ -186,6 +186,13 @@ func primaryAck(r state.Round, obs Observation, p Policy, firedAt time.Time) (st
 			return "review submitted", true
 		}
 	}
+	for _, check := range obs.Checks {
+		if sameBot(check.Bot, p.Bot) &&
+			(check.Verdict == dialect.CheckDone || check.Verdict == dialect.CheckDoneClean) &&
+			!check.CompletedAt.Before(firedAt) {
+			return "check completed", true
+		}
+	}
 	for _, ev := range obs.Events {
 		if !sameBot(ev.Bot, p.Bot) || ev.CommentID == r.CommandID || ev.UpdatedAt.Before(firedAt) {
 			continue

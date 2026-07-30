@@ -98,6 +98,33 @@ func TestRenderDashboardCoolingDownOnly(t *testing.T) {
 	}
 }
 
+// The pacing floor is a fleet setting, and this issue is written by whichever
+// host happens to save state. Rendering it from that process's own startup
+// configuration advertised a "next at" — and a queue order — that Pump, which
+// resolves the setting from the record, was never going to follow.
+func TestRenderDashboardPacesFromTheRecordedInterval(t *testing.T) {
+	now := time.Now().UTC()
+	st := stateWith(queuedRound("owner/repo", 7, 1, now))
+	fired := now.Add(-time.Minute)
+	st.LastFired = &fired
+	st.Fleet.MinInterval = "2h"
+
+	out := RenderDashboard(st, StoreConfig{MinInterval: time.Second})
+	ready := fmtStamp(ptime(fired.Add(2*time.Hour)), time.UTC)
+	if !strings.Contains(out, "next at "+ready) {
+		t.Errorf("header does not pace from the recorded interval (want %s):\n%s", ready, out)
+	}
+	// And the generic layer answers for it when nothing typed does, exactly as
+	// the configuration resolves it.
+	st.Fleet.MinInterval = ""
+	st.Fleet.Env = map[string]string{"CRQ_MIN_INTERVAL": "30m"}
+	out = RenderDashboard(st, StoreConfig{MinInterval: time.Second})
+	ready = fmtStamp(ptime(fired.Add(30*time.Minute)), time.UTC)
+	if !strings.Contains(out, "next at "+ready) {
+		t.Errorf("header ignores the fleet's env layer (want %s):\n%s", ready, out)
+	}
+}
+
 // Guard against over-correcting: a genuinely empty state keeps its empty-state
 // text and its idle title.
 func TestRenderDashboardEmpty(t *testing.T) {
@@ -933,19 +960,6 @@ func TestStatusLine(t *testing.T) {
 	if got := StatusLine(ready, StoreConfig{}); !strings.Contains(got, "next #7") {
 		t.Errorf("a ready queue should name what is next, got %q", got)
 	}
-	fleetPaced := stateWith(queuedRound("kristofferr/a", 7, 1, now))
-	fleetPaced.LastFired = &now
-	fleetPaced.SetFleetValue("min-interval", "1h")
-	if got := StatusLine(fleetPaced, StoreConfig{MinInterval: 0}); strings.Contains(got, "next #7") {
-		t.Errorf("fleet pacing must keep status from claiming the round is ready: %q", got)
-	}
-	// The recorded value is whatever an operator typed, and the parser that
-	// accepted it at `crq config set` trims. One that queue decisions honour must
-	// not leave this renderer quietly falling back to the host's interval.
-	fleetPaced.SetFleetValue("min-interval", " 1h ")
-	if got := StatusLine(fleetPaced, StoreConfig{MinInterval: 0}); strings.Contains(got, "next #7") {
-		t.Errorf("a padded fleet interval must pace status like an unpadded one: %q", got)
-	}
 
 	// Blocked: the countdown is the useful part.
 	blockedState := stateWith(queuedRound("kristofferr/a", 7, 1, now))
@@ -1018,6 +1032,55 @@ func TestStatusLine(t *testing.T) {
 	} {
 		if strings.ContainsAny(line, "\r\n") {
 			t.Errorf("status line contains a newline: %q", line)
+		}
+	}
+}
+
+// The issue is ONE artifact the whole fleet reads, so how its times are rendered
+// is a fleet answer. Taken from the rendering host's startup environment alone,
+// a timezone saved from the settings page was reported as in force while every
+// sync went on writing the zone of whichever machine happened to run it.
+func TestRenderDashboardPrefersTheFleetTimezone(t *testing.T) {
+	now := time.Now().UTC()
+	r := coolingRound("kristofferr/ha-adjustable-bed", 480, 1, now, 11*time.Minute)
+	st := stateWith(r)
+	st.Fleet.Env = map[string]string{"CRQ_TZ": "Asia/Tokyo"}
+
+	tokyo, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	out := RenderDashboard(st, StoreConfig{Timezone: "Europe/Oslo"})
+	if !strings.Contains(out, fmtStamp(r.RetryAt, tokyo)) {
+		t.Errorf("ready time not rendered in the fleet's zone:\n%s", out)
+	}
+
+	// A zone the fleet records but this binary cannot load falls through to the
+	// host's own rather than silently rendering everything in UTC.
+	oslo, err := time.LoadLocation("Europe/Oslo")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	st.Fleet.Env["CRQ_TZ"] = "Middle/Earth"
+	out = RenderDashboard(st, StoreConfig{Timezone: "Europe/Oslo"})
+	if !strings.Contains(out, fmtStamp(r.RetryAt, oslo)) {
+		t.Errorf("an unloadable fleet zone must fall back to the host's:\n%s", out)
+	}
+}
+
+func TestCoReviewerCellListsOnlyCoBotOverrides(t *testing.T) {
+	st := New()
+	st.SetRepoOverride("owner/primary-only", RepoReviewers{PrimaryOff: true})
+	st.SetRepoOverride("owner/required-only", RepoReviewers{SetRequired: true})
+	st.SetRepoOverride("owner/cobots", RepoReviewers{SetCoBots: true})
+
+	got := coReviewerCell(st, "codex")
+	if !strings.Contains(got, "owner/cobots") {
+		t.Fatalf("co-reviewer cell omitted the co-bot override: %q", got)
+	}
+	for _, unrelated := range []string{"owner/primary-only", "owner/required-only"} {
+		if strings.Contains(got, unrelated) {
+			t.Fatalf("co-reviewer cell lists unrelated override %q: %q", unrelated, got)
 		}
 	}
 }

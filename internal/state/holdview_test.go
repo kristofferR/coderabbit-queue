@@ -101,28 +101,27 @@ func TestCoReviewerRowSaysItIsTheDefaultAndNamesExceptions(t *testing.T) {
 		t.Error("the row does not say the list is a default")
 	}
 
-	// A required-reviewer override does not change the co-reviewer list.
-	st.SetRepoOverride("owner/required-only", RepoReviewers{SetRequired: true, UpdatedAt: &now})
-	body = RenderDashboard(st, cfg)
-	if strings.Contains(body, "owner/required-only") {
-		t.Errorf("the co-reviewer row names an unrelated override:\n%s", body)
-	}
-
 	// Once a repository overrides it, the row names which.
 	st.SetRepoOverride("owner/special", RepoReviewers{SetCoBots: true, UpdatedAt: &now})
 	body = RenderDashboard(st, cfg)
-	if !strings.Contains(body, "owner/special") {
-		t.Errorf("the row does not name the repository that differs:\n%s", body)
+	row := dashboardRow(body, "Co-reviewers")
+	if !strings.Contains(row, "owner/special") {
+		t.Errorf("the row does not name the repository that differs:\n%s", row)
 	}
-	if !strings.Contains(body, "override") {
+	if !strings.Contains(row, "override") {
 		t.Error("the row does not say the named repository overrides the default")
 	}
-
-	// An explicit repository answer still needs a row when the fleet default is empty.
-	withoutDefault := RenderDashboard(st, StoreConfig{})
-	if !strings.Contains(withoutDefault, "**Co-reviewers**") ||
-		!strings.Contains(withoutDefault, "owner/special") {
-		t.Errorf("an override with an empty fleet default is hidden:\n%s", withoutDefault)
+	if !strings.Contains(row, "owner/special override)") {
+		t.Errorf("one override has the wrong label: %s", row)
+	}
+	st.SetRepoOverride("owner/primary-only", RepoReviewers{PrimaryOff: true, UpdatedAt: &now})
+	st.SetRepoOverride("owner/required-only", RepoReviewers{SetRequired: true, UpdatedAt: &now})
+	body = RenderDashboard(st, cfg)
+	row = dashboardRow(body, "Co-reviewers")
+	for _, repo := range []string{"owner/primary-only", "owner/required-only"} {
+		if strings.Contains(row, repo) {
+			t.Errorf("the co-reviewer row names unrelated override %q:\n%s", repo, row)
+		}
 	}
 
 	// Many overrides are truncated rather than allowed to wrap the table.
@@ -130,10 +129,18 @@ func TestCoReviewerRowSaysItIsTheDefaultAndNamesExceptions(t *testing.T) {
 		st.SetRepoOverride(repo, RepoReviewers{SetCoBots: true, UpdatedAt: &now})
 	}
 	body = RenderDashboard(st, cfg)
-	if !strings.Contains(body, "+2 more") {
-		t.Errorf("five overrides were not summarised:\n%s", body)
+	row = dashboardRow(body, "Co-reviewers")
+	if !strings.Contains(row, "+2 more") || !strings.Contains(row, "overrides") {
+		t.Errorf("five overrides were not labelled and summarised:\n%s", row)
 	}
-	if !strings.Contains(body, "overrides") {
-		t.Errorf("multiple repositories were labelled as one override:\n%s", body)
+}
+
+func dashboardRow(body, label string) string {
+	prefix := "| **" + label + "** |"
+	for _, row := range strings.Split(body, "\n") {
+		if strings.HasPrefix(row, prefix) {
+			return row
+		}
 	}
+	return ""
 }

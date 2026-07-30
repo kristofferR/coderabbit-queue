@@ -45,9 +45,12 @@ func TestAutofixIsOnUnlessARepositorySaysOtherwise(t *testing.T) {
 		t.Error("turning one repository off turned another off too")
 	}
 
-	// Back to the default is distinguishable from an explicit on.
-	if cleared, err := svc.ClearAutofixEnabled(ctx, "owner/one"); err != nil || !cleared {
+	// Back to the default is distinguishable from an explicit on, and the answer
+	// it reports is the one the repository ends up with.
+	if setting, cleared, err := svc.ClearAutofixEnabled(ctx, "owner/one"); err != nil || !cleared {
 		t.Fatalf("clear = %v %v, want it to report the setting it removed", cleared, err)
+	} else if !setting.Enabled || !setting.Default {
+		t.Errorf("clear reported %+v, want the resolved default", setting)
 	}
 	st, _, _ = store.Load(ctx)
 	if !st.AutofixEnabled("owner/one") {
@@ -55,25 +58,62 @@ func TestAutofixIsOnUnlessARepositorySaysOtherwise(t *testing.T) {
 	}
 }
 
-func TestAutofixSettingsListsTheFleetRepositoryAllowlist(t *testing.T) {
+// The watcher builds its targets from CRQ_REPOS AND the enrollment records, so a
+// repository enrolled from the dashboard is being fixed here under the fleet
+// default. Listing only what env names — and what somebody has ruled on — left
+// that repository out of the one screen that says whether crq may touch it.
+func TestAutofixSettingsListEnrolledRepositories(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
-	cfg.AllowRepos = map[string]bool{"owner/host-only": true}
+	cfg.AllowRepos = map[string]bool{"owner/env": true}
 	store := NewMemoryStore(cfg)
-	if _, err := store.Update(ctx, func(st *State) error {
-		st.SetFleetValue("repos", "owner/fleet-only")
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
 	svc := NewService(cfg, newFakeGitHub(), store, nil)
 
+	if _, err := svc.SetEnrollment(ctx, "owner/added", true, ""); err != nil {
+		t.Fatal(err)
+	}
 	settings, err := svc.AutofixSettings(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(settings) != 1 || settings[0].Repo != "owner/fleet-only" {
-		t.Fatalf("settings = %+v, want the effective fleet repository", settings)
+	listed := map[string]AutofixSetting{}
+	for _, s := range settings {
+		listed[s.Repo] = s
+	}
+	added, ok := listed["owner/added"]
+	if !ok {
+		t.Fatalf("settings = %+v, want the enrolled repository the watcher will fix", settings)
+	}
+	if !added.Enabled || !added.Default {
+		t.Errorf("owner/added = %+v, want it reported as on by the fleet default", added)
+	}
+	if _, ok := listed["owner/env"]; !ok {
+		t.Errorf("settings = %+v, want this host's own repositories still listed", settings)
+	}
+}
+
+func TestAutofixSettingsUseFleetResolvedAllowList(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":  "owner/gate",
+		"CRQ_REPOS": "startup/old",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.Fleet.Env = map[string]string{"CRQ_REPOS": "fleet/new"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := NewService(cfg, newFakeGitHub(), store, nil).AutofixSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settings) != 1 || settings[0].Repo != "fleet/new" {
+		t.Fatalf("settings = %+v, want only the fleet-resolved repository", settings)
 	}
 }
 
@@ -85,12 +125,12 @@ func TestAutofixSwitchRejectsMalformedRepositoryNames(t *testing.T) {
 
 	for _, repo := range []string{
 		"owner", "owner/repo/", "/repo", "owner/repo/extra", "../repo",
-		"owner_name/repo", ".owner/repo", "owner--name/repo",
+		"owner/bad repo", "owner/control\nname", "bad_owner/repo", "-owner/repo",
 	} {
 		if _, err := svc.SetAutofixEnabled(ctx, repo, false, "operator stop"); err == nil {
 			t.Errorf("SetAutofixEnabled(%q) succeeded", repo)
 		}
-		if _, err := svc.ClearAutofixEnabled(ctx, repo); err == nil {
+		if _, _, err := svc.ClearAutofixEnabled(ctx, repo); err == nil {
 			t.Errorf("ClearAutofixEnabled(%q) succeeded", repo)
 		}
 	}

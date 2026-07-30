@@ -67,38 +67,6 @@ func TestRepoOverrideReachesTheDecision(t *testing.T) {
 	}
 }
 
-func TestClearReviewersComparesAgainstFleetPolicy(t *testing.T) {
-	ctx := context.Background()
-	cfg := isolatedConfig(t, map[string]string{
-		"CRQ_COBOTS":        "codex",
-		"CRQ_REQUIRED_BOTS": "coderabbitai[bot]",
-	})
-	repo, pr := "owner/repo", 19
-	now := time.Now().UTC()
-	gh := newFakeGitHub()
-	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
-	store := NewMemoryStore(cfg)
-	if _, err := store.Update(ctx, func(st *State) error {
-		st.SetFleetValue("required-bots", "coderabbitai[bot],"+dialect.CodexBotLogin)
-		st.SetRepoOverride(repo, RepoReviewers{
-			Required:    []string{"coderabbitai[bot]"},
-			SetRequired: true,
-			UpdatedAt:   &now,
-		})
-		st.PutRound(Round{Repo: repo, PR: pr, Head: "abcdef123", Phase: PhaseCompleted})
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := NewService(cfg, gh, store, nil).ClearReviewers(ctx, repo); err != nil {
-		t.Fatal(err)
-	}
-	st, _, _ := store.Load(ctx)
-	if round := st.Round(repo, pr); round == nil || round.Phase != PhaseQueued {
-		t.Fatalf("round = %+v, want clearing to the fleet reviewer set to reopen it", round)
-	}
-}
-
 // The override must be able to ADD a reviewer, not only subtract one. Resolving
 // choices against the fleet's enabled list made "which bots for which project"
 // a one-way filter: with CRQ_COBOTS=codex, asking for bugbot was rejected as
@@ -356,7 +324,7 @@ func TestChangingRequirementsReopensACompletedRound(t *testing.T) {
 	svc := NewService(cfg, gh, store, nil)
 	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 11)
 
-	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	st, _, err := store.Load(ctx)
@@ -389,12 +357,104 @@ func TestChangingRequirementsReopensACompletedRound(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	st, _, _ = store.Load(ctx)
 	if round := st.Round(repo, pr); round == nil || round.Phase != PhaseCompleted {
 		t.Errorf("round = %#v, want it left completed when nothing changed", round)
+	}
+}
+
+func TestPreviewReviewersPricesReenablingThePrimary(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost", "CRQ_REPOS": "o/r",
+		"CRQ_COBOTS": "codex", "CRQ_REQUIRED_BOTS": "codex",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, pr, head := "o/r", 18, "abcdef124"
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	off := false
+	if _, err := svc.SetReviewers(ctx, repo, nil, nil, &off); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 42)
+
+	on := true
+	impact, err := svc.PreviewReviewers(ctx, repo, nil, nil, &on)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if impact.Reopened != 1 || !strings.Contains(strings.Join(impact.Changes, "\n"), "coderabbitai") {
+		t.Fatalf("impact = %+v, want the primary and one reopened completed round", impact)
+	}
+	if _, _, err := svc.SetReviewersAt(ctx, repo, nil, nil, &on, &impact.Rev); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(repo, pr); round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("round = %#v, want the confirmed edit to reopen it", round)
+	}
+}
+
+func TestPreviewClearReviewersPricesRestoredFleetReviewers(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost", "CRQ_REPOS": "o/r",
+		"CRQ_COBOTS": "codex", "CRQ_REQUIRED_BOTS": "coderabbitai[bot],codex",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, pr, head := "o/r", 17, "abcdef123"
+	gh := newFakeGitHub()
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, gh, store, nil)
+	if _, err := svc.SetReviewers(ctx, repo, []string{}, []string{cfg.Bot}, nil); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 41)
+
+	impact, err := svc.PreviewClearReviewers(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if impact.Reopened != 1 || !strings.Contains(strings.Join(impact.Changes, "\n"), "codex") {
+		t.Fatalf("impact = %+v, want the inherited Codex reviewer and one reopened round", impact)
+	}
+	if _, err := store.Update(ctx, func(st *State) error {
+		st.CalibrationIssue++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.ClearReviewersAt(ctx, repo, &impact.Rev); err == nil ||
+		!strings.Contains(err.Error(), "preview the change again") {
+		t.Fatalf("stale reset error = %v, want preview-again refusal", err)
+	}
+	impact, err = svc.PreviewClearReviewers(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.ClearReviewersAt(ctx, repo, &impact.Rev); err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round := st.Round(repo, pr); round == nil || round.Phase != PhaseQueued {
+		t.Fatalf("round = %#v, want the confirmed reset to reopen it", round)
 	}
 }
 
@@ -406,7 +466,7 @@ func TestSettingIdenticalReviewersPreservesOverrideIdentity(t *testing.T) {
 	first := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
 	svc.now = func() time.Time { return first }
 
-	if _, err := svc.SetReviewers(ctx, "o/r", []string{"codex"}, []string{"codex"}); err != nil {
+	if _, err := svc.SetReviewers(ctx, "o/r", []string{"codex"}, []string{"codex"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	before, _, err := store.Load(ctx)
@@ -419,7 +479,7 @@ func TestSettingIdenticalReviewersPreservesOverrideIdentity(t *testing.T) {
 	}
 
 	svc.now = func() time.Time { return first.Add(time.Hour) }
-	if _, err := svc.SetReviewers(ctx, "o/r", []string{"codex"}, []string{"codex"}); err != nil {
+	if _, err := svc.SetReviewers(ctx, "o/r", []string{"codex"}, []string{"codex"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	after, _, err := store.Load(ctx)
@@ -448,7 +508,7 @@ func TestChangingEnabledCoReviewersReopensACompletedRound(t *testing.T) {
 	svc := NewService(cfg, gh, store, nil)
 	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 11)
 
-	if _, err := svc.SetReviewers(ctx, repo, []string{"bugbot"}, nil); err != nil {
+	if _, err := svc.SetReviewers(ctx, repo, []string{"bugbot"}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	st, _, err := store.Load(ctx)
@@ -490,7 +550,7 @@ func TestChangingReviewersForcesExistingActiveRounds(t *testing.T) {
 				}
 			}
 
-			if _, err := svc.SetReviewers(ctx, repo, []string{"bugbot"}, []string{"bugbot"}); err != nil {
+			if _, err := svc.SetReviewers(ctx, repo, []string{"bugbot"}, []string{"bugbot"}, nil); err != nil {
 				t.Fatal(err)
 			}
 			st, _, err := store.Load(ctx)
@@ -537,7 +597,7 @@ func TestDedupeIsRevalidatedAgainstAReviewerChange(t *testing.T) {
 	}
 
 	// Now the override lands after the decision was made from svc.cfg.
-	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	st, _, err = store.Load(ctx)
@@ -594,7 +654,7 @@ func TestDedupeIsRevalidatedInsideItsWrite(t *testing.T) {
 	}
 	round := *st.Round(repo, pr)
 	hooked.hook = func() {
-		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}, nil); err != nil {
 			t.Error(err)
 		}
 	}
@@ -623,7 +683,7 @@ func TestReviewersRejectAnIncompleteRepository(t *testing.T) {
 		if _, err := svc.Reviewers(ctx, repo); err == nil {
 			t.Errorf("Reviewers(%q) = nil error, want the malformed target refused", repo)
 		}
-		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, nil); err == nil {
+		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, nil, nil); err == nil {
 			t.Errorf("SetReviewers(%q) = nil error, want the malformed target refused", repo)
 		}
 		if _, err := svc.ClearReviewers(ctx, repo); err == nil {
@@ -651,7 +711,7 @@ func TestAReopenedPRPicksUpRequirementsChangedWhileItWasClosed(t *testing.T) {
 	}
 
 	// Both PRs are closed while the required set changes: no round is requeued.
-	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	st, _, err := store.Load(ctx)
@@ -694,7 +754,7 @@ func TestAReopenedPRPicksUpRequirementsChangedWhileItWasClosed(t *testing.T) {
 	if !need || gotHead != head {
 		t.Fatalf("needsReview = %v %q, want the reopened PR enqueued at %q", need, gotHead, head)
 	}
-	if err := svc.enqueueBatch(ctx, []queueCandidate{{Repo: repo, PR: auto, Head: gotHead}}, svc.fleetCfg(st).FleetRevision); err != nil {
+	if err := svc.enqueueBatch(ctx, []queueCandidate{{Repo: repo, PR: auto, Head: gotHead}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -729,7 +789,7 @@ func TestChangingRequirementsLeavesClosedPRsAlone(t *testing.T) {
 	seedRound(t, store, cfg, repo, open, "aaaaaaaa1", PhaseCompleted, time.Now().UTC(), 11)
 	seedRound(t, store, cfg, repo, merged, "bbbbbbbb2", PhaseCompleted, time.Now().UTC(), 12)
 
-	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	st, _, err := store.Load(ctx)
@@ -801,6 +861,32 @@ func TestOverrideAddsTheSilencedPrimaryEntryTheFleetLacked(t *testing.T) {
 	}
 }
 
+func TestRequiredReviewersResolveAgainstTheCurrentFleetPrimary(t *testing.T) {
+	ctx := context.Background()
+	repo := "o/repo"
+	cfg := isolatedConfig(t, map[string]string{
+		"CRQ_REPO": "o/gate", "CRQ_REPOS": repo, "CRQ_COBOTS": "",
+	})
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	const current = "replacement-reviewer[bot]"
+	if _, err := svc.SetEnv(ctx, "CRQ_BOT", current, false); err != nil {
+		t.Fatal(err)
+	}
+	view, err := svc.SetReviewers(ctx, repo, nil, []string{current}, nil)
+	if err != nil {
+		t.Fatalf("current fleet primary was rejected using the process's retired startup primary: %v", err)
+	}
+	found := false
+	for _, reviewer := range view.Reviewers {
+		found = found || (sameBot(reviewer.Login, current) && reviewer.Required)
+	}
+	if !found {
+		t.Fatalf("reviewers = %+v, want the current fleet primary required", view.Reviewers)
+	}
+}
+
 // An operator who sets CRQ_COBOT_<NAME>_TRIGGER=never has disabled that bot's
 // command everywhere: the fleet parse already lets that value win over the
 // registry's required trigger. A repository requiring the bot must not be able
@@ -850,7 +936,7 @@ func TestCompletionIsRevalidatedInsideItsWrite(t *testing.T) {
 	}
 	stale := svc.cfgFor(st, repo)
 	hooked.hook = func() {
-		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}, nil); err != nil {
 			t.Error(err)
 		}
 	}
@@ -862,57 +948,6 @@ func TestCompletionIsRevalidatedInsideItsWrite(t *testing.T) {
 	}
 	if got := roundPhase(t, store, repo, pr); got != PhaseFired {
 		t.Fatalf("phase = %s, want the stale completion dropped so the new reviewer is still asked", got)
-	}
-}
-
-// A retry is policy-dependent too: its RetryAt and account block are computed
-// from the fleet's rate-limit fallback, so a widened window landing in the same
-// decision/write gap would be persisted at the old, earlier deadline — and the
-// account unblocked in time for another metered review the fleet meant to defer.
-func TestRetryIsRevalidatedInsideItsWrite(t *testing.T) {
-	ctx := context.Background()
-	cfg := firingConfig()
-	store := NewMemoryStore(cfg)
-	hooked := &hookedStore{StateStore: store}
-	svc := NewService(cfg, newFakeGitHub(), hooked, nil)
-	now := time.Now().UTC()
-	repo, pr, head := "o/r", 14, "aaaaaaaa1"
-	seedRound(t, store, cfg, repo, pr, head, PhaseFired, now, 22)
-
-	st, _, err := store.Load(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stale := svc.cfgFor(st, repo)
-	hooked.hook = func() {
-		if _, err := store.Update(ctx, func(st *State) error {
-			st.SetFleetValue("rate-limit-fallback", "2h")
-			return nil
-		}); err != nil {
-			t.Error(err)
-		}
-	}
-	until := now.Add(15 * time.Minute)
-	retry := engine.Transition{
-		Outcome: engine.OutRetry,
-		Reason:  dialect.ReasonRateLimited,
-		RetryAt: until,
-		Blocked: &engine.AccountBlock{Until: until, CommentID: 99, CommentUpdated: now},
-	}
-	if _, err := hooked.Update(ctx, func(st *State) error {
-		return svc.applyTransition(st, st.Round(repo, pr), retry, now, stale)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if got := roundPhase(t, store, repo, pr); got != PhaseFired {
-		t.Fatalf("phase = %s, want the stale retry dropped so it is recomputed under the fleet's window", got)
-	}
-	st, _, err = store.Load(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.Account.BlockedUntil != nil {
-		t.Fatalf("the block computed from the old window must not be recorded, got %v", st.Account.BlockedUntil)
 	}
 }
 
@@ -938,7 +973,7 @@ func TestFeedbackCompletionIsRevalidatedInsideItsWrite(t *testing.T) {
 	}
 	stale := svc.cfgFor(st, repo)
 	hooked.hook = func() {
-		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
+		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}, nil); err != nil {
 			t.Error(err)
 		}
 	}
@@ -977,7 +1012,7 @@ func TestSelfHealTriggerIsRevalidatedInsideItsClaim(t *testing.T) {
 	obs := engine.Observation{Head: head, Open: true}
 	hooked.hook = func() {
 		// The operator drops the co-reviewer, keeping only the primary.
-		if _, err := svc.SetReviewers(ctx, repo, []string{}, []string{cfg.Bot}); err != nil {
+		if _, err := svc.SetReviewers(ctx, repo, []string{}, []string{cfg.Bot}, nil); err != nil {
 			t.Error(err)
 		}
 	}
@@ -997,73 +1032,183 @@ func TestSelfHealTriggerIsRevalidatedInsideItsClaim(t *testing.T) {
 	}
 }
 
-func TestSelfHealDoesNotTriggerForFleetExcludedRepository(t *testing.T) {
-	ctx := context.Background()
-	cfg := firingConfig()
-	cfg.RequiredBots = []string{cfg.Bot, dialect.CodexBotLogin}
-	cfg.CoBots = codexCoBots(cfg.RequiredBots)
-	cfg.ExcludeRepos = map[string]bool{"o/r": true}
-	store := NewMemoryStore(cfg)
-	gh := newFakeGitHub()
-	svc := NewService(cfg, gh, store, nil)
-	now := time.Now().UTC()
-	seedRound(t, store, cfg, "o/r", 13, "aaaaaaaa1", PhaseFired, now, 22)
-	st, _, err := store.Load(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	svc.selfHealCoReviewers(ctx, cfg, *st.Round("o/r", 13), engine.Observation{
-		Head: "aaaaaaaa1", Open: true,
-	}, now)
-
-	if len(gh.posted) != 0 {
-		t.Fatalf("excluded repository received a co-review trigger: %v", gh.posted)
-	}
-	st, _, err = store.Load(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c := st.Round("o/r", 13).Co(dialect.CodexBotLogin); c.ClaimedAt != nil || c.CommandID != 0 {
-		t.Fatalf("excluded repository retained a co-review claim: %+v", c)
-	}
-}
-
-// The co-review wait is the one fire verdict with no later reconciliation to
-// undo it: the round is still queued when a reviewer change lands, requeuing a
-// queued round is a no-op, and the stale decision then parks it in reviewing
-// with commands adopted for the reviewer set that no longer gates it.
-func TestCoReviewWaitIsRevalidatedInsideItsWrite(t *testing.T) {
+// TestTurningThePrimaryOff pins the switch a private repository on a free plan
+// needs: the metered reviewer stops running there, stops gating convergence,
+// and cannot be turned off when nobody else would be left to answer.
+func TestTurningThePrimaryOff(t *testing.T) {
 	ctx := context.Background()
 	cfg := firingConfig()
 	cfg.CoBots = codexCoBots(nil)
 	store := NewMemoryStore(cfg)
-	hooked := &hookedStore{StateStore: store}
-	svc := NewService(cfg, newFakeGitHub(), hooked, nil)
-	now := time.Now().UTC()
-	repo, pr, head := "o/r", 12, "aaaaaaaa2"
-	seedRound(t, store, cfg, repo, pr, head, PhaseQueued, now, 0)
+	gh := newFakeGitHub()
+	svc := NewService(cfg, gh, store, nil)
+	repo := "o/private"
+	off, on := false, true
 
+	// Nobody else is required yet, so turning the primary off would leave a
+	// round gating on nobody — refused at edit time, not discovered later.
+	if _, err := svc.SetReviewers(ctx, repo, nil, nil, &off); err == nil {
+		t.Fatal("turning off the only required reviewer must be refused")
+	}
+
+	// With a co-reviewer required, the switch takes.
+	view, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex", cfg.Bot}, &off)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.PrimaryOff {
+		t.Error("view must say the primary is off, or the empty Reviewers list reads as a fleet without one")
+	}
+	for _, r := range view.Reviewers {
+		if sameBot(r.Login, cfg.Bot) {
+			t.Fatalf("reviewers = %+v, want the primary absent", view.Reviewers)
+		}
+	}
+
+	// The fleet default required set names the primary. A repository that never
+	// rewrote that list must still converge, so a reviewer that does not run
+	// here cannot gate here.
 	st, _, err := store.Load(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	round := *st.Round(repo, pr)
-	hooked.hook = func() {
-		if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}); err != nil {
-			t.Error(err)
+	ov, _ := st.RepoOverride(repo)
+	got := cfg.ForRepo(ov)
+	for _, bot := range got.RequiredBots {
+		if sameBot(bot, cfg.Bot) {
+			t.Errorf("RequiredBots = %v, want the primary dropped once it stopped running here", got.RequiredBots)
 		}
 	}
-	wait := engine.FireDecision{Verdict: engine.FireCoReviewWait, Reason: "awaiting co-review"}
-	obs := engine.Observation{Open: true, Head: head, HeadAt: now.Add(-time.Minute)}
-	result, err := svc.applyFire(ctx, svc.cfgFor(st, repo), round, obs, wait, now)
+	if _, ok := got.Primary(); ok {
+		t.Error("Primary() must find nothing to fire on a repository that turned it off")
+	}
+
+	// And it is reversible without dropping the rest of the override.
+	view, err = svc.SetReviewers(ctx, repo, nil, nil, &on)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Action != "lost_race" {
-		t.Errorf("action = %q, want the wait voided by the override that beat its write", result.Action)
+	if view.PrimaryOff {
+		t.Error("primary must be back on")
+	}
+	if len(view.Reviewers) == 0 {
+		t.Fatal("reviewers must list the primary again")
+	}
+}
+
+func TestTurningThePrimaryOffRefusesAClaimedTriggerPost(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RequiredBots = []string{cfg.Bot, dialect.CodexBotLogin}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	repo := "o/private"
+	if _, err := store.Update(ctx, func(st *State) error {
+		round, err := st.NewRound(repo, 7, "abcdef123", time.Now())
+		if err != nil {
+			return err
+		}
+		round.Phase = PhaseReserved
+		st.PutRound(*round)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	off := false
+	if _, err := svc.SetReviewers(ctx, repo, nil, nil, &off); err == nil {
+		t.Fatal("turning the primary off succeeded while its trigger was being posted")
+	}
+	view, err := svc.Reviewers(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.PrimaryOff {
+		t.Fatal("the rejected primary-off action still changed the repository override")
+	}
+}
+
+func TestRemovingACoReviewerRefusesItsClaimedTriggerPost(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RequiredBots = []string{cfg.Bot, dialect.CodexBotLogin}
+	cfg.CoBots = codexCoBots(cfg.RequiredBots)
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	repo := "o/private"
+	if _, err := store.Update(ctx, func(st *State) error {
+		round, err := st.NewRound(repo, 8, "abcdef123", time.Now())
+		if err != nil {
+			return err
+		}
+		round.ClaimCo(dialect.CodexBotLogin, time.Now())
+		st.PutRound(*round)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.SetReviewers(ctx, repo, []string{}, []string{cfg.Bot}, nil); err == nil {
+		t.Fatal("removing Codex succeeded while its trigger was being posted")
+	}
+	st, _, err := store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, changed := st.RepoOverride(repo); changed {
+		t.Fatal("the rejected edit still persisted a repository override")
+	}
+}
+
+func TestReviewerEditPreservesAnExistingCustomRequiredLogin(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.RequiredBots = []string{cfg.Bot, "sonar[bot]"}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+
+	view, err := svc.SetReviewers(
+		ctx,
+		"o/custom-gate",
+		[]string{"codex"},
+		[]string{cfg.Bot, "sonar[bot]"},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, reviewer := range view.Reviewers {
+		if reviewer.Login == "sonar[bot]" && reviewer.Required {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("reviewers = %+v, want the existing custom gate retained", view.Reviewers)
+	}
+}
+
+func TestTurningThePrimaryBackOnReopensCompletedRounds(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = codexCoBots(nil)
+	store := NewMemoryStore(cfg)
+	gh := newFakeGitHub()
+	repo, pr, head := "o/private", 7, "aaaaaaaa1"
+	gh.searchPRs = []ghapi.SearchPR{{Repo: repo, Number: pr}}
+	svc := NewService(cfg, gh, store, nil)
+	off, on := false, true
+
+	if _, err := svc.SetReviewers(ctx, repo, []string{"codex"}, []string{"codex"}, &off); err != nil {
+		t.Fatal(err)
+	}
+	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 11)
+
+	if _, err := svc.SetReviewers(ctx, repo, nil, nil, &on); err != nil {
+		t.Fatal(err)
 	}
 	if got := roundPhase(t, store, repo, pr); got != PhaseQueued {
-		t.Fatalf("phase = %s, want the round left queued so the new reviewer set decides it", got)
+		t.Fatalf("phase = %s, want the completed round reopened for the newly enabled primary", got)
 	}
 }

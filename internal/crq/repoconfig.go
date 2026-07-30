@@ -23,10 +23,18 @@ type ReviewerView struct {
 	// per-repo overrides — an older binary loads the field, writes it back
 	// untouched, and keeps deciding from its own fleet-wide configuration. The
 	// override is real; those hosts will not honour it until they are upgraded.
-	Lagging   []string         `json:"lagging_hosts,omitempty"`
-	UpdatedAt string           `json:"updated_at,omitempty"`
-	By        string           `json:"by,omitempty"`
-	Reviewers []ReviewerDetail `json:"reviewers"`
+	Lagging []string `json:"lagging_hosts,omitempty"`
+	// PrimaryOff says the metered primary does not review this repository —
+	// which is why it is absent from Reviewers below. Without it the list reads
+	// as a fleet that never had one.
+	PrimaryOff bool   `json:"primary_off,omitempty"`
+	Primary    string `json:"primary,omitempty"`
+	// LaggingPrimaryOff names hosts that understand per-repo overrides but not
+	// this switch, and would still fire the primary here.
+	LaggingPrimaryOff []string         `json:"lagging_primary_off,omitempty"`
+	UpdatedAt         string           `json:"updated_at,omitempty"`
+	By                string           `json:"by,omitempty"`
+	Reviewers         []ReviewerDetail `json:"reviewers"`
 }
 
 // ReviewerDetail is one reviewer as it will actually be used.
@@ -53,10 +61,14 @@ func (s *Service) Reviewers(ctx context.Context, repo string) (ReviewerView, err
 		return ReviewerView{}, err
 	}
 	cfg := s.cfgFor(st, repo)
-	view := ReviewerView{Repo: repo, Reviewers: []ReviewerDetail{}}
+	view := ReviewerView{Repo: repo, Reviewers: []ReviewerDetail{}, Primary: cfg.Bot}
 	view.Lagging = st.LaggingWriters(CapsRepoOverrides, s.clock().UTC())
 	if ov, ok := st.RepoOverride(repo); ok {
 		view.Overridden = true
+		view.PrimaryOff = ov.PrimaryOff
+		if ov.PrimaryOff {
+			view.LaggingPrimaryOff = st.LaggingWriters(CapsPrimaryOff, s.clock().UTC())
+		}
 		view.By = ov.By
 		if ov.UpdatedAt != nil {
 			view.UpdatedAt = ov.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z")
@@ -77,149 +89,331 @@ func (s *Service) Reviewers(ctx context.Context, repo string) (ReviewerView, err
 // convergence. A nil list means "leave that half alone"; an empty non-nil list
 // means "none here", which is a different thing and has to survive as one.
 //
-// The primary is not settable. Its markers and command are injected into the
-// dialect classifiers when the Service is built, so a per-repo primary would
-// mean per-repo classifiers.
-func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, required []string) (ReviewerView, error) {
+// primary is nil to leave the primary switch alone, or points at whether the
+// primary runs here at all. WHICH bot is primary is still not settable: its
+// markers and command are injected into the dialect classifiers when the
+// Service is built, so a per-repo primary would mean per-repo classifiers.
+// Turning it off is a different question, and one a private repository on a
+// free plan has to be able to answer.
+func (s *Service) SetReviewers(ctx context.Context, repo string, coBots, required []string, primary *bool) (ReviewerView, error) {
+	view, _, err := s.SetReviewersAt(ctx, repo, coBots, required, primary, nil)
+	return view, err
+}
+
+// PreviewReviewers reports which completed open rounds a repository edit would
+// invalidate, without writing the override.
+func (s *Service) PreviewReviewers(ctx context.Context, repo string, coBots, required []string, primary *bool) (FleetImpact, error) {
 	repo = NormalizeRepo(repo)
 	if err := checkRepoShape(repo); err != nil {
-		return ReviewerView{}, err
+		return FleetImpact{}, err
 	}
-	if coBots == nil && required == nil {
-		// Neither half was named, so there is nothing to set. Writing anyway would
-		// stamp a fresh UpdatedAt, and that timestamp IS the override's identity:
-		// applyFire revalidates against it, so a no-op call would discard every
-		// in-flight fire decision for the repository.
-		return s.Reviewers(ctx, repo)
-	}
-	// Accept either spelling: the login (chatgpt-codex-connector[bot]) or the
-	// short config name (codex), which is what CRQ_COBOTS already takes.
-	// Resolve against the REGISTRY, not the fleet's enabled list. Restricting a
-	// project to bots the fleet already runs would make this feature only ever
-	// subtract, when the point is choosing different reviewers per project.
-	// Either spelling works: the login, or the short name CRQ_COBOTS takes.
-	known := map[string]string{}
-	for _, co := range dialect.KnownCoReviewers() {
-		known[dialect.NormalizeBotName(co.Login)] = co.Login
-		known[strings.ToLower(strings.TrimSpace(co.Name))] = co.Login
-	}
-	resolve := func(allowed map[string]string, list []string, what string) ([]string, error) {
-		out := make([]string, 0, len(list))
-		for _, name := range list {
-			name = strings.TrimSpace(name)
-			if name == "" {
-				continue
-			}
-			login, ok := allowed[dialect.NormalizeBotName(name)]
-			if !ok {
-				login, ok = allowed[strings.ToLower(name)]
-			}
-			if !ok {
-				return nil, fmt.Errorf("%s: unknown reviewer %q (known: %s)", what, name, strings.Join(knownLogins(allowed), ", "))
-			}
-			out = append(out, login)
-		}
-		return out, nil
-	}
-
-	// Both halves are resolved here; the MERGE happens inside the CAS closure,
-	// because two hosts setting different halves would otherwise derive from the
-	// same snapshot and the later write would drop the earlier one's half — and
-	// a retry that reuses an already-merged value cannot fix that.
-	var setCoBots, setRequired []string
-	if coBots != nil {
-		resolved, err := resolve(known, coBots, "--bots")
-		if err != nil {
-			return ReviewerView{}, err
-		}
-		setCoBots = resolved
-	}
-	if required != nil {
-		if len(required) == 0 {
-			// Gating on nobody means Feedback reports converged before anything
-			// runs, so `crq next` says done and the reviewers chosen by --bots
-			// never review at all.
-			return ReviewerView{}, errors.New("--required cannot be empty: a round that gates on nobody converges before any reviewer runs (crq reviewers clear <repo> to drop the override)")
-		}
-		// The primary may gate here even though it cannot be replaced here.
-		allowed := map[string]string{dialect.NormalizeBotName(s.cfg.Bot): s.cfg.Bot}
-		for k, v := range known {
-			allowed[k] = v
-		}
-		resolved, err := resolve(allowed, required, "--required")
-		if err != nil {
-			return ReviewerView{}, err
-		}
-		setRequired = resolved
-	}
-
-	// Read before the write: the requeue below may only touch live pull requests,
-	// and the CAS closure cannot ask GitHub. A failed lookup fails the whole
-	// command, which is retryable — writing the override and skipping the requeue
-	// would strand exactly the PRs the requeue exists for.
-	open, err := s.openPRs(ctx, repo)
+	setCoBots, err := validateReviewerEdit(coBots, required)
 	if err != nil {
-		return ReviewerView{}, err
+		return FleetImpact{}, err
+	}
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return FleetImpact{}, err
+	}
+	_, before, after, changed, err := s.applyReviewerEdit(st, repo, coBots, setCoBots, required, primary)
+	if err != nil {
+		return FleetImpact{}, err
+	}
+	if !changed {
+		return FleetImpact{Rev: st.Rev, Changes: []string{}, Summary: "nothing would change"}, nil
+	}
+	impact, _, err := s.analyzeReviewerChange(ctx, st, repo, before, after)
+	return impact, err
+}
+
+// SetReviewersAt binds a dashboard save to the state revision its consequence
+// preview described. CLI callers omit expectedRev and retain CAS-merged edits.
+func (s *Service) SetReviewersAt(
+	ctx context.Context,
+	repo string,
+	coBots, required []string,
+	primary *bool,
+	expectedRev *int64,
+) (ReviewerView, FleetImpact, error) {
+	repo = NormalizeRepo(repo)
+	if err := checkRepoShape(repo); err != nil {
+		return ReviewerView{}, FleetImpact{}, err
+	}
+	if coBots == nil && required == nil && primary == nil {
+		view, err := s.Reviewers(ctx, repo)
+		return view, FleetImpact{}, err
+	}
+	setCoBots, err := validateReviewerEdit(coBots, required)
+	if err != nil {
+		return ReviewerView{}, FleetImpact{}, err
+	}
+	loaded, _, err := s.store.Load(ctx)
+	if err != nil {
+		return ReviewerView{}, FleetImpact{}, err
+	}
+	if err := checkFleetPreviewRevision(loaded, expectedRev); err != nil {
+		return ReviewerView{}, FleetImpact{}, err
+	}
+	_, before, after, changed, err := s.applyReviewerEdit(loaded, repo, coBots, setCoBots, required, primary)
+	if err != nil {
+		return ReviewerView{}, FleetImpact{}, err
+	}
+	if !changed {
+		view, err := s.Reviewers(ctx, repo)
+		return view, FleetImpact{Rev: loaded.Rev, Changes: []string{}, Summary: "nothing would change"}, err
+	}
+	impact, open, err := s.analyzeReviewerChange(ctx, loaded, repo, before, after)
+	if err != nil {
+		return ReviewerView{}, FleetImpact{}, err
 	}
 	now := s.clock().UTC()
 	state, err := s.store.Update(ctx, func(st *State) error {
-		base := s.fleetCfg(*st)
-		ov, _ := st.RepoOverride(repo)
-		beforeOverride := ov
-		if coBots != nil {
-			ov.CoBots, ov.SetCoBots = setCoBots, true
+		if err := checkFleetPreviewRevision(*st, expectedRev); err != nil {
+			return err
 		}
-		if required != nil {
-			ov.Required, ov.SetRequired = setRequired, true
+		ov, was, is, changed, err := s.applyReviewerEdit(*st, repo, coBots, setCoBots, required, primary)
+		if err != nil {
+			return err
 		}
-		if ov.SetCoBots == beforeOverride.SetCoBots &&
-			ov.SetRequired == beforeOverride.SetRequired &&
-			sameLogins(ov.CoBots, beforeOverride.CoBots) &&
-			sameLogins(ov.Required, beforeOverride.Required) {
+		if !changed {
 			return ErrNoChange
 		}
+		if claimedTriggerRepo(st, repo, now) {
+			return errors.New("a review trigger is already being posted; wait for it to finish before changing this repository's reviewers")
+		}
 		ov.UpdatedAt, ov.By = &now, s.cfg.Host
-		before := base.ForRepo(mustOverride(st, repo))
 		st.SetRepoOverride(repo, ov)
-		s.reopenForChangedReviewers(st, repo, before, base.ForRepo(ov), open)
+		s.reopenForChangedReviewers(st, repo, was, is, open)
 		return nil
 	})
 	if err != nil {
-		return ReviewerView{}, err
+		return ReviewerView{}, FleetImpact{}, err
 	}
 	s.sync(ctx, state)
-	return s.Reviewers(ctx, repo)
+	view, err := s.Reviewers(ctx, repo)
+	return view, impact, err
+}
+
+func validateReviewerEdit(coBots, required []string) ([]string, error) {
+	var setCoBots []string
+	if coBots != nil {
+		resolved, err := resolveCoBotLogins(coBots)
+		if err != nil {
+			return nil, err
+		}
+		setCoBots = resolved
+	}
+	if required != nil && len(required) == 0 {
+		return nil, errors.New("--required cannot be empty: a round that gates on nobody converges before any reviewer runs (crq reviewers clear <repo> to drop the override)")
+	}
+	return setCoBots, nil
+}
+
+// applyReviewerEdit resolves both halves from one state revision. SetReviewersAt
+// calls it again inside CAS so two CLI hosts editing different halves merge
+// instead of the later write dropping the earlier one.
+func (s *Service) applyReviewerEdit(
+	st State,
+	repo string,
+	coBots, setCoBots, required []string,
+	primary *bool,
+) (RepoReviewers, Config, Config, bool, error) {
+	ov, _ := st.RepoOverride(repo)
+	beforeOverride := ov
+	before := s.cfgFor(st, repo)
+	if coBots != nil {
+		ov.CoBots, ov.SetCoBots = setCoBots, true
+	}
+	if required != nil {
+		resolved, err := resolveRequiredLoginsPreserving(required, before.Bot, before.RequiredBots)
+		if err != nil {
+			return RepoReviewers{}, Config{}, Config{}, false, err
+		}
+		ov.Required, ov.SetRequired = resolved, true
+	}
+	if primary != nil {
+		ov.PrimaryOff = !*primary
+	}
+	changed := ov.SetCoBots != beforeOverride.SetCoBots ||
+		ov.SetRequired != beforeOverride.SetRequired ||
+		ov.PrimaryOff != beforeOverride.PrimaryOff ||
+		!sameLogins(ov.CoBots, beforeOverride.CoBots) ||
+		!sameLogins(ov.Required, beforeOverride.Required)
+	base := s.cfg.WithFleet(st.Fleet)
+	after := base.ForRepo(ov)
+	if len(after.RequiredBots) == 0 {
+		return RepoReviewers{}, Config{}, Config{}, false, fmt.Errorf(
+			"that would leave %s with no required reviewer, so every round would converge before any bot answers — require a co-reviewer first", repo)
+	}
+	return ov, before, after, changed, nil
 }
 
 // ClearReviewers returns repo to the fleet default.
 func (s *Service) ClearReviewers(ctx context.Context, repo string) (ReviewerView, error) {
+	view, _, err := s.ClearReviewersAt(ctx, repo, nil)
+	return view, err
+}
+
+// PreviewClearReviewers reports which inherited reviewers a reset restores and
+// how many completed open rounds need another review.
+func (s *Service) PreviewClearReviewers(ctx context.Context, repo string) (FleetImpact, error) {
+	repo = NormalizeRepo(repo)
+	if err := checkRepoShape(repo); err != nil {
+		return FleetImpact{}, err
+	}
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return FleetImpact{}, err
+	}
+	impact, _, err := s.analyzeClearReviewers(ctx, st, repo)
+	return impact, err
+}
+
+// ClearReviewersAt binds the reset to the state revision its preview described.
+func (s *Service) ClearReviewersAt(ctx context.Context, repo string, expectedRev *int64) (ReviewerView, FleetImpact, error) {
 	repo = NormalizeRepo(repo)
 	// A typo like "owner-repo" would otherwise clear a key nothing uses and exit
 	// 0, so automation believes it restored the fleet default while the real
 	// override is still in force.
 	if err := checkRepoShape(repo); err != nil {
-		return ReviewerView{}, err
+		return ReviewerView{}, FleetImpact{}, err
 	}
-	open, err := s.openPRs(ctx, repo)
+	loaded, _, err := s.store.Load(ctx)
 	if err != nil {
-		return ReviewerView{}, err
+		return ReviewerView{}, FleetImpact{}, err
 	}
+	if err := checkFleetPreviewRevision(loaded, expectedRev); err != nil {
+		return ReviewerView{}, FleetImpact{}, err
+	}
+	impact, open, err := s.analyzeClearReviewers(ctx, loaded, repo)
+	if err != nil {
+		return ReviewerView{}, FleetImpact{}, err
+	}
+	now := s.clock().UTC()
 	state, err := s.store.Update(ctx, func(st *State) error {
-		base := s.fleetCfg(*st)
-		before := base.ForRepo(mustOverride(st, repo))
-		if !st.ClearRepoOverride(repo) {
+		if err := checkFleetPreviewRevision(*st, expectedRev); err != nil {
+			return err
+		}
+		// Clearing returns the repository to the FLEET default, so that is what
+		// the "after" side has to be — s.cfg is this host's env, which is only
+		// the same thing when the fleet has recorded nothing.
+		base := s.cfg.WithFleet(st.Fleet)
+		override, ok := st.RepoOverride(repo)
+		if !ok {
 			return ErrNoChange
 		}
+		before := base.ForRepo(override)
+		if claimedTriggerRepo(st, repo, now) {
+			return errors.New("a review trigger is already being posted; wait for it to finish before resetting this repository's reviewers")
+		}
+		st.ClearRepoOverride(repo)
 		s.reopenForChangedReviewers(st, repo, before, base, open)
 		return nil
 	})
 	if err != nil && !errors.Is(err, ErrNoChange) {
-		return ReviewerView{}, err
+		return ReviewerView{}, FleetImpact{}, err
 	}
 	if err == nil {
 		s.sync(ctx, state)
 	}
-	return s.Reviewers(ctx, repo)
+	view, err := s.Reviewers(ctx, repo)
+	return view, impact, err
+}
+
+// analyzeClearReviewers returns both the user-visible consequence preview and
+// the exact open-PR snapshot used to apply it. A confirmed reset must not ask
+// GitHub a second time and silently act on a different set than it displayed.
+func (s *Service) analyzeClearReviewers(ctx context.Context, st State, repo string) (FleetImpact, map[int]bool, error) {
+	impact := FleetImpact{Rev: st.Rev, Changes: []string{}}
+	ov, ok := st.RepoOverride(repo)
+	if !ok {
+		impact.Summary = "nothing would change"
+		return impact, nil, nil
+	}
+	base := s.cfg.WithFleet(st.Fleet)
+	before, after := base.ForRepo(ov), base
+	beforeRuns := before.reviewerLogins(func(Reviewer) bool { return true })
+	afterRuns := after.reviewerLogins(func(Reviewer) bool { return true })
+	if !sameLogins(beforeRuns, afterRuns) {
+		impact.Changes = append(impact.Changes, fmt.Sprintf("reviewers running: %s → %s",
+			shortBots(beforeRuns), shortBots(afterRuns)))
+	}
+	if !sameLogins(before.RequiredBots, after.RequiredBots) {
+		impact.Changes = append(impact.Changes, fmt.Sprintf("required reviewers: %s → %s",
+			shortBots(before.RequiredBots), shortBots(after.RequiredBots)))
+	}
+	if sameLogins(beforeRuns, afterRuns) && !sameTriggerSettings(before.Reviewers, after.Reviewers) {
+		impact.Changes = append(impact.Changes, "reviewer trigger policy or command changed")
+	}
+	if len(impact.Changes) == 0 {
+		impact.Summary = "removes the override; effective reviewers stay the same"
+		return impact, nil, nil
+	}
+	impact.Repos = 1
+	beforeCo := before.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
+	afterCo := after.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
+	var open map[int]bool
+	if addedReviewers(before, after, beforeCo, afterCo) {
+		var err error
+		open, err = s.openPRs(ctx, repo)
+		if err != nil {
+			return FleetImpact{}, nil, err
+		}
+		for _, round := range st.Rounds {
+			if NormalizeRepo(round.Repo) == repo && round.Phase == PhaseCompleted && open[round.PR] {
+				impact.Reopened++
+			}
+		}
+	}
+	if impact.Reopened > 0 {
+		impact.Summary = fmt.Sprintf("resets to the fleet default; %d completed round(s) would be reopened and reviewed again", impact.Reopened)
+	} else {
+		impact.Summary = "resets to the fleet default; no round would be reopened"
+	}
+	return impact, open, nil
+}
+
+func (s *Service) analyzeReviewerChange(
+	ctx context.Context,
+	st State,
+	repo string,
+	before, after Config,
+) (FleetImpact, map[int]bool, error) {
+	impact := FleetImpact{Rev: st.Rev, Repos: 1, Changes: []string{}}
+	beforeRuns := before.reviewerLogins(func(Reviewer) bool { return true })
+	afterRuns := after.reviewerLogins(func(Reviewer) bool { return true })
+	if !sameLogins(beforeRuns, afterRuns) {
+		impact.Changes = append(impact.Changes, fmt.Sprintf("reviewers running: %s → %s",
+			shortBots(beforeRuns), shortBots(afterRuns)))
+	}
+	if !sameLogins(before.RequiredBots, after.RequiredBots) {
+		impact.Changes = append(impact.Changes, fmt.Sprintf("required reviewers: %s → %s",
+			shortBots(before.RequiredBots), shortBots(after.RequiredBots)))
+	}
+	if sameLogins(beforeRuns, afterRuns) && !sameTriggerSettings(before.Reviewers, after.Reviewers) {
+		impact.Changes = append(impact.Changes, "reviewer trigger policy or command changed")
+	}
+	var open map[int]bool
+	beforeCo := before.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
+	afterCo := after.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
+	if addedReviewers(before, after, beforeCo, afterCo) {
+		var err error
+		open, err = s.openPRs(ctx, repo)
+		if err != nil {
+			return FleetImpact{}, nil, err
+		}
+		for _, round := range st.Rounds {
+			if NormalizeRepo(round.Repo) == repo && round.Phase == PhaseCompleted && open[round.PR] {
+				impact.Reopened++
+			}
+		}
+	}
+	if impact.Reopened > 0 {
+		impact.Summary = fmt.Sprintf("%d completed round(s) would be reopened and reviewed again", impact.Reopened)
+	} else {
+		impact.Summary = "no completed round would be reopened"
+	}
+	return impact, open, nil
 }
 
 // checkRepoShape is the one repository-shape check every reviewers path applies,
@@ -230,8 +424,7 @@ func (s *Service) ClearReviewers(ctx context.Context, repo string) (ReviewerView
 // otherwise print the fleet default and exit 0, reading as a report about a
 // project crq follows.
 func checkRepoShape(repo string) error {
-	owner, name, ok := strings.Cut(repo, "/")
-	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+	if !validRepoSlug(repo) {
 		return fmt.Errorf("repo must be owner/name, got %q", repo)
 	}
 	return nil
@@ -292,9 +485,19 @@ func mustOverride(st *State, repo string) RepoReviewers {
 func (s *Service) reopenForChangedReviewers(st *State, repo string, before, after Config, open map[int]bool) {
 	beforeCo := before.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
 	afterCo := after.reviewerLogins(func(r Reviewer) bool { return !r.Metered() })
-	if sameLogins(before.RequiredBots, after.RequiredBots) && sameLogins(beforeCo, afterCo) {
+	if sameReviewers(before, after) {
 		return
 	}
+	// Only ADDING a reviewer can invalidate a finished round. A round that
+	// converged did so with the reviewers it had; taking one away leaves it
+	// converged with MORE evidence than the new configuration asks for, and
+	// re-reviewing it buys nothing.
+	//
+	// This is not a nicety. Removing two co-reviewers from a fleet default
+	// proposed reopening seventeen completed rounds — seventeen metered
+	// reviews, against a shared allowance, to reach the answer already on
+	// record. A narrowing must be free.
+	added := addedReviewers(before, after, beforeCo, afterCo)
 	for _, round := range st.Rounds {
 		if NormalizeRepo(round.Repo) != NormalizeRepo(repo) {
 			continue
@@ -309,6 +512,10 @@ func (s *Service) reopenForChangedReviewers(st *State, repo string, before, afte
 			}
 			continue
 		case PhaseCompleted:
+			if !added {
+				// Narrowed only: the round's answer still stands.
+				continue
+			}
 		default:
 			continue
 		}
@@ -393,6 +600,44 @@ func (s *Service) openPRs(ctx context.Context, repo string) (map[int]bool, error
 	return open, nil
 }
 
+// sameReviewers reports whether two resolved configurations ask the same bots to
+// review and gate. It is the question every requeue path starts from, wherever
+// the change came from: a per-repo override, a fleet default, or a fleet-wide
+// env setting that happens to name the primary.
+func sameReviewers(before, after Config) bool {
+	return sameLogins(before.RequiredBots, after.RequiredBots) &&
+		sameLogins(before.reviewerLogins(func(Reviewer) bool { return true }),
+			after.reviewerLogins(func(Reviewer) bool { return true })) &&
+		sameTriggerSettings(before.Reviewers, after.Reviewers)
+}
+
+// sameTriggerSettings covers both whether crq posts and what it posts. A
+// command is captured before the network call, so changing it while a trigger
+// claim is live is the same configuration race as changing its mode.
+func sameTriggerSettings(a, b []Reviewer) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	type setting struct {
+		trigger engine.TriggerMode
+		command string
+	}
+	triggers := make(map[string]setting, len(a))
+	for _, reviewer := range a {
+		triggers[dialect.NormalizeBotName(reviewer.Login)] = setting{
+			trigger: reviewer.Trigger,
+			command: strings.TrimSpace(reviewer.Command),
+		}
+	}
+	for _, reviewer := range b {
+		got, ok := triggers[dialect.NormalizeBotName(reviewer.Login)]
+		if !ok || got.trigger != reviewer.Trigger || got.command != strings.TrimSpace(reviewer.Command) {
+			return false
+		}
+	}
+	return true
+}
+
 // sameLogins compares two reviewer lists as sets, since order is presentation.
 func sameLogins(a, b []string) bool {
 	if len(a) != len(b) {
@@ -410,4 +655,130 @@ func sameLogins(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// resolveCoBotLogins turns whichever spelling a caller used — the login
+// (chatgpt-codex-connector[bot]) or the short config name (codex) — into
+// logins, rejecting anything the registry does not know.
+//
+// Resolved against the REGISTRY, not the fleet's enabled list: restricting a
+// choice to bots the fleet already runs would make the feature only ever
+// subtract, when the point is choosing DIFFERENT reviewers.
+func resolveCoBotLogins(list []string) ([]string, error) {
+	return resolveBotList(coReviewerNames(), list, "--bots")
+}
+
+// resolveRequiredLogins additionally accepts the primary, which may gate even
+// though it cannot be replaced per repository.
+func resolveRequiredLogins(list []string, primary string) ([]string, error) {
+	allowed := coReviewerNames()
+	if primary != "" {
+		allowed[dialect.NormalizeBotName(primary)] = primary
+	}
+	return resolveBotList(allowed, list, "--required")
+}
+
+// resolveRequiredLoginsPreserving additionally accepts non-registry gates that
+// already exist in the repository's effective configuration. They cannot be
+// added through the per-repository editor, but an unrelated edit must not make
+// an inherited CRQ_REQUIRED_BOTS login impossible to retain.
+func resolveRequiredLoginsPreserving(list []string, primary string, existing []string) ([]string, error) {
+	allowed := coReviewerNames()
+	if primary != "" {
+		allowed[dialect.NormalizeBotName(primary)] = primary
+	}
+	for _, login := range existing {
+		login = strings.TrimSpace(login)
+		if login == "" {
+			continue
+		}
+		allowed[dialect.NormalizeBotName(login)] = login
+		allowed[strings.ToLower(login)] = login
+	}
+	return resolveBotList(allowed, list, "--required")
+}
+
+// coReviewerNames maps every accepted spelling to its login. Each bot appears
+// twice, which is why knownLogins deduplicates by value.
+func coReviewerNames() map[string]string {
+	known := map[string]string{}
+	for _, co := range dialect.KnownCoReviewers() {
+		known[dialect.NormalizeBotName(co.Login)] = co.Login
+		known[strings.ToLower(strings.TrimSpace(co.Name))] = co.Login
+	}
+	return known
+}
+
+func resolveBotList(allowed map[string]string, list []string, what string) ([]string, error) {
+	out := make([]string, 0, len(list))
+	seen := map[string]bool{}
+	for _, name := range list {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		login, ok := allowed[dialect.NormalizeBotName(name)]
+		if !ok {
+			login, ok = allowed[strings.ToLower(name)]
+		}
+		if !ok {
+			return nil, fmt.Errorf("%s: unknown reviewer %q (known: %s)", what, name, strings.Join(knownLogins(allowed), ", "))
+		}
+		// Both spellings of one bot resolve to one login, so a caller that sent
+		// "codex" and "chatgpt-codex-connector[bot]" named one reviewer, not two.
+		// Storing it twice would render it twice and read as a configuration
+		// mistake nobody made.
+		if seen[dialect.NormalizeBotName(login)] {
+			continue
+		}
+		seen[dialect.NormalizeBotName(login)] = true
+		out = append(out, login)
+	}
+	return out, nil
+}
+
+// addedReviewers reports whether the new configuration asks for evidence the
+// old one did not — a newly required reviewer, a newly enabled co-reviewer, or
+// a trigger policy that newly asks an existing reviewer to run. A pure removal
+// returns false, which is what makes narrowing free.
+func addedReviewers(before, after Config, beforeCo, afterCo []string) bool {
+	for _, login := range after.RequiredBots {
+		if !containsBot(before.RequiredBots, login) {
+			return true
+		}
+	}
+	for _, login := range afterCo {
+		if !containsBot(beforeCo, login) {
+			return true
+		}
+	}
+	for _, reviewer := range after.Reviewers {
+		if reviewer.Metered() {
+			if !containsBot(before.reviewerLogins(func(r Reviewer) bool { return r.Metered() }), reviewer.Login) {
+				return true
+			}
+			continue
+		}
+		if reviewer.Trigger == engine.TriggerNever {
+			continue
+		}
+		for _, old := range before.Reviewers {
+			if sameBot(old.Login, reviewer.Login) &&
+				triggerPolicyRank(reviewer.Trigger) > triggerPolicyRank(old.Trigger) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func triggerPolicyRank(mode engine.TriggerMode) int {
+	switch mode {
+	case engine.TriggerAlways:
+		return 2
+	case engine.TriggerSelfHeal:
+		return 1
+	default:
+		return 0
+	}
 }

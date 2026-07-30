@@ -98,7 +98,7 @@ func TestSyncDashboardWritesOnlyOnChange(t *testing.T) {
 
 	st := syncTestState(t)
 	for i := 0; i < 4; i++ {
-		if err := store.SyncDashboard(ctx, st, cfg); err != nil {
+		if err := store.SyncDashboard(ctx, st); err != nil {
 			t.Fatalf("sync %d: %v", i, err)
 		}
 	}
@@ -120,7 +120,7 @@ func TestSyncDashboardWritesOnlyOnChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	st.Normalize(t0)
-	if err := store.SyncDashboard(ctx, st, cfg); err != nil {
+	if err := store.SyncDashboard(ctx, st); err != nil {
 		t.Fatal(err)
 	}
 	srv.mu.Lock()
@@ -142,7 +142,7 @@ func TestSyncDashboardSkipsWriteWhenTheIssueAlreadyMatches(t *testing.T) {
 	st := syncTestState(t)
 
 	// One process (think: the daemon) publishes the dashboard.
-	if err := NewGitStateStore(cfg, client, nil).SyncDashboard(ctx, st, cfg); err != nil {
+	if err := NewGitStateStore(cfg, client, nil).SyncDashboard(ctx, st); err != nil {
 		t.Fatal(err)
 	}
 	srv.mu.Lock()
@@ -155,7 +155,7 @@ func TestSyncDashboardSkipsWriteWhenTheIssueAlreadyMatches(t *testing.T) {
 	// A genuinely cold second process against the same issue: its own client, so
 	// it shares no ETag cache with the first.
 	cold := NewGitStateStore(cfg, gh.NewTestClient(httpSrv.URL, httpSrv.Client()), nil)
-	if err := cold.SyncDashboard(ctx, st, cfg); err != nil {
+	if err := cold.SyncDashboard(ctx, st); err != nil {
 		t.Fatal(err)
 	}
 	srv.mu.Lock()
@@ -168,81 +168,27 @@ func TestSyncDashboardSkipsWriteWhenTheIssueAlreadyMatches(t *testing.T) {
 	}
 }
 
-func TestSyncDashboardUsesTheSuppliedEffectiveRenderingConfig(t *testing.T) {
+func TestSyncDashboardUsesStateBackedRenderConfig(t *testing.T) {
 	srv := &issueServer{}
 	_, client := srv.start(t)
 	startup := StoreConfig{
 		GateRepo: "owner/state", StateRef: "crq-state-v3", DashboardIssue: 1,
 		Scope: []string{"owner"}, CoReviewers: "codex (selfheal)",
 	}
-	effective := startup
-	effective.CoReviewers = "codex (required, always)"
-	st := syncTestState(t)
-
-	if err := NewGitStateStore(startup, client, nil).SyncDashboard(context.Background(), st, effective); err != nil {
-		t.Fatal(err)
-	}
-	srv.mu.Lock()
-	defer srv.mu.Unlock()
-	if !strings.Contains(srv.body, effective.CoReviewers) || strings.Contains(srv.body, startup.CoReviewers) {
-		t.Fatalf("dashboard body did not use the effective reviewer summary:\n%s", srv.body)
-	}
-}
-
-// dashboard.md is rewritten on EVERY state commit, so it has to be rendered
-// with the same effective policy the gate issue is. Rendering it from the
-// writing host's startup configuration would put that machine's co-reviewer set
-// in the shared file — disagreeing with the issue, and flapping between hosts
-// that are each configured differently.
-func TestStateCommitsRenderTheDashboardFileWithTheEffectiveConfig(t *testing.T) {
-	var blobs []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		enc := json.NewEncoder(w)
-		switch {
-		case strings.Contains(r.URL.Path, "/git/ref/"):
-			http.NotFound(w, r) // no state ref yet: the first write creates it
-		case strings.HasSuffix(r.URL.Path, "/git/blobs"):
-			var payload struct {
-				Content string `json:"content"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			blobs = append(blobs, payload.Content)
-			enc.Encode(map[string]string{"sha": "blobsha"})
-		case strings.HasSuffix(r.URL.Path, "/git/trees"):
-			enc.Encode(map[string]string{"sha": "treesha"})
-		case strings.HasSuffix(r.URL.Path, "/git/commits"):
-			enc.Encode(map[string]string{"sha": "commitsha"})
-		case strings.HasSuffix(r.URL.Path, "/git/refs"):
-			enc.Encode(map[string]any{"object": map[string]string{"sha": "commitsha"}})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(srv.Close)
-
-	startup := StoreConfig{
-		GateRepo: "owner/state", StateRef: "crq-state-v3", DashboardIssue: 1,
-		Scope: []string{"owner"}, CoReviewers: "codex (selfheal)",
-	}
-	store := NewGitStateStore(startup, gh.NewTestClient(srv.URL, srv.Client()), nil)
+	store := NewGitStateStore(startup, client, nil)
 	store.SetRenderConfig(func(State) StoreConfig {
 		effective := startup
 		effective.CoReviewers = "codex (required, always)"
 		return effective
 	})
-	if _, err := store.Update(context.Background(), func(st *State) error {
-		_, err := st.NewRound("owner/repo", 7, "abcdef123", t0)
-		return err
-	}); err != nil {
+
+	if err := store.SyncDashboard(context.Background(), syncTestState(t)); err != nil {
 		t.Fatal(err)
 	}
-
-	written := strings.Join(blobs, "\n")
-	if !strings.Contains(written, "codex (required, always)") || strings.Contains(written, "codex (selfheal)") {
-		t.Fatalf("the committed dashboard did not use the effective reviewer summary:\n%s", written)
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if !strings.Contains(srv.body, "codex (required, always)") ||
+		strings.Contains(srv.body, "codex (selfheal)") {
+		t.Fatalf("dashboard used startup reviewers instead of state-backed reviewers:\n%s", srv.body)
 	}
 }

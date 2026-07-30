@@ -2,7 +2,6 @@ package crq
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"time"
 
@@ -62,15 +61,16 @@ func (s *Service) RecordCLIQuota(ctx context.Context, report PreflightReport, cl
 	if err := s.cfg.RequireState(); err != nil {
 		return CLIQuotaResult{Reason: "no crq state configured, so there is no shared quota to update"}, nil
 	}
-	st, _, err := s.store.Load(ctx)
+	state, _, err := s.store.Load(ctx)
 	if err != nil {
-		return CLIQuotaResult{}, err
+		return CLIQuotaResult{Reason: "shared quota state could not be read, so the account behind the block cannot be confirmed"}, nil
 	}
-	cfg := s.fleetCfg(st)
+	cfg := s.cfg.WithFleet(state.Fleet)
 	if !cliOrgMatches(cfg, cliOrg) {
 		return CLIQuotaResult{
 			Reason: "the coderabbit cli is authenticated to " + orDash(cliOrg) +
 				", which is not the account crq queues for (" + strings.Join(cfg.Scope, ",") + ")",
+			Until: state.Account.BlockedUntil,
 		}, nil
 	}
 
@@ -81,6 +81,11 @@ func (s *Service) RecordCLIQuota(ctx context.Context, report PreflightReport, cl
 		// conservative fallback is right: treating an unreadable window as "not
 		// blocked" is what let the daemon re-fire every couple of minutes against
 		// a limit measured in tens of minutes.
+		//
+		// The FLEET's window, when one is recorded. CRQ_RL_FALLBACK is a fleet
+		// setting, and reading this host's startup value recorded a shorter block
+		// than the settings page said was in force — resuming metered fires early
+		// against the number the dashboard was showing.
 		fallback := now.Add(cliQuotaFallback(cfg.RateLimitFallback))
 		until = &fallback
 	}
@@ -91,13 +96,14 @@ func (s *Service) RecordCLIQuota(ctx context.Context, report PreflightReport, cl
 		return result, nil
 	}
 
-	applied, standing, err := s.applyAccountBlock(ctx, *until, "coderabbit-cli", cfg, cliOrg)
-	if errors.Is(err, errFleetQuotaChanged) {
-		result.Reason = "fleet policy changed while recording the block; run preflight again"
-		return result, nil
-	}
+	applied, standing, matched, err := s.applyAccountBlock(ctx, *until, "coderabbit-cli", cfg, cliOrg)
 	if err != nil {
 		return result, err
+	}
+	if !matched {
+		result.Reason = "the fleet account changed before the block could be recorded"
+		result.Until = standing
+		return result, nil
 	}
 	result.Applied = applied
 	if !applied {
@@ -106,8 +112,6 @@ func (s *Service) RecordCLIQuota(ctx context.Context, report PreflightReport, cl
 	}
 	return result, nil
 }
-
-var errFleetQuotaChanged = errors.New("fleet policy changed while recording cli quota")
 
 // cliOrgMatches reports whether the CLI's current organisation is the account
 // crq queues for. An empty org fails closed: without knowing whose limit this is,

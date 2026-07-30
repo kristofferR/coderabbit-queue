@@ -18,7 +18,7 @@ type TriggerMode string
 const (
 	TriggerNever    TriggerMode = "never"    // crq never posts this bot's command
 	TriggerSelfHeal TriggerMode = "selfheal" // post only when an active bot missed the head past a grace period
-	TriggerAlways   TriggerMode = "always"   // post at fire time unless the bot auto-reviews
+	TriggerAlways   TriggerMode = "always"   // post at fire time unless current-head evidence suppresses it
 )
 
 // CoReviewerPolicy is the configured stance toward one co-reviewer: whether
@@ -43,6 +43,13 @@ func (cp CoReviewerPolicy) selfHealGrace() time.Duration {
 type Policy struct {
 	Bot          string   // configured CodeRabbit login
 	RequiredBots []string // bots that gate round completion
+
+	// PrimaryOff means the metered primary does not review this repository at
+	// all. It reads as one more way a primary review cannot arrive, so every
+	// rule that already handles "no review is coming" handles this too — and
+	// resolves before the slot, quota and pacing gates, which is what keeps a
+	// repository crq does not fire from queueing behind one it does.
+	PrimaryOff bool
 
 	// CoReviewers are the enabled co-reviewer bots with their trigger stances.
 	CoReviewers []CoReviewerPolicy
@@ -219,6 +226,12 @@ func PrimaryReviewUnavailable(obs Observation, p Policy, head string) bool {
 // account quota that cannot apply — waiting, and holding the head, for a review
 // that will never arrive. Empty when a review is still expected.
 func PrimaryUnavailableReason(obs Observation, p Policy, head string) string {
+	// Configuration outranks evidence: a primary that does not run here will
+	// never produce a skip notice or a plan to read, so asking the observation
+	// first would just mean answering "still expected" for ever.
+	if p.PrimaryOff {
+		return "does not review this repository"
+	}
 	// The skip is the more specific and more actionable of the two: it names a
 	// fixable cause (narrow the PR) and binds to this head only.
 	if ReviewSkippedHead(obs, p, head) {

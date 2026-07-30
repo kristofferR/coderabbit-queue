@@ -50,6 +50,9 @@ func TestGoldenClassification(t *testing.T) {
 		// wantKind == EvOther (the zero value) skips the Classify assertion.
 		author   string
 		wantKind EventKind
+		// registryPrimary classifies the fixture with Codex promoted from a
+		// co-reviewer to the configured primary.
+		registryPrimary bool
 	}{
 		{file: "coderabbit/rate-limit-fair-usage.md", rateLimited: true, autoReply: true, availableIn: 48 * time.Minute},
 		// Contains the "does not re-review" boilerplate in its help section —
@@ -88,6 +91,10 @@ func TestGoldenClassification(t *testing.T) {
 		{file: "codex/clean-summary-legacy.md", codexClean: true, noAction: true, nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCoClean},
 		{file: "codex/clean-summary-tada.md", codexClean: true, noAction: true, nonActionable: true, reviewedSHA: "4d9e8bca82", author: "chatgpt-codex-connector[bot]", wantKind: EvCoClean},
 		{file: "codex/usage-limit.md", codexUsageLimit: true, nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCoUnable},
+		{file: "codex/clean-summary-tada.md", codexClean: true, noAction: true, nonActionable: true, reviewedSHA: "4d9e8bca82",
+			author: "chatgpt-codex-connector[bot]", wantKind: EvNoAction, registryPrimary: true},
+		{file: "codex/usage-limit.md", codexUsageLimit: true, nonActionable: true,
+			author: "chatgpt-codex-connector[bot]", wantKind: EvFailed, registryPrimary: true},
 		// Codex's "create an environment" platform ad, posted as a thread reply —
 		// never a finding, never a rebuttal.
 		{file: "codex/environment-notice.md", nonActionable: true, author: "chatgpt-codex-connector[bot]", wantKind: EvCoNotice},
@@ -96,8 +103,20 @@ func TestGoldenClassification(t *testing.T) {
 	base := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	classifier := Classifier{CodeRabbit: goldenCR, Bot: "coderabbitai[bot]", ReviewCommand: "@coderabbitai review", CoReviewers: KnownCoReviewers()}
 	for _, tc := range cases {
-		t.Run(tc.file, func(t *testing.T) {
+		name := tc.file
+		if tc.registryPrimary {
+			name += "/registry-primary"
+		}
+		t.Run(name, func(t *testing.T) {
 			body := readGolden(t, tc.file)
+			activeClassifier := classifier
+			if tc.registryPrimary {
+				primary, ok := CoReviewerByName("codex")
+				if !ok {
+					t.Fatal("Codex registry entry is missing")
+				}
+				activeClassifier.Bot, activeClassifier.Primary = primary.Login, &primary
+			}
 			checks := []struct {
 				name string
 				got  bool
@@ -134,7 +153,7 @@ func TestGoldenClassification(t *testing.T) {
 				t.Errorf("CodexReviewedCommitSHA = %q, want %q", got, tc.reviewedSHA)
 			}
 			if tc.wantKind != EvOther {
-				if got := classifier.Classify(tc.author, body, 1, base, base).Kind; got != tc.wantKind {
+				if got := activeClassifier.Classify(tc.author, body, 1, base, base).Kind; got != tc.wantKind {
 					t.Errorf("Classify kind = %v, want %v", got, tc.wantKind)
 				}
 			}
@@ -162,6 +181,7 @@ func TestGoldenFindings(t *testing.T) {
 		path     string
 		line     int
 		severity string // "" = don't check
+		scale    string // "" = don't check
 		title    string // "" = don't check
 		source   string
 		commit   string // "" = don't check
@@ -200,7 +220,7 @@ func TestGoldenFindings(t *testing.T) {
 		{
 			file: "codex/findings-outside-diff.md",
 			bot:  "chatgpt-codex-connector[bot]",
-			want: []want{{path: "convex/sections/aiCommands.ts", line: 2170, severity: "minor", title: "Query learning history by topic before taking", source: "review_body", commit: "347388ffd"}},
+			want: []want{{path: "convex/sections/aiCommands.ts", line: 2170, severity: "potential", scale: "P2", title: "Query learning history by topic before taking", source: "review_body", commit: "347388ffd"}},
 		},
 	}
 	for _, tc := range cases {
@@ -217,6 +237,9 @@ func TestGoldenFindings(t *testing.T) {
 				}
 				if w.severity != "" && f.Severity != w.severity {
 					t.Errorf("finding %d severity = %q, want %q", i, f.Severity, w.severity)
+				}
+				if w.scale != "" && f.Scale != w.scale {
+					t.Errorf("finding %d scale = %q, want %q", i, f.Scale, w.scale)
 				}
 				if w.title != "" && f.Title != w.title {
 					t.Errorf("finding %d title = %q, want %q", i, f.Title, w.title)
@@ -241,6 +264,7 @@ func TestGoldenReplyVerdict(t *testing.T) {
 		retained  bool
 	}{
 		{file: "coderabbit/reply-withdrawn.md", withdrawn: true},
+		{file: "coderabbit/reply-withdrawn-confirmed.md", withdrawn: true},
 		// A concession whose PROSE reads like agreement, not like the stock
 		// "withdrawing this" phrasing. CodeRabbit ships a machine-readable
 		// marker with it; matching that is what keeps a settled finding from
@@ -631,4 +655,111 @@ func TestGoldenCLIRateLimit(t *testing.T) {
 			t.Errorf("IsCLIRateLimit(%q) = true, want false", other)
 		}
 	}
+}
+
+// TestGoldenPricing pins the money vocabulary against the same corpus every
+// other classifier is pinned against. Both payloads were already captured and
+// their billing fields discarded; these rows are the spec for reading them.
+func TestGoldenPricing(t *testing.T) {
+	t.Run("macroscope agent credits", func(t *testing.T) {
+		raw, err := os.ReadFile(filepath.Join("testdata", "macroscope", "check-custom.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var run struct {
+			Output struct {
+				Text string `json:"text"`
+			} `json:"output"`
+		}
+		if err := json.Unmarshal(raw, &run); err != nil {
+			t.Fatal(err)
+		}
+		credits, ok := ParseAgentCredits(run.Output.Text)
+		if !ok || credits != 81 {
+			t.Fatalf("credits = %d, %v; want 81, true", credits, ok)
+		}
+		// A body without the line is not zero credits — it is no answer.
+		if _, ok := ParseAgentCredits("no credits line here"); ok {
+			t.Error("a body with no credit line must report absence, not 0")
+		}
+	})
+
+	t.Run("coderabbit cli billing metadata", func(t *testing.T) {
+		raw, err := os.ReadFile(filepath.Join("testdata", "coderabbit", "cli-rate-limit.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var event map[string]any
+		if err := json.Unmarshal(raw, &event); err != nil {
+			t.Fatal(err)
+		}
+		got := ParseCLIError(event)
+		if got.ProUser {
+			t.Error("isProUser is false in this capture")
+		}
+		if !strings.Contains(got.PolicyGuidance, "$0.25/file") {
+			t.Errorf("policy guidance = %q, want the vendor's own overage price kept verbatim", got.PolicyGuidance)
+		}
+		// The guidance INVITES enabling usage-based reviews, so they are off —
+		// which means this block costs nothing and simply waits.
+		if got.UsageBasedEnabled {
+			t.Error("guidance offering to enable usage-based reviews means they are not enabled")
+		}
+	})
+
+	t.Run("estimates", func(t *testing.T) {
+		// Under the 10 KB minimum the floor IS the price, so it is exact.
+		small := EstimateMacroscope(DiffStat{Additions: 40, Deletions: 20, ChangedFiles: 3})
+		if !small.Exact || small.Low != 0.50 || small.High != 0.50 {
+			t.Errorf("small diff = %+v, want an exact $0.50 floor", small)
+		}
+		// A large one is a range, and never above the per-review cap.
+		large := EstimateMacroscope(DiffStat{Additions: 40000, Deletions: 20000, ChangedFiles: 300})
+		if large.High > 10.0 || large.Low != macroscopeMinKB*macroscopePerKB || large.Low >= large.High || large.Exact {
+			t.Errorf("large diff = %+v, want the incremental floor through the capped whole-diff upper bound", large)
+		}
+
+		// A co-reviewer on its own subscription is free and says why; an
+		// unknown login is Unknown, never a confident $0.00.
+		if e := EstimateCost(CodexBotLogin, "coderabbitai[bot]", DiffStat{}, Allowance{}); !e.Exact || e.High != 0 || e.Basis == "" || e.Metered {
+			t.Errorf("codex = %+v, want an explained zero", e)
+		}
+		if e := EstimateCost("sonar[bot]", "coderabbitai[bot]", DiffStat{}, Allowance{}); !e.Unknown {
+			t.Errorf("unknown bot = %+v, want Unknown rather than free", e)
+		}
+
+		// The VENDOR decides the basis, not the role. CRQ_BOT may name a
+		// registry bot, and pricing whichever one is configured on CodeRabbit's
+		// allowance model billed a Macroscope primary on the wrong basis
+		// entirely and hid a Codex primary's subscription behind an allowance
+		// it does not use.
+		big := DiffStat{Additions: 40000, Deletions: 20000, ChangedFiles: 300}
+		spent := Allowance{RemainingKnown: true, UsageBasedKnown: true, UsageBasedEnabled: true}
+		if e := EstimateCost(MacroscopeLogin, MacroscopeLogin, big, spent); e != EstimateMacroscope(big) {
+			t.Errorf("macroscope primary = %+v, want its own per-kilobyte price", e)
+		}
+		if e := EstimateCost(CodexBotLogin, CodexBotLogin, big, spent); !e.Exact || e.High != 0 {
+			t.Errorf("codex primary = %+v, want the subscription it is actually covered by", e)
+		}
+
+		// The primary is free inside the allowance, unknown without a count,
+		// and priced per file only once past it WITH usage-based billing on.
+		d := DiffStat{ChangedFiles: 8}
+		if e := EstimateCodeRabbit("coderabbitai[bot]", d, Allowance{Remaining: 3, RemainingKnown: true}); !e.Exact || e.High != 0 || !e.Metered {
+			t.Errorf("inside allowance = %+v, want free", e)
+		}
+		if e := EstimateCodeRabbit("coderabbitai[bot]", d, Allowance{}); !e.Unknown {
+			t.Errorf("no count = %+v, want Unknown — absent is not exhausted", e)
+		}
+		if e := EstimateCodeRabbit("coderabbitai[bot]", d, Allowance{RemainingKnown: true}); !e.Unknown {
+			t.Errorf("exhausted, billing mode unknown = %+v, want Unknown — unknown is not off", e)
+		}
+		if e := EstimateCodeRabbit("coderabbitai[bot]", d, Allowance{RemainingKnown: true, UsageBasedKnown: true}); !e.Exact || e.High != 0 {
+			t.Errorf("exhausted with billing off = %+v, want free (it waits instead)", e)
+		}
+		e := EstimateCodeRabbit("coderabbitai[bot]", d, Allowance{RemainingKnown: true, UsageBasedKnown: true, UsageBasedEnabled: true})
+		if e.High != 2.0 {
+			t.Errorf("exhausted with billing on = %+v, want up to 8 files x $0.25", e)
+		}
+	})
 }

@@ -1,6 +1,7 @@
 package crq
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,11 +11,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
 	ghapi "github.com/kristofferR/coderabbit-queue/internal/gh"
 	"github.com/kristofferR/coderabbit-queue/internal/workspace"
@@ -81,12 +84,9 @@ type WatchEvent struct {
 // does, and why it is off unless asked for.
 //
 // Every dispatch is claimed under CAS, so two watchers cannot both spawn a
-// session for one PR, and bounded per head, so a fix that keeps not working
-// stops instead of spending a review round each time.
+// session for one PR, and bounded in cooldown-backed cycles, so a fix that keeps
+// not working neither spins nor permanently dead-letters the head.
 func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchEvent) error) error {
-	if opts.Interval <= 0 {
-		opts.Interval = s.cfg.WatchInterval
-	}
 	if opts.MaxAttempts <= 0 {
 		opts.MaxAttempts = s.cfg.DispatchMaxAttempts
 	}
@@ -98,6 +98,9 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 		on := true
 		opts.Dispatch = &on
 	}
+	// The watcher's PATH is the one a fix session inherits, so its report is the
+	// one that answers "can this host actually run the agent".
+	s.ReportHost(ctx, "autofix")
 	if *opts.Dispatch && len(opts.Command) == 0 {
 		opts.Command = s.cfg.DispatchCommand
 	}
@@ -144,7 +147,14 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 	defer pool.wait()
 	defer endSessions()
 	for {
+		// Resolved per pass, not once at startup: the interval is fleet-settable
+		// from the dashboard, and a watcher that read it when the service booted
+		// reported the new cadence while still running on the old one until
+		// somebody restarted it. This run's own --interval still wins.
 		wait := opts.Interval
+		if wait <= 0 {
+			wait = s.watchInterval(ctx)
+		}
 		if err := s.watchPass(sessionCtx, opts, pool, emit); err != nil {
 			reset, throttled := ghapi.ThrottleWait(err)
 			if !throttled {
@@ -177,52 +187,61 @@ func (s *Service) Watch(ctx context.Context, opts WatchOptions, emit func(WatchE
 	}
 }
 
-// watchesRepo reports whether the policy in hand still covers this repository,
-// the same two questions the pass asked when it gathered its candidates:
-// `exclude` means "crq does not go here" everywhere, and the fleet's repository
-// list decides the set whenever the pass had to build one. Repositories named on
-// the command line are the operator's own request and outrank the list — but not
-// the exclusion, exactly as at the top of the pass.
-//
-// An emptied list is not "watch everything" here. Unlike autoReviewPass, which
-// falls back to scanning by scope, a pass with no repositories of its own has
-// nothing to watch at all and refuses to run — so a candidate gathered under the
-// old list is one the live policy no longer covers, and treating the empty list
-// as permissive would dispatch a fix for a repository the fleet just dropped.
-func watchesRepo(cfg Config, explicit []string, repo string) bool {
-	key := NormalizeRepo(repo)
-	if cfg.ExcludeRepos[key] {
-		return false
+// watchInterval is the pass cadence with the fleet's recorded default applied,
+// falling back to this host's env when the ref cannot be read — a watcher must
+// not stop pacing itself because one load failed.
+func (s *Service) watchInterval(ctx context.Context) time.Duration {
+	if st, _, err := s.store.Load(ctx); err == nil {
+		if d := s.cfg.WithFleet(st.Fleet).WatchInterval; d > 0 {
+			return d
+		}
 	}
-	if len(explicit) > 0 {
-		return true
-	}
-	return cfg.AllowRepos[key]
+	return s.cfg.WatchInterval
 }
 
 func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispatchPool, emit func(WatchEvent) error) error {
 	var failures []string
-	state, _, err := s.store.Load(ctx)
-	if err != nil {
-		return err
-	}
-	cfg := s.fleetCfg(state)
 	type pendingEvent struct {
 		event  WatchEvent
 		result <-chan dispatchResult
 	}
 	var pending []pendingEvent
+	s.ReportHost(ctx, "autofix")
+	// One snapshot for the pass. It decides both which repositories are watched
+	// at all and which of them may be fixed, so it is read BEFORE the target
+	// list is built.
+	st, _, stateErr := s.store.Load(ctx)
+	if stateErr != nil {
+		return fmt.Errorf("loading shared state for watch pass: %w", stateErr)
+	}
+	fleetCfg := s.cfg.WithFleet(st.Fleet)
 	// Copied, never appended to in place. `crq watch -- <cmd>` splits argv at
 	// "--", so the flag half keeps CAPACITY reaching into the command half, and
 	// fs.Args() is a sub-slice of it: filling an empty list with append wrote the
 	// repository names straight over the fix command, and every dispatch in the
 	// fleet died with "fork/exec kristofferr/coderabbit-queue: no such file or
 	// directory". A caller's slice is the caller's.
-	repos := make([]string, 0, len(opts.Repos)+len(cfg.AllowRepos))
+	repos := make([]string, 0, len(opts.Repos)+len(fleetCfg.AllowRepos))
 	repos = append(repos, opts.Repos...)
 	if len(repos) == 0 {
-		for repo := range cfg.AllowRepos {
+		// Enrollment is a fleet-wide record, and autoreview already builds its
+		// scan list from it. Reading only CRQ_REPOS here meant a repository
+		// enrolled from the dashboard was reviewed but never watched — its
+		// findings arrived and no fix session ever started — until somebody
+		// edited an env file on this host and reinstalled the service.
+		seen := map[string]bool{}
+		add := func(repo string) {
+			if repo = NormalizeRepo(repo); repo == "" || seen[repo] {
+				return
+			}
+			seen[repo] = true
 			repos = append(repos, repo)
+		}
+		for repo := range fleetCfg.AllowRepos {
+			add(repo)
+		}
+		for _, repo := range st.EnrolledRepos() {
+			add(repo)
 		}
 		sort.Strings(repos) // stable order: a pass must not depend on map iteration
 	}
@@ -237,18 +256,25 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 	// its findings grew from 15 to 25. This is the same fix the quota-free
 	// rescue scan already needed, for the same reason.
 	type candidate struct {
-		repo string
-		pull ghapi.Pull
+		repo     string
+		pull     ghapi.Pull
+		priority int64
 	}
 	var candidates []candidate
-	gate := NormalizeRepo(cfg.GateRepo)
+	gate := NormalizeRepo(s.cfg.GateRepo)
 	// Which repositories may be FIXED is per repository, read once for the pass.
 	// Watching is unaffected: a repository with autofix off is still observed
 	// and still reviewed, so its feedback arrives for a person to act on.
 	autofixOff := map[string]bool{}
+	// A repository turned off from the dashboard must stop being watched on the
+	// next pass, not on restart.
+	notEnrolled := map[string]bool{}
 	for _, repo := range repos {
-		if !state.AutofixEnabled(repo) {
+		if !st.AutofixEnabled(repo) {
 			autofixOff[NormalizeRepo(repo)] = true
+		}
+		if !s.reviewsRepo(st, repo) {
+			notEnrolled[NormalizeRepo(repo)] = true
 		}
 	}
 	for _, repo := range repos {
@@ -264,7 +290,12 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		// it; this one did not, so the single setting that reads like a fleet-wide
 		// opt-out silently covered half of what crq does — reviews stopped and the
 		// watcher carried on, which is not a setting anyone can reason about.
-		if cfg.ExcludeRepos[NormalizeRepo(repo)] {
+		if s.cfg.ExcludeRepos[NormalizeRepo(repo)] {
+			continue
+		}
+		// "crq does not go here" has to mean that to every path, including the
+		// one that spends an agent on a fix session.
+		if notEnrolled[NormalizeRepo(repo)] {
 			continue
 		}
 		pulls, err := s.gh.ListPulls(ctx, repo, openPullQuery())
@@ -288,7 +319,11 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 		}
 		open := make(map[int]bool, len(pulls))
 		for _, pull := range pulls {
-			candidates = append(candidates, candidate{repo, pull})
+			var priority int64
+			if round := st.Round(repo, pull.Number); round != nil && round.Seq < 0 {
+				priority = round.Seq
+			}
+			candidates = append(candidates, candidate{repo: repo, pull: pull, priority: priority})
 			open[pull.Number] = true
 		}
 		// This list is the authoritative set of open pull requests for the
@@ -301,54 +336,58 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 			s.log.Printf("watch: %s: retiring closed rounds: %v", repo, err)
 		}
 	}
-	if len(candidates) > 0 {
-		s.watchOffset = (s.watchOffset + 1) % len(candidates)
+	// Operator-prioritized PRs always lead the pass, ordered by their queue
+	// sequence. Everyone else keeps the rotating start that prevents a fixed
+	// repository/PR order from starving the tail when dispatch capacity is full.
+	var prioritized, regular []candidate
+	for _, c := range candidates {
+		if c.priority < 0 {
+			prioritized = append(prioritized, c)
+		} else {
+			regular = append(regular, c)
+		}
+	}
+	sort.SliceStable(prioritized, func(i, j int) bool {
+		return prioritized[i].priority < prioritized[j].priority
+	})
+	if len(regular) > 0 {
+		s.watchOffset = (s.watchOffset + 1) % len(regular)
+		rotated := append([]candidate(nil), regular[s.watchOffset:]...)
+		rotated = append(rotated, regular[:s.watchOffset]...)
+		candidates = append(prioritized, rotated...)
+	} else {
+		candidates = prioritized
 	}
 	for i := range candidates {
-		c := candidates[(i+s.watchOffset)%len(candidates)]
+		c := candidates[i]
 		repo, pull := c.repo, c.pull
 		{
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			// The fleet's skip marker suppresses review deliberately, to protect
-			// the shared quota, and its repository lists say where crq goes at
-			// all. Next is a MUTATING oracle — it enqueues and can fire — and it
-			// enforces neither, because it is the manual path: its target is a
-			// request a person made. So both have to be honoured before calling
+			// The skip rules suppress review deliberately — the marker to protect
+			// the shared quota, the author list to keep crq off pull requests a
+			// repository has said not to touch. Next is a MUTATING oracle: it
+			// enqueues, it can fire, and it can start a fix session that runs an
+			// agent with approvals bypassed. So both are honoured BEFORE calling
 			// it, not after.
 			//
-			// The policy is re-read here rather than reused from the top of the
-			// pass. A fleet-wide scan is long, so a marker the fleet adopted — or
-			// a repository it dropped — mid-pass would otherwise spend a metered
-			// review on every candidate still to come in it, gathered under the
-			// policy the pass started with. Rereading costs a conditional GET on
-			// the ETag'd state ref, against a call that already re-observes the
-			// PR.
-			live, _, lerr := s.store.Load(ctx)
-			if lerr != nil {
-				if _, throttled := ghapi.ThrottleWait(lerr); throttled {
-					return lerr
-				}
-				// Next reads the same ref and would fail the same way; treat it
-				// like any other unreadable candidate rather than firing under a
-				// policy crq could not confirm.
-				if s.log != nil {
-					s.log.Printf("watch: %s#%d: %v", repo, pull.Number, lerr)
-				}
-				if opts.Once {
-					failures = append(failures, fmt.Sprintf("%s#%d: %v", repo, pull.Number, lerr))
-				}
-				continue
+			// Read through the pass's state, the way autoReviewPass reads them:
+			// both are fleet- and repository-settable, and a watcher answering
+			// from its startup env reviewed pull requests the settings it was
+			// displaying had just excluded.
+			skipCfg := s.cfgFor(st, repo)
+			skipped := ""
+			switch {
+			case skipCfg.SkipsReview(pull.Body):
+				skipped = "fleet auto-review skip marker present"
+			case skipCfg.SkipAuthors[dialect.NormalizeBotName(strings.ToLower(pull.User.Login))]:
+				skipped = "the author is on this repository's skip list"
 			}
-			liveCfg := s.fleetCfg(live)
-			if !watchesRepo(liveCfg, opts.Repos, repo) {
-				continue
-			}
-			if liveCfg.SkipsReview(pull.Body) {
+			if skipped != "" {
 				event := WatchEvent{
 					Repo: repo, PR: pull.Number,
-					Action: "skipped", Reason: "fleet auto-review skip marker present",
+					Action: "skipped", Reason: skipped,
 					At: s.clock().UTC(),
 				}
 				if emit != nil {
@@ -392,10 +431,11 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 				Action: report.Action, Reason: report.Reason,
 				Findings: len(report.Findings), At: s.clock().UTC(),
 			}
+			report.Fork = forkPull(repo, pull)
 			var result <-chan dispatchResult
 			if opts.dispatching() && report.Action == string(engine.ActionFix) && autofixOff[NormalizeRepo(repo)] {
 				event.Skipped = "autofix is off for this repository (crq autofix on " + NormalizeRepo(repo) + ")"
-			} else if opts.dispatching() && report.Action == string(engine.ActionFix) && !s.mayDispatch(repo, pull) {
+			} else if opts.dispatching() && report.Action == string(engine.ActionFix) && !s.mayDispatch(skipCfg, repo, pull) {
 				event.Skipped = "the head branch is a fork; set CRQ_DISPATCH_FORKS=1 to fix contributor pull requests"
 			} else if opts.dispatching() && report.Action == string(engine.ActionFix) {
 				// Claim here and hand preparation to the pool. Checkout and
@@ -478,15 +518,19 @@ func (s *Service) watchPass(ctx context.Context, opts WatchOptions, pool *dispat
 // sandbox and does not claim to be one — it is the line between code the
 // operator wrote and code somebody else did. Reviewing a fork is unaffected:
 // reading a pull request runs nothing.
-func (s *Service) mayDispatch(repo string, pull ghapi.Pull) bool {
-	if s.cfg.DispatchForks {
+func (s *Service) mayDispatch(cfg Config, repo string, pull ghapi.Pull) bool {
+	if cfg.DispatchForks {
 		return true
 	}
+	return !forkPull(repo, pull)
+}
+
+func forkPull(repo string, pull ghapi.Pull) bool {
 	head := NormalizeRepo(pull.Head.Repo.FullName)
 	// An unreadable head repository is not evidence that it is ours. A deleted
 	// fork answers with an empty name, and defaulting to "same repository" would
 	// hand exactly the untrusted case the permission it is missing.
-	return head != "" && head == NormalizeRepo(repo)
+	return head == "" || head != NormalizeRepo(repo)
 }
 
 // noteDispatchHealth records whether fix sessions are starting, and says so
@@ -570,6 +614,13 @@ func (s *Service) queueDispatch(
 	if s.cfg.DryRun {
 		return false, "dry run: would dispatch a fix session", nil, nil
 	}
+	solver := s.repoCfg(ctx, report.Repo)
+	if len(report.Findings) > 0 {
+		report.Findings = autofixFindings(report.Findings, solver.FixSeverities)
+		if len(report.Findings) == 0 {
+			return false, "autofix policy excludes every open finding", nil, nil
+		}
+	}
 	var ok bool
 	var why string
 	if opts.Once {
@@ -581,7 +632,7 @@ func (s *Service) queueDispatch(
 		return false, why, nil, nil
 	}
 	token := randomToken()
-	claimed, why, byDesign := s.claimDispatch(ctx, report, token, opts.MaxAttempts)
+	claimed, why, byDesign, model := s.claimDispatchModels(ctx, &report, token, opts.MaxAttempts)
 	if !claimed {
 		pool.release()
 		// A round another watcher already holds, or one that has spent its
@@ -600,10 +651,47 @@ func (s *Service) queueDispatch(
 	result := make(chan dispatchResult, 1)
 	started := make(chan dispatchResult, 1)
 	pool.run(func() {
-		result <- s.runDispatch(ctx, opts, report, token, started)
+		result <- s.runDispatch(ctx, opts, report, token, model, started)
 		close(result)
 	})
 	return true, "", result, started
+}
+
+// recordedMaxAttempts is the fix-session budget for one repository: whatever
+// shared state RECORDS, falling back to this run's own value.
+//
+// Per repository, not per watcher — the budget is a property of the project
+// being fixed, and one that keeps needing a fourth try should not have to raise
+// the limit for every other repository the watcher handles.
+//
+// RECORDED, not resolved. The merged configuration always carries a positive
+// default, so reading that here outranked this run's own `--max-attempts` on
+// every ordinary setup: the flag was accepted and then silently replaced by 3.
+//
+// Both records are asked. The typed solver record is the per-repository answer;
+// the generic fleet map is where the settings editor saves
+// CRQ_DISPATCH_MAX_ATTEMPTS, and a claim that consulted only the first went on
+// enforcing this host's number while the dashboard reported the fleet's — with
+// no later state read able to change it.
+func (s *Service) recordedMaxAttempts(ctx context.Context, repo string, fallback int) int {
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return fallback
+	}
+	return recordedMaxAttemptsIn(st, repo, fallback)
+}
+
+func recordedMaxAttemptsIn(st State, repo string, fallback int) int {
+	if sv := st.EffectiveSolver(repo); sv.MaxAttempts != nil {
+		return *sv.MaxAttempts
+	}
+	// Positive only, the way every consumer of a fleet setting reads one: a
+	// recorded 0 or a value that will not parse is not a budget, and honouring
+	// it would stop the whole fleet fixing anything.
+	if n, err := strconv.Atoi(strings.TrimSpace(st.Fleet.Env["CRQ_DISPATCH_MAX_ATTEMPTS"])); err == nil && n > 0 {
+		return n
+	}
+	return fallback
 }
 
 type dispatchResult struct {
@@ -618,9 +706,10 @@ func (s *Service) runDispatch(
 	opts WatchOptions,
 	report NextReport,
 	token string,
+	model string,
 	started chan<- dispatchResult,
 ) dispatchResult {
-	ok, why := s.dispatchWithStart(ctx, opts, report, token, started)
+	ok, why := s.dispatchWithStart(ctx, opts, report, token, model, started)
 	if !ok && s.log != nil {
 		s.log.Printf("watch: %s#%d not fixed: %s", report.Repo, report.PR, why)
 	}
@@ -629,7 +718,8 @@ func (s *Service) runDispatch(
 
 // dispatch checks the claimed round's head out and runs the fix session.
 func (s *Service) dispatch(ctx context.Context, opts WatchOptions, report NextReport, token string) (bool, string) {
-	return s.dispatchWithStart(ctx, opts, report, token, nil)
+	model, _ := s.claimedDispatchModel(ctx, report, token)
+	return s.dispatchWithStart(ctx, opts, report, token, model, nil)
 }
 
 func (s *Service) dispatchWithStart(
@@ -637,6 +727,7 @@ func (s *Service) dispatchWithStart(
 	opts WatchOptions,
 	report NextReport,
 	token string,
+	model string,
 	started chan<- dispatchResult,
 ) (ok bool, reason string) {
 	// Health means "can this watcher START a session", not whether the agent later
@@ -689,6 +780,11 @@ func (s *Service) dispatchWithStart(
 	// read but the fact that nothing happened. Every session gets a file, and
 	// the path is logged before it starts so it is findable while it runs.
 	logPath, logFile, err := s.sessionLog(ctx, report)
+	if err == nil {
+		// Record where the output is going and what it is working on, so the
+		// dashboard can say more about a running session than "attempt 2".
+		s.noteSessionDetail(ctx, report, token, logPath, len(report.Findings))
+	}
 	if err != nil {
 		s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
 		_ = co.Remove(context.WithoutCancel(ctx))
@@ -701,11 +797,22 @@ func (s *Service) dispatchWithStart(
 	cmd.Dir = co.Dir
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	// The repository's solver settings travel in the ENVIRONMENT, because argv
+	// is fixed when the watcher starts and these differ per repository. The
+	// session script reads them; a script from an older install ignores them
+	// and runs exactly as it did.
+	solver := s.repoCfg(runCtx, report.Repo)
+	sessionPrompt := appendAutofixPolicy(solver.FixPrompt, solver.FixSeverities, solver.FixAskMode)
 	cmd.Env = append(os.Environ(),
 		"CRQ_DISPATCH_REPO="+report.Repo,
 		fmt.Sprintf("CRQ_DISPATCH_PR=%d", report.PR),
 		"CRQ_DISPATCH_HEAD="+report.Head,
 		"CRQ_DISPATCH_FINDINGS="+findingsPath,
+		// The agent and prompt come from the unit's environment and are already
+		// in os.Environ(); only the per-repository half is added here.
+		"CRQ_FIX_MODEL="+model,
+		"CRQ_FIX_EFFORT="+solver.FixEffort,
+		"CRQ_FIX_PROMPT="+sessionPrompt,
 	)
 	// The session's push is a plain `git push`, and git reads no GITHUB_TOKEN of
 	// its own. The mirror carries a credential helper that reads this variable
@@ -731,6 +838,27 @@ func (s *Service) dispatchWithStart(
 	}
 	s.noteDispatchHealth(context.WithoutCancel(ctx), true, "")
 	runErr := cmd.Wait()
+	_ = logFile.Sync()
+	if question := clarificationFromLog(string(readLogTail(logPath, 256<<10))); question != "" {
+		// Asking is not a failed solution attempt. Hold the PR with the exact
+		// question so it appears in the dashboard's existing attention surface,
+		// then release this claim without consuming the per-head budget.
+		reason := "Autofix needs clarification: " + question
+		if _, err := s.holdDispatch(context.WithoutCancel(ctx), report, token, reason); err == nil {
+			s.releaseDispatch(context.WithoutCancel(ctx), report, token, false)
+			return false, fmt.Sprintf("%s (log: %s)", reason, logPath)
+		}
+		// Standalone watch/autofix has no autoreview leader, so it cannot create
+		// an administrative hold. Keep a head-scoped terminal dispatch marker
+		// instead; otherwise the released claim launches another paid session
+		// for the same unanswered question on the next pass.
+		if err := s.stopDispatchForClarification(
+			context.WithoutCancel(ctx), report, token, question,
+		); err != nil {
+			return false, fmt.Sprintf("%s (could not record the clarification stop: %v; log: %s)", reason, err, logPath)
+		}
+		return false, fmt.Sprintf("%s (autofix stopped for this head; log: %s)", reason, logPath)
+	}
 	// A session the WATCHER stopped did not use up the head's attempt budget.
 	//
 	// That budget exists to stop a fix which keeps not working from looping for
@@ -740,6 +868,16 @@ func (s *Service) dispatchWithStart(
 	// would have left the pull request unfixable at that commit while `crq next`
 	// went on asking for a fix.
 	attempted := ctx.Err() == nil
+	if runErr != nil && attempted {
+		if failure := dialect.ClassifyAgentFailure(readLogTail(logPath, 256<<10), s.clock()); failure.Unavailable {
+			s.releaseDispatchUnavailable(context.WithoutCancel(ctx), report, token, failure)
+			if lost() {
+				return false, "another watcher took this round; the session was stopped"
+			}
+			return false, fmt.Sprintf("%s; fallback will retry after %s (log: %s)",
+				failure.Reason, failure.RetryAt.Format(time.RFC3339), logPath)
+		}
+	}
 	s.releaseDispatch(context.WithoutCancel(ctx), report, token, attempted)
 	if lost() {
 		return false, "another watcher took this round; the session was stopped"
@@ -766,6 +904,93 @@ func (s *Service) dispatchWithStart(
 	}
 	_ = co.Remove(context.WithoutCancel(ctx))
 	return true, ""
+}
+
+func autofixFindings(findings []dialect.Finding, allowed map[string]bool) []dialect.Finding {
+	if len(allowed) == 0 {
+		return findings
+	}
+	out := make([]dialect.Finding, 0, len(findings))
+	for _, finding := range findings {
+		severity := strings.ToLower(strings.TrimSpace(finding.Severity))
+		if severity == "" {
+			severity = "unknown"
+		}
+		if allowed[severity] {
+			out = append(out, finding)
+		}
+	}
+	return out
+}
+
+const clarificationMarker = "CRQ_NEEDS_CLARIFICATION:"
+
+func appendAutofixPolicy(prompt string, severities map[string]bool, askMode string) string {
+	allowed := sortedKeys(severities)
+	if len(allowed) == 0 {
+		allowed = dialect.KnownSeverities()
+	}
+	instruction := "Autofix policy:\n- Work only on findings passed to this session (configured severities: " +
+		strings.Join(allowed, ", ") + ").\n"
+	switch askMode {
+	case "ambiguous":
+		instruction += "- Stop at the first meaningful ambiguity: if multiple reasonable solutions would change behavior differently, do not guess.\n"
+	case "uncertain":
+		instruction += "- Stop when confidence is low that the chosen solution is the intended one; do not guess through unclear requirements.\n"
+	default:
+		instruction += "- Use best judgment and stop for clarification only when missing information makes a safe fix impossible.\n"
+	}
+	instruction += "- To ask, make no further edits and end your response with exactly `" +
+		clarificationMarker + " <one concrete question>`."
+	if strings.TrimSpace(prompt) == "" {
+		return instruction
+	}
+	return strings.TrimSpace(prompt) + "\n\n" + instruction
+}
+
+func clarificationFromLog(body string) string {
+	var response string
+	scanner := bufio.NewScanner(strings.NewReader(body))
+	scanner.Buffer(make([]byte, 64<<10), 256<<10)
+	for scanner.Scan() {
+		var event struct {
+			Type   string `json:"type"`
+			Result string `json:"result"`
+			Item   struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"item"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &event) != nil {
+			continue
+		}
+		switch {
+		case event.Type == "result":
+			// Claude's stream-json terminal event.
+			response = event.Result
+		case event.Type == "item.completed" && event.Item.Type == "agent_message":
+			// Codex's --json terminal assistant message.
+			response = event.Item.Text
+		}
+	}
+
+	response = strings.TrimSpace(response)
+	if response == "" {
+		return ""
+	}
+	line := response
+	if start := strings.LastIndexByte(response, '\n'); start >= 0 {
+		line = response[start+1:]
+	}
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, clarificationMarker) {
+		return ""
+	}
+	question := strings.TrimSpace(strings.TrimPrefix(line, clarificationMarker))
+	if len(question) > 500 {
+		question = question[:500]
+	}
+	return strings.TrimSpace(question)
 }
 
 // sessionWork reports whether this checkout holds work that exists nowhere else,
@@ -832,8 +1057,20 @@ func (s *Service) writeFindings(report NextReport) (string, error) {
 // already running for this PR, or a head that has spent its attempt budget —
 // rather than evidence about whether fix sessions can start at all.
 func (s *Service) claimDispatch(ctx context.Context, report NextReport, token string, maxAttempts int) (bool, string, bool) {
+	ok, why, byDesign, _ := s.claimDispatchModels(ctx, &report, token, maxAttempts)
+	return ok, why, byDesign
+}
+
+func (s *Service) claimDispatchModels(
+	ctx context.Context,
+	report *NextReport,
+	token string,
+	fallbackMaxAttempts int,
+) (bool, string, bool, string) {
 	reason, byDesign := "", false
 	var seen string
+	var selectedModel string
+	var selectedFindings []dialect.Finding
 	_, err := s.store.Update(ctx, func(st *State) error {
 		// The pass-level snapshot is only an optimization. The switch is an
 		// operator safety gate, so enforce it in the same CAS that grants the
@@ -842,8 +1079,17 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 			reason, byDesign = "fix sessions are disabled for this repository", true
 			return ErrNoChange
 		}
-		if s.fleetCfg(*st).ExcludeRepos[NormalizeRepo(report.Repo)] {
-			reason, byDesign = "repository is excluded by fleet policy", true
+		// Enrollment is the same kind of gate and gets the same treatment. The
+		// pass reads it once and can be minutes old, and its load is best-effort —
+		// so "Stop reviewing" could be clicked, and a coding-agent session still
+		// start against the repository, on the strength of a snapshot taken before
+		// the click or of no snapshot at all.
+		if !s.reviewsRepo(*st, report.Repo) {
+			reason, byDesign = "crq is not reviewing this repository", true
+			return ErrNoChange
+		}
+		if report.Fork && !s.cfgFor(*st, report.Repo).DispatchForks {
+			reason, byDesign = "the head branch is a fork and current solver policy forbids fixing it", true
 			return ErrNoChange
 		}
 		round := st.Round(report.Repo, report.PR)
@@ -852,7 +1098,7 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 		// claim at all, and no test reproduces it: the tests assert the refusal
 		// and get it. So the next occurrence has to explain itself from the log —
 		// which round each grant saw, and what its claim said at the time.
-		seen = describeDispatchClaim(round, st, report, s.clock())
+		seen = describeDispatchClaim(round, st, *report, s.clock())
 		// Somebody is fixing an earlier head of this PR right now, and is entitled
 		// to finish: a session's own push moves the head, so this is what a
 		// successful session looks like from the outside. Superseding its round
@@ -898,7 +1144,13 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 			// CARRIED from an older commit proves nothing about this head either.
 			// Both cases leave the round adoptable instead, so the queue can
 			// still buy the review that is actually missing.
-			if report.ReviewedBy[s.cfg.Bot] && len(engine.FindingsOnHead(report.Findings, report.Head)) > 0 {
+			//
+			// Who the primary IS comes from the state this write lands on, not
+			// from this watcher's startup env: a fleet that changed CRQ_BOT would
+			// otherwise have its new primary's review read as a co-reviewer's, and
+			// the head marked unreviewed for a review it already has.
+			if reviewedByConfiguredBot(report.ReviewedBy, s.cfgFor(*st, report.Repo).Bot) &&
+				len(engine.FindingsOnHead(report.Findings, report.Head)) > 0 {
 				if err := round.Dedupe(s.clock()); err != nil {
 					return err
 				}
@@ -909,17 +1161,37 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 				round.Note = "adopted to fix feedback carried from an earlier head"
 			}
 		}
-		ok, why := round.ClaimDispatch(s.cfg.Host, token, s.clock(), maxAttempts)
+		// The operator can replace the severity policy, model ranking, or attempt
+		// limit after this pass's initial read. Resolve all three from the state
+		// revision this CAS will write.
+		claimCfg := s.cfgFor(*st, report.Repo)
+		selectedFindings = autofixFindings(report.Findings, claimCfg.FixSeverities)
+		if len(report.Findings) > 0 && len(selectedFindings) == 0 {
+			reason, byDesign = "current autofix policy excludes every open finding", true
+			return ErrNoChange
+		}
+		models := append([]string(nil), claimCfg.FixModels...)
+		if len(models) == 0 && claimCfg.FixModel != "" {
+			models = []string{claimCfg.FixModel}
+		}
+		maxAttempts := recordedMaxAttemptsIn(*st, report.Repo, fallbackMaxAttempts)
+		ok, why := round.ClaimDispatchModels(s.cfg.Host, token, s.clock(), maxAttempts, models)
 		if !ok {
 			reason, byDesign = why, true
 			return ErrNoChange
 		}
+		selectedModel = round.Dispatch.Model
 		st.RememberDispatch(report.Repo, report.PR, *round.Dispatch)
 		st.PutRound(*round)
 		return nil
 	})
 	if err != nil {
-		return false, err.Error(), false
+		return false, err.Error(), false, ""
+	}
+	if reason == "" {
+		// The session receives exactly the finding set selected by the same
+		// state revision that granted its claim.
+		report.Findings = selectedFindings
 	}
 	if s.log != nil {
 		outcome := "granted"
@@ -929,7 +1201,7 @@ func (s *Service) claimDispatch(ctx context.Context, report NextReport, token st
 		s.log.Printf("dispatch claim %s for %s#%d@%s token=%s: %s",
 			outcome, report.Repo, report.PR, report.Head, token, seen)
 	}
-	return reason == "", reason, byDesign
+	return reason == "", reason, byDesign, selectedModel
 }
 
 // describeDispatchClaim renders what a claim attempt read, for the log line
@@ -967,10 +1239,102 @@ func (s *Service) releaseDispatch(ctx context.Context, report NextReport, token 
 		}
 		if !attempted && round.Dispatch != nil && round.Dispatch.Attempts > 0 {
 			round.Dispatch.Attempts--
+			round.Dispatch.AttemptResetAt = nil
 		}
 		st.PutRound(*round)
 		return nil
 	})
+}
+
+func (s *Service) stopDispatchForClarification(
+	ctx context.Context,
+	report NextReport,
+	token string,
+	question string,
+) error {
+	_, err := s.store.Update(ctx, func(st *State) error {
+		round := st.Round(report.Repo, report.PR)
+		if round == nil || !round.MarkDispatchClarification(token, question) {
+			return ErrNoChange
+		}
+		if claim, ok := st.Dispatches[QueueKey(report.Repo, report.PR)]; ok && claim.Token == token {
+			delete(st.Dispatches, QueueKey(report.Repo, report.PR))
+		}
+		st.PutRound(*round)
+		return nil
+	})
+	return err
+}
+
+// releaseDispatchUnavailable refunds an attempt that never reached the code
+// problem: the provider/model could not serve it. The selected model is parked
+// until its retry time while the already-advanced cursor makes the next claim
+// choose a fallback.
+func (s *Service) releaseDispatchUnavailable(
+	ctx context.Context,
+	report NextReport,
+	token string,
+	failure dialect.AgentFailure,
+) {
+	_, _ = s.store.Update(ctx, func(st *State) error {
+		round := st.Round(report.Repo, report.PR)
+		current := round != nil && round.MarkDispatchUnavailable(token, failure.RetryAt, failure.Reason)
+		archived := false
+		if !current {
+			archived = st.MarkArchivedDispatchUnavailable(
+				report.Repo, report.PR, token, failure.RetryAt, failure.Reason,
+			)
+		}
+		if !current && !archived {
+			return ErrNoChange
+		}
+		if current {
+			if !round.ReleaseDispatch(token) {
+				return ErrNoChange
+			}
+			st.PutRound(*round)
+		}
+		st.ReleaseArchivedDispatch(report.Repo, report.PR, token)
+		return nil
+	})
+}
+
+func (s *Service) claimedDispatchModel(
+	ctx context.Context,
+	report NextReport,
+	token string,
+) (string, bool) {
+	st, _, err := s.store.Load(ctx)
+	if err != nil {
+		return "", false
+	}
+	if round := st.Round(report.Repo, report.PR); round != nil &&
+		round.Dispatch != nil && round.Dispatch.Token == token {
+		return round.Dispatch.Model, true
+	}
+	if claim, ok := st.Dispatches[QueueKey(report.Repo, report.PR)]; ok && claim.Token == token {
+		return claim.Model, true
+	}
+	return "", false
+}
+
+func readLogTail(path string, limit int64) []byte {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil
+	}
+	start := info.Size() - limit
+	if start < 0 {
+		start = 0
+	}
+	body := make([]byte, info.Size()-start)
+	n, _ := file.ReadAt(body, start)
+	return body[:n]
 }
 
 // beatDispatch refreshes the claim while the session runs, so a session that
@@ -1241,4 +1605,32 @@ func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[
 		}
 	}
 	return nil
+}
+
+// noteSessionDetail records what a running session is working on, for the
+// reader. Best-effort: this is display bookkeeping, and failing a fix session
+// over it would trade something that matters for something that does not.
+func (s *Service) noteSessionDetail(ctx context.Context, report NextReport, token, logPath string, findings int) {
+	_, err := s.store.Update(ctx, func(st *State) error {
+		r := st.Round(report.Repo, report.PR)
+		if r == nil || r.Dispatch == nil || r.Dispatch.Token != token {
+			return ErrNoChange
+		}
+		mirror := st.Dispatches[QueueKey(report.Repo, report.PR)]
+		if r.Dispatch.Log == logPath && r.Dispatch.Findings == findings &&
+			mirror.Token == token && mirror.Log == logPath && mirror.Findings == findings {
+			return ErrNoChange
+		}
+		r.Dispatch.Log, r.Dispatch.Findings = logPath, findings
+		st.PutRound(*r)
+		// The session list reads the MIRRORED claim, not the round, so the same
+		// write has to reach both. Left to the heartbeat, these fields appeared
+		// a third of a TTL late — and never at all for a session that finished
+		// sooner, which is most of them.
+		st.RememberDispatch(report.Repo, report.PR, *r.Dispatch)
+		return nil
+	})
+	if err != nil && !errors.Is(err, ErrNoChange) && s.log != nil {
+		s.log.Printf("warning: recording session detail for %s#%d: %v", report.Repo, report.PR, err)
+	}
 }

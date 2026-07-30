@@ -14,24 +14,28 @@ import (
 // the package qualifier, and without colliding with the many `state`/`st`
 // variable names in this package.
 type (
-	State         = crqstate.State
-	Round         = crqstate.Round
-	Phase         = crqstate.Phase
-	FireSlot      = crqstate.FireSlot
-	AccountQuota  = crqstate.AccountQuota
-	LeaderLease   = crqstate.LeaderLease
-	PostedCommand = crqstate.PostedCommand
-	RepoReviewers = crqstate.RepoReviewers
-	Revision      = crqstate.Revision
-	StateStore    = crqstate.StateStore
-	StoreConfig   = crqstate.StoreConfig
+	State          = crqstate.State
+	Round          = crqstate.Round
+	Phase          = crqstate.Phase
+	FireSlot       = crqstate.FireSlot
+	AccountQuota   = crqstate.AccountQuota
+	LeaderLease    = crqstate.LeaderLease
+	PostedCommand  = crqstate.PostedCommand
+	RepoReviewers  = crqstate.RepoReviewers
+	RepoEnrollment = crqstate.RepoEnrollment
+	FleetDefaults  = crqstate.FleetDefaults
+	SolverSettings = crqstate.SolverSettings
+	CoBotRound     = crqstate.CoBotRound
+	HostReport     = crqstate.HostReport
+	ToolReport     = crqstate.ToolReport
+	Revision       = crqstate.Revision
+	StateStore     = crqstate.StateStore
+	StoreConfig    = crqstate.StoreConfig
 
 	LeaderCapabilityLease = crqstate.LeaderCapabilityLease
 
 	// RepoAutofixSwitch is one repository's answer to whether crq may fix it.
 	RepoAutofixSwitch = crqstate.RepoAutofixSwitch
-
-	// RepoReviewers is the per-repository reviewer override (see Config.ForRepo).
 )
 
 const (
@@ -50,10 +54,20 @@ const (
 	AutofixUnhealthyAfter = crqstate.AutofixUnhealthyAfter
 	// CapsRepoOverrides is the binary capability per-repo reviewer overrides need.
 	CapsRepoOverrides = crqstate.CapsRepoOverrides
-	// CapsFleetPolicy is the binary capability state-backed fleet policy needs.
-	CapsFleetPolicy = crqstate.CapsFleetPolicy
-	// WriterCaps is what THIS binary understands of the shared state.
+	// CapsPrimaryOff is the capability a host needs to honour a repository that
+	// turned the metered primary off.
+	CapsPrimaryOff = crqstate.CapsPrimaryOff
+	// CapsEnrollment is the capability a host needs to honour enrollment records.
+	CapsEnrollment = crqstate.CapsEnrollment
+	// CapsFleetDefaults is the capability a host needs to honour fleet defaults.
+	CapsFleetDefaults = crqstate.CapsFleetDefaults
+	// CapsSolver is the capability a host needs to honour solver settings.
+	CapsSolver = crqstate.CapsSolver
+	// WriterCaps is what THIS binary understands, recorded in each host's
+	// self-report so a fleet can see why a host ignores a setting.
 	WriterCaps = crqstate.WriterCaps
+	// HostReportTTL is how long a host's self-report counts as current.
+	HostReportTTL = crqstate.HostReportTTL
 )
 
 var (
@@ -70,8 +84,11 @@ func (c Config) storeConfig() StoreConfig {
 		Timezone:       c.Timezone,
 		Scope:          c.Scope,
 		CoReviewers:    c.coReviewerSummary(),
-		Host:           c.WriterID(),
-		MinInterval:    c.MinInterval,
+		ResolveCoReviewers: func(fleet FleetDefaults) string {
+			return c.WithFleet(fleet).coReviewerSummary()
+		},
+		Host:        c.WriterID(),
+		MinInterval: c.MinInterval,
 	}
 }
 
@@ -97,18 +114,13 @@ func (c Config) coReviewerSummary() string {
 	return strings.Join(parts, " · ")
 }
 
-// NewGitStateStore builds the git-ref-backed store. The logger surfaces the
-// loud auto-reinit line when a stale-schema payload is loaded.
-//
-// The store renders dashboard.md on every state commit, and it renders it with
-// the fleet's policy rather than this host's startup settings — otherwise the
-// file in the state ref would carry whichever co-reviewer set the writing
-// machine happened to be configured with, while the gate issue shows the
-// fleet's.
+// NewGitStateStore builds the git-ref-backed store. Dashboard rendering resolves
+// the fleet record from the state being written rather than using this host's
+// frozen startup configuration.
 func NewGitStateStore(cfg Config, gh *ghapi.GitHub, log Logger) *crqstate.GitStateStore {
 	store := crqstate.NewGitStateStore(cfg.storeConfig(), gh, log)
 	store.SetRenderConfig(func(st State) StoreConfig {
-		return applyFleet(cfg, st.FleetConfig, nil).storeConfig()
+		return cfg.WithFleet(st.Fleet).storeConfig()
 	})
 	return store
 }
@@ -127,19 +139,19 @@ func DefaultState(cfg Config) State {
 }
 
 func renderDashboard(st State, cfg Config) string {
-	return crqstate.RenderDashboard(st, cfg.storeConfig())
+	return crqstate.RenderDashboard(st, cfg.WithFleet(st.Fleet).storeConfig())
 }
 func renderTitle(st State, cfg Config) string {
-	return crqstate.RenderTitle(st, cfg.storeConfig())
+	return crqstate.RenderTitle(st, cfg.WithFleet(st.Fleet).storeConfig())
 }
 
 // StatusLine renders the queue as a single line for a harness status bar.
 func StatusLine(st State, cfg Config) string {
-	return crqstate.StatusLine(st, cfg.storeConfig())
+	return crqstate.StatusLine(st, cfg.WithFleet(st.Fleet).storeConfig())
 }
 
 func issueBody(st State, cfg Config) (string, error) {
-	return crqstate.IssueBody(st, cfg.storeConfig())
+	return crqstate.IssueBody(st, cfg.WithFleet(st.Fleet).storeConfig())
 }
 
 // policy assembles the engine Policy from config.
@@ -147,6 +159,7 @@ func (c Config) policy() engine.Policy {
 	p := engine.Policy{
 		Bot:                c.Bot,
 		RequiredBots:       c.RequiredBots,
+		PrimaryOff:         c.PrimaryOff,
 		MinInterval:        c.MinInterval,
 		InflightTimeout:    c.InflightTimeout,
 		RateLimitFallback:  c.RateLimitFallback,

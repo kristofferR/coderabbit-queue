@@ -240,6 +240,61 @@ func TestSubmittedPrimaryReviewAcknowledgesTheRound(t *testing.T) {
 	}
 }
 
+func TestRegistryPrimaryCompletedCheckAcknowledgesTheRound(t *testing.T) {
+	p := policy
+	p.Bot = dialect.CodexBotLogin
+	p.RequiredBots = []string{"some-other-bot[bot]"}
+	cases := []struct {
+		name    string
+		check   CheckSeen
+		outcome Outcome
+		reason  string
+	}{
+		{
+			name: "current terminal primary check",
+			check: CheckSeen{
+				Bot: dialect.CodexBotLogin, Verdict: dialect.CheckDoneClean,
+				CompletedAt: t0.Add(time.Minute),
+			},
+			outcome: OutReviewing, reason: "check completed",
+		},
+		{
+			name: "stale terminal check",
+			check: CheckSeen{
+				Bot: dialect.CodexBotLogin, Verdict: dialect.CheckDone,
+				CompletedAt: t0,
+			},
+			outcome: KeepWaiting, reason: "review in flight",
+		},
+		{
+			name: "wrong bot",
+			check: CheckSeen{
+				Bot: "other[bot]", Verdict: dialect.CheckDoneClean,
+				CompletedAt: t0.Add(time.Minute),
+			},
+			outcome: KeepWaiting, reason: "review in flight",
+		},
+		{
+			name: "non-terminal primary check",
+			check: CheckSeen{
+				Bot: dialect.CodexBotLogin, Verdict: dialect.CheckInProgress,
+				CompletedAt: t0.Add(time.Minute),
+			},
+			outcome: KeepWaiting, reason: "review in flight",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := firedRound(t, "abcdef123")
+			obs := Observation{Head: "abcdef123", Open: true, Checks: []CheckSeen{tc.check}}
+			tr := Progress(r, state.AccountQuota{}, obs, t0.Add(2*time.Minute), p)
+			if tr.Outcome != tc.outcome || tr.Reason != tc.reason {
+				t.Fatalf("Progress = %+v, want outcome %v reason %q", tr, tc.outcome, tc.reason)
+			}
+		})
+	}
+}
+
 func TestInflightTimeoutCarriesCooldown(t *testing.T) {
 	r := firedRound(t, "abcdef123")
 	now := t0.Add(16 * time.Minute)
@@ -484,7 +539,7 @@ func TestDecideCodexPost(t *testing.T) {
 		want           bool
 	}{
 		{name: "required, no auto, first fire", round: state.Round{Head: head}, obs: base, policy: codexReq, want: true},
-		{name: "auto-active never posts", round: state.Round{Head: head}, obs: Observation{Head: head, Open: true, Co: codexSeen(CoSeen{AutoActive: true})}, policy: codexReq, want: false},
+		{name: "always mode overrides historical auto activity", round: state.Round{Head: head}, obs: Observation{Head: head, Open: true, Co: codexSeen(CoSeen{AutoActive: true})}, policy: codexReq, want: true},
 		{name: "already reviewed head", round: state.Round{Head: head}, obs: Observation{Head: head, Open: true, Reviews: []ReviewSeen{codexReviewHead}}, policy: codexReq, want: false},
 		{name: "command already present", round: state.Round{Head: head}, obs: base, policy: codexReq, commandPresent: true, want: false},
 		{name: "not required", round: state.Round{Head: head}, obs: base, policy: policy, want: false},
@@ -581,8 +636,8 @@ func TestDecideFireCodexDedupe(t *testing.T) {
 	// Same, but Codex auto-reviews: crq must not post; wait for its own review,
 	// bounded (FireCoReviewWait) rather than left queued with no deadline.
 	autoObs := Observation{Head: head, Open: true, Co: codexSeen(CoSeen{AutoActive: true}), Reviews: []ReviewSeen{crReviewed}}
-	if d := DecideFire(free, queued, autoObs, now, codexReq); d.Verdict != FireCoReviewWait {
-		t.Fatalf("auto-active codex must wait (bounded), not dedupe, got %+v", d)
+	if d := DecideFire(free, queued, autoObs, now, codexReq); d.Verdict != FireCoOnly || !codexPosted(d) {
+		t.Fatalf("always-mode codex must be commanded, not deduped, got %+v", d)
 	}
 	// A live `@codex review` command already on the PR: crq must not repost it;
 	// wait for its answer, bounded.
@@ -891,8 +946,8 @@ func TestDecideFireBlockedCodexDeferred(t *testing.T) {
 	}
 	// Auto-active Codex reviews unprompted → nothing to post; blocked FireNo.
 	autoObs := Observation{Head: head, Open: true, Co: codexSeen(CoSeen{AutoActive: true})}
-	if d := DecideFire(g, queued, autoObs, now, degrade); d.Verdict != FireNo {
-		t.Fatalf("auto-active codex must not be commanded, got %+v", d)
+	if d := DecideFire(g, queued, autoObs, now, degrade); d.Verdict != FireCoDeferred || !codexPosted(d) {
+		t.Fatalf("always-mode codex must be commanded while the primary is blocked, got %+v", d)
 	}
 	// Unblocked → the normal fire path is untouched.
 	if d := DecideFire(Global{SlotFree: true}, queued, open, now, degrade); d.Verdict != FirePost || !codexPosted(d) {
@@ -1147,5 +1202,51 @@ func TestReopenedRoundDedupesOnlyOnCompletionEvidence(t *testing.T) {
 				t.Fatalf("verdict = %v, want %v (%+v)", d.Verdict, tc.want, d)
 			}
 		})
+	}
+}
+
+// TestPrimaryOffNeverFiresAndNeverWaitsOnTheQuota pins the repository-level
+// primary switch. A private repo on a free plan gets nothing from the metered
+// reviewer, so crq must neither spend the account on it nor let that account's
+// state — or another PR's fire slot — delay the co-reviewers that DO run there.
+func TestPrimaryOffNeverFiresAndNeverWaitsOnTheQuota(t *testing.T) {
+	now := t0.Add(10 * time.Minute)
+	head := "abcdef123"
+	queued := state.Round{Repo: "owner/private", PR: 7, Head: head, Phase: state.PhaseQueued, Seq: 1}
+	obs := Observation{Head: head, Open: true}
+
+	off := withCodex(policy, "@codex review")
+	off.PrimaryOff = true
+	off.RequiredBots = []string{dialect.CodexBotLogin} // ForRepo drops the primary
+
+	blocked := now.Add(time.Hour)
+	for _, g := range []Global{
+		{SlotFree: true},
+		{SlotFree: false},                        // another PR holds the slot
+		{SlotFree: true, BlockedUntil: &blocked}, // account quota blocked
+		{SlotFree: true, LastFired: &now},        // inside the pacing window
+	} {
+		d := DecideFire(g, queued, obs, now, off)
+		if d.Verdict != FireCoOnly {
+			t.Fatalf("primary off must resolve on the co-reviewers alone whatever the account is doing, got %+v (global %+v)", d, g)
+		}
+		if len(d.PostCo) != 1 || d.PostCo[0] != dialect.CodexBotLogin {
+			t.Fatalf("primary off must still command the co-reviewers, got %+v", d.PostCo)
+		}
+	}
+
+	// With the primary on, the same round is an ordinary metered fire — the
+	// switch is what changed the decision, not the observation.
+	on := off
+	on.PrimaryOff = false
+	on.RequiredBots = []string{"coderabbitai[bot]", dialect.CodexBotLogin}
+	if d := DecideFire(Global{SlotFree: true}, queued, obs, now, on); d.Verdict != FirePost {
+		t.Fatalf("primary on must still fire, got %+v", d)
+	}
+
+	// And the reason is reportable, so an agent is never left reasoning about
+	// quota for a reviewer that does not run here.
+	if why := PrimaryUnavailableReason(obs, off, head); why == "" {
+		t.Fatal("primary off must name itself as the reason no review is coming")
 	}
 }

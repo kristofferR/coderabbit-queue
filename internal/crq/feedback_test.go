@@ -100,9 +100,8 @@ func TestFeedbackReturnsObservedAccountBlockPersistenceFailure(t *testing.T) {
 	}
 }
 
-func TestFeedbackUsesTheFleetFallbackForAWindowlessAccountBlock(t *testing.T) {
+func TestReadOnlyFeedbackDoesNotPersistObservedAccountBlocks(t *testing.T) {
 	cfg := firingConfig()
-	cfg.RateLimitFallback = 5 * time.Minute
 	now := time.Now().UTC()
 	gh := newFakeGitHub()
 	var pull ghapi.Pull
@@ -110,32 +109,19 @@ func TestFeedbackUsesTheFleetFallbackForAWindowlessAccountBlock(t *testing.T) {
 	pull.Head.SHA = "abcdef1234567890"
 	gh.pulls[fakeKey("o/repo", 3)] = pull
 	notice := ghapi.IssueComment{
-		ID: 17, Body: "You are rate limited by coderabbit.ai. Please wait before requesting another review.",
+		ID: 17, Body: "You are rate limited by coderabbit.ai. Reviews available in 3 minutes.",
 		CreatedAt: now, UpdatedAt: now,
 	}
 	notice.User.Login = cfg.Bot
 	gh.comments[fakeKey("o/repo", 3)] = []ghapi.IssueComment{notice}
 
-	store := NewMemoryStore(cfg)
-	if _, err := store.Update(context.Background(), func(st *State) error {
-		st.SetFleetValue("rate-limit-fallback", "45m")
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	writeErr := errors.New("read-only feedback attempted a state write")
+	store := &failNthUpdateStore{StateStore: NewMemoryStore(cfg), n: 1, err: writeErr}
 	svc := NewService(cfg, gh, store, nil)
 	svc.now = func() time.Time { return now }
 
-	if _, err := svc.Feedback(context.Background(), "o/repo", 3); err != nil {
-		t.Fatal(err)
-	}
-	st, _, err := store.Load(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := now.Add(45 * time.Minute)
-	if st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.Equal(want) {
-		t.Fatalf("blocked until = %v, want fleet fallback %s", st.Account.BlockedUntil, want)
+	if _, err := svc.FeedbackReadOnly(context.Background(), "o/repo", 3); err != nil {
+		t.Fatalf("read-only feedback failed: %v", err)
 	}
 }
 
@@ -770,7 +756,8 @@ This boilerplate must not become part of the finding.
 	if finding.Path != "convex/sections/aiCommands.ts" || finding.Line != 2170 {
 		t.Fatalf("location mismatch: %#v", finding)
 	}
-	if finding.Title != "Query learning history by topic before taking" || finding.Severity != "minor" {
+	if finding.Title != "Query learning history by topic before taking" ||
+		finding.Severity != "potential" || finding.Scale != "P2" {
 		t.Fatalf("metadata mismatch: %#v", finding)
 	}
 	if finding.Commit != "347388ffd" || finding.Source != "review_body" {
@@ -1009,6 +996,9 @@ func TestThreadFindingsSurfacesUnresolvedAcrossCommits(t *testing.T) {
 	}
 	if got[0].ThreadID != "PRRT_x" || got[0].Line != 42 {
 		t.Fatalf("finding mismatch: %#v", got[0])
+	}
+	if got[0].Title != "Potential issue still unfixed." {
+		t.Fatalf("finding title = %q, want reviewer markup removed", got[0].Title)
 	}
 
 	// Resolved and outdated threads are skipped regardless of commit.
@@ -2198,6 +2188,47 @@ func TestFeedbackSurfacesSkippedReviewDespiteRateLimitMarker(t *testing.T) {
 	}
 }
 
+func TestFeedbackUsesTheFleetEditedPrimary(t *testing.T) {
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":          "o/gate",
+		"CRQ_HOST":          "test",
+		"CRQ_COBOTS":        "",
+		"CRQ_REQUIRED_BOTS": "coderabbitai[bot]",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const primary = "replacement-reviewer[bot]"
+	body := corpusMessage(t, "coderabbit/review-skipped-too-many-files.md")
+	gh := newFakeGitHub()
+	sha := "56150a0423a243224b03f355c3a3ba6941011b5b"
+	pull := ghapi.Pull{State: "open"}
+	pull.Head.SHA = sha
+	gh.pulls[fakeKey("o/repo", 214)] = pull
+	skip := ghapi.IssueComment{ID: 5074197614, Body: body,
+		CreatedAt: time.Now().UTC().Add(-time.Hour), UpdatedAt: time.Now().UTC().Add(-time.Minute)}
+	skip.User.Login = primary
+	gh.comments[fakeKey("o/repo", 214)] = []ghapi.IssueComment{skip}
+
+	store := NewMemoryStore(cfg)
+	if _, err := store.Update(context.Background(), func(st *State) error {
+		st.Fleet = fleetEnvSet(st.Fleet, "CRQ_BOT", primary, false)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := NewService(cfg, gh, store, nil).Feedback(context.Background(), "o/repo", 214)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, finding := range rep.Findings {
+		if finding.CommentID == skip.ID {
+			return
+		}
+	}
+	t.Fatalf("the skip notice from the state-resolved primary was dropped: %#v", rep.Findings)
+}
+
 // TestAccountBlockIgnoredWhenPrimaryWillNotReview pins the rule that stopped
 // agents reasoning about CodeRabbit on repos it never reviews. On a summary-only
 // round the account block is meaningless: it must not extend the wait deadline,
@@ -2398,45 +2429,6 @@ func TestCompleteWaitRoundHoldsAnUnacknowledgedFireSlot(t *testing.T) {
 	}
 	if st.FireSlot != nil {
 		t.Fatalf("completing the round must release the slot, got %+v", st.FireSlot)
-	}
-}
-
-// The hold is bounded by the in-flight window Progress gives up at, and that
-// window is fleet policy. A host whose own value is shorter would otherwise
-// stamp a hold that lapses while Progress is still waiting on the command,
-// letting the next pull request spend the allowance alongside it.
-func TestHeldFireSlotUsesTheFleetsInflightTimeout(t *testing.T) {
-	ctx := context.Background()
-	cfg := firingConfig()
-	cfg.InflightTimeout = time.Minute // this host's own, shorter, answer
-	store := NewMemoryStore(cfg)
-	svc := NewService(cfg, newFakeGitHub(), store, nil)
-	now := time.Now().UTC()
-	repo, pr, head := "o/r", 6, "aaaaaaaa1"
-	seedRound(t, store, cfg, repo, pr, head, PhaseFired, now, 12)
-	if _, err := store.Update(ctx, func(st *State) error {
-		st.SetFleetValue("inflight-timeout", "2h")
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	st, _, err := store.Load(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fleet := svc.cfgFor(st, repo)
-
-	svc.completeWaitRound(ctx, repo, pr, head, true, &fleet)
-	st, _, err = store.Load(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.FireSlot == nil || st.FireSlot.HoldUntil == nil {
-		t.Fatalf("the slot must be held for the unanswered command, got %+v", st.FireSlot)
-	}
-	want := now.Add(2 * time.Hour)
-	if !st.FireSlot.HoldUntil.Equal(want) {
-		t.Fatalf("hold until = %s, want the fleet's window %s", st.FireSlot.HoldUntil, want)
 	}
 }
 

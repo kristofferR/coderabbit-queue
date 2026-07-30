@@ -27,9 +27,12 @@ const (
 // an empty environment. Duplicating the defaults here let them drift silently:
 // a new co-reviewer, or a changed trigger default, would leave replay coverage
 // asserting a world that no longer exists.
+// defaultCoBots is every registry co-reviewer with its own defaults. Named
+// explicitly because a co-reviewer is opt-in: these replays are ABOUT the
+// co-reviewers, so they enable them the way an operator would.
 func defaultCoBots(t *testing.T) []CoBotConfig {
 	t.Helper()
-	co, err := parseCoBots(map[string]string{}, nil)
+	co, err := parseCoBots(map[string]string{"CRQ_COBOTS": "codex,bugbot,macroscope"}, nil)
 	if err != nil {
 		t.Fatalf("parseCoBots defaults: %v", err)
 	}

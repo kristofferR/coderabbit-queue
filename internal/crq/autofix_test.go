@@ -3,7 +3,6 @@ package crq
 import (
 	"context"
 	"encoding/xml"
-	"errors"
 	"html"
 	"os"
 	"os/exec"
@@ -14,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kristofferR/coderabbit-queue/internal/dialect"
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
 )
 
@@ -27,7 +25,7 @@ func TestInstallAutofixPlansWithoutWriting(t *testing.T) {
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
 	agent := fakeAgent(t, "claude")
-	plan, err := svc.InstallAutofix(context.Background(), agent, nil, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), agent, nil, nil, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +38,7 @@ func TestInstallAutofixPlansWithoutWriting(t *testing.T) {
 	if len(plan.Repos) != 1 || plan.Repos[0] != "owner/name" {
 		t.Errorf("repos = %v, want the configured fleet", plan.Repos)
 	}
-	for _, path := range []string{plan.Prompt, plan.Wrapper, plan.Unit, plan.LogDir} {
+	for _, path := range []string{plan.Prompt, plan.Binary, plan.Unit, plan.LogDir} {
 		if path == "" {
 			t.Fatalf("plan = %+v, want every path named so --dry-run is reviewable", plan)
 		}
@@ -68,13 +66,26 @@ func TestAutofixPlanOrdersTheFleetTheSameWayEveryTime(t *testing.T) {
 
 	want := []string{"owner/alpha", "owner/mike", "owner/zulu"}
 	for i := range 8 {
-		plan, err := AutofixPlan(cfg, agent, nil, nil, true)
+		plan, err := AutofixPlan(cfg, agent, nil, nil, true, false)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !slices.Equal(plan.Repos, want) {
 			t.Fatalf("plan %d repos = %v, want %v", i, plan.Repos, want)
 		}
+	}
+}
+
+func TestAutofixPlanAllowsRepositoriesFromSharedEnrollment(t *testing.T) {
+	cfg := firingConfig()
+	cfg.AllowRepos = nil
+
+	plan, err := AutofixPlan(cfg, fakeAgent(t, "claude"), nil, nil, true, false)
+	if err != nil {
+		t.Fatalf("planning with no legacy CRQ_REPOS: %v", err)
+	}
+	if len(plan.Repos) != 0 {
+		t.Fatalf("static repos = %v, want the watcher to load shared enrollments", plan.Repos)
 	}
 }
 
@@ -90,7 +101,7 @@ func TestAutofixPlanRetiresThePreRenameWatcher(t *testing.T) {
 	agent := fakeAgent(t, "claude")
 
 	// A host that never ran the old installer must not be told to retire it.
-	clean, err := AutofixPlan(cfg, agent, nil, nil, true)
+	clean, err := AutofixPlan(cfg, agent, nil, nil, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +125,7 @@ func TestAutofixPlanRetiresThePreRenameWatcher(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := AutofixPlan(cfg, agent, nil, nil, true)
+	plan, err := AutofixPlan(cfg, agent, nil, nil, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,121 +147,13 @@ func TestInstallAutofixHonoursConfiguredDryRun(t *testing.T) {
 	cfg.AllowRepos = map[string]bool{"owner/repo": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, false)
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !plan.DryRun || plan.Started {
 		t.Fatalf("configured dry-run installation applied its plan: %+v", plan)
 	}
-}
-
-func TestInstallAutofixUsesFleetRepositories(t *testing.T) {
-	cfg := firingConfig()
-	cfg.AllowRepos = nil
-	store := NewMemoryStore(cfg)
-	if _, err := store.Update(context.Background(), func(st *State) error {
-		st.SetFleetValue("repos", "owner/fleet-repo")
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	svc := NewService(cfg, newFakeGitHub(), store, nil)
-
-	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(plan.Repos) != 1 || plan.Repos[0] != "owner/fleet-repo" {
-		t.Fatalf("autofix repos = %v, want the fleet repository", plan.Repos)
-	}
-	if plan.PolicySource != "fleet" {
-		t.Fatalf("policy source = %q, want fleet", plan.PolicySource)
-	}
-}
-
-func TestAutofixUnitKeepsHostFallbacksUnderFleetPolicy(t *testing.T) {
-	cfg := firingConfig()
-	cfg.AllowRepos = map[string]bool{"owner/host-repo": true}
-	cfg.ExcludeRepos = map[string]bool{"owner/host-excluded": true}
-	store := NewMemoryStore(cfg)
-	if _, err := store.Update(context.Background(), func(st *State) error {
-		st.SetFleetValue("repos", "owner/fleet-repo")
-		st.SetFleetValue("exclude", "owner/fleet-excluded")
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	svc := NewService(cfg, newFakeGitHub(), store, nil)
-
-	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(plan.Repos) != 1 || plan.Repos[0] != "owner/fleet-repo" {
-		t.Fatalf("preview repos = %v, want current fleet policy", plan.Repos)
-	}
-	env := autofixEnvFor(svc.autofixFallbackConfig(nil), plan)
-	if got := env["CRQ_REPOS"]; got != "owner/host-repo" {
-		t.Fatalf("unit CRQ_REPOS = %q, want host fallback", got)
-	}
-	if got := env["CRQ_EXCLUDE"]; got != "owner/host-excluded" {
-		t.Fatalf("unit CRQ_EXCLUDE = %q, want host fallback", got)
-	}
-}
-
-func TestAutofixUnitKeepsExplicitRepositoriesAsHostFallback(t *testing.T) {
-	cfg := firingConfig()
-	cfg.AllowRepos = map[string]bool{"owner/configured": true}
-	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
-	plan := AutofixInstall{Repos: []string{"owner/explicit"}}
-
-	env := autofixEnvFor(svc.autofixFallbackConfig(plan.Repos), plan)
-	if got := env["CRQ_REPOS"]; got != "owner/explicit" {
-		t.Fatalf("unit CRQ_REPOS = %q, want explicit install repository", got)
-	}
-}
-
-func TestAutofixWrapperKeepsExplicitRepositoriesAuthoritative(t *testing.T) {
-	got := autofixWrapper("/usr/bin/crq", "'agent' 'prompt'", []string{"owner/explicit", "owner/with space"})
-	if !strings.Contains(got, "watch 'owner/explicit' 'owner/with space' --") {
-		t.Fatalf("wrapper lost explicit repositories:\n%s", got)
-	}
-	if fallback := autofixWrapper("/usr/bin/crq", "'agent' 'prompt'", nil); !strings.Contains(fallback, "watch --") {
-		t.Fatalf("wrapper without explicit repositories does not use runtime fleet policy:\n%s", fallback)
-	}
-}
-
-// A state ref this host cannot read must not turn the documented preview into an
-// error — --dry-run is what somebody runs to inspect the setup before finishing
-// it. The plan says which policy it could see, so it cannot be mistaken for the
-// fleet's; a real install has no such fallback.
-func TestInstallAutofixPreviewsFromTheHostWhenFleetStateIsUnreadable(t *testing.T) {
-	cfg := firingConfig()
-	cfg.AllowRepos = map[string]bool{"owner/host-repo": true}
-	svc := NewService(cfg, newFakeGitHub(), unreadableStore{NewMemoryStore(cfg)}, nil)
-
-	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.PolicySource != "host" || plan.Warning == "" {
-		t.Fatalf("plan = %+v, want a labelled host-only preview", plan)
-	}
-	if len(plan.Repos) != 1 || plan.Repos[0] != "owner/host-repo" {
-		t.Fatalf("preview repos = %v, want this host's own", plan.Repos)
-	}
-	if _, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, false); err == nil {
-		t.Fatal("an install wrote a unit from policy it could not check against the fleet's")
-	}
-}
-
-// unreadableStore is a host that cannot reach the state ref: no access to the
-// gate repository, or no network to reach it over.
-type unreadableStore struct{ StateStore }
-
-func (unreadableStore) Load(context.Context) (State, Revision, error) {
-	return State{}, Revision{}, errors.New("state ref unreadable")
 }
 
 // A missing agent must fail loudly at install time. Discovering it at the first
@@ -260,7 +163,7 @@ func TestInstallAutofixRefusesWithoutAnAgent(t *testing.T) {
 	cfg.AllowRepos = map[string]bool{"owner/name": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	_, err := svc.InstallAutofix(context.Background(), "definitely-not-a-real-binary", nil, nil, true)
+	_, err := svc.InstallAutofix(context.Background(), "definitely-not-a-real-binary", nil, nil, true, false)
 	if err == nil {
 		t.Skip("a binary by that name exists on this machine")
 	}
@@ -327,7 +230,7 @@ func TestAutofixUnitCarriesTheConfigurationTheInstallRead(t *testing.T) {
 	cfg.CalibrationPR = 1
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,8 +267,6 @@ func TestAutofixUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 	cfg.SkipMarker = "<!-- custom-skip -->"
 	cfg.Bot = "custom-reviewer[bot]"
 	cfg.RequiredBots = []string{"custom-reviewer[bot]", "cursor[bot]"}
-	// Named by the operator: it reaches past who reviews, which only an explicit
-	// CRQ_FEEDBACK_BOTS can do — and only an explicit one travels.
 	cfg.FeedbackBots = []string{"custom-reviewer[bot]", "cursor[bot]", "observer[bot]"}
 	cfg.FeedbackBotsExplicit = true
 	cfg.ReviewCommand = "@custom review this"
@@ -381,7 +282,7 @@ func TestAutofixUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 		Required: true, SelfHealGrace: 4 * time.Minute,
 	}}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
-	plan := AutofixInstall{Platform: "linux", Wrapper: "/tmp/crq autofix", LogDir: "/tmp/crq logs"}
+	plan := AutofixInstall{Platform: "linux", Binary: "/tmp/crq autofix", LogDir: "/tmp/crq logs"}
 
 	unit := svc.autofixUnit(plan)
 	for _, want := range []string{
@@ -409,87 +310,41 @@ func TestAutofixUnitCarriesEffectiveReviewerConfiguration(t *testing.T) {
 	}
 }
 
-// An implicit trigger must install as unset. Freezing the resolved mode into the
-// unit makes the service read it as an operator's choice, and the registry
-// default for a bot the fleet later REQUIRES can then never be recomputed — so a
-// required Codex would be waited for and never commanded.
-func TestAutofixEnvInstallsAnImplicitTriggerAsUnset(t *testing.T) {
-	cfg := firingConfig()
-	cfg.CoBots = []CoBotConfig{{
-		Name: "codex", Login: dialect.CodexBotLogin, Command: "@codex review",
-		Trigger: engine.TriggerNever, SelfHealGrace: 10 * time.Minute,
-	}}
+func TestAutofixEnvKeepsDerivedReviewerSettingsDynamic(t *testing.T) {
+	cfg, err := BuildConfig(map[string]string{
+		"CRQ_REPO":          "owner/gate",
+		"CRQ_HOST":          "installer",
+		"CRQ_COBOTS":        "codex",
+		"CRQ_REQUIRED_BOTS": "coderabbitai",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
-
 	env := svc.autofixEnv(AutofixInstall{})
-	trigger, ok := env["CRQ_COBOT_CODEX_TRIGGER"]
-	if !ok || trigger != "" {
-		t.Fatalf("CRQ_COBOT_CODEX_TRIGGER = %q, present=%t; want an explicit empty value", trigger, ok)
-	}
-	// The installed service reloads from this environment: the mode has to come
-	// back implicit, so requiring the bot still promotes it to always.
-	reloaded := resolveCoBot(env, mustCoReviewer(t, "codex"), true)
-	if reloaded.TriggerExplicit {
-		t.Fatal("reloaded trigger is explicit; the installing host had no such setting")
-	}
-	if reloaded.Trigger != engine.TriggerAlways {
-		t.Fatalf("required codex reloaded with trigger %q, want always", reloaded.Trigger)
-	}
-}
 
-// A derived surfaced set must install as unset, for the same reason as the
-// implicit trigger: written out as a value, the service reads it back as the
-// operator's own list and stops recomputing it, so a co-reviewer the fleet
-// enables later never has its findings surfaced.
-func TestAutofixEnvInstallsDerivedFeedbackBotsAsUnset(t *testing.T) {
-	cfg := firingConfig()
-	cfg.FeedbackBots = []string{cfg.Bot, dialect.CodexBotLogin}
-	cfg.FeedbackBotsExplicit = false
-	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
-
-	env := svc.autofixEnv(AutofixInstall{})
-	bots, ok := env["CRQ_FEEDBACK_BOTS"]
-	if !ok || bots != "" {
-		t.Fatalf("CRQ_FEEDBACK_BOTS = %q, present=%t; want an explicit empty value", bots, ok)
+	if got := env["CRQ_FEEDBACK_BOTS"]; got != "" {
+		t.Fatalf("derived feedback bots were frozen into the unit as %q", got)
 	}
-}
-
-// The per-bot settings of a co-reviewer this host has switched OFF still travel.
-// They are what a repository override — or a fleet `cobots` change that names
-// the bot without naming its keys — picks the bot up with, and the installing
-// shell's own preview uses them.
-func TestAutofixEnvCarriesDisabledCoBotFallbacks(t *testing.T) {
-	cfg := firingConfig()
-	cfg.CoBots = nil
-	cfg.KnownCoBots = []CoBotConfig{{
-		Name: "bugbot", Login: "cursor[bot]", Command: "bugbot run please",
-		Trigger: engine.TriggerAlways, TriggerExplicit: true,
-		SelfHealGrace: 42 * time.Minute,
-	}}
-	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
-
-	env := svc.autofixEnv(AutofixInstall{})
-	if got := env["CRQ_COBOTS"]; got != "" {
-		t.Fatalf("CRQ_COBOTS = %q, want the enabled set to stay empty", got)
+	if got := env["CRQ_COBOT_CODEX_TRIGGER"]; got != "" {
+		t.Fatalf("implicit Codex trigger was frozen into the unit as %q", got)
 	}
-	for key, want := range map[string]string{
-		"CRQ_COBOT_BUGBOT_CMD":     "bugbot run please",
-		"CRQ_COBOT_BUGBOT_TRIGGER": "always",
-		"CRQ_COBOT_BUGBOT_GRACE":   "42m0s",
-	} {
-		if got := env[key]; got != want {
-			t.Errorf("%s = %q, want %q", key, got, want)
-		}
-	}
-}
 
-func mustCoReviewer(t *testing.T, name string) dialect.CoReviewer {
-	t.Helper()
-	co, ok := dialect.CoReviewerByName(name)
-	if !ok {
-		t.Fatalf("unknown co-reviewer %q", name)
+	// A later fleet change can make Codex required. Restarting from the unit
+	// must then re-derive both visibility and the required `always` trigger.
+	env["CRQ_REQUIRED_BOTS"] = "coderabbitai,chatgpt-codex-connector[bot]"
+	reloaded, err := BuildConfig(env)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return co
+	if reloaded.FeedbackBotsExplicit ||
+		!hasLogin(reloaded.FeedbackBots, "chatgpt-codex-connector[bot]") {
+		t.Fatalf("feedback bots stayed frozen after restart: %v", reloaded.FeedbackBots)
+	}
+	if len(reloaded.CoBots) != 1 || reloaded.CoBots[0].Trigger != engine.TriggerAlways ||
+		reloaded.CoBots[0].TriggerExplicit {
+		t.Fatalf("Codex trigger did not follow requiredness after restart: %+v", reloaded.CoBots)
+	}
 }
 
 func TestAutofixEnvCarriesAnIntentionallyEmptySkipMarker(t *testing.T) {
@@ -523,7 +378,7 @@ func TestInstallAutofixMakesRelativeWorkspaceAbsolute(t *testing.T) {
 	cfg.WorkspaceRoot = "relative workspace"
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,7 +394,7 @@ func TestLaunchdUnitEscapesXMLValues(t *testing.T) {
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 	plan := AutofixInstall{
 		Platform: "darwin",
-		Wrapper:  "/tmp/a&b/crq-autofix",
+		Binary:   "/tmp/a&b/crq",
 		LogDir:   "/tmp/a<b/logs",
 	}
 
@@ -548,7 +403,7 @@ func TestLaunchdUnitEscapesXMLValues(t *testing.T) {
 	if err := xml.Unmarshal([]byte(unit), &document); err != nil {
 		t.Fatalf("launchd unit is not valid XML: %v\n%s", err, unit)
 	}
-	for _, raw := range []string{plan.Wrapper, plan.LogDir, cfg.ReviewCommand} {
+	for _, raw := range []string{plan.Binary, plan.LogDir, cfg.ReviewCommand} {
 		if strings.Contains(unit, raw) {
 			t.Errorf("launchd unit contains unescaped value %q:\n%s", raw, unit)
 		}
@@ -573,7 +428,7 @@ func TestInstallAutofixMakesRelativeAgentAbsolute(t *testing.T) {
 	cfg := firingConfig()
 	cfg.AllowRepos = map[string]bool{"owner/name": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
-	plan, err := svc.InstallAutofix(context.Background(), "./bin/wrapper", []string{"--run"}, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), "./bin/wrapper", []string{"--run"}, nil, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -587,7 +442,7 @@ func TestSystemdEnvironmentAssignmentsQuoteWhitespace(t *testing.T) {
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "config with spaces", "env"))
 	t.Setenv("PATH", "/usr/bin:/opt/tools with spaces/bin")
-	plan := AutofixInstall{Platform: "linux", Wrapper: "/tmp/crq-autofix", LogDir: "/tmp/crq"}
+	plan := AutofixInstall{Platform: "linux", Binary: "/tmp/crq", LogDir: "/tmp/crq"}
 
 	unit := svc.autofixUnit(plan)
 	for _, key := range []string{"CRQ_CONFIG", "PATH", "CRQ_REVIEW_CMD"} {
@@ -598,8 +453,10 @@ func TestSystemdEnvironmentAssignmentsQuoteWhitespace(t *testing.T) {
 	if strings.Contains(unit, "Environment=CRQ_CONFIG=") {
 		t.Errorf("CRQ_CONFIG was emitted as an unquoted systemd assignment:\n%s", unit)
 	}
-	if !strings.Contains(unit, `ExecStart="/tmp/crq-autofix"`) {
-		t.Errorf("ExecStart executable is not quoted:\n%s", unit)
+	// One binary, twice: it starts the watcher and it runs each fix session.
+	// Every word quoted, since a path with a space in it is a path.
+	if !strings.Contains(unit, `ExecStart="/tmp/crq" "watch" "--" "/tmp/crq" "fix-session"`) {
+		t.Errorf("ExecStart is not the crq binary, quoted, twice:\n%s", unit)
 	}
 }
 
@@ -632,7 +489,7 @@ func TestInstallAutofixNamesALogDirectory(t *testing.T) {
 	cfg.AllowRepos = map[string]bool{"owner/name": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -649,46 +506,67 @@ func TestInstallAutofixNamesALogDirectory(t *testing.T) {
 // they should use — that belongs in the agent's own config or in --agent-args.
 // Getting this wrong is invisible until a session starts and dies on a flag the
 // binary does not have.
-func TestAgentInvocationPerAgent(t *testing.T) {
-	prompt := "/tmp/p.txt"
+func TestFixSessionArgvPerAgent(t *testing.T) {
+	prompt := "do the thing"
 
-	claude, err := agentInvocation("/usr/bin/claude", prompt, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"-p ", "bypassPermissions", "stream-json", prompt} {
-		if !strings.Contains(claude, want) {
-			t.Errorf("claude invocation %q missing %q", claude, want)
+	claude := fixSessionArgv("/usr/bin/claude", prompt, nil, "", "")
+	joined := strings.Join(claude, " ")
+	for _, want := range []string{"-p", "bypassPermissions", "stream-json", prompt} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("claude argv %q missing %q", joined, want)
 		}
 	}
 
-	codex, err := agentInvocation("/usr/bin/codex", prompt, []string{"-c", "model_reasoning_effort=high"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "model_reasoning_effort=high", prompt} {
-		if !strings.Contains(codex, want) {
-			t.Errorf("codex invocation %q missing %q", codex, want)
+	codex := fixSessionArgv("/usr/bin/codex", prompt, []string{"--foo"}, "", "")
+	joined = strings.Join(codex, " ")
+	for _, want := range []string{"exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--foo", prompt} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("codex argv %q missing %q", joined, want)
 		}
 	}
-	// Codex takes the prompt as a positional; claude's -p is not its flag.
-	if strings.Contains(codex, "--permission-mode") || strings.Contains(codex, "-p ") {
-		t.Errorf("codex invocation carries claude's flags: %q", codex)
+	// Codex takes the prompt as a positional, and last; claude's flags are not
+	// its flags.
+	if codex[len(codex)-1] != prompt {
+		t.Errorf("codex argv must end with the prompt, got %q", codex[len(codex)-1])
+	}
+	if strings.Contains(joined, "--permission-mode") {
+		t.Errorf("codex argv carries claude's flags: %q", joined)
 	}
 
-	// No model anywhere: a queue does not choose the model.
-	for _, inv := range []string{claude, codex} {
-		if strings.Contains(inv, "--model") || strings.Contains(inv, "-m ") {
-			t.Errorf("invocation hardcodes a model: %q", inv)
+	// No model or effort unless the repository asked for one. An empty value
+	// must add no flag at all: every agent rejects an empty one differently and
+	// none ignores it, so the session would die on its first argument and the
+	// fix would silently never happen.
+	for _, argv := range [][]string{claude, codex} {
+		if slices.Contains(argv, "--model") || slices.Contains(argv, "--effort") {
+			t.Errorf("argv invents a model or effort: %v", argv)
+		}
+		for _, a := range argv {
+			if a == "" {
+				t.Errorf("argv carries an empty word: %v", argv)
+			}
 		}
 	}
 
-	// An unknown executable may be a self-contained prompt-taking wrapper.
-	if got, err := agentInvocation("/usr/bin/mystery", prompt, nil); err != nil || !strings.Contains(got, prompt) {
-		t.Errorf("a self-contained wrapper should be honoured, got %q err=%v", got, err)
+	// And they are applied in each agent's own spelling when asked for.
+	claude = fixSessionArgv("/usr/bin/claude", prompt, nil, "opus", "high")
+	if !slices.Contains(claude, "--model") || !slices.Contains(claude, "opus") ||
+		!slices.Contains(claude, "--effort") || !slices.Contains(claude, "high") {
+		t.Errorf("claude argv missing the requested model/effort: %v", claude)
 	}
-	if got, err := agentInvocation("/usr/bin/mystery", prompt, []string{"--run"}); err != nil || !strings.Contains(got, "--run") {
-		t.Errorf("an unknown agent with explicit args should be honoured, got %q err=%v", got, err)
+	codex = fixSessionArgv("/usr/bin/codex", prompt, nil, "gpt-5", "high")
+	if !slices.Contains(codex, `model_reasoning_effort="high"`) {
+		t.Errorf("codex argv missing its own effort spelling: %v", codex)
+	}
+
+	// An unknown executable is a self-contained prompt-taking wrapper: no flags
+	// are invented for it.
+	mystery := fixSessionArgv("/usr/bin/mystery", prompt, []string{"--run"}, "opus", "high")
+	if mystery[len(mystery)-1] != prompt || !slices.Contains(mystery, "--run") {
+		t.Errorf("unknown agent argv = %v, want its own args and the prompt last", mystery)
+	}
+	if slices.Contains(mystery, "--model") {
+		t.Errorf("flags were invented for an unknown agent: %v", mystery)
 	}
 }
 
@@ -726,7 +604,7 @@ func TestInstallAutofixRestartsAnAlreadyRunningService(t *testing.T) {
 	cfg.AllowRepos = map[string]bool{"owner/name": true}
 	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
 
-	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true)
+	plan, err := svc.InstallAutofix(context.Background(), fakeAgent(t, "claude"), nil, nil, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}

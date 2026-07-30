@@ -11,6 +11,22 @@ import (
 	"github.com/kristofferR/coderabbit-queue/internal/engine"
 )
 
+func TestBuildConfigRetainsACopyOfTheInputEnvironment(t *testing.T) {
+	env := map[string]string{
+		"CRQ_REPO": "owner/gate",
+		"CRQ_BOT":  "original-reviewer[bot]",
+	}
+	cfg, err := BuildConfig(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env["CRQ_BOT"] = "mutated-reviewer[bot]"
+	if got := cfg.WithFleet(FleetDefaults{}).Bot; got != "original-reviewer[bot]" {
+		t.Fatalf("fleet rebuild used caller-mutated env: bot = %q", got)
+	}
+}
+
 func TestLoadConfigDefaultsToCodeRabbitRequiredBot(t *testing.T) {
 	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
 	t.Setenv("CRQ_REQUIRED_BOTS", "")
@@ -46,8 +62,12 @@ func TestLoadConfigFeedbackBotsIncludeCodexByDefault(t *testing.T) {
 	if has(cfg.RequiredBots, "chatgpt-codex-connector[bot]") {
 		t.Fatalf("Codex must not be a required (convergence-gating) bot, got %#v", cfg.RequiredBots)
 	}
-	if !has(cfg.FeedbackBots, "coderabbitai[bot]") || !has(cfg.FeedbackBots, "chatgpt-codex-connector[bot]") {
-		t.Fatalf("feedback bots should include CodeRabbit and Codex by default, got %#v", cfg.FeedbackBots)
+	// The primary and the documented default co-reviewers surface findings.
+	if !has(cfg.FeedbackBots, "coderabbitai[bot]") {
+		t.Fatalf("feedback bots should include the primary, got %#v", cfg.FeedbackBots)
+	}
+	if !has(cfg.FeedbackBots, "chatgpt-codex-connector[bot]") {
+		t.Fatalf("default Codex findings must remain enabled across upgrades, got %#v", cfg.FeedbackBots)
 	}
 }
 
@@ -249,10 +269,33 @@ func TestLoadConfigDispatchMaxAttemptsStaysBounded(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cfg.DispatchMaxAttempts != 3 {
-				t.Errorf("DispatchMaxAttempts = %d, want the bounded default 3", cfg.DispatchMaxAttempts)
+			if cfg.DispatchMaxAttempts != 5 {
+				t.Errorf("DispatchMaxAttempts = %d, want the bounded default 5", cfg.DispatchMaxAttempts)
 			}
 		})
+	}
+}
+
+func TestBuildConfigRejectsUnknownFixSeverity(t *testing.T) {
+	_, err := BuildConfig(map[string]string{"CRQ_FIX_SEVERITIES": "major,majro"})
+	if err == nil || !strings.Contains(err.Error(), `severity "majro"`) {
+		t.Fatalf("BuildConfig error = %v, want unknown severity rejected", err)
+	}
+}
+
+func TestLoadConfigRankedModels(t *testing.T) {
+	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
+	t.Setenv("CRQ_FIX_MODELS", "opus, sonnet, opus")
+	t.Setenv("CRQ_FIX_MODEL", "ignored-legacy")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.FixModels, ","); got != "opus,sonnet" {
+		t.Fatalf("models = %q, want ordered and deduplicated", got)
+	}
+	if cfg.FixModel != "opus" {
+		t.Fatalf("preferred model = %q, want the first ranked model", cfg.FixModel)
 	}
 }
 func TestLoadConfigTidyIsOptIn(t *testing.T) {
@@ -302,15 +345,27 @@ func TestLoadConfigCoBotsDefaults(t *testing.T) {
 	for _, key := range []string{"CRQ_REQUIRED_BOTS", "CRQ_FEEDBACK_BOTS", "CRQ_COBOTS", "CRQ_CODEX_CMD"} {
 		t.Setenv(key, "")
 	}
-	os.Unsetenv("CRQ_COBOTS") // "" would disable all; the default is all known
+	os.Unsetenv("CRQ_COBOTS")
 	os.Unsetenv("CRQ_CODEX_CMD")
 
 	cfg, err := LoadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Preserve the documented pre-registry default on upgrade. Explicit empty
+	// below remains the way to disable all.
+	if len(cfg.CoBots) != len(dialect.KnownCoReviewers()) {
+		t.Fatalf("default CoBots = %#v, want every built-in co-reviewer", cfg.CoBots)
+	}
+
+	// Naming one enables it, with the registry's own defaults.
+	t.Setenv("CRQ_COBOTS", "codex,bugbot,macroscope")
+	cfg, err = LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(cfg.CoBots) != 3 {
-		t.Fatalf("default CoBots = %#v, want codex+bugbot+macroscope", cfg.CoBots)
+		t.Fatalf("CoBots = %#v, want the three that were named", cfg.CoBots)
 	}
 	codex, _ := coBotByName(cfg, "codex")
 	if codex.Trigger != engine.TriggerNever || codex.Command != "@codex review" || codex.Required {
@@ -318,6 +373,7 @@ func TestLoadConfigCoBotsDefaults(t *testing.T) {
 	}
 
 	bugbot, _ := coBotByName(cfg, "bugbot")
+
 	if bugbot.Trigger != engine.TriggerSelfHeal || bugbot.Command != "bugbot run" || bugbot.SelfHealGrace != 10*time.Minute {
 		t.Fatalf("bugbot defaults wrong: %+v", bugbot)
 	}
@@ -416,6 +472,9 @@ func TestLoadConfigRequiredBotsListingEnablesCoBot(t *testing.T) {
 func TestLoadConfigCoBotCmdAliasesAndOverrides(t *testing.T) {
 	t.Setenv("CRQ_CONFIG", filepath.Join(t.TempDir(), "missing-env"))
 	t.Setenv("CRQ_REQUIRED_BOTS", "")
+	// Enabled explicitly: per-bot settings describe HOW a co-reviewer runs, not
+	// whether it does, and a co-reviewer is opt-in.
+	t.Setenv("CRQ_COBOTS", "codex,bugbot,macroscope")
 	t.Setenv("CRQ_CODEX_CMD", "@codex ship it")
 	t.Setenv("CRQ_COBOT_BUGBOT_TRIGGER", "always")
 	t.Setenv("CRQ_COBOT_MACROSCOPE_CMD", "")
@@ -510,6 +569,37 @@ func TestSplitArgvKeepsQuotedArgumentsWhole(t *testing.T) {
 	// Still not a shell: nothing here expands what the operator did not write.
 	if argv := SplitArgv(`echo $HOME *.go`); len(argv) != 3 || argv[1] != "$HOME" || argv[2] != "*.go" {
 		t.Errorf("argv = %q, want the literal words back", argv)
+	}
+}
+
+// argv makes a round trip through the service unit's environment: the install
+// parses it, writes it as one value, and the session splits it again. Joining on
+// spaces lost the boundaries, so an argument the operator quoted once reached
+// the agent as several words — and every installed session ran with the wrong
+// option, or died on it.
+func TestJoinArgvSurvivesSplitArgv(t *testing.T) {
+	for _, argv := range [][]string{
+		{"--config", "value with space"},
+		{"-p", `he said "hi"`, "--dir", "/tmp/with space"},
+		{"--mixed", `a"b'c`},
+		{"--empty", "", "--after"},
+		{"plain", "--flag"},
+	} {
+		joined := JoinArgv(argv)
+		got := SplitArgv(joined)
+		if len(got) != len(argv) {
+			t.Errorf("SplitArgv(JoinArgv(%q)) = %q via %q, want the same arguments", argv, got, joined)
+			continue
+		}
+		for i := range argv {
+			if got[i] != argv[i] {
+				t.Errorf("argv[%d] = %q, want %q (joined as %q)", i, got[i], argv[i], joined)
+			}
+		}
+	}
+	// A word needing no quoting is left alone, so the unit stays readable.
+	if got := JoinArgv([]string{"--model", "opus"}); got != "--model opus" {
+		t.Errorf("JoinArgv = %q, want plain words unquoted", got)
 	}
 }
 

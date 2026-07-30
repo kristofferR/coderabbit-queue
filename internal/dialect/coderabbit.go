@@ -459,6 +459,29 @@ type CLIError struct {
 	// OrgAttributed distinguishes an organisation-wide limit from this user's
 	// own. Only the former says anything about the shared account.
 	OrgAttributed bool
+	// ProUser is the CLI's own "isProUser". It says which plan's allowance the
+	// limit belongs to, which is what decides whether a review past it costs
+	// money or simply waits.
+	ProUser bool
+	// PolicyGuidance is the CLI's prose about what to do, which is the only
+	// place it states the overage price. Kept verbatim: it is a vendor string
+	// and paraphrasing it would put a price in crq's mouth.
+	PolicyGuidance string
+	// UsageBasedEnabled is read OFF that prose: when the CLI offers to enable
+	// usage-based reviews, they are not enabled, so exhausting the allowance
+	// stops work rather than billing for it.
+	UsageBasedEnabled bool
+}
+
+// usageBasedAlreadyEnabled reports whether the guidance does not invite the
+// reader to enable usage-based reviews.
+func usageBasedAlreadyEnabled(guidance string) bool {
+	if guidance == "" {
+		return false
+	}
+	lower := strings.ToLower(guidance)
+	return !strings.Contains(lower, "enable **[usage-based reviews]") &&
+		!strings.Contains(lower, "enable usage-based reviews")
 }
 
 // ParseCLIError reads an error event from the CLI's --agent JSON stream.
@@ -473,6 +496,11 @@ func ParseCLIError(event map[string]any) CLIError {
 		if v, ok := meta["orgAttributed"].(bool); ok {
 			out.OrgAttributed = v
 		}
+		if v, ok := meta["isProUser"].(bool); ok {
+			out.ProUser = v
+		}
+		out.PolicyGuidance = cliStringField(meta, "policyGuidance")
+		out.UsageBasedEnabled = usageBasedAlreadyEnabled(out.PolicyGuidance)
 	}
 	return out
 }

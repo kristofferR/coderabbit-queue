@@ -13,6 +13,8 @@ type RepoAutofixSwitch struct {
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
 	By        string     `json:"by,omitempty"`
 	Reason    string     `json:"reason,omitempty"`
+
+	unknown unknownFields
 }
 
 // AutofixEnabled reports whether fix sessions may run for repo.
@@ -28,7 +30,11 @@ type RepoAutofixSwitch struct {
 // is a class of divergence worth not having.
 func (s *State) AutofixEnabled(repo string) bool {
 	sw, ok := s.RepoAutofix[autofixRepoKey(repo)]
-	return !ok || sw.Enabled
+	if !ok {
+		// The fleet default, which is on unless one was recorded otherwise.
+		return s.AutofixDefaultOn()
+	}
+	return sw.Enabled
 }
 
 // AutofixSwitch returns repo's explicit setting, and whether one exists.
@@ -42,7 +48,11 @@ func (s *State) SetAutofixSwitch(repo string, sw RepoAutofixSwitch) {
 	if s.RepoAutofix == nil {
 		s.RepoAutofix = map[string]RepoAutofixSwitch{}
 	}
-	s.RepoAutofix[autofixRepoKey(repo)] = sw
+	key := autofixRepoKey(repo)
+	if prev, ok := s.RepoAutofix[key]; ok {
+		sw.unknown = carryUnknown(sw.unknown, prev.unknown)
+	}
+	s.RepoAutofix[key] = sw
 }
 
 // ClearAutofixSwitch drops repo's setting, returning it to the default, and
