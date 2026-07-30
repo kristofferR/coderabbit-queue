@@ -213,7 +213,7 @@ export function QuickSettings({
             >
               Discard
             </button>
-            {dirty && <span className="text-[12.5px] text-warn">1 change pending</span>}
+            {dirty && <span className="text-[12.5px] text-warn">unsaved changes</span>}
           </div>
         </DialogContent>
       </Dialog>

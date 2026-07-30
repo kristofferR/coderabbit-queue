@@ -135,6 +135,10 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	// for every repository that has not overridden them.
 	req.Repo = strings.TrimSpace(req.Repo)
 	action := r.PathValue("action")
+	if req.Preview && action != "fleet" && action != "env" && action != "reviewers" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "this action has no preview"})
+		return
+	}
 	fleetWide := action == "fleet" || action == "env" || (action == "solver" && req.Repo == "")
 	if !fleetWide && (req.Repo == "" || !strings.Contains(req.Repo, "/")) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo must be owner/name"})
@@ -169,12 +173,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	case "reviewers":
 		if req.Clear {
 			impact, clearErr := s.actor.ClearReviewers(ctx, req.Repo, req.ExpectedRev, req.Preview)
-			if clearErr != nil {
-				writeJSON(w, http.StatusBadGateway, map[string]string{"error": clearErr.Error()})
-				return
-			}
-			if req.Preview {
-				writeJSON(w, http.StatusOK, map[string]any{"impact": impact})
+			if writeImpact(w, impact, clearErr, req.Preview) {
 				return
 			}
 			snap, warning := s.actionSnapshot(ctx)
@@ -202,8 +201,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		lagging, impact, err = s.actor.SetReviewers(
 			ctx, req.Repo, req.CoBots, req.Required, req.Primary, req.ExpectedRev, req.Preview,
 		)
-		if err == nil && req.Preview {
-			writeJSON(w, http.StatusOK, map[string]any{"impact": impact})
+		if writeImpact(w, impact, err, req.Preview) {
 			return
 		}
 		if err == nil && len(lagging) > 0 {
@@ -240,14 +238,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		impact, ferr := s.actor.SetFleet(ctx, change, req.Preview)
-		if ferr != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": ferr.Error()})
-			return
-		}
-		if req.Preview {
-			// A preview writes nothing, so there is no new snapshot to return
-			// and returning the old one would read as a save that did nothing.
-			writeJSON(w, http.StatusOK, map[string]any{"impact": impact})
+		if writeImpact(w, impact, ferr, req.Preview) {
 			return
 		}
 		snap, warning := s.actionSnapshot(ctx)
@@ -263,12 +254,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		impact, envErr := s.actor.SetEnv(ctx, req.Key, req.Value, req.Clear, req.ExpectedRev, req.Preview)
-		if envErr != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": envErr.Error()})
-			return
-		}
-		if req.Preview {
-			writeJSON(w, http.StatusOK, map[string]any{"impact": impact})
+		if writeImpact(w, impact, envErr, req.Preview) {
 			return
 		}
 		snap, warning := s.actionSnapshot(ctx)
@@ -333,6 +319,23 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	// Re-read immediately rather than waiting for the next poll: the person who
 	// clicked is watching, and a stale answer reads as a failed click.
 	s.writeActionSnapshot(w, ctx, "")
+}
+
+// writeImpact owns the common preview contract: a preview returns only the
+// consequence estimate, while a failed preview or save returns the mutation
+// error. It reports whether the response is complete.
+func writeImpact(w http.ResponseWriter, impact FleetImpact, err error, preview bool) bool {
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return true
+	}
+	if preview {
+		// A preview writes nothing, so returning a snapshot would read as a save
+		// that silently failed to change it.
+		writeJSON(w, http.StatusOK, map[string]any{"impact": impact})
+		return true
+	}
+	return false
 }
 
 // writeActionSnapshot reports a completed mutation even if its confirming read

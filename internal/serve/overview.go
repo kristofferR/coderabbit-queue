@@ -358,8 +358,7 @@ func queueRows(st state.State, now time.Time, minInterval time.Duration, botsFor
 	for i := range entries {
 		if !hasPrimary(entries[i].Repo) &&
 			(entries[i].Why == state.WaitAccountBlocked ||
-				entries[i].Why == state.WaitPacing ||
-				entries[i].Why == state.WaitSlotBusy) {
+				entries[i].Why == state.WaitPacing) {
 			entries[i].Why = ""
 			entries[i].ReadyAt = time.Time{}
 		}

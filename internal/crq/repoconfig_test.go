@@ -391,7 +391,7 @@ func TestPreviewReviewersPricesReenablingThePrimary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if impact.Reopened != 1 || !strings.Contains(strings.Join(impact.Changes, "\n"), "coderabbitai") {
+	if impact.Reopened != 1 || !strings.Contains(strings.Join(impact.Changes, "\n"), dialect.NormalizeBotName(cfg.Bot)) {
 		t.Fatalf("impact = %+v, want the primary and one reopened completed round", impact)
 	}
 	if _, _, err := svc.SetReviewersAt(ctx, repo, nil, nil, &on, &impact.Rev); err != nil {
@@ -404,13 +404,43 @@ func TestPreviewReviewersPricesReenablingThePrimary(t *testing.T) {
 	if round := st.Round(repo, pr); round == nil || round.Phase != PhaseQueued {
 		t.Fatalf("round = %#v, want the confirmed edit to reopen it", round)
 	}
+	if _, ok := st.RepoOverride(repo); ok {
+		t.Fatal("re-enabling the primary left an empty repository override instead of restoring inheritance")
+	}
+}
+
+func TestConcurrentIdenticalReviewerEditIsASuccessfulNoOp(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.CoBots = codexCoBots([]string{dialect.CodexBotLogin})
+	cfg.RequiredBots = []string{dialect.CodexBotLogin}
+	store := NewMemoryStore(cfg)
+	hooked := &hookedStore{StateStore: store}
+	svc := NewService(cfg, newFakeGitHub(), hooked, nil)
+	off := false
+
+	hooked.hook = func() {
+		if _, err := store.Update(ctx, func(st *State) error {
+			st.SetRepoOverride("o/r", RepoReviewers{PrimaryOff: true})
+			return nil
+		}); err != nil {
+			t.Error(err)
+		}
+	}
+	view, _, err := svc.SetReviewersAt(ctx, "o/r", nil, nil, &off, nil)
+	if err != nil {
+		t.Fatalf("identical concurrent edit returned an error: %v", err)
+	}
+	if !view.PrimaryOff {
+		t.Fatalf("view = %+v, want the concurrently committed setting", view)
+	}
 }
 
 func TestPreviewClearReviewersPricesRestoredFleetReviewers(t *testing.T) {
 	ctx := context.Background()
 	cfg, err := BuildConfig(map[string]string{
 		"CRQ_REPO": "owner/gate", "CRQ_HOST": "testhost", "CRQ_REPOS": "o/r",
-		"CRQ_COBOTS": "codex", "CRQ_REQUIRED_BOTS": "coderabbitai[bot],codex",
+		"CRQ_COBOTS": "codex", "CRQ_REQUIRED_BOTS": dialect.CodeRabbitLogin + ",codex",
 	})
 	if err != nil {
 		t.Fatal(err)

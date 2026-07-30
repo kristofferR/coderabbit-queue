@@ -25,7 +25,7 @@ func TestAutofixSessionKeepsTheHeadOwnedByItsClaim(t *testing.T) {
 	}
 }
 
-func TestPrimaryOffQueueRowIgnoresMeteredQuotaGates(t *testing.T) {
+func TestPrimaryOffQueueRowWaitsForALiveFireSlot(t *testing.T) {
 	now := time.Date(2026, 7, 29, 17, 0, 0, 0, time.UTC)
 	blocked := now.Add(time.Hour)
 	fired := now
@@ -49,8 +49,8 @@ func TestPrimaryOffQueueRowIgnoresMeteredQuotaGates(t *testing.T) {
 		t.Fatalf("queue = %+v, want one row", ov.Queue)
 	}
 	row := ov.Queue[0]
-	if row.Why != "" || row.ReadyAt != nil || row.Position != 1 {
-		t.Fatalf("primary-off row = %+v, want ready despite account block and pacing", row)
+	if row.Why != state.WaitSlotBusy || row.ReadyAt != nil || row.Position != 0 {
+		t.Fatalf("primary-off row = %+v, want the live slot that makes Pump return to remain visible", row)
 	}
 }
 

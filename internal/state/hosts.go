@@ -2,7 +2,6 @@ package state
 
 import (
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -266,26 +265,106 @@ func newestHostVersion(versions map[string]string, fallback string) string {
 }
 
 func dottedVersionAfter(a, b string) bool {
+	ac, apre, aok := parseDottedVersion(a)
+	bc, bpre, bok := parseDottedVersion(b)
+	if !aok || !bok {
+		return a > b
+	}
+	for i := 0; i < len(ac) || i < len(bc); i++ {
+		av, bv := "0", "0"
+		if i < len(ac) {
+			av = ac[i]
+		}
+		if i < len(bc) {
+			bv = bc[i]
+		}
+		if cmp := compareDecimal(av, bv); cmp != 0 {
+			return cmp > 0
+		}
+	}
+	switch {
+	case apre == "" && bpre != "":
+		return true
+	case apre != "" && bpre == "":
+		return false
+	default:
+		return prereleaseAfter(apre, bpre)
+	}
+}
+
+func parseDottedVersion(version string) (core []string, prerelease string, ok bool) {
+	version = strings.TrimSpace(version)
+	version = strings.TrimPrefix(strings.TrimPrefix(version, "v"), "V")
+	version, _, _ = strings.Cut(version, "+")
+	coreText, prerelease, _ := strings.Cut(version, "-")
+	if coreText == "" {
+		return nil, "", false
+	}
+	for _, part := range strings.Split(coreText, ".") {
+		n, numeric := decimalIdentifier(part)
+		if !numeric {
+			return nil, "", false
+		}
+		core = append(core, n)
+	}
+	return core, prerelease, true
+}
+
+func prereleaseAfter(a, b string) bool {
+	if a == b {
+		return false
+	}
 	ap, bp := strings.Split(a, "."), strings.Split(b, ".")
 	for i := 0; i < len(ap) || i < len(bp); i++ {
-		x, y := "0", "0"
-		if i < len(ap) {
-			x = ap[i]
+		if i >= len(ap) {
+			return false
 		}
-		if i < len(bp) {
-			y = bp[i]
+		if i >= len(bp) {
+			return true
 		}
-		if x == y {
+		if ap[i] == bp[i] {
 			continue
 		}
-		xn, xerr := strconv.Atoi(x)
-		yn, yerr := strconv.Atoi(y)
-		if xerr == nil && yerr == nil {
-			return xn > yn
+		an, aNumeric := decimalIdentifier(ap[i])
+		bn, bNumeric := decimalIdentifier(bp[i])
+		switch {
+		case aNumeric && bNumeric:
+			return compareDecimal(an, bn) > 0
+		case aNumeric:
+			return false // numeric identifiers precede non-numeric ones
+		case bNumeric:
+			return true
+		default:
+			return ap[i] > bp[i]
 		}
-		return x > y
 	}
 	return false
+}
+
+func decimalIdentifier(value string) (string, bool) {
+	if value == "" {
+		return "", false
+	}
+	for _, digit := range value {
+		if digit < '0' || digit > '9' {
+			return "", false
+		}
+	}
+	value = strings.TrimLeft(value, "0")
+	if value == "" {
+		return "0", true
+	}
+	return value, true
+}
+
+func compareDecimal(a, b string) int {
+	if len(a) < len(b) {
+		return -1
+	}
+	if len(a) > len(b) {
+		return 1
+	}
+	return strings.Compare(a, b)
 }
 
 // mergeTools carries what a newer binary recorded about a tool onto this

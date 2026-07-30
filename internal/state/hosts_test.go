@@ -95,6 +95,33 @@ func TestHostVersionsStayWithTheirReportingRoles(t *testing.T) {
 	}
 }
 
+func TestHostVersionComparisonUnderstandsPrefixesAndPrereleases(t *testing.T) {
+	for _, tc := range []struct {
+		name, newer, older string
+	}{
+		{name: "leading v", newer: "2.1.0", older: "v2.0.0"},
+		{name: "release after prerelease", newer: "2.1.0", older: "2.1.0-rc1"},
+		{name: "later prerelease", newer: "2.1.0-rc.2", older: "2.1.0-rc.1"},
+		{name: "longer prerelease", newer: "2.1.0-rc.1.1", older: "2.1.0-rc.1"},
+		{name: "text after numeric prerelease", newer: "2.1.0-rc.alpha", older: "2.1.0-rc.999999999999999999999999"},
+		{name: "oversized core", newer: "999999999999999999999999.0.0", older: "888888888888888888888888.9.9"},
+		{name: "oversized prerelease", newer: "2.1.0-rc.999999999999999999999999", older: "2.1.0-rc.888888888888888888888888"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !dottedVersionAfter(tc.newer, tc.older) {
+				t.Fatalf("%q was not ranked after %q", tc.newer, tc.older)
+			}
+			if dottedVersionAfter(tc.older, tc.newer) {
+				t.Fatalf("%q was incorrectly ranked after %q", tc.older, tc.newer)
+			}
+		})
+	}
+	if dottedVersionAfter("2.1.0+new-build", "2.1.0+old-build") ||
+		dottedVersionAfter("2.1.0+old-build", "2.1.0+new-build") {
+		t.Fatal("build metadata changed version precedence")
+	}
+}
+
 // A record an older binary wrote carries roles and no dates. They are exactly
 // as old as the record, which is the honest date to expire them from — anything
 // else either drops a live role or keeps a dead one.

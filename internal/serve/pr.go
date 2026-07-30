@@ -457,7 +457,7 @@ func (s *Server) handlePR(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				entry.err = err.Error()
 				view.CostError = entry.err
-			} else if head != "" && !strings.EqualFold(cost.Head, head) {
+			} else if head != "" && !sameHead(cost.Head, head) {
 				entry.err = "pull request moved while pricing; refresh to price the observed head"
 				view.CostError = entry.err
 			} else {

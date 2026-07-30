@@ -181,15 +181,21 @@ func (s *Service) SetReviewersAt(
 		if claimedTriggerRepo(st, repo, now) {
 			return errors.New("a review trigger is already being posted; wait for it to finish before changing this repository's reviewers")
 		}
-		ov.UpdatedAt, ov.By = &now, s.cfg.Host
-		st.SetRepoOverride(repo, ov)
+		if repoOverrideEmpty(ov) {
+			st.ClearRepoOverride(repo)
+		} else {
+			ov.UpdatedAt, ov.By = &now, s.cfg.Host
+			st.SetRepoOverride(repo, ov)
+		}
 		s.reopenForChangedReviewers(st, repo, was, is, open)
 		return nil
 	})
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrNoChange) {
 		return ReviewerView{}, FleetImpact{}, err
 	}
-	s.sync(ctx, state)
+	if err == nil {
+		s.sync(ctx, state)
+	}
 	view, err := s.Reviewers(ctx, repo)
 	return view, impact, err
 }
@@ -246,6 +252,10 @@ func (s *Service) applyReviewerEdit(
 			"that would leave %s with no required reviewer, so every round would converge before any bot answers — require a co-reviewer first", repo)
 	}
 	return ov, before, after, changed, nil
+}
+
+func repoOverrideEmpty(ov RepoReviewers) bool {
+	return !ov.SetCoBots && !ov.SetRequired && !ov.PrimaryOff
 }
 
 // ClearReviewers returns repo to the fleet default.

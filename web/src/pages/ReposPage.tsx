@@ -387,13 +387,17 @@ function ReviewerEditor({
     setRuns((cur) => (cur.includes(name) ? cur : [...cur, name]));
   };
 
+  const reviewerBody = () => ({
+    repo: repo.repo,
+    cobots: runs.filter((name) => name !== primaryBot?.name && configurableNames.has(name)),
+    required,
+    primary: primaryBot ? primaryOn : undefined,
+  });
+
   const save = (clear = false, expectedRev?: number) => {
     runOperation(
       act("reviewers", {
-        repo: repo.repo,
-        cobots: runs.filter((name) => name !== primaryBot?.name && configurableNames.has(name)),
-        required,
-        primary: primaryBot ? primaryOn : undefined,
+        ...reviewerBody(),
         clear,
         expected_rev: expectedRev,
       }),
@@ -416,10 +420,7 @@ function ReviewerEditor({
   const previewSave = () =>
     runOperation(
       act("reviewers", {
-        repo: repo.repo,
-        cobots: runs.filter((name) => name !== primaryBot?.name && configurableNames.has(name)),
-        required,
-        primary: primaryBot ? primaryOn : undefined,
+        ...reviewerBody(),
         preview: true,
       }),
       { onSuccess: (impact) => setSaveImpact(impact) },
@@ -521,7 +522,7 @@ function ReviewerEditor({
             {warning}
           </div>
         )}
-        {error && !saveImpact && (
+        {error && !saveImpact && !resetImpact && (
           <div className="mt-3 rounded-lg border border-bad-edge bg-bad-bg px-3 py-2 text-[12.5px] text-bad">
             {error}
           </div>

@@ -86,7 +86,8 @@ func (s *Service) enrollmentOf(st State, repo string) EnrollmentView {
 		// repository a host's CRQ_REPOS lists. A record that turns one ON that
 		// env never mentioned is the feature working, not a conflict.
 		view.EnvConflict = inEnv && !rec.Enabled
-		view.ClearEnables = !rec.Enabled && (inEnv || len(cfg.AllowRepos) == 0)
+		view.ClearEnables = !rec.Enabled &&
+			(inEnv || (len(cfg.AllowRepos) == 0 && repoInScope(cfg, repo)))
 		// The autofix watcher reads this record too, and it holds neither the
 		// leader lease nor the fire slot — so an old one went on scanning a
 		// repository the off switch had just abandoned while the save reported
@@ -186,6 +187,13 @@ func claimedTriggerRepo(st *State, repo string, now time.Time) bool {
 // claim. Keep the network-race guard for one lease, then let administrative
 // changes proceed instead of treating the tombstone as an eternal post.
 func archivedTriggerPostClaimed(round *Round, now time.Time) bool {
+	// Abandon deliberately preserves ReservedAt even though it clears the live
+	// slot token. A primary poster can still be inside PostIssueComment after a
+	// concurrent supersede archives its round, so that timestamp is the only
+	// durable evidence that the network call may still resume and post.
+	if round.ReservedAt != nil && now.Before(round.ReservedAt.UTC().Add(triggerClaimTTL)) {
+		return true
+	}
 	for _, co := range round.CoBots {
 		if co.ClaimedAt != nil && now.Before(co.ClaimedAt.UTC().Add(triggerClaimTTL)) {
 			return true
@@ -367,22 +375,28 @@ func (s *Service) scanTargets(st State) (targets []string, scoped bool) {
 // the same scan budget twice over.
 func (s *Service) enrolledOutsideScope(st State) []string {
 	cfg := s.cfg.WithFleet(st.Fleet)
-	inScope := map[string]bool{}
-	for _, owner := range cfg.Scope {
-		if owner = strings.ToLower(strings.TrimSpace(owner)); owner != "" {
-			inScope[owner] = true
-		}
-	}
 	var out []string
 	for _, repo := range st.EnrolledRepos() {
-		owner, _, _ := strings.Cut(NormalizeRepo(repo), "/")
-		if inScope[owner] || !s.reviewsRepo(st, repo) {
+		if repoInScope(cfg, repo) || !s.reviewsRepo(st, repo) {
 			continue
 		}
 		out = append(out, NormalizeRepo(repo))
 	}
 	sort.Strings(out)
 	return out
+}
+
+// repoInScope uses the same owner normalization as the owner-wide scan. It is
+// shared by discovery and ClearEnables so the dashboard never claims that
+// clearing an off record will enable a repository the scope search cannot find.
+func repoInScope(cfg Config, repo string) bool {
+	owner, _, _ := strings.Cut(NormalizeRepo(repo), "/")
+	for _, scopedOwner := range cfg.Scope {
+		if strings.EqualFold(strings.TrimSpace(scopedOwner), owner) {
+			return true
+		}
+	}
+	return false
 }
 
 // EnrollmentIn answers for an already-loaded state, so a caller rendering many

@@ -98,6 +98,22 @@ func TestEnrollmentPrecedence(t *testing.T) {
 	}
 }
 
+func TestOutOfScopeOffRecordDoesNotClaimClearingWillEnableIt(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{}
+	cfg.Scope = []string{"in-scope"}
+	svc := NewService(cfg, newFakeGitHub(), NewMemoryStore(cfg), nil)
+
+	view, err := svc.SetEnrollment(ctx, "outside/repo", false, "not reviewed here")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Enabled || view.ClearEnables {
+		t.Fatalf("view = %+v, want clearing to remain off because the owner is outside CRQ_SCOPE", view)
+	}
+}
+
 func TestSetEnrollmentHonorsFleetExcludePolicy(t *testing.T) {
 	ctx := context.Background()
 	cfg, err := BuildConfig(map[string]string{
@@ -465,6 +481,34 @@ func TestDisablingEnrollmentRefusesAnArchivedTriggerClaim(t *testing.T) {
 
 	if _, err := svc.SetEnrollment(ctx, "o/stopped", false, "stop reviewing this"); err == nil {
 		t.Fatal("turning the repository off succeeded while an archived trigger claim was still posting")
+	}
+}
+
+func TestDisablingEnrollmentRefusesAnArchivedPrimaryPostClaim(t *testing.T) {
+	ctx := context.Background()
+	cfg := firingConfig()
+	cfg.AllowRepos = map[string]bool{"o/stopped": true}
+	store := NewMemoryStore(cfg)
+	svc := NewService(cfg, newFakeGitHub(), store, nil)
+	now := time.Now().UTC()
+	svc.now = func() time.Time { return now }
+	if _, err := store.Update(ctx, func(st *State) error {
+		round, err := st.NewRound("o/stopped", 7, "abcdef123", now)
+		if err != nil {
+			return err
+		}
+		if err := round.Reserve("posting", cfg.WriterID(), now); err != nil {
+			return err
+		}
+		st.PutRound(*round)
+		_, err = st.Supersede("o/stopped", 7, "fedcba987", now.Add(time.Second))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.SetEnrollment(ctx, "o/stopped", false, "stop reviewing this"); err == nil {
+		t.Fatal("turning the repository off succeeded while an archived primary trigger was still posting")
 	}
 }
 

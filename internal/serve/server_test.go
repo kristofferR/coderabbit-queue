@@ -55,6 +55,18 @@ type countingCoster struct {
 	calls int
 }
 
+type previewGuardActor struct {
+	Actor
+	enrollmentCalls int
+}
+
+func (a *previewGuardActor) SetEnrollment(
+	context.Context, string, bool, string, *int64,
+) ([]string, error) {
+	a.enrollmentCalls++
+	return nil, nil
+}
+
 func (c *countingCoster) Cost(context.Context, string, int) (Cost, error) {
 	c.calls++
 	return c.cost, nil
@@ -309,6 +321,28 @@ func TestActionsAreRefusedOnANameThatOnlyResolvesHere(t *testing.T) {
 	req.Header.Set("Origin", "http://evil.test")
 	if err := srv.addressedHere(req); err == nil {
 		t.Error("a cross-origin POST to localhost was accepted")
+	}
+}
+
+func TestUnsupportedPreviewIsRejectedBeforeItCanMutate(t *testing.T) {
+	actor := &previewGuardActor{}
+	srv := New(&stubLoader{}, Options{Addr: "127.0.0.1:7777", Actor: actor})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(
+		t.Context(),
+		http.MethodPost,
+		"http://localhost:7777/api/action/enroll",
+		strings.NewReader(`{"repo":"o/r","enabled":true,"preview":true}`),
+	)
+	req.Header.Set("X-CRQ-Dashboard", "1")
+	req.SetPathValue("action", "enroll")
+	srv.handleAction(rec, req)
+
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "no preview") {
+		t.Fatalf("unsupported preview = %d: %s", rec.Code, rec.Body.String())
+	}
+	if actor.enrollmentCalls != 0 {
+		t.Fatalf("enrollment calls = %d, want the request rejected before mutation", actor.enrollmentCalls)
 	}
 }
 
@@ -723,9 +757,10 @@ func TestPRObservationCacheRejectsAnObservationForAnotherHead(t *testing.T) {
 
 func TestPROmitsObservationThatRacedAheadOfState(t *testing.T) {
 	now := time.Now().UTC()
-	observer := &sequenceObserver{observations: []Observation{{
-		Head: "bbbbbbbbb", CheckedAt: now,
-	}}}
+	observer := &sequenceObserver{observations: []Observation{
+		{Head: "bbbbbbbbb", CheckedAt: now},
+		{Head: "ccccccccc", CheckedAt: now.Add(time.Second)},
+	}}
 	srv := New(&stubLoader{}, Options{Addr: "127.0.0.1:7777", Observer: observer})
 	srv.loaded = true
 	srv.lastState = state.New()
@@ -733,22 +768,27 @@ func TestPROmitsObservationThatRacedAheadOfState(t *testing.T) {
 		"o/r#1": {Repo: "o/r", PR: 1, Head: "aaaaaaaaa", Phase: state.PhaseCompleted},
 	}
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost:7777/api/pr/o/r/1", nil)
-	req.Header.Set("X-CRQ-Dashboard", "1")
-	req.SetPathValue("owner", "o")
-	req.SetPathValue("name", "r")
-	req.SetPathValue("pr", "1")
-	srv.handlePR(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("PR read = %d: %s", rec.Code, rec.Body.String())
+	for range 2 {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost:7777/api/pr/o/r/1", nil)
+		req.Header.Set("X-CRQ-Dashboard", "1")
+		req.SetPathValue("owner", "o")
+		req.SetPathValue("name", "r")
+		req.SetPathValue("pr", "1")
+		srv.handlePR(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PR read = %d: %s", rec.Code, rec.Body.String())
+		}
+		var view PRView
+		if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+			t.Fatal(err)
+		}
+		if view.Observed != nil || !strings.Contains(view.ObserveError, "moved") {
+			t.Fatalf("observed = %+v error = %q, want mixed-head observation omitted", view.Observed, view.ObserveError)
+		}
 	}
-	var view PRView
-	if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
-		t.Fatal(err)
-	}
-	if view.Observed != nil || !strings.Contains(view.ObserveError, "moved") {
-		t.Fatalf("observed = %+v error = %q, want mixed-head observation omitted", view.Observed, view.ObserveError)
+	if observer.calls != 2 {
+		t.Fatalf("observer calls = %d, want raced observations never cached", observer.calls)
 	}
 }
 
@@ -812,6 +852,38 @@ func TestPRRejectsCostForADifferentObservedHead(t *testing.T) {
 	}
 	if view.Cost != nil || !strings.Contains(view.CostError, "moved") {
 		t.Fatalf("cost = %+v error = %q, want the mixed-head estimate omitted", view.Cost, view.CostError)
+	}
+}
+
+func TestPRAcceptsCostForTheFullObservedHead(t *testing.T) {
+	now := time.Now().UTC()
+	observer := &sequenceObserver{observations: []Observation{{Head: "abcdef123", CheckedAt: now}}}
+	coster := &countingCoster{cost: Cost{Head: "abcdef1234567890"}}
+	srv := New(&stubLoader{}, Options{
+		Addr: "127.0.0.1:7777", Observer: observer, Coster: coster,
+	})
+	srv.loaded = true
+	srv.lastState = state.New()
+	srv.lastState.Rounds = map[string]state.Round{
+		"o/r#1": {Repo: "o/r", PR: 1, Head: "abcdef123", Phase: state.PhaseCompleted},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost:7777/api/pr/o/r/1", nil)
+	req.Header.Set("X-CRQ-Dashboard", "1")
+	req.SetPathValue("owner", "o")
+	req.SetPathValue("name", "r")
+	req.SetPathValue("pr", "1")
+	srv.handlePR(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PR read = %d: %s", rec.Code, rec.Body.String())
+	}
+	var view PRView
+	if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.Cost == nil || view.CostError != "" {
+		t.Fatalf("cost = %+v error = %q, want prefix-equivalent heads accepted", view.Cost, view.CostError)
 	}
 }
 

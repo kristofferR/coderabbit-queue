@@ -592,7 +592,7 @@ func TestSetEnvPrimaryReopensCompletedRounds(t *testing.T) {
 	svc := NewService(cfg, gh, store, nil)
 	seedRound(t, store, cfg, repo, pr, head, PhaseCompleted, time.Now().UTC(), 11)
 
-	impact, err := svc.PreviewEnv(ctx, "CRQ_BOT", "chatgpt-codex-connector[bot]", false)
+	impact, err := svc.PreviewEnv(ctx, "CRQ_BOT", dialect.CodexBotLogin, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -608,22 +608,22 @@ func TestSetEnvPrimaryReopensCompletedRounds(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := svc.SetEnvAt(ctx, "CRQ_BOT", "chatgpt-codex-connector[bot]", false, &impact.Rev); err == nil ||
+	if _, _, err := svc.SetEnvAt(ctx, "CRQ_BOT", dialect.CodexBotLogin, false, &impact.Rev); err == nil ||
 		!strings.Contains(err.Error(), "preview the change again") {
 		t.Fatalf("stale save error = %v, want a revision mismatch", err)
 	}
-	impact, err = svc.PreviewEnv(ctx, "CRQ_BOT", "chatgpt-codex-connector[bot]", false)
+	impact, err = svc.PreviewEnv(ctx, "CRQ_BOT", dialect.CodexBotLogin, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := svc.SetEnvAt(ctx, "CRQ_BOT", "chatgpt-codex-connector[bot]", false, &impact.Rev); err != nil {
+	if _, _, err := svc.SetEnvAt(ctx, "CRQ_BOT", dialect.CodexBotLogin, false, &impact.Rev); err != nil {
 		t.Fatal(err)
 	}
 	st, _, err := store.Load(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := svc.cfgFor(st, repo).Bot; got != "chatgpt-codex-connector[bot]" {
+	if got := svc.cfgFor(st, repo).Bot; got != dialect.CodexBotLogin {
 		t.Fatalf("primary = %q, want the fleet record applied", got)
 	}
 	round := st.Round(repo, pr)
