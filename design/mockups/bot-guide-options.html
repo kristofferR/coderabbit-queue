@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Review bot guide — 4 UX options</title>
+<link rel="icon" href="icons/repo-crq.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,650;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="opt.css">
+<style>
+.botcard{background:var(--card);border:1px solid var(--edge);border-radius:var(--r);box-shadow:var(--shadow);
+  display:flex;flex-direction:column}
+.botcard.sug{border-color:var(--ok-edge);box-shadow:0 0 0 3px var(--ok-bg),var(--shadow)}
+.botcard .h{display:flex;align-items:center;gap:11px;padding:12px 15px 0}
+.botcard .b{padding:9px 15px 0;font-size:12.5px;color:var(--mut);flex:1}
+.botcard .c{display:flex;gap:8px;padding:11px 15px 13px;flex-wrap:wrap;align-items:center}
+.sugline{margin:8px 15px 0;font-size:12px;color:var(--ok);background:var(--ok-bg);
+  border:1px solid var(--ok-edge);border-radius:7px;padding:5px 10px}
+.disc{font-size:11px;color:var(--faint);padding:0 15px 11px}
+.steps{list-style:none;margin:7px 0 0;font-size:12px;color:var(--mut)}
+.steps li{padding:2px 0 2px 19px;position:relative}
+.steps li::before{content:"";position:absolute;left:3px;top:8px;width:6px;height:6px;border-radius:50%;border:1.5px solid var(--edge2)}
+.steps li.done::before{background:var(--ok);border-color:var(--ok)}
+
+/* one variant at a time — the jump chips are radios, not anchors */
+#O-A,#O-B,#O-C,#O-D{position:absolute;left:-9999px}
+.opt{display:none}
+#O-A:checked ~ #a,#O-B:checked ~ #b,#O-C:checked ~ #c,#O-D:checked ~ #d{display:block}
+.optbar .jump label{font-size:12.5px;font-weight:600;color:var(--mut);border:1px solid var(--edge);
+  border-radius:8px;padding:3px 12px;cursor:pointer}
+.optbar .jump label:hover{border-color:var(--acc-edge);color:var(--acc);background:var(--acc-bg)}
+#O-A:checked ~ .optbar label[for="O-A"],#O-B:checked ~ .optbar label[for="O-B"],
+#O-C:checked ~ .optbar label[for="O-C"],#O-D:checked ~ .optbar label[for="O-D"]{
+  background:var(--ink);border-color:var(--ink);color:#fff}
+.opt{border-top:none;padding-top:18px}
+</style>
+</head>
+<body>
+<input type="radio" name="opt" id="O-A" checked><input type="radio" name="opt" id="O-B"><input type="radio" name="opt" id="O-C"><input type="radio" name="opt" id="O-D">
+
+<div class="optbar">
+  <span class="crq">crq</span><h1>Review bot guide</h1>
+  <span class="sub">4 UX options · same styling, different structure</span>
+  <span class="jump"><label for="O-A">A</label><label for="O-B">B</label><label for="O-C">C</label><label for="O-D">D</label>
+    <a class="back" href="options.html">All pages ↩</a></span>
+</div>
+
+<div class="intro">
+  <p>The job: help someone choose review bots they don't have yet, see which ones are already working,
+  and sign up — while being straight that some links are referral links. Every option carries the same
+  policy line: <b>suggestions are based on compatibility, not referral compensation.</b></p>
+</div>
+
+<!-- A -->
+<section class="opt" id="a">
+  <div class="opthd"><span class="optlet">A</span>
+    <div><h2>Card per bot</h2>
+      <p class="why">Four equal cards, each with a pitch, requirements, setup progress and a call to
+      action. Suggested ones are outlined. What we have today.</p></div>
+    <div class="tags"><span class="pill mut sm plain">room to explain</span><span class="pill mut sm plain">hard to compare</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Each bot gets space for what it's actually for, its setup checklist and its own
+      disclosure line. Adding a fifth bot costs nothing.</div>
+    <div class="bad"><b>Costly</b> Comparing two bots means reading two paragraphs and holding them in your head;
+      shared attributes aren't aligned.</div></div>
+
+  <div class="frame">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div class="botcard sug">
+        <div class="h"><img class="bico lg" src="icons/bot-coderabbit.png" alt="">
+          <div><h3 style="font-size:15px;font-weight:650">CodeRabbit</h3>
+            <div class="note">primary · metered by the shared quota</div></div>
+          <span class="end pill ok sm" style="margin-left:auto">Seen 13:50</span></div>
+        <div class="sugline"><b>Suggested</b> — this repo is public, and Pro is free for open source.</div>
+        <div class="b"><p>Full-PR reviews with summaries and inline findings; crq paces it through the queue.</p>
+          <ol class="steps"><li class="done">App installed</li><li class="done">Access granted</li>
+            <li class="done">Active on 6 repos</li></ol></div>
+        <div class="c"><a class="btn sm" href="#a">Manage repositories</a>
+          <a class="btn ghost sm" href="#a">Visit vendor ↗ <span class="dim">referral</span></a></div>
+        <div class="disc">Referral link — supports Code Review Queue development.</div>
+      </div>
+      <div class="botcard sug">
+        <div class="h"><img class="bico lg" src="icons/bot-codex.png" alt="">
+          <div><h3 style="font-size:15px;font-weight:650">Codex</h3>
+            <div class="note">co-reviewer · free, no crq quota</div></div>
+          <span class="end pill ok sm" style="margin-left:auto">Seen 13:50</span></div>
+        <div class="sugline"><b>Suggested</b> — the <span class="mono">codex</span> CLI is on mbp.</div>
+        <div class="b"><p>Deep defect-finding on demand; crq reads its verdicts and rebuttals.</p>
+          <ol class="steps"><li class="done">Connector installed</li><li class="done">Access granted</li>
+            <li class="done">Active on 5 repos</li></ol></div>
+        <div class="c"><a class="btn sm" href="#a">Manage repositories</a>
+          <a class="btn ghost sm" href="#a">Visit vendor ↗</a></div>
+        <div class="disc">No referral program — plain link.</div>
+      </div>
+      <div class="botcard">
+        <div class="h"><img class="bico lg" src="icons/bot-bugbot.png" alt="">
+          <div><h3 style="font-size:15px;font-weight:650">Cursor Bugbot</h3>
+            <div class="note">co-reviewer · free, no crq quota</div></div>
+          <span class="end pill warn sm" style="margin-left:auto">Seen 07-21</span></div>
+        <div class="b"><p>Bug-focused review from the Cursor team; strongest if you live in Cursor.</p>
+          <ol class="steps"><li class="done">App installed</li><li>Enabled on 2 of 6 repos</li></ol></div>
+        <div class="c"><a class="btn sm" href="#a">Configure in crq</a>
+          <a class="btn ghost sm" href="#a">Visit vendor ↗ <span class="dim">referral</span></a></div>
+        <div class="disc">Referral link — supports Code Review Queue development.</div>
+      </div>
+      <div class="botcard">
+        <div class="h"><img class="bico lg" src="icons/bot-macroscope.png" alt="">
+          <div><h3 style="font-size:15px;font-weight:650">Macroscope</h3>
+            <div class="note">co-reviewer · free tier</div></div>
+          <span class="end pill mut sm" style="margin-left:auto">Not verified</span></div>
+        <div class="b"><p>Architecture-aware review with clean/issues verdicts crq reads directly.</p>
+          <ol class="steps"><li>Install the app</li><li>Grant access</li><li>Enable in crq</li></ol></div>
+        <div class="c"><a class="btn sm" href="#a">View setup</a>
+          <a class="btn ghost sm" href="#a">Visit vendor ↗ <span class="dim">referral</span></a></div>
+        <div class="disc">Referral link — supports Code Review Queue development.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- B -->
+<section class="opt" id="b">
+  <div class="opthd"><span class="optlet">B</span>
+    <div><h2>Comparison table</h2>
+      <p class="why">Bots across the top, attributes down the side — so every claim is aligned and
+      directly comparable.</p></div>
+    <div class="tags"><span class="pill mut sm plain">built for choosing</span><span class="pill mut sm plain">terse</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Answers “what's the difference?” in one pass. Gaps are obvious: cost, what it
+      catches, whether it blocks convergence, whether it's already working.</div>
+    <div class="bad"><b>Costly</b> No room for nuance or setup steps, and every cell must stay short — the honest
+      caveats (last-checked pricing, unverified status) get squeezed.</div></div>
+
+  <div class="frame">
+    <div class="card" style="margin:0">
+      <div class="hd"><h3>Compare review bots</h3>
+        <span class="sum">for <span class="mono">kristofferR/coderabbit-queue</span> · public · Go</span></div>
+      <table class="t pad">
+        <thead><tr><th></th>
+          <th><div class="who"><img class="bico sm" src="icons/bot-coderabbit.png" alt="">CodeRabbit</div></th>
+          <th><div class="who"><img class="bico sm" src="icons/bot-codex.png" alt="">Codex</div></th>
+          <th><div class="who"><img class="bico sm" src="icons/bot-bugbot.png" alt="">Bugbot</div></th>
+          <th><div class="who"><img class="bico sm" src="icons/bot-macroscope.png" alt="">Macroscope</div></th></tr></thead>
+        <tbody>
+          <tr><td class="nm">Suggested here</td>
+            <td><span class="pill ok sm">Yes — public repo</span></td>
+            <td><span class="pill ok sm">Yes — CLI detected</span></td>
+            <td class="dim">—</td><td class="dim">—</td></tr>
+          <tr><td class="nm">Role in crq</td><td>primary · metered</td><td>co-reviewer · free</td>
+            <td>co-reviewer · free</td><td>co-reviewer · free</td></tr>
+          <tr><td class="nm">Best at</td><td>summaries + inline review of the whole PR</td>
+            <td>finding real defects on demand</td><td>bugs, if you use Cursor</td><td>architecture-level review</td></tr>
+          <tr><td class="nm">Costs</td><td>free for public repos <span class="note">(checked 07-27)</span></td>
+            <td>included with ChatGPT plans</td><td>Cursor subscription</td><td>free tier</td></tr>
+          <tr><td class="nm">Spends crq quota</td><td><span class="pill warn sm">Yes</span></td>
+            <td><span class="pill ok sm">No</span></td><td><span class="pill ok sm">No</span></td>
+            <td><span class="pill ok sm">No</span></td></tr>
+          <tr><td class="nm">Setup status</td><td><span class="pill ok sm">Seen 13:50</span></td>
+            <td><span class="pill ok sm">Seen 13:50</span></td><td><span class="pill warn sm">Seen 07-21</span></td>
+            <td><span class="pill mut sm">Not verified</span></td></tr>
+          <tr><td class="nm">On this repo</td><td>runs · required</td><td>runs · required</td><td>runs</td>
+            <td class="dim">off</td></tr>
+          <tr><td></td>
+            <td><a class="btn sm" href="#b">Manage</a></td><td><a class="btn sm" href="#b">Manage</a></td>
+            <td><a class="btn ghost sm" href="#b">Configure</a></td><td><a class="btn ghost sm" href="#b">Set up</a></td></tr>
+        </tbody>
+      </table>
+      <div class="body" style="padding-top:9px"><span class="note">Suggestions are based on compatibility,
+        not referral compensation. Vendor links for CodeRabbit, Bugbot and Macroscope are referral links.</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- C -->
+<section class="opt" id="c">
+  <div class="opthd"><span class="optlet">C</span>
+    <div><h2>Recommendation first</h2>
+      <p class="why">crq states an opinion up front — “use these two, here's why” — with the full list
+      demoted to a secondary section.</p></div>
+    <div class="tags"><span class="pill mut sm plain">decides for you</span><span class="pill mut sm plain">shortest path</span>
+      <span class="pill mut sm plain">needs trustworthy reasons</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> The common case is one click. The reasons are concrete and checkable, which is
+      what keeps a recommendation from feeling like an advert.</div>
+    <div class="bad"><b>Costly</b> With referral links in play, leading with an opinion needs the disclosure to
+      be prominent — and a wrong guess is more annoying than a neutral list.</div></div>
+
+  <div class="frame">
+    <div class="card" style="max-width:760px;margin:0 auto">
+      <div class="hd"><h3>For <span class="mono">coderabbit-queue</span> we'd use these two</h3>
+        <span class="end"><a href="#c" class="note">see all four →</a></span></div>
+      <div class="body">
+        <div class="rowline" style="padding:11px 0">
+          <img class="bico lg" src="icons/bot-coderabbit.png" alt="">
+          <div><div style="font-weight:600">CodeRabbit <span class="pill ok sm" style="margin-left:5px">already active</span></div>
+            <div class="note">Because this repo is <b>public</b> — CodeRabbit's Pro tier is free for open
+              source, and it's the reviewer crq paces through the queue.</div></div>
+          <span class="end"><a class="btn sm" href="#c">Manage</a></span></div>
+        <div class="rowline" style="padding:11px 0">
+          <img class="bico lg" src="icons/bot-codex.png" alt="">
+          <div><div style="font-weight:600">Codex <span class="pill ok sm" style="margin-left:5px">already active</span></div>
+            <div class="note">Because the <span class="mono">codex</span> CLI is installed on mbp, so you
+              likely have a plan that already includes review. It costs no crq quota.</div></div>
+          <span class="end"><a class="btn sm" href="#c">Manage</a></span></div>
+        <div class="hintbox" style="margin-top:11px"><b>Why not the others?</b>
+          Bugbot needs a Cursor subscription and hasn't been seen since 21 July; Macroscope isn't set up
+          yet — worth adding if you want a third opinion on architecture.
+          <a href="#c">Add one anyway →</a></div>
+        <div style="margin-top:11px" class="note">Suggestions are based on compatibility, not referral
+          compensation. Some vendor links are referral links, marked where they appear.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- D -->
+<section class="opt" id="d">
+  <div class="opthd"><span class="optlet">D</span>
+    <div><h2>List and detail</h2>
+      <p class="why">A compact list on the left; the selected bot gets a full page of detail on the right —
+      setup steps, what crq reads from it, where it's enabled.</p></div>
+    <div class="tags"><span class="pill mut sm plain">room for real docs</span><span class="pill mut sm plain">one bot at a time</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> The only option with space for a real setup walkthrough and for explaining how
+      crq interprets each bot — useful when a bot is misbehaving, not just when choosing.</div>
+    <div class="bad"><b>Costly</b> Comparison is worst here: you see one bot at a time, so choosing between two
+      means clicking back and forth.</div></div>
+
+  <div class="frame">
+    <div style="display:grid;grid-template-columns:230px 1fr;gap:12px">
+      <div class="card" style="margin:0"><div class="hd plain"><h3>Bots</h3></div>
+        <div class="body" style="padding:6px 8px 10px"><div class="side">
+          <a href="#d"><img class="bico sm" src="icons/bot-coderabbit.png" alt=""> CodeRabbit
+            <span class="pill ok sm" style="margin-left:5px">active</span></a>
+          <a href="#d"><img class="bico sm" src="icons/bot-codex.png" alt=""> Codex
+            <span class="pill ok sm" style="margin-left:5px">active</span></a>
+          <a href="#d"><img class="bico sm" src="icons/bot-bugbot.png" alt=""> Cursor Bugbot
+            <span class="pill warn sm" style="margin-left:5px">quiet</span></a>
+          <a class="on" href="#d"><img class="bico sm" src="icons/bot-macroscope.png" alt=""> Macroscope
+            <span class="pill mut sm" style="margin-left:5px">not set up</span></a></div></div></div>
+      <div class="card" style="margin:0">
+        <div class="hd"><img class="bico lg" src="icons/bot-macroscope.png" alt="">
+          <div><h3 style="font-size:15px">Macroscope</h3><div class="note">co-reviewer · free tier · spends no crq quota</div></div>
+          <span class="end"><span class="pill mut sm">Setup not verified</span>
+            <a class="btn ghost sm" href="#d">Visit vendor ↗</a></span></div>
+        <div class="body">
+          <p style="font-size:13px;color:var(--mut)">Architecture-aware review. crq triggers it with
+            <span class="mono">@macroscope-app review</span> and reads its Correctness Check plus the
+            verdict line, so “clean at this commit” is a fact crq can act on rather than text you read.</p>
+          <div class="hintbox" style="margin:11px 0"><b>Set up in three steps</b>
+            <ol class="steps" style="margin-top:6px"><li>Install the Macroscope GitHub App on your account</li>
+              <li>Grant it access to the repos you'll enable</li>
+              <li>Turn it on in crq — verification happens on its first review</li></ol></div>
+          <table class="t"><thead><tr><th>Where crq would use it</th><th>Now</th><th></th></tr></thead>
+            <tbody>
+              <tr><td><div class="who"><img class="rico" src="icons/repo-crq.png" alt="">coderabbit-queue</div></td>
+                <td class="dim">off</td><td><span class="sw dirty"></span></td></tr>
+              <tr><td><div class="who"><img class="rico" src="icons/repo-carrier.png" alt="">Carrier</div></td>
+                <td class="dim">off</td><td><span class="sw"></span></td></tr>
+              <tr><td><div class="who"><img class="rico" src="icons/repo-sportarr.png" alt="">Sportarr</div></td>
+                <td class="dim">off</td><td><span class="sw"></span></td></tr>
+            </tbody></table>
+          <div style="display:flex;gap:9px;margin-top:11px;align-items:center">
+            <button class="btn sm">Enable on 1 repo</button>
+            <span class="note">Enabling an unverified bot is fine — status catches up after its first review.</span></div>
+          <div class="note" style="margin-top:9px">Vendor link is a referral link — supports Code Review Queue development.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<details class="notes">
+  <summary>Notes on these options</summary>
+  <ul>
+    <li>This page has a commercial edge, so compare how honest each option feels: B is the most neutral,
+      C the most opinionated, and C therefore needs the disclosure closest to the recommendation.</li>
+    <li>D is the only one with room to explain what crq actually reads from a bot, which matters when a
+      bot goes quiet.</li>
+    <li>A and B could coexist: cards by default, "compare all" opening the table.</li>
+  </ul>
+</details>
+
+</body>
+</html>

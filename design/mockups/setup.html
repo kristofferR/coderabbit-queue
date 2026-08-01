@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Setup — Code Review Queue</title>
+<link rel="icon" href="icons/repo-crq.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,650;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#F2F3F6; --card:#FFFFFF; --edge:#E3E6EB; --edge2:#C9CFD8;
+  --ink:#1B2430; --mut:#5B6472; --faint:#8B93A0;
+  --ok:#1F7A4D; --ok-bg:#EAF4EE; --ok-edge:#C7E2D2;
+  --warn:#8A5300; --warn-fg:#B45D10; --warn-bg:#FBF1E2; --warn-edge:#EAD7B4;
+  --bad:#B3362B; --bad-bg:#F9ECEA; --bad-edge:#EFCFCB;
+  --acc:#2B5FAA; --acc-bg:#EBF1FA; --acc-edge:#C9D8EF;
+  --r:10px; --shadow:0 1px 2px rgba(27,36,48,.05),0 4px 14px rgba(27,36,48,.04);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:14px;line-height:1.5;
+  color:var(--ink);background:var(--bg);min-width:820px}
+.mono{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.92em}
+a{color:var(--acc);text-decoration:none}
+a:hover{text-decoration:underline}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px}
+.num{font-variant-numeric:tabular-nums}
+.dim{color:var(--faint)}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;
+  padding:1px 10px 1px 7px;border-radius:99px;border:1px solid transparent;white-space:nowrap}
+.pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+.pill.ok{color:var(--ok);background:var(--ok-bg);border-color:var(--ok-edge)}
+.pill.warn{color:var(--warn);background:var(--warn-bg);border-color:var(--warn-edge)}
+.pill.bad{color:var(--bad);background:var(--bad-bg);border-color:var(--bad-edge)}
+.pill.mut{color:var(--mut);background:#EEF0F3;border-color:var(--edge)}
+.pill.acc{color:var(--acc);background:var(--acc-bg);border-color:var(--acc-edge)}
+.pill.sm{font-size:11px;padding:0 8px 0 6px}
+.pill.sm::before{width:6px;height:6px}
+.bico{width:20px;height:20px;border-radius:6px;border:1px solid var(--edge);background:#fff;flex:none}
+.rico{width:16px;height:16px;border-radius:4px;object-fit:cover;background:#fff;border:1px solid var(--edge);
+  vertical-align:-3px;flex:none}
+.rfall{display:inline-flex;width:16px;height:16px;border-radius:4px;align-items:center;justify-content:center;
+  font-size:9px;font-weight:700;color:#fff;background:#7A8496;vertical-align:-3px;flex:none}
+
+.topbar{display:flex;align-items:center;flex-wrap:wrap;gap:16px;background:var(--card);
+  border-bottom:1px solid var(--edge);padding:10px 24px;position:sticky;top:0;z-index:6}
+.brand{display:flex;align-items:baseline;gap:10px}
+.brand .crq{font-family:"IBM Plex Mono",monospace;font-weight:500;font-size:13px;color:#fff;
+  background:var(--ink);border-radius:6px;padding:2px 7px}
+.brand .name{font-weight:650;font-size:16px;letter-spacing:-.01em}
+.topbar nav{display:flex;gap:4px;margin-left:8px}
+.topbar nav a{color:var(--mut);padding:5px 12px;border-radius:8px;font-weight:500;font-size:13.5px}
+.topbar nav a:hover{background:var(--bg);text-decoration:none}
+.topbar nav a.on{color:var(--ink);background:var(--bg)}
+.fresh{margin-left:auto;display:flex;align-items:center;gap:7px;color:var(--mut);font-size:12px}
+.fresh::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--ok)}
+
+.wrap{max-width:1120px;margin:0 auto;padding:20px 24px 80px}
+h1{font-size:21px;font-weight:650;letter-spacing:-.01em}
+.lede{color:var(--mut);font-size:13.5px;margin:4px 0 0;max-width:820px}
+
+/* progress header */
+.prog{display:grid;grid-template-columns:1fr auto;gap:20px;align-items:center;background:var(--card);
+  border:1px solid var(--edge);border-radius:var(--r);box-shadow:var(--shadow);padding:16px 20px;margin:14px 0}
+.bar{height:8px;border-radius:99px;background:#EEF0F3;overflow:hidden;display:flex;margin-top:10px}
+.bar i{display:block;height:100%}
+.bar .g{background:var(--ok);width:66%}
+.bar .a{background:var(--warn-fg);width:22%}
+.bar .r{background:var(--bad);width:12%}
+.prog .counts{display:flex;gap:14px;margin-top:9px;font-size:12.5px;color:var(--mut);flex-wrap:wrap}
+.prog h2{font-size:15px;font-weight:650}
+.prog .cta{text-align:right}
+.btn{font:inherit;font-weight:600;font-size:13.5px;border:none;border-radius:8px;padding:8px 18px;cursor:pointer;
+  background:var(--ink);color:#fff}
+.btn:hover{background:#2E3C4E}
+.btn.ghost{background:none;border:1px solid var(--edge);color:var(--mut)}
+.btn.sm{font-size:12.5px;padding:4px 12px}
+
+.card{background:var(--card);border:1px solid var(--edge);border-radius:var(--r);margin-bottom:14px;box-shadow:var(--shadow)}
+.card>.hd{display:flex;align-items:center;gap:12px;padding:13px 20px 10px;border-bottom:1px solid #EEF0F3}
+.card>.hd .n{width:24px;height:24px;border-radius:50%;background:#EEF0F3;color:var(--mut);flex:none;
+  display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:600}
+.card.done>.hd .n{background:var(--ok);color:#fff}
+.card.attn>.hd .n{background:var(--bad);color:#fff}
+.card>.hd h3{font-size:15px;font-weight:650}
+.card>.hd .sum{color:var(--faint);font-size:12.5px}
+.card>.hd .end{margin-left:auto;display:flex;gap:8px;align-items:center}
+.body{padding:12px 20px 16px}
+.body>.intro{font-size:13px;color:var(--mut);margin-bottom:10px;max-width:820px}
+
+/* generic check rows */
+.chk{display:grid;grid-template-columns:22px 1fr auto;gap:10px;align-items:baseline;padding:8px 0;
+  border-bottom:1px solid #EEF0F3;font-size:13.5px}
+.chk:last-child{border-bottom:none}
+.chk .m{font-size:13px;line-height:1.4}
+.chk .m.ok{color:var(--ok)}.chk .m.warn{color:var(--warn-fg)}.chk .m.bad{color:var(--bad)}.chk .m.mut{color:var(--faint)}
+.chk .d{font-size:12.5px;color:var(--faint);margin-top:1px}
+.chk .r{text-align:right;white-space:nowrap;font-size:12.5px}
+
+/* tool matrix */
+table.tools{width:100%;border-collapse:collapse}
+table.tools th{font-size:11px;font-weight:500;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);
+  text-align:left;padding:6px 10px 6px 0;border-bottom:1px solid var(--edge)}
+table.tools th.h{text-align:center;width:132px}
+table.tools td{padding:9px 10px 9px 0;border-bottom:1px solid #EEF0F3;vertical-align:top}
+table.tools td.h{text-align:center}
+table.tools tr:last-child td{border-bottom:none}
+.tool .nm{font-weight:600;font-family:"IBM Plex Mono",monospace;font-size:13px}
+.tool .why{font-size:12.5px;color:var(--mut);margin-top:2px;max-width:420px}
+.ver{display:block;font-size:11px;color:var(--faint);font-family:"IBM Plex Mono",monospace;margin-top:3px}
+.grouprow td{background:#FAFBFC;font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--mut);padding:7px 10px 7px 0}
+.grouprow td span{font-weight:400;letter-spacing:0;text-transform:none;color:var(--faint);margin-left:8px}
+details.fix{margin-top:7px}
+details.fix summary{cursor:pointer;font-size:12.5px;color:var(--acc);list-style:none}
+details.fix summary::before{content:"▸ ";}
+details.fix[open] summary::before{content:"▾ ";}
+.cmd{display:flex;align-items:center;gap:10px;background:#F5F6F8;border:1px solid var(--edge);border-radius:7px;
+  padding:6px 10px;margin-top:6px;font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--ink)}
+.cmd .copy{margin-left:auto;font-size:11px;color:var(--acc);cursor:pointer;font-family:"IBM Plex Sans",sans-serif;
+  border:1px solid var(--acc-edge);border-radius:6px;padding:1px 8px;background:var(--acc-bg)}
+.cmd .os{color:var(--faint);font-size:11px;font-family:"IBM Plex Sans",sans-serif}
+.hint{font-size:12.5px;color:var(--mut);margin-top:7px}
+.hint b{color:var(--ink)}
+
+/* bots row */
+.bots{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.botc{border:1px solid var(--edge);border-radius:8px;padding:10px 12px;display:flex;gap:10px;align-items:flex-start}
+.botc .nm{font-weight:600;font-size:13px}
+.botc .st{font-size:12px;color:var(--faint);margin-top:3px}
+
+/* hosts */
+.hosts{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.hostc{border:1px solid var(--edge);border-radius:8px;padding:11px 14px}
+.hostc.bad{border-color:var(--bad-edge);background:var(--bad-bg)}
+.hostc .nm{font-weight:650;font-family:"IBM Plex Mono",monospace;font-size:13.5px;display:flex;gap:8px;align-items:center}
+.hostc .row{font-size:12.5px;color:var(--mut);margin-top:6px;display:flex;justify-content:space-between;gap:8px}
+.hostc .row b{font-weight:500;color:var(--ink)}
+
+.notes{position:fixed;left:14px;bottom:12px;max-width:400px;font-size:12px;color:var(--mut);
+  background:var(--card);border:1px solid var(--edge);border-radius:8px;padding:8px 14px;z-index:10;box-shadow:var(--shadow)}
+.notes summary{cursor:pointer;color:var(--acc);font-weight:500}
+.notes ul{margin:6px 0 4px 16px}
+
+.layoutpick{display:flex;align-items:center;gap:4px;margin-left:14px;padding-left:14px;border-left:1px solid var(--edge)}
+.layoutpick .lbl{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin-right:3px}
+.layoutpick a{width:25px;height:25px;border-radius:7px;border:1px solid var(--edge);display:flex;
+  align-items:center;justify-content:center;font-size:12.5px;font-weight:650;color:var(--mut);text-decoration:none}
+.layoutpick a:hover{border-color:var(--acc-edge);color:var(--acc);background:var(--acc-bg);text-decoration:none}
+.layoutpick a.on{background:var(--ink);border-color:var(--ink);color:#fff}
+
+/* ---- narrower windows: reflow instead of overflowing ---- */
+@media (max-width:1400px){
+  .shell{grid-template-columns:minmax(0,1fr)!important}
+  .rail,.feedcol,.panel{position:static!important}
+  .cols{grid-template-columns:minmax(0,1fr)!important}
+}
+@media (max-width:1150px){
+  .quota{grid-template-columns:1fr!important}
+  .bots,.hosts,.grid,.botrow,.cards{grid-template-columns:1fr 1fr!important}
+  .kv,.set,.flat{grid-template-columns:minmax(0,1fr)!important;gap:5px!important}
+  .kv .prv,.set .ov,.flat .ov{text-align:left!important}
+  .c-host{display:none}
+  table.tools th.h{width:auto}
+}
+@media (max-width:940px){
+  .bots,.hosts,.grid,.botrow,.cards{grid-template-columns:1fr!important}
+  .tradeoff{grid-template-columns:1fr!important}
+  .c-att{display:none}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand"><span class="crq">crq</span><span class="name">Code Review Queue</span></div>
+  <nav>
+    <a href="overview.html">Overview</a>
+    <a href="settings.html">Repos</a>
+    <a href="bot-guide.html">Bots</a>
+    <a class="on" href="setup.html">Setup</a>
+    <a href="fleet-settings.html">Settings</a>
+  </nav>
+  <span class="layoutpick" title="This page is built as option A — B/C/D open the comparison">
+    <span class="lbl">Layout</span><a class="on" href="setup.html">A</a><a href="setup-options.html#b">B</a><a href="setup-options.html#c">C</a><a href="setup-options.html#d">D</a>
+  </span>
+  <div class="fresh num">live · rev 4182 · 13:51:26</div>
+</div>
+
+<div class="wrap">
+  <h1>Setup</h1>
+  <p class="lede">Everything crq needs to run, and whether this fleet actually has it. The page stays
+  useful after the first run — it’s where you look when a host stops fixing, a token expires or a new
+  machine joins.</p>
+
+  <div class="prog">
+    <div>
+      <h2>2 things need attention</h2>
+      <div class="bar"><i class="g"></i><i class="a"></i><i class="r"></i></div>
+      <div class="counts">
+        <span><span class="pill ok sm">6 ready</span></span>
+        <span><span class="pill warn sm">2 need attention</span></span>
+        <span><span class="pill mut sm">1 optional missing</span></span>
+        <span class="dim">checked 13:51:24 · 3 hosts reporting</span>
+      </div>
+    </div>
+    <div class="cta">
+      <button class="btn">Re-run checks</button>
+      <div class="dim" style="font-size:12px;margin-top:6px">reads local state + each host’s last report</div>
+    </div>
+  </div>
+
+  <!-- 1. GitHub access -->
+  <div class="card done">
+    <div class="hd"><span class="n">✓</span><h3>GitHub access</h3>
+      <span class="sum">token, scopes and API budget</span>
+      <span class="end"><span class="pill ok">Ready</span></span></div>
+    <div class="body">
+      <div class="chk"><span class="m ok">●</span>
+        <span><b>Authenticated as <span class="mono">kristofferR</span></b>
+          <span class="d">token from <span class="mono">gh auth</span>, picked up via GH_TOKEN</span></span>
+        <span class="r dim">scopes: repo, read:org</span></div>
+      <div class="chk"><span class="m ok">●</span>
+        <span><b>REST budget healthy</b>
+          <span class="d">the fleet shares one 5,000/hr quota across the daemon and any agents you run</span></span>
+        <span class="r"><span class="num">4,412</span> left · resets 14:12</span></div>
+      <div class="chk"><span class="m ok">●</span>
+        <span><b>Write access to every enrolled repo</b>
+          <span class="d">needed to post trigger comments, resolve threads and push fixes</span></span>
+        <span class="r dim">6 of 6 repos</span></div>
+    </div>
+  </div>
+
+  <!-- 2. Command-line tools -->
+  <div class="card attn" id="tools">
+    <div class="hd"><span class="n">!</span><h3>Command-line tools</h3>
+      <span class="sum">what each host needs on its PATH</span>
+      <span class="end"><span class="pill bad">1 blocking</span><span class="pill mut">1 optional missing</span></span></div>
+    <div class="body">
+      <p class="intro">crq shells out to these. <b>Required</b> tools must exist on every host that runs a
+      daemon; <b>recommended</b> ones unlock a feature and are skipped silently when absent. A tool has to be
+      visible to the <i>service</i>, not just to your shell — that distinction is what breaks most often.</p>
+
+      <table class="tools">
+        <thead><tr>
+          <th>Tool</th><th class="h">mbp</th><th class="h">atlas</th><th class="h">wsl</th>
+        </tr></thead>
+        <tbody>
+          <tr class="grouprow"><td colspan="4">Required <span>— crq will not run a daemon without these</span></td></tr>
+
+          <tr class="tool">
+            <td><div class="nm">crq</div>
+              <div class="why">The binary itself. Every host must run the <b>same version</b> — an older
+                one silently ignores newer settings and can wipe state it doesn’t understand.</div>
+              <details class="fix"><summary>wsl is behind — update it</summary>
+                <div class="cmd"><span class="os">any</span>curl -fsSL https://raw.githubusercontent.com/kristofferR/coderabbit-queue/main/install.sh | sh<span class="copy">copy</span></div>
+                <div class="hint">Then check <span class="mono">crq doctor</span> on that host — it also
+                  reports any <b>second, older crq</b> left elsewhere on the PATH.</div>
+              </details></td>
+            <td class="h"><span class="pill ok sm">2.4.1</span><span class="ver">/usr/local/bin</span></td>
+            <td class="h"><span class="pill ok sm">2.4.1</span><span class="ver">/usr/local/bin</span></td>
+            <td class="h"><span class="pill warn sm">2.3.0 · behind</span><span class="ver">~/.local/bin</span></td>
+          </tr>
+
+          <tr class="tool">
+            <td><div class="nm">git</div>
+              <div class="why">Repository mirrors and detached worktrees for fix sessions.</div></td>
+            <td class="h"><span class="pill ok sm">2.51.0</span></td>
+            <td class="h"><span class="pill ok sm">2.47.1</span></td>
+            <td class="h"><span class="pill ok sm">2.43.0</span></td>
+          </tr>
+
+          <tr class="tool">
+            <td><div class="nm">gh</div>
+              <div class="why">GitHub CLI — how crq gets a token. Any token in
+                <span class="mono">GITHUB_TOKEN</span> works instead, but <span class="mono">gh</span>
+                keeps it refreshed.</div></td>
+            <td class="h"><span class="pill ok sm">2.63.2</span><span class="ver">authenticated</span></td>
+            <td class="h"><span class="pill ok sm">2.62.0</span><span class="ver">authenticated</span></td>
+            <td class="h"><span class="pill ok sm">2.62.0</span><span class="ver">authenticated</span></td>
+          </tr>
+
+          <tr class="grouprow"><td colspan="4">Recommended <span>— each one turns on a feature</span></td></tr>
+
+          <tr class="tool">
+            <td><div class="nm">claude</div>
+              <div class="why">Claude Code — the default <b>autofix agent</b>. Without it, that host can
+                review but never fix.</div>
+              <details class="fix" open><summary>atlas: installed for your shell, invisible to the service</summary>
+                <div class="hint">This is exactly what’s failing right now: <span class="mono">claude:
+                  command not found (PATH empty in unit)</span> — 4 attempts in a row. The binary is at
+                  <span class="mono">/home/kristoffer/.local/bin/claude</span>, but
+                  <span class="mono">crq-autofix.service</span> starts with an empty PATH.</div>
+                <div class="cmd"><span class="os">atlas</span>systemctl --user edit crq-autofix.service<span class="copy">copy</span></div>
+                <div class="cmd"><span class="os">add</span>Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin<span class="copy">copy</span></div>
+                <div class="cmd"><span class="os">then</span>systemctl --user restart crq-autofix.service<span class="copy">copy</span></div>
+              </details></td>
+            <td class="h"><span class="pill ok sm">2.1.4</span><span class="ver">~/.local/bin</span></td>
+            <td class="h"><span class="pill bad sm">not on service PATH</span><span class="ver">found in shell</span></td>
+            <td class="h"><span class="pill mut sm">not installed</span></td>
+          </tr>
+
+          <tr class="tool">
+            <td><div class="nm">codex</div>
+              <div class="why">Codex CLI — an alternative autofix agent, and the local signal behind the
+                “you already have Codex” suggestion on the <a href="bot-guide.html">bot guide</a>.</div>
+              <details class="fix"><summary>install</summary>
+                <div class="cmd"><span class="os">npm</span>npm i -g @openai/codex<span class="copy">copy</span></div>
+                <div class="cmd"><span class="os">brew</span>brew install codex<span class="copy">copy</span></div>
+              </details></td>
+            <td class="h"><span class="pill ok sm">0.94.0</span></td>
+            <td class="h"><span class="pill ok sm">0.94.0</span></td>
+            <td class="h"><span class="pill mut sm">not installed</span></td>
+          </tr>
+
+          <tr class="tool">
+            <td><div class="nm">coderabbit</div>
+              <div class="why">CodeRabbit CLI — powers <span class="mono">crq preflight</span>: a local
+                review of uncommitted work <b>before</b> you push, so a round doesn’t get spent on
+                something the CLI would have caught.</div>
+              <details class="fix"><summary>install</summary>
+                <div class="cmd"><span class="os">any</span>curl -fsSL https://cli.coderabbit.ai/install.sh | sh<span class="copy">copy</span></div>
+                <div class="hint">Point crq at a non-standard path with
+                  <span class="mono">CRQ_CODERABBIT_BIN</span>.</div>
+              </details></td>
+            <td class="h"><span class="pill ok sm">0.3.4</span></td>
+            <td class="h"><span class="pill mut sm">not installed</span><span class="ver">preflight unavailable</span></td>
+            <td class="h"><span class="pill mut sm">not installed</span></td>
+          </tr>
+
+          <tr class="tool">
+            <td><div class="nm">macroscope</div>
+              <div class="why">Macroscope CLI — a second local opinion before pushing, alongside the
+                CodeRabbit CLI. <span class="dim">Not wired into <span class="mono">crq preflight</span>
+                yet; listed so the host inventory is complete.</span></div>
+              <details class="fix"><summary>install</summary>
+                <div class="cmd"><span class="os">npm</span>npm i -g @macroscope/cli<span class="copy">copy</span></div>
+                <div class="hint">Check the current install command on the vendor’s docs —
+                  <a href="bot-guide.html">Macroscope on the bot guide ↗</a>.</div>
+              </details></td>
+            <td class="h"><span class="pill mut sm">not installed</span></td>
+            <td class="h"><span class="pill mut sm">not installed</span></td>
+            <td class="h"><span class="pill mut sm">not installed</span></td>
+          </tr>
+
+          <tr class="tool">
+            <td><div class="nm">cursor-agent</div>
+              <div class="why">Cursor’s CLI. Optional — Bugbot itself runs on GitHub, so crq never needs
+                this locally; it only sharpens the suggestion on the bot guide.</div></td>
+            <td class="h"><span class="pill ok sm">1.8.0</span></td>
+            <td class="h"><span class="pill mut sm">—</span></td>
+            <td class="h"><span class="pill mut sm">—</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 3. Hosts and services -->
+  <div class="card attn" id="hosts">
+    <div class="hd"><span class="n">!</span><h3>Hosts &amp; services</h3>
+      <span class="sum">who runs the review daemon, who may fix</span>
+      <span class="end"><span class="pill bad">atlas unhealthy</span></span></div>
+    <div class="body">
+      <p class="intro">One host holds the leader lease and drives reviews for the whole fleet; any host
+      can run autofix. A host with no recent signal isn’t healthy — it’s unknown, and shown that way.</p>
+      <div class="hosts">
+        <div class="hostc">
+          <div class="nm">mbp <span class="pill ok sm">Healthy</span></div>
+          <div class="row"><span>Review daemon</span><b>leader · since 09:02</b></div>
+          <div class="row"><span>Autofix service</span><b>running · 1 session</b></div>
+          <div class="row"><span>Last success</span><b class="num">13:41:37</b></div>
+        </div>
+        <div class="hostc bad">
+          <div class="nm">atlas <span class="pill bad sm">Unhealthy</span></div>
+          <div class="row"><span>Review daemon</span><b>standby</b></div>
+          <div class="row"><span>Autofix service</span><b>failing · 4 in a row</b></div>
+          <div class="row"><span>Cause</span><b><a href="#tools">claude not on service PATH ↑</a></b></div>
+        </div>
+        <div class="hostc">
+          <div class="nm">wsl <span class="pill mut sm">No recent signal</span></div>
+          <div class="row"><span>Review daemon</span><b>not installed</b></div>
+          <div class="row"><span>Autofix service</span><b>not installed</b></div>
+          <div class="row"><span>Last seen</span><b class="num">09:12</b></div>
+        </div>
+      </div>
+      <div class="chk" style="margin-top:12px"><span class="m ok">●</span>
+        <span><b>Review daemon installed</b>
+          <span class="d">keeps every open PR in scope reviewed — <span class="mono">crq autoreview</span></span></span>
+        <span class="r dim">1 of 3 hosts · one leader is enough</span></div>
+      <div class="chk"><span class="m warn">●</span>
+        <span><b>Autofix installed on 2 of 3 hosts</b>
+          <span class="d">install with <span class="mono">crq autofix install</span>; per-repo permission
+            lives on each repo’s settings page</span></span>
+        <span class="r"><a href="settings.html">Per-repo autofix →</a></span></div>
+    </div>
+  </div>
+
+  <!-- 4. Queue home -->
+  <div class="card done">
+    <div class="hd"><span class="n">✓</span><h3>Queue home</h3>
+      <span class="sum">where the shared state lives</span>
+      <span class="end"><span class="pill ok">Ready</span></span></div>
+    <div class="body">
+      <p class="intro">One private repo holds the state every host reads and writes. Created by
+      <span class="mono">crq init</span>.</p>
+      <div class="chk"><span class="m ok">●</span>
+        <span><b>Gate repo</b> <span class="d">holds the state ref, the dashboard issue and the calibration PR</span></span>
+        <span class="r mono">kristofferR/crq-home</span></div>
+      <div class="chk"><span class="m ok">●</span>
+        <span><b>State ref</b> <span class="d">schema v4 · compare-and-swap on every write</span></span>
+        <span class="r mono">crq-state-v3 · rev 4182</span></div>
+      <div class="chk"><span class="m ok">●</span>
+        <span><b>Dashboard issue</b> <span class="d">the legacy Markdown dashboard — stays as it is, alongside this one</span></span>
+        <span class="r"><a href="#">issue #12 ↗</a></span></div>
+      <div class="chk"><span class="m ok">●</span>
+        <span><b>Calibration PR</b> <span class="d">how crq learns the account’s remaining quota</span></span>
+        <span class="r"><a href="#">PR #3 ↗</a> · asked 13:50</span></div>
+    </div>
+  </div>
+
+  <!-- 5. Review bots -->
+  <div class="card done">
+    <div class="hd"><span class="n">✓</span><h3>Review bots</h3>
+      <span class="sum">the GitHub Apps that do the reviewing</span>
+      <span class="end"><span class="pill ok">3 active</span><a class="btn ghost sm" href="bot-guide.html">Compare &amp; set up</a></span></div>
+    <div class="body">
+      <p class="intro">These run on GitHub, not on your machines — nothing to install locally. Status is
+      inferred from activity crq has already seen, so a fresh install shows as unverified until its
+      first review.</p>
+      <div class="bots">
+        <div class="botc"><img class="bico" src="icons/bot-coderabbit.png" alt="">
+          <div><div class="nm">CodeRabbit</div><div class="st">primary · seen 13:50</div>
+            <span class="pill ok sm" style="margin-top:6px">Active</span></div></div>
+        <div class="botc"><img class="bico" src="icons/bot-codex.png" alt="">
+          <div><div class="nm">Codex</div><div class="st">co-reviewer · seen 13:50</div>
+            <span class="pill ok sm" style="margin-top:6px">Active</span></div></div>
+        <div class="botc"><img class="bico" src="icons/bot-bugbot.png" alt="">
+          <div><div class="nm">Cursor Bugbot</div><div class="st">co-reviewer · seen 07-21</div>
+            <span class="pill warn sm" style="margin-top:6px">Previously seen</span></div></div>
+        <div class="botc"><img class="bico" src="icons/bot-macroscope.png" alt="">
+          <div><div class="nm">Macroscope</div><div class="st">co-reviewer</div>
+            <span class="pill mut sm" style="margin-top:6px">Not verified</span></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 6. Repos -->
+  <div class="card done">
+    <div class="hd"><span class="n">✓</span><h3>Repositories</h3>
+      <span class="sum">what the fleet watches</span>
+      <span class="end"><span class="pill ok">6 enrolled</span><a class="btn sm" href="add-repo.html">+ Add repo</a></span></div>
+    <div class="body">
+      <div class="chk"><span class="m ok">●</span>
+        <span><b>6 repos enrolled</b>
+          <span class="d"><img class="rico" src="icons/repo-crq.png" alt=""> coderabbit-queue ·
+            <img class="rico" src="icons/repo-pengeoversikt.svg" alt=""> pengeoversikt ·
+            <img class="rico" src="icons/repo-iptvchecker.png" alt=""> IPTVChecker ·
+            <img class="rico" src="icons/repo-carrier.png" alt=""> Carrier ·
+            <img class="rico" src="icons/repo-sportarr.png" alt=""> Sportarr ·
+            <span class="rfall">H</span> ha-gradient-card</span></span>
+        <span class="r"><a href="settings.html">Manage →</a></span></div>
+      <div class="chk"><span class="m warn">●</span>
+        <span><b>1 repo still enrolled by env file</b>
+          <span class="d">IPTVChecker comes from <span class="mono">CRQ_REPOS</span> on mbp, not from shared
+            state — so the other hosts don’t see it. Move it into state to manage it here.</span></span>
+        <span class="r"><a href="settings.html">Review →</a></span></div>
+      <div class="chk"><span class="m ok">●</span>
+        <span><b>Quota calibrated</b>
+          <span class="d">CodeRabbit account window · blocked until 14:32, then metered reviews resume</span></span>
+        <span class="r">checked 13:50:41 · <a href="#">refresh</a></span></div>
+    </div>
+  </div>
+
+</div>
+
+<details class="notes">
+  <summary>Mockup notes</summary>
+  <ul>
+    <li>Setup doubles as an ongoing health page, so it shows a fleet mid-life, not a blank first run.
+      A true first run would show the same sections with everything unchecked and a single “start here”.</li>
+    <li>The CLI section is a <b>tool × host matrix</b> because that’s where the real failures live: the
+      atlas row shows <i>installed for your shell, invisible to the service</i>, which is the exact cause
+      of the autofix failures on the overview — the two pages link to each other.</li>
+    <li>Required vs recommended is real: required tools block a daemon, recommended ones each turn on one
+      feature and are skipped silently when missing.</li>
+    <li>Install commands are illustrative. The <span class="mono">macroscope</span> row is marked as not
+      wired into <span class="mono">crq preflight</span> yet — only the CodeRabbit CLI is today.</li>
+    <li>Versions, paths and host names are fake data; in production they come from each host’s reported
+      capability record (the same channel behind the “older binary” warnings).</li>
+  </ul>
+</details>
+
+</body>
+</html>

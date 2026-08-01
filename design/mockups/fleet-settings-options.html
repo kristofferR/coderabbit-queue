@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fleet settings — 4 UX options</title>
+<link rel="icon" href="icons/repo-crq.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,650;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="opt.css">
+<style>.setrow{display:grid;grid-template-columns:1fr auto 150px;gap:12px;align-items:center;padding:8px 0;
+  border-bottom:1px solid #EEF0F3;font-size:13px}
+.setrow:last-child{border-bottom:none}
+.setrow .k{font-weight:500}
+.setrow .k .sub{display:block;font-weight:400;font-size:11.5px;color:var(--faint);margin-top:1px}
+.setrow .ov{text-align:right;font-size:11.5px;color:var(--faint)}
+.flat{display:grid;grid-template-columns:280px 1fr 190px;gap:12px;align-items:center;padding:7px 0;
+  border-bottom:1px solid #EEF0F3;font-size:13px}
+.flat .path{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--mut)}
+.flat .path b{color:var(--ink);font-family:"IBM Plex Sans",sans-serif;font-size:13px;display:block;font-weight:550}
+
+/* one variant at a time — the jump chips are radios, not anchors */
+#O-A,#O-B,#O-C,#O-D{position:absolute;left:-9999px}
+.opt{display:none}
+#O-A:checked ~ #a,#O-B:checked ~ #b,#O-C:checked ~ #c,#O-D:checked ~ #d{display:block}
+.optbar .jump label{font-size:12.5px;font-weight:600;color:var(--mut);border:1px solid var(--edge);
+  border-radius:8px;padding:3px 12px;cursor:pointer}
+.optbar .jump label:hover{border-color:var(--acc-edge);color:var(--acc);background:var(--acc-bg)}
+#O-A:checked ~ .optbar label[for="O-A"],#O-B:checked ~ .optbar label[for="O-B"],
+#O-C:checked ~ .optbar label[for="O-C"],#O-D:checked ~ .optbar label[for="O-D"]{
+  background:var(--ink);border-color:var(--ink);color:#fff}
+.opt{border-top:none;padding-top:18px}
+</style>
+</head>
+<body>
+<input type="radio" name="opt" id="O-A" checked><input type="radio" name="opt" id="O-B"><input type="radio" name="opt" id="O-C"><input type="radio" name="opt" id="O-D">
+
+<div class="optbar">
+  <span class="crq">crq</span><h1>Fleet settings</h1>
+  <span class="sub">4 UX options · same styling, different structure</span>
+  <span class="jump"><label for="O-A">A</label><label for="O-B">B</label><label for="O-C">C</label><label for="O-D">D</label>
+    <a class="back" href="options.html">All pages ↩</a></span>
+</div>
+
+<div class="intro">
+  <p>The job: change a default that every repo inherits, while seeing <b>how many repos would move</b> and
+  what it costs. There are roughly 25 settings across six groups — enough that how they're organised is
+  the whole design question.</p>
+</div>
+
+<!-- A -->
+<section class="opt" id="a">
+  <div class="opthd"><span class="optlet">A</span>
+    <div><h2>Long page, grouped sections</h2>
+      <p class="why">Every group stacked in one scroll, each with its own save. What we have today.</p></div>
+    <div class="tags"><span class="pill mut sm plain">everything findable by scrolling</span>
+      <span class="pill mut sm plain">long</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Ctrl-F finds anything, and related settings sit next to each other so you can
+      see how pacing and quota interact.</div>
+    <div class="bad"><b>Costly</b> Long enough that the bottom groups are rarely seen, and per-group saves scattered
+      down the page make it unclear what's still unsaved.</div></div>
+
+  <div class="frame">
+    <div class="card" style="margin:0 0 10px"><div class="hd"><h3>CodeRabbit account</h3>
+      <span class="end"><span class="pill warn sm">Blocked −41:15</span><button class="btn ghost sm">Refresh quota</button></span></div></div>
+    <div class="card" style="margin:0 0 10px"><div class="hd"><h3>Reviewers</h3>
+      <span class="sum">which bots run, and which a round waits for</span>
+      <span class="end"><span class="pill mut sm">5 of 6 repos inherit this</span></span></div>
+      <div class="body">
+        <table class="t"><thead><tr><th>Reviewer</th><th class="c">Runs</th><th class="c">Required</th>
+          <th>Trigger</th><th class="ov">Repos overriding</th></tr></thead>
+          <tbody>
+            <tr><td><div class="who"><img class="bico" src="icons/bot-coderabbit.png" alt="">CodeRabbit
+              <span class="st">primary</span></div></td><td class="c"><span class="sw on lock"></span></td>
+              <td class="c"><span class="sw on"></span></td><td class="dim">via the queue</td>
+              <td class="ov dim">none</td></tr>
+            <tr><td><div class="who"><img class="bico" src="icons/bot-codex.png" alt="">Codex</div></td>
+              <td class="c"><span class="sw on"></span></td><td class="c"><span class="sw on"></span></td>
+              <td><span class="seg"><span>Never</span><span>Self-heal</span><span class="on">Always</span></span></td>
+              <td class="ov"><a href="#a">1 repo ↗</a></td></tr>
+            <tr><td><div class="who"><img class="bico" src="icons/bot-macroscope.png" alt="">Macroscope</div></td>
+              <td class="c"><span class="sw dirty"></span></td><td class="c"><span class="sw"></span></td>
+              <td><span class="seg"><span>Never</span><span class="on">Self-heal</span><span>Always</span></span></td>
+              <td class="ov"><a href="#a">1 repo ↗</a></td></tr>
+          </tbody></table>
+        <div style="display:flex;gap:9px;margin-top:11px;align-items:center"><button class="btn sm">Save reviewers</button>
+          <span class="note" style="color:var(--warn)">1 change pending</span></div></div></div>
+    <div class="card" style="margin:0 0 10px"><div class="hd"><h3>Autofix</h3>
+      <span class="sum">agent, model, effort, attempts, forks, prompt</span></div></div>
+    <div class="card" style="margin:0 0 10px"><div class="hd"><h3>Pacing &amp; limits</h3>
+      <span class="sum">min interval 90s · in-flight 15m · retry 5m · fallback 15m</span></div></div>
+    <div class="card" style="margin:0"><div class="hd"><h3>Automatic review · Hosts · Plumbing</h3>
+      <span class="sum">…three more groups below</span></div></div>
+  </div>
+</section>
+
+<!-- B -->
+<section class="opt" id="b">
+  <div class="opthd"><span class="optlet">B</span>
+    <div><h2>Tabs</h2>
+      <p class="why">One group per tab. Each screen is short, with a single save and a dirty marker on the
+      tabs that have unsaved edits.</p></div>
+    <div class="tags"><span class="pill mut sm plain">short screens</span><span class="pill mut sm plain">unsaved work can hide</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Every screen fits without scrolling, and the tab strip is a map of what's
+      configurable at fleet level.</div>
+    <div class="bad"><b>Costly</b> You can't see two groups at once — and pacing only makes sense next to the quota
+      it protects.</div></div>
+
+  <div class="frame tight">
+    <div style="background:var(--card);border-radius:8px;overflow:hidden">
+      <div style="display:flex;align-items:center;gap:11px;padding:11px 16px">
+        <h3 style="font-size:14px;font-weight:650">Fleet settings</h3>
+        <span class="note">defaults inherited by 6 repos</span>
+        <span class="end" style="margin-left:auto"><span class="pill warn sm">Blocked −41:15</span></span></div>
+      <div class="tabs"><a href="#b">Account</a>
+        <a class="on" href="#b">Reviewers <span class="pill warn sm plain" style="margin-left:4px">1</span></a>
+        <a href="#b">Autofix</a><a href="#b">Pacing</a><a href="#b">Automatic review</a>
+        <a href="#b">Hosts</a><a href="#b">Plumbing</a></div>
+      <div style="padding:13px 16px 16px">
+        <table class="t"><thead><tr><th>Reviewer</th><th class="c">Runs</th><th class="c">Required</th>
+          <th>Trigger</th><th>Grace</th><th class="ov">Overridden by</th></tr></thead>
+          <tbody>
+            <tr><td><div class="who"><img class="bico" src="icons/bot-coderabbit.png" alt="">CodeRabbit</div></td>
+              <td class="c"><span class="sw on lock"></span></td><td class="c"><span class="sw on"></span></td>
+              <td class="dim">via the queue</td><td class="dim">—</td><td class="ov dim">no repos</td></tr>
+            <tr><td><div class="who"><img class="bico" src="icons/bot-codex.png" alt="">Codex</div></td>
+              <td class="c"><span class="sw on"></span></td><td class="c"><span class="sw on"></span></td>
+              <td><span class="seg"><span>Never</span><span>Self-heal</span><span class="on">Always</span></span></td>
+              <td class="dim">—</td><td class="ov"><img class="rico" src="icons/repo-crq.png" alt=""> crq</td></tr>
+            <tr><td><div class="who"><img class="bico" src="icons/bot-bugbot.png" alt="">Cursor Bugbot</div></td>
+              <td class="c"><span class="sw on"></span></td><td class="c"><span class="sw"></span></td>
+              <td><span class="seg"><span>Never</span><span class="on">Self-heal</span><span>Always</span></span></td>
+              <td><span class="dur"><span>−</span><b>10m</b><span>+</span></span></td>
+              <td class="ov">2 repos</td></tr>
+            <tr><td><div class="who"><img class="bico" src="icons/bot-macroscope.png" alt="">Macroscope</div></td>
+              <td class="c"><span class="sw dirty"></span></td><td class="c"><span class="sw"></span></td>
+              <td><span class="seg"><span>Never</span><span class="on">Self-heal</span><span>Always</span></span></td>
+              <td><span class="dur"><span>−</span><b>10m</b><span>+</span></span></td>
+              <td class="ov">1 repo</td></tr>
+          </tbody></table>
+        <div class="impact" style="margin-top:11px"><b>Saving changes 5 repositories</b> — enables Macroscope
+          everywhere except coderabbit-queue, and triggers it on 4 open PRs.</div>
+        <div style="display:flex;gap:9px;margin-top:11px"><button class="btn sm">Review and save</button>
+          <button class="btn ghost sm">Discard</button></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- C -->
+<section class="opt" id="c">
+  <div class="opthd"><span class="optlet">C</span>
+    <div><h2>Section nav beside the content</h2>
+      <p class="why">A sticky list of groups on the left, content on the right — the classic settings app.
+      One save bar for the whole page.</p></div>
+    <div class="tags"><span class="pill mut sm plain">orientation kept</span><span class="pill mut sm plain">one save</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> You always know where you are and what else exists; scrolling and jumping both
+      work. A single save bar can total up every pending change across groups.</div>
+    <div class="bad"><b>Costly</b> Spends horizontal space on navigation, and one global save makes a mixed
+      batch (reviewers + pacing) harder to describe in one impact preview.</div></div>
+
+  <div class="frame">
+    <div style="display:grid;grid-template-columns:190px 1fr;gap:12px">
+      <div class="card" style="margin:0"><div class="body" style="padding:9px 8px"><div class="side">
+        <a href="#c">Account &amp; quota</a><a class="on" href="#c">Reviewers</a><a href="#c">Autofix</a>
+        <a href="#c">Pacing &amp; limits</a><a href="#c">Automatic review</a><a href="#c">Hosts</a>
+        <a href="#c">Plumbing</a></div>
+        <div class="note" style="padding:9px 9px 2px;border-top:1px solid #EEF0F3;margin-top:8px">
+          1 unsaved change<br>in <b>Reviewers</b></div></div></div>
+      <div>
+        <div class="card" style="margin:0">
+          <div class="hd"><h3>Reviewers</h3><span class="sum">defaults for every repo that hasn't decided</span>
+            <span class="end"><span class="pill mut sm">5 of 6 inherit</span></span></div>
+          <div class="body">
+            <div class="setrow"><span class="k">Primary reviewer
+              <span class="sub">the metered one — set by CRQ_BOT, not hardcoded</span></span>
+              <span><select><option>coderabbitai[bot]</option><option>chatgpt-codex-connector[bot]</option></select></span>
+              <span class="ov">no overrides</span></div>
+            <div class="setrow"><span class="k">Primary must approve before converging</span>
+              <span><span class="sw on"></span></span><span class="ov">1 repo differs</span></div>
+            <div class="setrow"><span class="k">Codex runs by default</span>
+              <span><span class="sw on"></span></span><span class="ov"><a href="#c">1 repo ↗</a></span></div>
+            <div class="setrow"><span class="k">Bugbot runs by default
+              <span class="sub">self-heal after 10m of silence</span></span>
+              <span><span class="sw on"></span></span><span class="ov"><a href="#c">2 repos ↗</a></span></div>
+            <div class="setrow"><span class="k">Macroscope runs by default</span>
+              <span><span class="sw dirty"></span></span><span class="ov"><a href="#c">1 repo ↗</a></span></div>
+          </div></div>
+        <div style="display:flex;align-items:center;gap:11px;padding:10px 14px;background:var(--card);
+          border:1px solid var(--edge);border-radius:var(--r);margin-top:10px;box-shadow:var(--shadow)">
+          <span class="impact" style="flex:1"><b>1 pending change</b> — Macroscope on by default would move
+            5 repos and trigger it on 4 open PRs.</span>
+          <button class="btn sm">Review &amp; save</button><button class="btn ghost sm">Discard all</button></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- D -->
+<section class="opt" id="d">
+  <div class="opthd"><span class="optlet">D</span>
+    <div><h2>Search every setting</h2>
+      <p class="why">One flat searchable list of all settings with their values, scope and override count —
+      like an editor's settings pane.</p></div>
+    <div class="tags"><span class="pill mut sm plain">fastest if you know the name</span>
+      <span class="pill mut sm plain">no structure to learn</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Unbeatable for “where do I change the min interval?” — type “interval”. Every
+      setting also shows its env-var name, so the docs, the CLI and the UI line up.</div>
+    <div class="bad"><b>Costly</b> Terrible for discovery: a flat list teaches nothing about how pacing, quota and
+      the fire slot relate, which is exactly what a newcomer needs.</div></div>
+
+  <div class="frame">
+    <div class="card" style="margin:0">
+      <div class="hd"><h3>All settings</h3><span class="sum">25 · 6 groups</span>
+        <span class="end" style="gap:6px"><span class="searchbox" style="min-width:230px">⌕ interval</span>
+          <span class="pill acc sm plain">Modified 1</span><span class="pill mut sm plain">Overridden 5</span></span></div>
+      <div class="body">
+        <div class="flat"><span class="path"><b>Minimum interval between fires</b>CRQ_MIN_INTERVAL · pacing</span>
+          <span><span class="dur"><span>−</span><b>90s</b><span>+</span></span>
+            <span class="note" style="margin-left:8px">the queue's main throttle</span></span>
+          <span class="ov note">fleet-wide only</span></div>
+        <div class="flat"><span class="path"><b>In-flight timeout</b>CRQ_INFLIGHT_TIMEOUT · pacing</span>
+          <span><span class="dur"><span>−</span><b>15m</b><span>+</span></span>
+            <span class="note" style="margin-left:8px">release a round whose bot never answered</span></span>
+          <span class="ov note">fleet-wide only</span></div>
+        <div class="flat"><span class="path"><b>Scan cadence</b>CRQ_AUTOREVIEW_POLL · automatic review</span>
+          <span><span class="dur"><span>−</span><b>1m</b><span>+</span></span>
+            <span class="note" style="margin-left:8px">how often the daemon looks for work</span></span>
+          <span class="ov note">fleet-wide only</span></div>
+        <div class="flat"><span class="path"><b>Self-heal grace — Bugbot</b>CRQ_COBOT_BUGBOT_GRACE · reviewers</span>
+          <span><span class="dur"><span>−</span><b>10m</b><span>+</span></span></span>
+          <span class="ov"><a href="#d">2 repos override ↗</a></span></div>
+        <div class="flat"><span class="path"><b>Retry backoff</b>not configurable yet · pacing</span>
+          <span><span class="dur"><span>−</span><b>5m</b><span>+</span></span>
+            <span class="pill warn sm" style="margin-left:8px">hardcoded today</span></span>
+          <span class="ov note">—</span></div>
+        <div class="flat"><span class="path"><b>Feedback wait timeout</b>CRQ_FEEDBACK_WAIT_TIMEOUT · pacing</span>
+          <span><span class="dur"><span>−</span><b>20m</b><span>+</span></span></span>
+          <span class="ov note">fleet-wide only</span></div>
+        <div class="hintbox" style="margin-top:10px">6 of 25 settings match <b>“interval”</b>.
+          <a href="#d">Clear the filter</a> to browse by group instead.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<details class="notes">
+  <summary>Notes on these options</summary>
+  <ul>
+    <li>The override count is the thing worth protecting in all four — it's what stops a fleet default from
+      being changed blind.</li>
+    <li>C and D combine well: section nav for browsing, a search box that jumps straight to a setting.</li>
+    <li>Only B and C can offer a single "review &amp; save" step; A's per-group saves are simpler to reason
+      about but let unsaved changes hide off-screen.</li>
+  </ul>
+</details>
+
+</body>
+</html>

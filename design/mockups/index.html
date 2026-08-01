@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code Review Queue — dashboard mockups</title>
+<link rel="icon" href="icons/repo-crq.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;650&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#F2F3F6;--card:#fff;--edge:#E3E6EB;--ink:#1B2430;--mut:#5B6472;--faint:#8B93A0;
+  --acc:#2B5FAA;--acc-bg:#EBF1FA;--acc-edge:#C9D8EF;--ok:#1F7A4D;--ok-bg:#EAF4EE;--ok-edge:#C7E2D2;
+  --shadow:0 1px 2px rgba(27,36,48,.05),0 4px 14px rgba(27,36,48,.04)}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:15px;line-height:1.55;color:var(--ink);
+  background:var(--bg);max-width:1280px;margin:0 auto;padding:34px 28px 70px}
+.mono{font-family:"IBM Plex Mono",monospace;font-size:.9em}
+a{color:var(--acc);text-decoration:none}
+a:hover{text-decoration:underline}
+.brand{display:flex;align-items:baseline;gap:10px;margin-bottom:4px}
+.brand .crq{font-family:"IBM Plex Mono",monospace;font-weight:500;font-size:13px;color:#fff;
+  background:var(--ink);border-radius:6px;padding:2px 7px}
+h1{font-size:23px;font-weight:650;letter-spacing:-.01em}
+.sub{color:var(--mut);max-width:820px;margin:6px 0 6px}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;
+  padding:1px 10px 1px 7px;border-radius:99px;border:1px solid var(--ok-edge);background:var(--ok-bg);color:var(--ok)}
+.pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+h2{font-size:15px;font-weight:650;margin:28px 0 10px}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.card{background:var(--card);border:1px solid var(--edge);border-radius:10px;overflow:hidden;
+  display:flex;flex-direction:column;box-shadow:var(--shadow)}
+.card.wide{grid-column:span 3;flex-direction:row;align-items:stretch}
+.frame{height:212px;overflow:hidden;position:relative;background:#eee;border-bottom:1px solid var(--edge)}
+.card.wide .frame{width:520px;height:auto;min-height:300px;border-bottom:none;border-right:1px solid var(--edge);flex:none}
+.frame iframe{width:1440px;height:1000px;border:0;transform-origin:0 0;pointer-events:none;position:absolute;top:0;left:0}
+.body{padding:13px 17px 15px;display:flex;flex-direction:column;gap:7px;flex:1}
+.card h3{font-size:15.5px;font-weight:650}
+.card p{color:var(--mut);font-size:13.5px}
+.card .open{margin-top:auto;padding-top:7px;font-weight:550;font-size:13.5px}
+.list{background:var(--card);border:1px solid var(--edge);border-radius:10px;padding:16px 22px;
+  box-shadow:var(--shadow);max-width:900px}
+.list ul{margin:6px 0 0 18px;color:var(--mut);font-size:14px;display:grid;gap:5px}
+.list b{color:var(--ink)}
+.icons{display:flex;gap:22px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.ico{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--mut)}
+.ico img{width:26px;height:26px;border-radius:7px;border:1px solid var(--edge);background:#fff}
+.ico .fall{width:26px;height:26px;border-radius:7px;background:#7A8496;color:#fff;font-weight:700;
+  display:flex;align-items:center;justify-content:center;font-size:13px}
+.meta{margin-top:24px;color:var(--faint);font-size:13px;max-width:900px}
+
+/* ---- narrower windows: reflow instead of overflowing ---- */
+@media (max-width:1400px){
+  .shell{grid-template-columns:minmax(0,1fr)!important}
+  .rail,.feedcol,.panel{position:static!important}
+  .cols{grid-template-columns:minmax(0,1fr)!important}
+}
+@media (max-width:1150px){
+  .quota{grid-template-columns:1fr!important}
+  .bots,.hosts,.grid,.botrow,.cards{grid-template-columns:1fr 1fr!important}
+  .kv,.set,.flat{grid-template-columns:minmax(0,1fr)!important;gap:5px!important}
+  .kv .prv,.set .ov,.flat .ov{text-align:left!important}
+  .c-host{display:none}
+  table.tools th.h{width:auto}
+}
+@media (max-width:940px){
+  .bots,.hosts,.grid,.botrow,.cards{grid-template-columns:1fr!important}
+  .tradeoff{grid-template-columns:1fr!important}
+  .c-att{display:none}
+}
+</style>
+</head>
+<body>
+
+<div class="brand"><span class="crq">crq</span><span class="pill">Direction picked: Operations Desk</span></div>
+<h1>Code Review Queue — live dashboard mockups</h1>
+<p class="sub">Static design mockups of the planned web dashboard. They cross-link like a prototype:
+nav, repo names, the ⚙ quick-settings gear and PR links all work. Everything renders one frozen
+moment — <span class="mono">Mon 2026-07-27 13:51:26 CEST</span> — with the CodeRabbit quota blocked,
+one review in flight, four PRs queued for different reasons, one held, a fix session running and one
+broken host. Countdowns tick live.</p>
+
+<div class="list" style="max-width:none;margin-bottom:18px;border-color:#C9D8EF;background:#EBF1FA">
+  <b>New: 4 UX options per page (8 pages, 32 options).</b> Same styling, different structure — layout, grouping, ordering
+  and how much is visible at once. <a href="options.html"><b>Open the options index →</b></a>
+  <div style="margin-top:6px;font-size:13.5px;color:#5B6472">
+    <a href="overview-options.html">Overview</a> ·
+    <a href="settings-options.html">Per-repo settings</a> ·
+    <a href="add-repo-options.html">Add repo</a> ·
+    <a href="setup-options.html">Setup</a> ·
+    <a href="bot-guide-options.html">Bot guide</a> ·
+    <a href="pr-detail-options.html">PR detail</a> ·
+    <a href="fleet-settings-options.html">Fleet settings</a> ·
+    <a href="first-run-options.html">First run</a>
+  </div>
+</div>
+
+<div class="cards">
+  <div class="card wide">
+    <div class="frame"><iframe src="overview.html" style="transform:scale(0.361)" tabindex="-1" title="Preview: Overview"></iframe></div>
+    <div class="body">
+      <h3>Overview</h3>
+      <p>The queue at a glance: quota banner with countdown, needs-attention, in-flight round with
+      per-bot state, the queue with its wait reasons, held PRs, fix sessions with per-host health,
+      and a live activity feed.</p>
+      <p><b>Try it:</b> the ⚙ next to any repo name opens the quick-settings slide-over
+      <i>for that repo</i> — × or the backdrop closes it. It starts open so it isn't missed.</p>
+      <div class="open"><a href="overview.html">Open Overview →</a></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="frame"><iframe src="settings.html" style="transform:scale(0.283)" tabindex="-1" title="Preview: Repos"></iframe></div>
+    <div class="body">
+      <h3>Repos &amp; settings</h3>
+      <p>The rail on the left picks the repo; the panel holds Runs/Required per bot, trigger modes,
+      the fix-agent block and the unenroll contract. The save is painted with its impact preview open.</p>
+      <div class="open"><a href="settings.html">Open →</a></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="frame"><iframe src="add-repo.html" style="transform:scale(0.283)" tabindex="-1" title="Preview: Add repo"></iframe></div>
+    <div class="body">
+      <h3>Add repo</h3>
+      <p>Enrollment in one save. The active step is the start policy — what happens to the PRs that
+      are already open, with the quota cost spelled out before you commit.</p>
+      <div class="open"><a href="add-repo.html">Open →</a></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="frame"><iframe src="bot-guide.html" style="transform:scale(0.283)" tabindex="-1" title="Preview: Bots"></iframe></div>
+    <div class="body">
+      <h3>Review bot guide</h3>
+      <p>Compare the four bots, see which are actually set up, and sign up. Suggestions state their
+      criterion; signup links that are referral links say so.</p>
+      <div class="open"><a href="bot-guide.html">Open →</a></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="frame"><iframe src="setup.html" style="transform:scale(0.283)" tabindex="-1" title="Preview: Setup"></iframe></div>
+    <div class="body">
+      <h3>Setup</h3>
+      <p>Readiness that stays useful: GitHub access, the required and recommended CLI tools as a
+      tool&nbsp;&times;&nbsp;host matrix, services per host, the queue's home, bots and repos.</p>
+      <div class="open"><a href="setup.html">Open &rarr;</a></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="frame"><iframe src="pr-detail.html" style="transform:scale(0.283)" tabindex="-1" title="Preview: PR detail"></iframe></div>
+    <div class="body">
+      <h3>PR detail</h3>
+      <p>Carrier#85 mid-fix: findings grouped by severity with thread state, the running fix session,
+      round history, and the cached-observation banner.</p>
+      <div class="open"><a href="pr-detail.html">Open →</a></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="frame"><iframe src="fleet-settings.html" style="transform:scale(0.283)" tabindex="-1" title="Preview: Fleet settings"></iframe></div>
+    <div class="body">
+      <h3>Fleet settings</h3>
+      <p>The defaults every repo inherits — reviewers, autofix, pacing, auto-review scope. Each row says
+      how many repos override it, and the save shows its blast radius before it commits.</p>
+      <div class="open"><a href="fleet-settings.html">Open &rarr;</a></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="frame"><iframe src="first-run.html" style="transform:scale(0.283)" tabindex="-1" title="Preview: First run"></iframe></div>
+    <div class="body">
+      <h3>First run</h3>
+      <p>The empty state before anything exists: no state ref, no bots, no repos. Plain language only &mdash;
+      no queue vocabulary before you&rsquo;ve enrolled anything.</p>
+      <div class="open"><a href="first-run.html">Open &rarr;</a></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="frame"><iframe src="pr-detail-converged.html" style="transform:scale(0.283)" tabindex="-1" title="Preview: Converged PR"></iframe></div>
+    <div class="body">
+      <h3>PR detail &mdash; converged</h3>
+      <p>The settled counterpart: a verdict instead of a worklist, and declined findings showing the
+      bot&rsquo;s reply &mdash; withdrawn or stood by.</p>
+      <div class="open"><a href="pr-detail-converged.html">Open &rarr;</a></div>
+    </div>
+  </div>
+</div>
+
+<h2>Real logos, real repos</h2>
+<div class="list">
+  Bot logos are the actual GitHub avatars of the accounts crq matches on; repo icons are the real
+  favicons pulled from those repositories. A repo with no favicon falls back to a letter tile.
+  <div class="icons">
+    <span class="ico"><img src="icons/bot-coderabbit.png" alt="">CodeRabbit</span>
+    <span class="ico"><img src="icons/bot-codex.png" alt="">Codex</span>
+    <span class="ico"><img src="icons/bot-bugbot.png" alt="">Cursor Bugbot</span>
+    <span class="ico"><img src="icons/bot-macroscope.png" alt="">Macroscope</span>
+    <span class="ico"><img src="icons/repo-crq.png" alt="">coderabbit-queue</span>
+    <span class="ico"><img src="icons/repo-pengeoversikt.svg" alt="">pengeoversikt</span>
+    <span class="ico"><img src="icons/repo-iptvchecker.png" alt="">IPTVChecker</span>
+    <span class="ico"><img src="icons/repo-carrier.png" alt="">Carrier</span>
+    <span class="ico"><img src="icons/repo-sportarr.png" alt="">Sportarr</span>
+    <span class="ico"><img src="icons/repo-bonusvarsler.png" alt="">BonusVarsler</span>
+    <span class="ico"><img src="icons/repo-musikkfest.png" alt="">musikkfest</span>
+    <span class="ico"><span class="fall">H</span>ha-gradient-card <i>(no favicon)</i></span>
+  </div>
+</div>
+
+<p class="meta">These are design artifacts, not the frontend. Production will be a React SPA served by
+a new <span class="mono">crq serve</span> command, reading the same state the GitHub-issue dashboard
+renders from. The issue dashboard stays exactly as it is — the web dashboard is optional.</p>
+
+</body>
+</html>

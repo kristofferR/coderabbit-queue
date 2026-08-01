@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Per-repo settings — 4 UX options</title>
+<link rel="icon" href="icons/repo-crq.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,650;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="opt.css">
+<style>
+/* one variant at a time — the jump chips are radios, not anchors */
+#O-A,#O-B,#O-C,#O-D{position:absolute;left:-9999px}
+.opt{display:none}
+#O-A:checked ~ #a,#O-B:checked ~ #b,#O-C:checked ~ #c,#O-D:checked ~ #d{display:block}
+.optbar .jump label{font-size:12.5px;font-weight:600;color:var(--mut);border:1px solid var(--edge);
+  border-radius:8px;padding:3px 12px;cursor:pointer}
+.optbar .jump label:hover{border-color:var(--acc-edge);color:var(--acc);background:var(--acc-bg)}
+#O-A:checked ~ .optbar label[for="O-A"],#O-B:checked ~ .optbar label[for="O-B"],
+#O-C:checked ~ .optbar label[for="O-C"],#O-D:checked ~ .optbar label[for="O-D"]{
+  background:var(--ink);border-color:var(--ink);color:#fff}
+.opt{border-top:none;padding-top:18px}
+</style>
+</head>
+<body>
+<input type="radio" name="opt" id="O-A" checked><input type="radio" name="opt" id="O-B"><input type="radio" name="opt" id="O-C"><input type="radio" name="opt" id="O-D">
+
+<div class="optbar">
+  <span class="crq">crq</span>
+  <h1>Per-repo settings</h1>
+  <span class="sub">4 UX options · same styling, different structure</span>
+  <span class="jump"><label for="O-A">A</label><label for="O-B">B</label><label for="O-C">C</label><label for="O-D">D</label>
+    <a class="back" href="options.html">All pages ↩</a></span>
+</div>
+
+<div class="intro">
+  <p>The job: pick a repository, see what it inherits from the fleet, change what should differ, and
+  understand the consequence before saving. The four options differ in <b>how you get to a repo</b> and
+  <b>how much you see at once</b> — everything else (controls, wording, provenance, impact preview) is
+  held constant.</p>
+</div>
+
+<!-- ============ OPTION A ============ -->
+<section class="opt" id="a">
+  <div class="opthd">
+    <span class="optlet">A</span>
+    <div><h2>Rail + long form</h2>
+      <p class="why">A list of repos on the left, and the selected repo's settings as one long scrolling
+      page. What we have today.</p></div>
+    <div class="tags"><span class="pill mut sm plain">fleet visible</span>
+      <span class="pill mut sm plain">no hidden state</span><span class="pill mut sm plain">long scroll</span></div>
+  </div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Nothing is hidden behind a tab — you can read a repo's whole configuration in
+      one pass, and the rail keeps the rest of the fleet in view for comparison.</div>
+    <div class="bad"><b>Costly</b> The page gets long as settings grow; the advanced half is far from the
+      basics, and the rail eats horizontal room the forms could use.</div>
+  </div>
+
+  <div class="frame">
+    <div style="display:grid;grid-template-columns:270px 1fr;gap:12px">
+      <div class="card" style="margin:0">
+        <div class="hd"><h3>Repos</h3><span class="sum num">7</span><span class="end"><button class="btn sm">+ Add</button></span></div>
+        <div style="padding:0 0 6px">
+          <div class="rowline" style="padding:8px 14px;background:var(--acc-bg);border-left:3px solid var(--acc)">
+            <img class="rico" src="icons/repo-crq.png" alt=""><span class="nm">coderabbit-queue</span>
+            <span class="end pill ok sm">Managed</span></div>
+          <div class="rowline" style="padding:8px 16px"><img class="rico" src="icons/repo-pengeoversikt.svg" alt="">
+            pengeoversikt <span class="end pill ok sm">Managed</span></div>
+          <div class="rowline" style="padding:8px 16px"><img class="rico" src="icons/repo-iptvchecker.png" alt="">
+            IPTVChecker <span class="end pill acc sm">Env</span></div>
+          <div class="rowline" style="padding:8px 16px"><img class="rico" src="icons/repo-carrier.png" alt="">
+            Carrier <span class="end pill ok sm">Managed</span></div>
+          <div class="rowline" style="padding:8px 16px"><img class="rico" src="icons/repo-sportarr.png" alt="">
+            Sportarr <span class="end pill ok sm">Managed</span></div>
+          <div class="rowline" style="padding:8px 16px"><span class="rfall">H</span>
+            ha-gradient-card <span class="end pill ok sm">Managed</span></div>
+        </div>
+      </div>
+
+      <div>
+        <div class="card">
+          <div class="hd"><img class="rico lg" src="icons/repo-crq.png" alt="">
+            <h3 class="mono">kristofferR/coderabbit-queue</h3><span class="pill ok sm">Managed · On</span>
+            <span class="end"><span class="pill warn sm">Override</span><a href="#a">Clear all</a></span></div>
+          <div class="body">
+            <table class="t">
+              <thead><tr><th>Reviewer</th><th class="c">Runs</th><th class="c">Required</th><th>Trigger</th><th>Status</th></tr></thead>
+              <tbody>
+                <tr><td><div class="who"><img class="bico" src="icons/bot-coderabbit.png" alt="">
+                  <div><div class="nm">CodeRabbit</div><div class="st">primary · metered</div></div></div></td>
+                  <td class="c"><span class="sw on lock"></span></td><td class="c"><span class="sw on"></span></td>
+                  <td class="dim">via the queue</td><td><span class="pill ok sm">Seen 13:50</span></td></tr>
+                <tr><td><div class="who"><img class="bico" src="icons/bot-codex.png" alt=""><span class="nm">Codex</span></div></td>
+                  <td class="c"><span class="sw on"></span></td><td class="c"><span class="sw on"></span></td>
+                  <td><span class="seg"><span>Never</span><span>Self-heal</span><span class="on">Always</span></span></td>
+                  <td><span class="pill ok sm">Seen 13:50</span></td></tr>
+                <tr><td><div class="who"><img class="bico" src="icons/bot-bugbot.png" alt=""><span class="nm">Cursor Bugbot</span></div></td>
+                  <td class="c"><span class="sw on"></span></td><td class="c"><span class="sw"></span></td>
+                  <td><span class="seg"><span>Never</span><span class="on">Self-heal</span><span>Always</span></span></td>
+                  <td><span class="pill ok sm">Seen 13:50</span></td></tr>
+                <tr><td><div class="who"><img class="bico" src="icons/bot-macroscope.png" alt=""><span class="nm">Macroscope</span></div></td>
+                  <td class="c"><span class="sw on dirty"></span></td><td class="c"><span class="sw"></span></td>
+                  <td><span class="seg"><span>Never</span><span class="on">Self-heal</span><span>Always</span></span></td>
+                  <td><span class="pill mut sm">Not verified</span></td></tr>
+              </tbody>
+            </table>
+            <div class="impact" style="margin-top:12px"><b>Saving would:</b> enable Macroscope here and
+              trigger it on 2 open PRs at their current heads. No metered reviews spent.</div>
+            <div style="display:flex;gap:9px;margin-top:12px;align-items:center">
+              <button class="btn">Save reviewers</button><button class="btn ghost">Discard</button>
+              <span class="note" style="color:var(--warn)">1 change pending</span></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="hd"><h3>Autofix</h3><span class="sum">…continues below: agent, model, effort,
+            attempts, prompt, holds, enrollment</span></div>
+          <div class="body"><div class="kv"><span class="k">Autofix for this repo</span>
+            <span><span class="seg"><span>Off</span><span>On</span><span class="on">Default (on)</span></span></span>
+            <span class="prv">fleet default</span></div>
+            <div class="kv"><span class="k">Fix agent</span><span><select><option>claude · sonnet · high</option></select></span>
+              <span class="prv">fleet default</span></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ OPTION B ============ -->
+<section class="opt" id="b">
+  <div class="opthd">
+    <span class="optlet">B</span>
+    <div><h2>Repo switcher + tabs</h2>
+      <p class="why">The repo is a dropdown in a header bar; settings are split across tabs, so each
+      screen is short and single-purpose.</p></div>
+    <div class="tags"><span class="pill mut sm plain">short screens</span>
+      <span class="pill mut sm plain">full width for forms</span><span class="pill mut sm plain">state hidden in tabs</span></div>
+  </div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> No scrolling to reach the advanced settings, and forms get the whole width.
+      Tab labels double as a map of what's configurable.</div>
+    <div class="bad"><b>Costly</b> You can't see a repo's whole configuration at once, and an unsaved change on
+      another tab is easy to forget — needs a per-tab dirty marker.</div>
+  </div>
+
+  <div class="frame tight">
+    <div class="card" style="margin:0;border:none;box-shadow:none;border-radius:0">
+      <div class="hd">
+        <img class="rico lg" src="icons/repo-crq.png" alt="">
+        <select style="font-size:13.5px;font-weight:600"><option>kristofferR/coderabbit-queue</option>
+          <option>kristofferR/pengeoversikt</option><option>kristofferR/Carrier</option></select>
+        <span class="pill ok sm">Managed · On</span><span class="pill warn sm">Override</span>
+        <span class="end"><span class="note">3 active rounds · public · Go</span></span>
+      </div>
+      <div class="tabs">
+        <a class="on" href="#b">Reviewers <span class="pill warn sm plain" style="margin-left:5px">1</span></a>
+        <a href="#b">Autofix</a><a href="#b">Held PRs</a><a href="#b">Enrollment</a><a href="#b">Activity</a>
+      </div>
+      <div class="body" style="padding:14px 16px 16px">
+        <table class="t">
+          <thead><tr><th>Reviewer</th><th class="c">Runs</th><th class="c">Required</th><th>Trigger</th>
+            <th>Self-heal grace</th><th>Status</th><th>Inherited?</th></tr></thead>
+          <tbody>
+            <tr><td><div class="who"><img class="bico" src="icons/bot-coderabbit.png" alt="">
+              <div><div class="nm">CodeRabbit</div><div class="st">primary · metered</div></div></div></td>
+              <td class="c"><span class="sw on lock"></span></td><td class="c"><span class="sw on"></span></td>
+              <td class="dim">via the queue</td><td class="dim">—</td>
+              <td><span class="pill ok sm">Seen 13:50</span></td><td class="note">fleet default</td></tr>
+            <tr><td><div class="who"><img class="bico" src="icons/bot-codex.png" alt=""><span class="nm">Codex</span></div></td>
+              <td class="c"><span class="sw on"></span></td><td class="c"><span class="sw on"></span></td>
+              <td><span class="seg"><span>Never</span><span>Self-heal</span><span class="on">Always</span></span></td>
+              <td class="dim">—</td><td><span class="pill ok sm">Seen 13:50</span></td>
+              <td class="note"><span class="pill warn sm">override</span></td></tr>
+            <tr><td><div class="who"><img class="bico" src="icons/bot-bugbot.png" alt=""><span class="nm">Cursor Bugbot</span></div></td>
+              <td class="c"><span class="sw on"></span></td><td class="c"><span class="sw"></span></td>
+              <td><span class="seg"><span>Never</span><span class="on">Self-heal</span><span>Always</span></span></td>
+              <td><span class="dur"><span>−</span><b>10m</b><span>+</span></span></td>
+              <td><span class="pill ok sm">Seen 13:50</span></td><td class="note">fleet default</td></tr>
+            <tr><td><div class="who"><img class="bico" src="icons/bot-macroscope.png" alt=""><span class="nm">Macroscope</span></div></td>
+              <td class="c"><span class="sw on dirty"></span></td><td class="c"><span class="sw"></span></td>
+              <td><span class="seg"><span>Never</span><span class="on">Self-heal</span><span>Always</span></span></td>
+              <td><span class="dur"><span>−</span><b>10m</b><span>+</span></span></td>
+              <td><span class="pill mut sm">Not verified</span></td><td class="note">fleet default</td></tr>
+          </tbody>
+        </table>
+        <div class="impact" style="margin-top:12px"><b>Saving would:</b> enable Macroscope here and trigger
+          it on 2 open PRs at their current heads.</div>
+        <div style="display:flex;gap:9px;margin-top:12px;align-items:center">
+          <button class="btn">Save reviewers</button><button class="btn ghost">Discard</button>
+          <span class="note" style="color:var(--warn)">1 unsaved change on this tab</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ OPTION C ============ -->
+<section class="opt" id="c">
+  <div class="opthd">
+    <span class="optlet">C</span>
+    <div><h2>Fleet table, expand a row to edit</h2>
+      <p class="why">No rail and no separate page: every repo is a row with its key settings as columns.
+      Clicking a row expands it in place for editing.</p></div>
+    <div class="tags"><span class="pill mut sm plain">compare across repos</span>
+      <span class="pill mut sm plain">spot the odd one out</span><span class="pill mut sm plain">cramped editing</span></div>
+  </div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Answers questions the other options can't: <i>which repos have Bugbot off?
+      which still inherit everything?</i> Drift across the fleet is visible at a glance.</div>
+    <div class="bad"><b>Costly</b> Only a few settings fit as columns, so the deep ones live inside the expander;
+      with many repos the table itself becomes the scroll problem.</div>
+  </div>
+
+  <div class="frame tight">
+    <div style="background:var(--card);border-radius:8px;overflow:hidden">
+      <div style="display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--edge)">
+        <h3 style="font-size:14px;font-weight:650">Repositories</h3><span class="note">7 · 1 with overrides</span>
+        <span class="searchbox" style="margin-left:auto">⌕ filter…</span><button class="btn sm">+ Add repo</button>
+      </div>
+      <table class="t pad">
+        <thead><tr><th>Repository</th><th>Enrollment</th><th>Reviewers</th><th>Required</th>
+          <th>Autofix</th><th>Rounds</th><th></th></tr></thead>
+        <tbody>
+          <tr class="sel"><td><div class="who"><img class="rico" src="icons/repo-crq.png" alt="">
+            <span class="nm">coderabbit-queue</span><span class="pill warn sm">override</span></div></td>
+            <td><span class="pill ok sm">Managed</span></td>
+            <td><img class="bico sm" src="icons/bot-coderabbit.png" alt=""> <img class="bico sm" src="icons/bot-codex.png" alt="">
+              <img class="bico sm" src="icons/bot-bugbot.png" alt=""></td>
+            <td class="note">CodeRabbit + Codex</td><td><span class="pill ok sm">Default</span></td>
+            <td class="num">3</td><td class="dim">▾</td></tr>
+          <tr><td colspan="7" style="background:#FAFBFC;padding:0">
+            <div style="padding:12px 16px 14px">
+              <table class="t" style="max-width:760px">
+                <thead><tr><th>Reviewer</th><th class="c">Runs</th><th class="c">Required</th><th>Trigger</th></tr></thead>
+                <tbody>
+                  <tr><td><div class="who"><img class="bico" src="icons/bot-coderabbit.png" alt="">CodeRabbit</div></td>
+                    <td class="c"><span class="sw on lock"></span></td><td class="c"><span class="sw on"></span></td><td class="dim">via the queue</td></tr>
+                  <tr><td><div class="who"><img class="bico" src="icons/bot-codex.png" alt="">Codex</div></td>
+                    <td class="c"><span class="sw on"></span></td><td class="c"><span class="sw on"></span></td>
+                    <td><span class="seg"><span>Never</span><span>Self-heal</span><span class="on">Always</span></span></td></tr>
+                  <tr><td><div class="who"><img class="bico" src="icons/bot-macroscope.png" alt="">Macroscope</div></td>
+                    <td class="c"><span class="sw on dirty"></span></td><td class="c"><span class="sw"></span></td>
+                    <td><span class="seg"><span>Never</span><span class="on">Self-heal</span><span>Always</span></span></td></tr>
+                </tbody>
+              </table>
+              <div class="impact" style="margin-top:10px;max-width:760px"><b>Saving would:</b> enable
+                Macroscope here and trigger it on 2 open PRs.</div>
+              <div style="display:flex;gap:9px;margin-top:10px;align-items:center">
+                <button class="btn sm">Save</button><button class="btn ghost sm">Discard</button>
+                <a href="#c" style="font-size:12.5px">Advanced settings (agent, model, prompt, holds) →</a></div>
+            </div></td></tr>
+          <tr><td><div class="who"><img class="rico" src="icons/repo-pengeoversikt.svg" alt="">
+            <span class="nm">pengeoversikt</span></div></td>
+            <td><span class="pill ok sm">Managed</span></td>
+            <td><img class="bico sm" src="icons/bot-coderabbit.png" alt=""> <img class="bico sm" src="icons/bot-codex.png" alt="">
+              <img class="bico sm" src="icons/bot-bugbot.png" alt=""></td>
+            <td class="note">CodeRabbit</td><td><span class="pill ok sm">Default</span></td><td class="num">1</td><td class="dim">▸</td></tr>
+          <tr><td><div class="who"><img class="rico" src="icons/repo-iptvchecker.png" alt="">
+            <span class="nm">IPTVChecker</span></div></td>
+            <td><span class="pill acc sm">Env · mbp</span></td>
+            <td><img class="bico sm" src="icons/bot-coderabbit.png" alt=""> <img class="bico sm" src="icons/bot-codex.png" alt="">
+              <img class="bico sm" src="icons/bot-bugbot.png" alt=""></td>
+            <td class="note">CodeRabbit</td><td><span class="pill ok sm">Default</span></td><td class="num">1</td><td class="dim">▸</td></tr>
+          <tr><td><div class="who"><img class="rico" src="icons/repo-carrier.png" alt="">
+            <span class="nm">Carrier</span></div></td>
+            <td><span class="pill ok sm">Managed</span></td>
+            <td><img class="bico sm" src="icons/bot-coderabbit.png" alt=""> <img class="bico sm" src="icons/bot-codex.png" alt=""></td>
+            <td class="note">CodeRabbit</td><td><span class="pill warn sm">Off — “noisy”</span></td><td class="num">1</td><td class="dim">▸</td></tr>
+          <tr><td><div class="who"><span class="rfall">H</span><span class="nm">ha-gradient-card</span></div></td>
+            <td><span class="pill ok sm">Managed</span></td>
+            <td><img class="bico sm" src="icons/bot-coderabbit.png" alt=""> <img class="bico sm" src="icons/bot-codex.png" alt="">
+              <img class="bico sm" src="icons/bot-bugbot.png" alt=""></td>
+            <td class="note">CodeRabbit</td><td><span class="pill ok sm">Default</span></td><td class="num">1 held</td><td class="dim">▸</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ============ OPTION D ============ -->
+<section class="opt" id="d">
+  <div class="opthd">
+    <span class="optlet">D</span>
+    <div><h2>Bulk matrix with multi-select</h2>
+      <p class="why">Repos down, settings across. Select several repos and change them together; deep
+      per-repo configuration lives one click away.</p></div>
+    <div class="tags"><span class="pill mut sm plain">fleet-scale edits</span>
+      <span class="pill mut sm plain">one save, many repos</span><span class="pill mut sm plain">easy to over-apply</span></div>
+  </div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> "Turn Macroscope on everywhere except Carrier" is two clicks instead of six
+      visits. Ideal once the fleet grows past a handful of repos.</div>
+    <div class="bad"><b>Costly</b> Bulk edits are the easiest way to spend quota by accident, so the impact
+      preview has to carry more weight — and per-repo nuance is pushed off-screen.</div>
+  </div>
+
+  <div class="frame tight">
+    <div style="background:var(--card);border-radius:8px;overflow:hidden">
+      <div style="display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--edge)">
+        <h3 style="font-size:14px;font-weight:650">Reviewers across the fleet</h3>
+        <span class="pill acc sm">3 repos selected</span>
+        <span class="end" style="margin-left:auto;display:flex;gap:8px">
+          <button class="btn sm">Apply to selected…</button><button class="btn ghost sm">Clear</button></span>
+      </div>
+      <table class="t pad">
+        <thead><tr><th style="width:26px"></th><th>Repository</th>
+          <th class="c"><img class="bico sm" src="icons/bot-coderabbit.png" alt="" title="CodeRabbit"> CR</th>
+          <th class="c"><img class="bico sm" src="icons/bot-codex.png" alt="" title="Codex"> CX</th>
+          <th class="c"><img class="bico sm" src="icons/bot-bugbot.png" alt="" title="Bugbot"> BB</th>
+          <th class="c"><img class="bico sm" src="icons/bot-macroscope.png" alt="" title="Macroscope"> MS</th>
+          <th>Autofix</th><th></th></tr></thead>
+        <tbody>
+          <tr class="sel"><td><input type="checkbox" checked></td>
+            <td><div class="who"><img class="rico" src="icons/repo-pengeoversikt.svg" alt=""><span class="nm">pengeoversikt</span></div></td>
+            <td class="c"><span class="sw on lock"></span></td><td class="c"><span class="sw on"></span></td>
+            <td class="c"><span class="sw on"></span></td><td class="c"><span class="sw dirty"></span></td>
+            <td><span class="pill ok sm">Default</span></td><td><a href="#d" class="note">open ↗</a></td></tr>
+          <tr class="sel"><td><input type="checkbox" checked></td>
+            <td><div class="who"><img class="rico" src="icons/repo-iptvchecker.png" alt=""><span class="nm">IPTVChecker</span></div></td>
+            <td class="c"><span class="sw on lock"></span></td><td class="c"><span class="sw on"></span></td>
+            <td class="c"><span class="sw on"></span></td><td class="c"><span class="sw dirty"></span></td>
+            <td><span class="pill ok sm">Default</span></td><td><a href="#d" class="note">open ↗</a></td></tr>
+          <tr class="sel"><td><input type="checkbox" checked></td>
+            <td><div class="who"><img class="rico" src="icons/repo-sportarr.png" alt=""><span class="nm">Sportarr</span></div></td>
+            <td class="c"><span class="sw on lock"></span></td><td class="c"><span class="sw on"></span></td>
+            <td class="c"><span class="sw on"></span></td><td class="c"><span class="sw dirty"></span></td>
+            <td><span class="pill ok sm">Default</span></td><td><a href="#d" class="note">open ↗</a></td></tr>
+          <tr><td><input type="checkbox"></td>
+            <td><div class="who"><img class="rico" src="icons/repo-crq.png" alt=""><span class="nm">coderabbit-queue</span>
+              <span class="pill warn sm">override</span></div></td>
+            <td class="c"><span class="sw on lock"></span></td><td class="c"><span class="sw on"></span></td>
+            <td class="c"><span class="sw on"></span></td><td class="c"><span class="sw"></span></td>
+            <td><span class="pill ok sm">Default</span></td><td><a href="#d" class="note">open ↗</a></td></tr>
+          <tr><td><input type="checkbox"></td>
+            <td><div class="who"><img class="rico" src="icons/repo-carrier.png" alt=""><span class="nm">Carrier</span></div></td>
+            <td class="c"><span class="sw on lock"></span></td><td class="c"><span class="sw on"></span></td>
+            <td class="c"><span class="sw"></span></td><td class="c"><span class="sw"></span></td>
+            <td><span class="pill warn sm">Off</span></td><td><a href="#d" class="note">open ↗</a></td></tr>
+        </tbody>
+      </table>
+      <div style="padding:12px 16px 14px;border-top:1px solid var(--edge)">
+        <div class="impact"><b>Applying to 3 repos would:</b> enable Macroscope on pengeoversikt,
+          IPTVChecker and Sportarr, and trigger it once on <b>4 open PRs</b> at their current heads.
+          No metered reviews are spent. <br>
+          <span class="dim">Carrier and coderabbit-queue are not selected and keep their current setup.</span></div>
+        <div style="display:flex;gap:9px;margin-top:11px;align-items:center">
+          <button class="btn">Apply to 3 repos</button><button class="btn ghost">Cancel</button>
+          <span class="note">or <a href="#d">edit them one at a time</a></span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<details class="notes">
+  <summary>Notes on these options</summary>
+  <ul>
+    <li>Identical styling by design — judge structure, ordering and how much is visible at once.</li>
+    <li>Every option keeps the same three guarantees: Runs vs Required stay separate, provenance
+      (fleet default vs override) is visible, and a save states its consequence first.</li>
+    <li>They can be combined: C or D as the Repos landing page, with A or B as the single-repo view.</li>
+  </ul>
+</details>
+
+</body>
+</html>

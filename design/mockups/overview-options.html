@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Overview — 4 UX options</title>
+<link rel="icon" href="icons/repo-crq.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,650;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="opt.css">
+<style>
+.bm{position:relative;display:inline-block;width:19px;height:19px}
+.bm img{width:19px;height:19px;border-radius:5px;display:block;border:1px solid var(--edge);background:#fff}
+.bm i{position:absolute;right:-3px;bottom:-3px;width:11px;height:11px;border-radius:50%;font-size:7px;
+  font-style:normal;display:flex;align-items:center;justify-content:center;color:#fff;
+  border:1.5px solid var(--card);line-height:1}
+.bm.y i{background:var(--ok)}.bm.p i{background:var(--warn-fg)}
+.bm.n{opacity:.34}.bm.n i{background:var(--faint)}
+.marks{display:inline-flex;gap:9px;align-items:center}
+.lane{background:var(--card);border:1px solid var(--edge);border-radius:var(--r);box-shadow:var(--shadow)}
+.lane>.h{padding:11px 14px 9px;border-bottom:1px solid #EEF0F3}
+.lane>.h h3{font-size:13.5px;font-weight:650;display:flex;align-items:center;gap:8px}
+.lane>.h .sub{font-size:11.5px;color:var(--faint);margin-top:2px}
+.lane>.b{padding:9px 14px 12px}
+.item{padding:8px 0;border-bottom:1px solid #EEF0F3;font-size:12.5px}
+.item:last-child{border-bottom:none}
+.item .t{font-weight:550;font-size:13px;display:flex;align-items:center;gap:6px}
+.item .m{color:var(--mut);margin-top:2px}
+.gate{background:var(--warn-bg);border:1px solid var(--warn-edge);border-radius:7px;padding:7px 11px;
+  font-size:12px;color:var(--warn);margin-bottom:9px}
+.feedline{display:flex;gap:11px;align-items:flex-start;padding:8px 0;border-bottom:1px solid #EEF0F3;font-size:13px}
+.feedline:last-child{border-bottom:none}
+.feedline .t{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--faint);flex:none;width:56px;padding-top:2px}
+.feedline .ic{flex:none}
+.feedline .x{color:var(--mut);font-size:12px}
+.hero{background:var(--card);border:1px solid var(--edge);border-radius:var(--r);box-shadow:var(--shadow);
+  padding:18px 20px}
+.hero h2{font-size:19px;font-weight:650}
+.hero .sub{color:var(--mut);font-size:13px;margin-top:4px}
+
+/* one variant at a time — the jump chips are radios, not anchors */
+#O-A,#O-B,#O-C,#O-D{position:absolute;left:-9999px}
+.opt{display:none}
+#O-A:checked ~ #a,#O-B:checked ~ #b,#O-C:checked ~ #c,#O-D:checked ~ #d{display:block}
+.optbar .jump label{font-size:12.5px;font-weight:600;color:var(--mut);border:1px solid var(--edge);
+  border-radius:8px;padding:3px 12px;cursor:pointer}
+.optbar .jump label:hover{border-color:var(--acc-edge);color:var(--acc);background:var(--acc-bg)}
+#O-A:checked ~ .optbar label[for="O-A"],#O-B:checked ~ .optbar label[for="O-B"],
+#O-C:checked ~ .optbar label[for="O-C"],#O-D:checked ~ .optbar label[for="O-D"]{
+  background:var(--ink);border-color:var(--ink);color:#fff}
+.opt{border-top:none;padding-top:18px}
+</style>
+</head>
+<body>
+<input type="radio" name="opt" id="O-A" checked><input type="radio" name="opt" id="O-B"><input type="radio" name="opt" id="O-C"><input type="radio" name="opt" id="O-D">
+
+<div class="optbar">
+  <span class="crq">crq</span><h1>Overview</h1>
+  <span class="sub">4 UX options · same styling, different structure</span>
+  <span class="jump"><label for="O-A">A</label><label for="O-B">B</label><label for="O-C">C</label><label for="O-D">D</label>
+    <a class="back" href="options.html">All pages ↩</a></span>
+</div>
+
+<div class="intro">
+  <p>The job: answer “is anything stuck, and does it need me?” in about a second — while the quota is
+  blocked, one review is running, four PRs wait for different reasons, one is held, a fix session is
+  working, and one host is broken. Same moment in all four.</p>
+</div>
+
+<!-- A -->
+<section class="opt" id="a">
+  <div class="opthd"><span class="optlet">A</span>
+    <div><h2>One table, every PR</h2>
+      <p class="why">No sections. Every pull request crq knows about is a row, with its state and reason
+      as columns you can sort and filter.</p></div>
+    <div class="tags"><span class="pill mut sm plain">maximum density</span><span class="pill mut sm plain">sortable</span>
+      <span class="pill mut sm plain">flattens meaning</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Everything on one screen with no scrolling between sections, and you can
+      re-sort to ask your own questions — by age, by host, by why-it's-waiting. Scales best as the fleet grows.</div>
+    <div class="bad"><b>Costly</b> “In flight”, “queued” and “held” become just values in a column, so the shape of
+      the queue is something you read rather than see. The one broken host has to fight for attention.</div></div>
+
+  <div class="frame">
+    <div class="card" style="margin:0 0 10px"><div class="hd" style="border-bottom:none;padding-bottom:11px">
+      <span class="pill warn">CodeRabbit quota blocked</span>
+      <span class="num" style="font-size:17px;font-weight:650;color:var(--warn-fg)">−41:15</span>
+      <span class="note">reopens 14:32 · co-review and autofix continue</span>
+      <span class="end" style="margin-left:auto"><span class="pill bad sm">atlas failing</span>
+        <span class="note">quota 0 · slot open · leader mbp · rev 4182</span></span></div></div>
+    <div class="card" style="margin:0">
+      <div class="hd"><h3>All pull requests</h3><span class="sum">7</span>
+        <span class="end" style="margin-left:auto;gap:6px">
+          <span class="searchbox">⌕ filter…</span>
+          <span class="note">sort: <b>state</b> · <a href="#a">age</a> · <a href="#a">host</a></span></span></div>
+      <table class="t pad">
+        <thead><tr><th>Pull request</th><th>Head</th><th>State</th><th>Why / next</th><th>Reviewers</th>
+          <th class="c">Att.</th><th>Host</th><th>Age</th></tr></thead>
+        <tbody>
+          <tr><td><div class="who"><img class="rico" src="icons/repo-crq.png" alt=""><span class="nm">coderabbit-queue#141</span></div></td>
+            <td class="mono note">9f3c2a1d7</td><td><span class="pill ok sm">Reviewing</span></td>
+            <td>waiting on CodeRabbit + Bugbot · deadline <b class="num">−13:32</b></td>
+            <td><span class="marks"><span class="bm y"><img src="icons/bot-coderabbit.png" alt=""><i>✓</i></span>
+              <span class="bm y"><img src="icons/bot-codex.png" alt=""><i>✓</i></span>
+              <span class="bm p"><img src="icons/bot-bugbot.png" alt=""><i>⏳</i></span>
+              <span class="bm n"><img src="icons/bot-macroscope.png" alt=""><i>—</i></span></span></td>
+            <td class="c num">1</td><td class="mono note">mbp</td><td class="num note">1m</td></tr>
+          <tr><td><div class="who"><img class="rico" src="icons/repo-carrier.png" alt=""><span class="nm">Carrier#85</span></div></td>
+            <td class="mono note">d94c17e6b</td><td><span class="pill ok sm">Fixing</span></td>
+            <td>agent working through 6 findings · <span class="num">9:49</span></td>
+            <td><span class="marks"><span class="bm y"><img src="icons/bot-coderabbit.png" alt=""><i>✓</i></span>
+              <span class="bm y"><img src="icons/bot-codex.png" alt=""><i>✓</i></span></span></td>
+            <td class="c num">1</td><td class="mono note">mbp</td><td class="num note">49m</td></tr>
+          <tr><td><div class="who"><img class="rico" src="icons/repo-crq.png" alt=""><span class="nm">coderabbit-queue#143</span></div></td>
+            <td class="mono note">4e8b0c25a</td><td><span class="pill acc sm">Queued 1</span></td>
+            <td>ready now — fires next pass <span class="note">(co-only, no quota)</span></td>
+            <td class="dim">—</td><td class="c num">0</td><td class="mono note">mbp</td><td class="num note">1m</td></tr>
+          <tr><td><div class="who"><img class="rico" src="icons/repo-pengeoversikt.svg" alt=""><span class="nm">pengeoversikt#87</span></div></td>
+            <td class="mono note">7d1f9e3b2</td><td><span class="pill mut sm">Queued</span></td>
+            <td><span class="pill warn sm">account blocked</span> until 14:32, then its turn</td>
+            <td class="dim">—</td><td class="c num">0</td><td class="mono note">atlas</td><td class="num note">7m</td></tr>
+          <tr><td><div class="who"><img class="rico" src="icons/repo-iptvchecker.png" alt=""><span class="nm">IPTVChecker#23</span></div></td>
+            <td class="mono note">c62a48d01</td><td><span class="pill mut sm">Queued</span></td>
+            <td><span class="pill mut sm">behind an earlier round</span> — follows #143</td>
+            <td class="dim">—</td><td class="c num">0</td><td class="mono note">mbp</td><td class="num note">4m</td></tr>
+          <tr><td><div class="who"><img class="rico" src="icons/repo-sportarr.png" alt=""><span class="nm">Sportarr#9</span></div></td>
+            <td class="mono note">08fa3d95c</td><td><span class="pill mut sm">Queued</span></td>
+            <td><span class="pill warn sm">cooling down</span> — retries after 14:51</td>
+            <td class="dim">—</td><td class="c num">2</td><td class="mono note">atlas</td><td class="num note">80m</td></tr>
+          <tr><td><div class="who"><span class="rfall">H</span><span class="nm">ha-gradient-card#31</span></div></td>
+            <td class="mono note">b3e51f7a9</td><td><span class="pill bad sm">Held</span></td>
+            <td>“migrating to HA 2026.7 first” · kristoffer@mbp</td>
+            <td class="dim">—</td><td class="c dim">—</td><td class="dim">—</td><td class="num note">53m</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- B -->
+<section class="opt" id="b">
+  <div class="opthd"><span class="optlet">B</span>
+    <div><h2>Three lanes</h2>
+      <p class="why">The screen is split the way the system actually works: metered review, free
+      co-review, and autofix — each with its own gate and its own work.</p></div>
+    <div class="tags"><span class="pill mut sm plain">teaches the model</span>
+      <span class="pill mut sm plain">quota block stays local</span><span class="pill mut sm plain">a PR can span lanes</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Makes the most misread fact structural: the quota block sits on <i>one</i> column
+      while the other two keep moving. Each lane can state its own gate once instead of repeating it per row.</div>
+    <div class="bad"><b>Costly</b> A PR being reviewed and fixed appears twice, which needs care to not read as
+      duplication — and three columns give each lane less room than one full-width list.</div></div>
+
+  <div class="frame">
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+      <div class="lane">
+        <div class="h"><h3><img class="bico sm" src="icons/bot-coderabbit.png" alt=""> Metered review
+          <span class="pill warn sm" style="margin-left:auto">blocked</span></h3>
+          <div class="sub">spends the shared quota · one at a time</div></div>
+        <div class="b">
+          <div class="gate"><b>Quota reopens in <span class="num" >41:15</span></b><br>
+            0 remaining · nothing metered fires until 14:32</div>
+          <div class="item"><div class="t"><img class="rico" src="icons/repo-crq.png" alt="">coderabbit-queue#141</div>
+            <div class="m"><span class="pill ok sm">Reviewing</span> CodeRabbit acked; waiting on its review ·
+              deadline <b class="num">−13:32</b></div></div>
+          <div class="item"><div class="t"><img class="rico" src="icons/repo-pengeoversikt.svg" alt="">pengeoversikt#87</div>
+            <div class="m">waiting for the window, then its turn</div></div>
+          <div class="item"><div class="t"><img class="rico" src="icons/repo-sportarr.png" alt="">Sportarr#9</div>
+            <div class="m">cooling down after 2 attempts · retries 14:51</div></div>
+          <div class="item"><div class="t dim">ha-gradient-card#31 <span class="pill bad sm">held</span></div>
+            <div class="m">“migrating to HA 2026.7 first”</div></div>
+        </div></div>
+
+      <div class="lane">
+        <div class="h"><h3><img class="bico sm" src="icons/bot-codex.png" alt=""> Co-review
+          <span class="pill ok sm" style="margin-left:auto">running</span></h3>
+          <div class="sub">free · unaffected by the quota</div></div>
+        <div class="b">
+          <div class="item"><div class="t"><img class="rico" src="icons/repo-crq.png" alt="">coderabbit-queue#143</div>
+            <div class="m"><span class="pill ok sm">Next up</span> ready now — fires on the next pass</div></div>
+          <div class="item"><div class="t"><img class="rico" src="icons/repo-iptvchecker.png" alt="">IPTVChecker#23</div>
+            <div class="m">ready, queued behind #143</div></div>
+          <div class="item"><div class="t"><img class="rico" src="icons/repo-crq.png" alt="">coderabbit-queue#141</div>
+            <div class="m"><span class="marks"><span class="bm y"><img src="icons/bot-codex.png" alt=""><i>✓</i></span>
+              <span class="bm p"><img src="icons/bot-bugbot.png" alt=""><i>⏳</i></span></span>
+              Codex done · Bugbot claimed 13:50</div></div>
+        </div></div>
+
+      <div class="lane">
+        <div class="h"><h3>🔧 Autofix <span class="pill bad sm" style="margin-left:auto">1 host down</span></h3>
+          <div class="sub">agents fixing findings on your machines</div></div>
+        <div class="b">
+          <div class="item"><div class="t"><img class="rico" src="icons/repo-carrier.png" alt="">Carrier#85</div>
+            <div class="m"><span class="pill ok sm">Running <span class="num">9:49</span></span>
+              mbp · attempt 1 of 3 · 6 findings</div></div>
+          <div class="item"><div class="t">Hosts</div>
+            <div class="m"><span class="pill ok sm">mbp</span> <span class="pill bad sm">atlas · 4 failures</span>
+              <span class="pill mut sm">wsl · quiet</span></div></div>
+          <div class="item"><div class="m"><b>atlas:</b> <span class="mono">claude: command not found</span>
+            — the agent isn't on the service PATH. <a href="setup-options.html">Fix →</a></div></div>
+        </div></div>
+    </div>
+  </div>
+</section>
+
+<!-- C -->
+<section class="opt" id="c">
+  <div class="opthd"><span class="optlet">C</span>
+    <div><h2>Only what needs you</h2>
+      <p class="why">One sentence answers the question, then a short list of things a person must decide.
+      Everything running normally is folded into a line.</p></div>
+    <div class="tags"><span class="pill mut sm plain">calmest</span><span class="pill mut sm plain">glanceable from afar</span>
+      <span class="pill mut sm plain">hides the queue</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> Most visits end in “nothing to do” — this makes that the answer in one line
+      instead of five tables you have to scan to conclude the same thing.</div>
+    <div class="bad"><b>Costly</b> When you <i>do</i> want to watch the queue move, you have to expand it. And the
+      page has to judge what counts as “needs you”, which is a rule that can be wrong.</div></div>
+
+  <div class="frame">
+    <div class="hero" style="margin-bottom:10px">
+      <div style="display:flex;align-items:center;gap:12px">
+        <span class="pill bad">1 thing needs you</span>
+        <h2>Autofix is broken on <span class="mono">atlas</span></h2></div>
+      <p class="sub">Four attempts failed with <span class="mono">claude: command not found</span> — the agent
+        is installed for your shell but not visible to the service. Reviews are unaffected.</p>
+      <div style="display:flex;gap:9px;margin-top:12px">
+        <a class="btn sm" href="setup-options.html">Show me the fix</a>
+        <button class="btn ghost sm">Use codex there instead</button>
+        <button class="btn ghost sm">Turn autofix off on atlas</button></div>
+    </div>
+    <div class="card" style="margin:0 0 10px"><div class="body" style="padding:11px 16px">
+      <div class="rowline" style="padding-top:0"><span class="pill warn sm">waiting</span>
+        <span>CodeRabbit's quota reopens at <b>14:32</b> <span class="num">(−41:15)</span> — 2 PRs are
+          waiting for it. Nothing to do; co-review and fixing carry on.</span>
+        <a class="end" href="#c">show queue</a></div>
+      <div class="rowline"><span class="pill ok sm">running</span>
+        <span>1 review in flight, 1 fix session, 2 co-only rounds ready — all healthy</span>
+        <a class="end" href="#c">show all 7</a></div>
+      <div class="rowline"><span class="pill mut sm">held</span>
+        <span><span class="rfall">H</span> ha-gradient-card#31 — you held it 53m ago
+          <span class="note">“migrating to HA 2026.7 first”</span></span>
+        <a class="end" href="#c">unhold</a></div>
+    </div></div>
+    <div class="card" style="margin:0"><div class="body" style="padding:9px 16px">
+      <span class="note">Recently finished — <img class="rico" src="icons/repo-crq.png" alt="">
+        coderabbit-queue#140 converged 13:29 · <img class="rico" src="icons/repo-bonusvarsler.png" alt="">
+        BonusVarsler#12 superseded · <img class="rico" src="icons/repo-musikkfest.png" alt="">
+        musikkfest-planlegger#7 closed</span></div></div>
+  </div>
+</section>
+
+<!-- D -->
+<section class="opt" id="d">
+  <div class="opthd"><span class="optlet">D</span>
+    <div><h2>The feed is the page</h2>
+      <p class="why">A running stream of what the queue is doing, newest first, with current state as a
+      thin strip on top.</p></div>
+    <div class="tags"><span class="pill mut sm plain">feels alive</span><span class="pill mut sm plain">explains itself</span>
+      <span class="pill mut sm plain">weak as a status board</span></div></div>
+  <div class="tradeoff">
+    <div class="good"><b>Good</b> You can see the machine working, which is reassuring for something that acts on
+      your repos unattended — and cause and effect sit next to each other (quota hit → everything queued).</div>
+    <div class="bad"><b>Costly</b> “What's waiting right now?” means reconstructing it from events. The feed is also
+      only live since the server started, so it can't be the whole truth after a restart.</div></div>
+
+  <div class="frame">
+    <div class="card" style="margin:0 0 10px"><div class="hd" style="border-bottom:none;padding-bottom:11px">
+      <span class="pill warn sm">quota −41:15</span><span class="pill ok sm">1 reviewing</span>
+      <span class="pill acc sm">4 queued</span><span class="pill ok sm">1 fixing</span>
+      <span class="pill bad sm">atlas failing</span>
+      <span class="end" style="margin-left:auto"><span class="note">live · rev 4182 · since 09:02</span></span></div></div>
+    <div class="card" style="margin:0">
+      <div class="hd"><h3>Activity</h3><span class="sum">live — since this dashboard started</span>
+        <span class="end" style="margin-left:auto"><span class="note">filter:
+          <b>all</b> · <a href="#d">fires</a> · <a href="#d">problems</a> · <a href="#d">this repo</a></span></span></div>
+      <div class="body">
+        <div class="feedline"><span class="t num">13:50:41</span><span class="ic pill warn sm">quota</span>
+          <span><b>The account window closed</b> — CodeRabbit is out of reviews until 14:32.
+            <span class="x">Two queued PRs now wait for it; co-only work keeps going.</span></span></div>
+        <div class="feedline"><span class="t num">13:50:31</span><span class="ic pill acc sm">enqueued</span>
+          <span><img class="rico" src="icons/repo-crq.png" alt=""> <b>coderabbit-queue#143</b>
+            <span class="x">— co-reviewers only, so it can fire even while the quota is blocked.</span></span></div>
+        <div class="feedline"><span class="t num">13:50:12</span><span class="ic pill warn sm">claimed</span>
+          <span><img class="bico sm" src="icons/bot-bugbot.png" alt=""> <b>Bugbot</b> claimed #141
+            <span class="x">— posted, not yet recorded as a review.</span></span></div>
+        <div class="feedline"><span class="t num">13:50:11</span><span class="ic pill ok sm">commanded</span>
+          <span><img class="bico sm" src="icons/bot-codex.png" alt=""> <b>Codex</b> asked to review #141</span></div>
+        <div class="feedline"><span class="t num">13:50:05</span><span class="ic pill ok sm">acked</span>
+          <span><img class="bico sm" src="icons/bot-coderabbit.png" alt=""> <b>CodeRabbit acknowledged #141</b>
+            <span class="x">— the fire slot was released, so other PRs could move again.</span></span></div>
+        <div class="feedline"><span class="t num">13:49:58</span><span class="ic pill ok sm">fired</span>
+          <span><img class="rico" src="icons/repo-crq.png" alt=""> <b>coderabbit-queue#141</b> at
+            <span class="mono">9f3c2a1d7</span> from mbp <span class="x">— this spent the last review.</span></span></div>
+        <div class="feedline"><span class="t num">13:41:37</span><span class="ic pill ok sm">fixing</span>
+          <span><img class="rico" src="icons/repo-carrier.png" alt=""> <b>Carrier#85</b> — agent started on mbp,
+            6 findings <span class="x">· running <span class="num">9:49</span> · <a href="#d">log</a></span></span></div>
+        <div class="feedline"><span class="t num">13:36:12</span><span class="ic pill bad sm">failed</span>
+          <span><b>Autofix failed on atlas</b> — <span class="mono">claude: command not found</span>
+            <span class="x">· fourth in a row · <a href="setup-options.html">fix the service PATH →</a></span></span></div>
+        <div class="feedline"><span class="t num">13:29:45</span><span class="ic pill ok sm">converged</span>
+          <span><img class="rico" src="icons/repo-crq.png" alt=""> <b>coderabbit-queue#140</b> finished clean
+            <span class="x">— nothing blocking, merge when ready.</span></span></div>
+        <div class="feedline"><span class="t num">12:58:50</span><span class="ic pill bad sm">held</span>
+          <span><span class="rfall">H</span> <b>ha-gradient-card#31</b> held by you
+            <span class="x">— “migrating to HA 2026.7 first”.</span></span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<details class="notes">
+  <summary>Notes on these options</summary>
+  <ul>
+    <li>These answer different questions: A “what's the state of everything”, B “how does this system work”,
+      C “does anything need me”, D “what has it been doing”.</li>
+    <li>They combine well in pairs — C as the top of the page with A beneath it is close to a status page that
+      is calm by default and complete on demand; B's lane headers could group A's table instead of splitting it.</li>
+    <li>All four keep the honest bits: only the front of the queue gets a time, the quota block is named as
+      CodeRabbit's rather than the fleet's, and the feed is labelled as live-only.</li>
+  </ul>
+</details>
+
+</body>
+</html>

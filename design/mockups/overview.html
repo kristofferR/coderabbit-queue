@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quota blocked −41:15 · Code Review Queue</title>
+<link rel="icon" href="icons/repo-crq.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,650;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#F2F3F6; --card:#FFFFFF; --edge:#E3E6EB; --edge2:#C9CFD8;
+  --ink:#1B2430; --mut:#5B6472; --faint:#8B93A0;
+  --ok:#1F7A4D; --ok-bg:#EAF4EE; --ok-edge:#C7E2D2;
+  --warn:#8A5300; --warn-fg:#B45D10; --warn-bg:#FBF1E2; --warn-edge:#EAD7B4;
+  --bad:#B3362B; --bad-bg:#F9ECEA; --bad-edge:#EFCFCB;
+  --acc:#2B5FAA; --acc-bg:#EBF1FA; --acc-edge:#C9D8EF;
+  --r:10px; --shadow:0 1px 2px rgba(27,36,48,.05),0 4px 14px rgba(27,36,48,.04);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:14px;line-height:1.5;
+  color:var(--ink);background:var(--bg);min-width:820px}
+.mono{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.92em}
+a{color:var(--acc);text-decoration:none}
+a:hover{text-decoration:underline}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px}
+.num{font-variant-numeric:tabular-nums}
+.dim{color:var(--faint)}
+
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;
+  padding:1px 10px 1px 7px;border-radius:99px;border:1px solid transparent;white-space:nowrap}
+.pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+.pill.ok{color:var(--ok);background:var(--ok-bg);border-color:var(--ok-edge)}
+.pill.warn{color:var(--warn);background:var(--warn-bg);border-color:var(--warn-edge)}
+.pill.bad{color:var(--bad);background:var(--bad-bg);border-color:var(--bad-edge)}
+.pill.mut{color:var(--mut);background:#EEF0F3;border-color:var(--edge)}
+.pill.acc{color:var(--acc);background:var(--acc-bg);border-color:var(--acc-edge)}
+
+/* repo favicons + fallback tiles */
+.rico{width:16px;height:16px;border-radius:4px;object-fit:cover;vertical-align:-3px;
+  background:#fff;border:1px solid var(--edge);flex:none}
+.rfall{display:inline-flex;width:16px;height:16px;border-radius:4px;align-items:center;justify-content:center;
+  font-size:9px;font-weight:700;color:#fff;background:#7A8496;vertical-align:-3px;flex:none;font-family:"IBM Plex Sans",sans-serif}
+.repo{display:inline-flex;align-items:center;gap:7px}
+
+/* bot avatars with state badge */
+.bm{position:relative;display:inline-block;width:22px;height:22px}
+.bm img{width:22px;height:22px;border-radius:6px;display:block;border:1px solid var(--edge);background:#fff}
+.bm i{position:absolute;right:-4px;bottom:-4px;width:13px;height:13px;border-radius:50%;font-size:8px;font-style:normal;
+  display:flex;align-items:center;justify-content:center;color:#fff;border:1.5px solid var(--card);line-height:1}
+.bm.y i{background:var(--ok)}
+.bm.p i{background:var(--warn-fg)}
+.bm.n{opacity:.34}
+.bm.n i{background:var(--faint)}
+.marks{display:inline-flex;gap:11px;align-items:center}
+.bico{width:18px;height:18px;border-radius:5px;vertical-align:-4px;border:1px solid var(--edge);background:#fff}
+
+.gear{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;
+  border-radius:6px;border:1px solid transparent;color:var(--faint);cursor:pointer;font-size:13px;background:none}
+.gear:hover{color:var(--acc);background:var(--acc-bg);border-color:var(--acc-edge)}
+tr .gear{visibility:hidden}
+tr:hover .gear,tr.hovered .gear{visibility:visible}
+.gear.demo{visibility:visible;color:var(--acc);background:var(--acc-bg);border-color:var(--acc-edge)}
+
+.topbar{display:flex;align-items:center;gap:16px;flex-wrap:wrap;background:var(--card);
+  border-bottom:1px solid var(--edge);padding:10px 24px;position:sticky;top:0;z-index:6}
+.brand{display:flex;align-items:baseline;gap:10px}
+.brand .crq{font-family:"IBM Plex Mono",monospace;font-weight:500;font-size:13px;color:#fff;
+  background:var(--ink);border-radius:6px;padding:2px 7px}
+.brand .name{font-weight:650;font-size:16px;letter-spacing:-.01em}
+.topbar nav{display:flex;gap:4px;margin-left:8px}
+.topbar nav a{color:var(--mut);padding:5px 12px;border-radius:8px;font-weight:500;font-size:13.5px}
+.topbar nav a:hover{background:var(--bg);text-decoration:none}
+.topbar nav a.on{color:var(--ink);background:var(--bg)}
+.searchbox{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--faint);
+  border:1px solid var(--edge);border-radius:8px;padding:5px 12px;background:var(--bg);font-size:13px;
+  flex:1 1 140px;min-width:0}
+.fresh{display:flex;align-items:center;gap:7px;color:var(--mut);font-size:12px}
+.fresh::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--ok)}
+
+.shell{display:grid;grid-template-columns:minmax(0,1fr) 384px;gap:18px;padding:18px 24px 60px;align-items:start}
+.maincol{min-width:0}
+
+.banner{display:grid;grid-template-columns:1fr auto auto auto auto;gap:13px;align-items:center;
+  background:linear-gradient(135deg,#FDF7EA,var(--warn-bg));border:1px solid var(--warn-edge);
+  border-radius:var(--r);padding:14px 20px;margin-bottom:10px;box-shadow:var(--shadow)}
+.banner .h .top{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.banner .h .title{font-size:17px;font-weight:650;color:var(--warn)}
+.banner .h .cd{font-size:27px;font-weight:650;color:var(--warn-fg);letter-spacing:-.01em}
+.banner .h .sub{color:var(--mut);font-size:13px;margin-top:2px}
+.banner .h .sub b{color:var(--ok);font-weight:500}
+.tile{background:var(--card);border:1px solid var(--edge);border-radius:8px;padding:8px 13px;min-width:104px}
+.tile .k{font-size:11px;font-weight:500;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
+.tile .v{font-weight:600;font-size:14.5px;display:flex;align-items:center;gap:7px}
+
+.attn{display:flex;align-items:center;gap:12px;background:var(--bad-bg);border:1px solid var(--bad-edge);
+  border-left:4px solid var(--bad);border-radius:var(--r);padding:9px 16px;margin-bottom:14px;font-size:13.5px}
+.attn .go{margin-left:auto;white-space:nowrap}
+
+.chips{display:flex;gap:8px;margin:2px 2px 14px;align-items:center}
+.chip{font:inherit;font-size:12.5px;font-weight:500;color:var(--mut);border:1px solid var(--edge);
+  border-radius:99px;padding:3px 13px;background:var(--card);cursor:pointer}
+.chip.on{color:#fff;background:var(--ink);border-color:var(--ink)}
+.chip:hover{border-color:var(--edge2)}
+.chips .lbl{font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em;margin-right:2px}
+
+.card{background:var(--card);border:1px solid var(--edge);border-radius:var(--r);margin-bottom:14px;box-shadow:var(--shadow)}
+.card>.hd{display:flex;align-items:baseline;gap:10px;padding:12px 18px 0}
+.card>.hd h2{font-size:14.5px;font-weight:650;letter-spacing:-.005em}
+.card>.hd .ct{color:var(--faint);font-size:12.5px}
+.card>.hd .end{margin-left:auto;font-size:12.5px;color:var(--faint)}
+table{width:100%;border-collapse:collapse;margin-top:6px}
+th{font-size:11px;font-weight:500;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);
+   text-align:left;padding:6px 18px;border-bottom:1px solid var(--edge)}
+td{padding:10px 18px;border-bottom:1px solid #EEF0F3;vertical-align:top}
+tr:last-child td{border-bottom:none}
+tbody tr:hover{background:#F7F8FA}
+.prcell .t{font-weight:550;display:flex;align-items:center;gap:7px}
+.prcell .s{color:var(--faint);font-size:12.5px;margin-left:23px}
+.next{color:var(--mut);font-size:12.5px;margin:3px 0 0 23px}
+.sha{color:var(--mut)}
+.right{text-align:right}
+.cost{white-space:nowrap;font-variant-numeric:tabular-nums}
+.cost b{font-weight:600}
+.cost .free{color:var(--ok)}
+.cost .unk{color:var(--faint)}
+.cost .est{display:block;font-size:11px;color:var(--faint)}
+
+tr.hovered{background:#F2F6FC!important;position:relative}
+tr.hovered .rowacts{visibility:visible}
+.rowacts{visibility:hidden;white-space:nowrap;font-size:12.5px}
+.rowacts a{margin-left:10px}
+.annot{position:absolute;right:16px;top:-9px;font-family:"IBM Plex Mono",monospace;font-size:10px;
+  color:var(--acc);background:var(--card);border:1px dashed var(--acc-edge);border-radius:5px;padding:0 7px;letter-spacing:.05em;z-index:2}
+
+.disprow{display:flex;gap:16px;align-items:center;padding:12px 18px;border-bottom:1px solid #EEF0F3;flex-wrap:wrap}
+.hosts{display:flex;gap:14px;padding:12px 18px;flex-wrap:wrap}
+.hostcard{flex:1;min-width:170px;border:1px solid var(--edge);border-radius:8px;padding:8px 12px;font-size:12.5px;color:var(--mut)}
+.hostcard .nm{font-weight:600;color:var(--ink)}
+.hostcard.bad{border-color:var(--bad-edge);background:var(--bad-bg)}
+details.err{padding:0 18px 12px;font-size:12.5px;color:var(--mut)}
+details.err summary{cursor:pointer;color:var(--bad)}
+details.err pre{font-family:"IBM Plex Mono",monospace;font-size:12px;margin:6px 0 0 14px;white-space:pre-wrap}
+
+.feedcol{position:sticky;top:64px}
+.feed ol{list-style:none;padding:6px 18px 12px}
+.feed li{display:flex;gap:10px;padding:4.5px 0;font-size:12.5px;color:var(--mut);border-bottom:1px dashed #EEF0F3;align-items:center}
+.feed li:last-child{border-bottom:none}
+.feed .t{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--faint);flex:none;width:52px}
+.feed .pill{font-size:10.5px;padding:0 8px 0 6px;flex:none}
+
+#qs{position:absolute;left:-9999px}
+.scrim{position:fixed;inset:0;background:rgba(27,36,48,.28);opacity:0;pointer-events:none;transition:opacity .22s;z-index:8}
+#qs:checked ~ .scrim{opacity:1;pointer-events:auto}
+.slideover{position:fixed;top:0;right:0;bottom:0;width:412px;background:var(--card);z-index:9;
+  border-left:1px solid var(--edge);box-shadow:-16px 0 40px rgba(27,36,48,.18);
+  transform:translateX(103%);transition:transform .22s ease;overflow-y:auto}
+#qs:checked ~ .slideover{transform:none}
+@media (prefers-reduced-motion:reduce){.slideover,.scrim{transition:none}}
+.so-hd{position:sticky;top:0;background:var(--card);border-bottom:1px solid var(--edge);padding:12px 18px 10px;z-index:2}
+.so-hd .r1{display:flex;align-items:center;gap:10px}
+.so-hd h2{font-size:14px;font-weight:650}
+.so-close{margin-left:auto;width:26px;height:26px;border-radius:8px;border:1px solid var(--edge);
+  display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--mut);font-size:15px}
+.so-close:hover{background:var(--bg)}
+.so-hd .r2{display:flex;align-items:center;gap:10px;margin-top:8px}
+.so-repo{font:inherit;font-size:13px;border:1px solid var(--edge);border-radius:8px;padding:4px 10px;background:var(--bg);color:var(--ink);flex:1}
+.so-hd .full{font-size:12.5px;white-space:nowrap}
+.so-body{padding:8px 18px 18px}
+.so-note{font-size:12px;color:var(--faint);margin:4px 0 8px}
+.prov{display:flex;gap:8px;align-items:center;margin:6px 0 4px;font-size:12.5px;color:var(--mut)}
+.prov .reset{margin-left:auto}
+.bhead{display:grid;grid-template-columns:1fr 64px 64px;gap:10px;padding:8px 0 4px;
+  font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em}
+.bhead span:nth-child(2),.bhead span:nth-child(3){text-align:center}
+.brow{display:grid;grid-template-columns:1fr 64px 64px;gap:10px;align-items:center;
+  padding:9px 0;border-bottom:1px solid #EEF0F3;font-size:13.5px}
+.brow .who{display:flex;gap:9px;align-items:center}
+.brow .who .nm{font-weight:550}
+.brow .who .st{display:block;font-size:12px;color:var(--faint);line-height:1.35}
+.brow .who .st .w{color:var(--warn)}
+.tg{display:flex;justify-content:center}
+.sw{width:34px;height:19px;border-radius:99px;background:#D6DAE0;position:relative;flex:none}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#fff;
+  box-shadow:0 1px 2px rgba(0,0,0,.25)}
+.sw.on{background:var(--ok)}
+.sw.on::after{left:auto;right:2px}
+.sw.dirty{outline:2px dashed var(--warn-fg);outline-offset:2px}
+.sw.lock{opacity:.55}
+.impact{border:1px solid var(--warn-edge);border-left:4px solid var(--warn-fg);background:var(--warn-bg);
+  border-radius:8px;padding:10px 14px;margin:12px 0;font-size:13px}
+.impact b{color:var(--warn)}
+.kvrow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;
+  border-bottom:1px solid #EEF0F3;font-size:13.5px}
+.kvrow .v{color:var(--mut);text-align:right}
+.seg{display:inline-flex;border:1px solid var(--edge);border-radius:8px;overflow:hidden}
+.seg span{padding:2px 11px;font-size:12px;color:var(--mut)}
+.seg span.on{background:var(--ok-bg);color:var(--ok);font-weight:500}
+.btnrow{display:flex;gap:10px;align-items:center;margin-top:14px}
+.btn{font:inherit;font-weight:600;font-size:13.5px;border:none;border-radius:8px;padding:7px 18px;cursor:pointer;
+  background:var(--ink);color:#fff}
+.btn:hover{background:#2E3C4E}
+.btn.ghost{background:none;border:1px solid var(--edge);color:var(--mut)}
+.pending{font-size:12.5px;color:var(--warn)}
+
+.inset{border:1px dashed var(--edge2);border-radius:var(--r);padding:14px 18px;margin:22px 0 0;position:relative;background:#FBFBFC}
+.inset::before{content:"IDLE VARIANT — “calm when idle?”";position:absolute;top:-8px;left:14px;background:var(--bg);
+  padding:0 8px;font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.08em;color:var(--faint)}
+.inset .r1{display:flex;gap:14px;align-items:center}
+.inset .r1 .t{font-size:15px;font-weight:600}
+.inset p{color:var(--faint);font-size:13px;margin-top:6px}
+/* ---- A/B/C/D layout switcher ---- */
+#L-A,#L-B,#L-C,#L-D{position:absolute;left:-9999px}
+.lay{display:none}
+#L-A:checked ~ .lay-a,#L-B:checked ~ .lay-b,#L-C:checked ~ .lay-c,#L-D:checked ~ .lay-d{display:block}
+.layoutpick{display:flex;align-items:center;gap:4px;margin-left:14px;padding-left:14px;
+  border-left:1px solid var(--edge)}
+.layoutpick .lbl{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin-right:3px}
+.layoutpick label{width:25px;height:25px;border-radius:7px;border:1px solid var(--edge);display:flex;
+  align-items:center;justify-content:center;font-size:12.5px;font-weight:650;color:var(--mut);cursor:pointer}
+.layoutpick label:hover{border-color:var(--acc-edge);color:var(--acc);background:var(--acc-bg)}
+#L-A:checked ~ .topbar label[for="L-A"],#L-B:checked ~ .topbar label[for="L-B"],
+#L-C:checked ~ .topbar label[for="L-C"],#L-D:checked ~ .topbar label[for="L-D"]{
+  background:var(--ink);border-color:var(--ink);color:#fff}
+.laybar{display:flex;align-items:center;gap:10px;padding:7px 24px;background:#EDEFF3;
+  border-bottom:1px solid var(--edge);font-size:12.5px;color:var(--mut)}
+.laybar b{color:var(--ink);font-weight:650}
+.laybar .end{margin-left:auto}
+.lane{background:var(--card);border:1px solid var(--edge);border-radius:var(--r);box-shadow:var(--shadow)}
+.lane>.h{padding:11px 15px 9px;border-bottom:1px solid #EEF0F3}
+.lane>.h h3{font-size:13.5px;font-weight:650;display:flex;align-items:center;gap:8px}
+.lane>.h .sub{font-size:11.5px;color:var(--faint);margin-top:2px}
+.lane>.b{padding:8px 15px 12px}
+.item{padding:9px 0;border-bottom:1px solid #EEF0F3;font-size:12.5px}
+.item:last-child{border-bottom:none}
+.item .t{font-weight:550;font-size:13px;display:flex;align-items:center;gap:6px}
+.item .m{color:var(--mut);margin-top:2px}
+.gate{background:var(--warn-bg);border:1px solid var(--warn-edge);border-radius:7px;padding:8px 11px;
+  font-size:12px;color:var(--warn);margin-bottom:9px}
+.hero{background:var(--card);border:1px solid var(--edge);border-radius:var(--r);box-shadow:var(--shadow);padding:18px 20px}
+.hero h2{font-size:19px;font-weight:650}
+.hero .sub{color:var(--mut);font-size:13px;margin-top:5px;max-width:760px}
+.feedline{display:flex;gap:12px;align-items:flex-start;padding:9px 0;border-bottom:1px solid #EEF0F3;font-size:13px}
+.feedline:last-child{border-bottom:none}
+.feedline .t{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--faint);flex:none;width:58px;padding-top:2px}
+.feedline .ic{flex:none}
+.feedline .x{color:var(--mut);font-size:12px}
+
+/* ---- narrower windows: reflow instead of overflowing ---- */
+@media (max-width:1400px){
+  .shell{grid-template-columns:minmax(0,1fr)}
+  .feedcol{position:static}
+  .feed ol{columns:2;column-gap:26px}
+  .feed li{break-inside:avoid}
+}
+@media (max-width:1150px){
+  .banner{display:flex;flex-wrap:wrap;align-items:stretch}
+  .banner .h{flex:1 1 100%}
+  .tile{flex:1 1 auto}
+  .feed ol{columns:1}
+  /* drop the least load-bearing columns before anything clips — never the cost */
+  .c-host{display:none}
+}
+@media (max-width:940px){
+  .chips{flex-wrap:wrap}
+  .c-att{display:none}
+}
+.notes{position:fixed;left:14px;bottom:12px;max-width:390px;font-size:12px;color:var(--mut);
+  background:var(--card);border:1px solid var(--edge);border-radius:8px;padding:8px 14px;z-index:10;box-shadow:var(--shadow)}
+.notes summary{cursor:pointer;color:var(--acc);font-weight:500}
+.notes ul{margin:6px 0 4px 16px}
+footer{padding:10px 2px;color:var(--faint);font-size:12px;display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+footer .lg{display:inline-flex;align-items:center;gap:6px}
+</style>
+</head>
+<body>
+
+<input type="radio" name="lay" id="L-A" checked><input type="radio" name="lay" id="L-B">
+<input type="radio" name="lay" id="L-C"><input type="radio" name="lay" id="L-D">
+<input type="checkbox" id="qs">
+
+<div class="topbar">
+  <div class="brand">
+    <span class="crq">crq</span>
+    <span class="name">Code Review Queue</span>
+  </div>
+  <nav>
+    <a class="on" href="overview.html">Overview</a>
+    <a href="settings.html">Repos</a>
+    <a href="bot-guide.html">Bots</a>
+    <a href="setup.html">Setup</a>
+    <a href="fleet-settings.html">Settings</a>
+  </nav>
+  <div class="searchbox">⌕ Search repo or PR…</div>
+  <span class="layoutpick" title="Switch the overview's structure — same data, four ways">
+    <span class="lbl">Layout</span>
+    <label for="L-A">A</label><label for="L-B">B</label><label for="L-C">C</label><label for="L-D">D</label>
+  </span>
+  <div class="fresh num">live · rev 4182</div>
+</div>
+
+<div class="lay lay-a">
+<div class="laybar"><b>A · Findings-first tables</b> — sections stacked by state, activity in a side column.
+  <span class="dim">What the design currently implements.</span>
+  <span class="end"><a href="overview-options.html#a">tradeoffs ↗</a></span></div>
+<div class="shell">
+<div class="maincol">
+
+  <div class="banner">
+    <div class="h">
+      <div class="top">
+        <span class="title">CodeRabbit quota blocked</span>
+        <span class="cd num" data-remaining="2475" data-sign="neg">−41:15</span>
+        <span class="dim num">reopens 14:32:41</span>
+      </div>
+      <div class="sub">Only the metered lane is paused — <b>co-review and fix sessions continue</b>. 1 in flight · 4 queued · 1 held · 1 fixing.</div>
+    </div>
+    <div class="tile"><div class="k">Quota</div><div class="v num">0 remaining</div></div>
+    <div class="tile"><div class="k">Spend</div><div class="v num">$14.20 <span class="dim" style="font-weight:400;font-size:12px">of $50 cap</span></div></div>
+    <div class="tile"><div class="k">Fire slot</div><div class="v"><span class="pill ok">Open</span></div></div>
+    <div class="tile"><div class="k">Leader</div><div class="v"><span class="pill ok">mbp</span></div></div>
+  </div>
+
+  <div class="attn">
+    <span class="pill bad">Needs attention</span>
+    <span>Fix sessions failing on <b>atlas</b> — 4 consecutive: <span class="mono">claude: command not found (PATH empty in unit)</span></span>
+    <a class="go" href="setup.html#tools">Open hosts →</a>
+  </div>
+
+  <div class="chips">
+    <span class="lbl">Filter</span>
+    <button class="chip on">All</button><button class="chip">Blocked</button><button class="chip">Held</button>
+    <button class="chip">Fixing</button><button class="chip">Needs attention</button>
+  </div>
+
+  <div class="card">
+    <div class="hd"><h2>In flight</h2><span class="ct num">1</span></div>
+    <table>
+      <thead><tr><th>Pull request</th><th>Head</th><th>Phase</th><th>Fired</th><th>Deadline</th><th>Reviewers</th><th class="right">Cost</th><th class="c-host">Host</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="prcell"><div class="t"><img class="rico" src="icons/repo-crq.png" alt="">
+              <a href="pr-detail.html">coderabbit-queue#141</a>
+              <label class="gear demo" for="qs" title="Quick settings for kristofferR/coderabbit-queue">⚙</label></div>
+            <div class="s">engine: bound co-reviewer wait by slot hold</div>
+            <div class="next">CodeRabbit acked and released the slot; waiting on its review and Bugbot before 14:04:58.</div></td>
+          <td class="mono sha">9f3c2a1d7</td>
+          <td><span class="pill ok">Reviewing</span></td>
+          <td class="num">13:49:58<br><span class="dim mono" style="font-size:11.5px"><span data-elapsed="88">1:28</span> ago</span></td>
+          <td class="num"><b data-remaining="812" data-sign="neg" data-due="due — next pump pass">−13:32</b><br><span class="dim mono" style="font-size:11.5px">14:04:58</span></td>
+          <td><span class="marks">
+              <span class="bm y" title="CodeRabbit — commanded 13:49:58"><img src="icons/bot-coderabbit.png" alt="CodeRabbit"><i>✓</i></span>
+              <span class="bm y" title="Codex — commanded 13:50:11"><img src="icons/bot-codex.png" alt="Codex"><i>✓</i></span>
+              <span class="bm p" title="Cursor Bugbot — claim posted 13:50:12, not yet recorded"><img src="icons/bot-bugbot.png" alt="Cursor Bugbot"><i>⏳</i></span>
+              <span class="bm n" title="Macroscope — not enabled here"><img src="icons/bot-macroscope.png" alt="Macroscope"><i>—</i></span>
+            </span></td>
+          <td class="right cost"><b class="free">$0.00</b><span class="est">within plan allowance</span></td>
+          <td class="mono sha c-host">mbp</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="hd"><h2>Queue</h2><span class="ct num">4 waiting</span>
+      <span class="end">only the front row carries a time · cost is an estimate from diff size — <a href="fleet-settings.html">how it’s worked out</a></span></div>
+    <table>
+      <thead><tr><th style="width:24px">#</th><th>Pull request</th><th>Head</th><th>Ready</th><th>Why</th><th class="right">Est. cost</th><th class="right c-att">Att.</th><th class="c-host">Host</th><th></th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="num">1</td>
+          <td class="prcell"><div class="t"><img class="rico" src="icons/repo-crq.png" alt="">
+              <a href="pr-detail.html">coderabbit-queue#143</a>
+              <label class="gear" for="qs" title="Quick settings">⚙</label></div>
+            <div class="s">dashboard: link hosts to autofix health</div>
+            <div class="next">Ready — fires on the daemon’s next pass. Co-reviewers only; spends no quota.</div></td>
+          <td class="mono sha">4e8b0c25a</td>
+          <td><b>now</b></td>
+          <td><span class="pill ok">Next up · co-only</span></td>
+          <td class="right cost"><b>$0.50</b><span class="est">Macroscope 8 KB → floor</span></td>
+          <td class="num right c-att">0</td><td class="mono sha c-host">mbp</td><td></td>
+        </tr>
+        <tr>
+          <td class="dim">—</td>
+          <td class="prcell"><div class="t"><img class="rico" src="icons/repo-pengeoversikt.svg" alt="">
+              <a href="pr-detail.html">pengeoversikt#87</a>
+              <span class="pill mut" style="font-size:10.5px">private</span>
+              <label class="gear" for="qs" title="Quick settings">⚙</label></div>
+            <div class="s">sync: refresh bank tokens before they expire</div>
+            <div class="next">Waits for the CodeRabbit quota window at 14:32, then its turn in the queue.</div></td>
+          <td class="mono sha">7d1f9e3b2</td>
+          <td class="dim">—</td>
+          <td><span class="pill warn">Account blocked</span></td>
+          <td class="right cost"><b>$1.60</b><span class="est">Macroscope 32 KB · CodeRabbit free</span></td>
+          <td class="num right c-att">0</td><td class="mono sha c-host">atlas</td><td></td>
+        </tr>
+        <tr class="hovered">
+          <td class="dim">—</td>
+          <td class="prcell"><span class="annot">hover: gear + row actions appear</span>
+            <div class="t"><img class="rico" src="icons/repo-iptvchecker.png" alt="">
+              <a href="pr-detail.html">IPTVChecker#23</a>
+              <label class="gear" for="qs" title="Quick settings">⚙</label></div>
+            <div class="s">probe: parallelise channel checks with jitter</div>
+            <div class="next">Ready, queued behind coderabbit-queue#143. Co-reviewers only.</div></td>
+          <td class="mono sha">c62a48d01</td>
+          <td class="dim">—</td>
+          <td><span class="pill mut">Behind an earlier round</span></td>
+          <td class="right cost"><b>$0.50</b><span class="est">Macroscope 6 KB → floor</span></td>
+          <td class="num right c-att">0</td><td class="mono sha c-host">mbp</td>
+          <td class="rowacts"><a href="#">Hold</a><a href="#">Cancel</a><a href="pr-detail.html">Open ↗</a></td>
+        </tr>
+        <tr>
+          <td class="dim">—</td>
+          <td class="prcell"><div class="t"><img class="rico" src="icons/repo-sportarr.png" alt="">
+              <a href="pr-detail.html">Sportarr#9</a>
+              <label class="gear" for="qs" title="Quick settings">⚙</label></div>
+            <div class="s">indexer: parse caps response with namespaces</div>
+            <div class="next">Cooling down after 2 attempts; retries no earlier than 14:51:20.</div></td>
+          <td class="mono sha">08fa3d95c</td>
+          <td class="dim">—</td>
+          <td><span class="right cost"></span><span class="pill warn">Cooling down</span></td>
+          <td class="right cost"><b>$3.05</b><span class="est">Macroscope 21 KB · CR 8 files past allowance</span></td>
+          <td class="num right c-att">2</td><td class="mono sha c-host">atlas</td><td></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="hd"><h2>Held</h2><span class="ct num">1</span></div>
+    <table>
+      <thead><tr><th>Pull request</th><th>Head</th><th class="c-host">Held by</th><th>Since</th><th>Reason</th><th></th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="prcell"><div class="t"><span class="rfall" title="no favicon in repo">H</span>
+              <a href="pr-detail.html">ha-gradient-card#31</a>
+              <span class="pill mut" style="font-size:10.5px">private</span>
+              <label class="gear" for="qs" title="Quick settings">⚙</label></div>
+            <div class="s">light: interpolate gradient stops in Oklab</div></td>
+          <td class="mono sha">b3e51f7a9</td>
+          <td class="mono sha c-host">kristoffer@mbp</td>
+          <td class="num">12:58:50</td>
+          <td><span class="pill bad">Held</span> <span class="dim">“migrating to HA 2026.7 first — findings would churn”</span></td>
+          <td class="rowacts" style="visibility:visible"><a href="#">Unhold</a></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="hd"><h2>Fix sessions</h2><span class="ct">1 live · 3 hosts</span></div>
+    <div class="disprow">
+      <span class="pill ok">Fixing · <span class="num" data-elapsed="589">9:49</span></span>
+      <span class="repo"><img class="rico" src="icons/repo-carrier.png" alt="">
+        <a href="pr-detail.html">Carrier#85</a> <span class="mono sha">d94c17e6b</span>
+        — notifications: debounce unread badge count</span>
+      <span class="dim">mbp · attempt 1 of 3 · 6 findings (1 major, 3 potential, 2 minor)</span>
+    </div>
+    <div class="hosts">
+      <div class="hostcard"><span class="nm mono">mbp</span> <span class="pill ok">Healthy</span><br>last success 13:41:37 · 1 session live</div>
+      <div class="hostcard bad"><span class="nm mono">atlas</span> <span class="pill bad">Unhealthy</span><br>4 consecutive failures</div>
+      <div class="hostcard"><span class="nm mono">wsl</span> <span class="pill mut">No recent signal</span><br>last seen 09:12</div>
+    </div>
+    <details class="err">
+      <summary>atlas last error · 13:36:12</summary>
+      <pre>claude: command not found (PATH empty in unit)
+unit: crq-autofix.service · retries on next eligible dispatch
+fix: add the agent to the unit PATH — see Setup → Command-line tools</pre>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="hd"><h2>Recently finished</h2><span class="ct num">3</span></div>
+    <table>
+      <thead><tr><th>Pull request</th><th>Head</th><th>Outcome</th><th>When</th></tr></thead>
+      <tbody>
+        <tr><td class="prcell"><div class="t"><img class="rico" src="icons/repo-crq.png" alt=""><a href="#">coderabbit-queue#140</a></div></td>
+          <td class="mono sha">6b7d90e12</td>
+          <td><span class="pill ok">Completed</span> <span class="dim">converged · 0 open findings</span></td><td class="num">13:29:45</td></tr>
+        <tr><td class="prcell"><div class="t"><img class="rico" src="icons/repo-bonusvarsler.png" alt=""><a href="#">BonusVarsler#12</a></div></td>
+          <td class="mono sha">2f41ac8d3</td>
+          <td><span class="pill mut">Superseded</span> <span class="dim">new head 8c02df114</span></td><td class="num">11:58:03</td></tr>
+        <tr><td class="prcell"><div class="t"><img class="rico" src="icons/repo-musikkfest.png" alt=""><a href="#">musikkfest-planlegger#7</a></div></td>
+          <td class="mono sha">a91e5c47f</td>
+          <td><span class="pill mut">Closed</span> <span class="dim">PR closed before review</span></td><td class="num">10:42:17</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="inset">
+    <div class="r1">
+      <span class="pill ok">Idle</span><span class="t">The queue is clear</span>
+      <span class="dim num">quota 3 remaining · last fired 09:14:02 · leader mbp · rev 4183</span>
+    </div>
+    <p>Nothing in flight, nothing queued, nothing held. No fix sessions running; all three hosts healthy.</p>
+  </div>
+
+  <footer>
+    <span class="lg"><span class="bm y" style="width:18px;height:18px"><img src="icons/bot-coderabbit.png" alt="" style="width:18px;height:18px"><i style="width:11px;height:11px;font-size:7px">✓</i></span> commanded</span>
+    <span class="lg"><span class="bm p" style="width:18px;height:18px"><img src="icons/bot-bugbot.png" alt="" style="width:18px;height:18px"><i style="width:11px;height:11px;font-size:7px">⏳</i></span> claim posted, not yet recorded</span>
+    <span class="lg"><span class="bm n" style="width:18px;height:18px"><img src="icons/bot-macroscope.png" alt="" style="width:18px;height:18px"><i style="width:11px;height:11px;font-size:7px">—</i></span> not enabled</span>
+    <span style="margin-left:auto">Managed by crq · written 13:51:26 CEST by mbp</span>
+  </footer>
+
+</div><!-- /maincol -->
+
+<aside class="feedcol">
+  <div class="card feed" style="margin-bottom:0">
+    <div class="hd"><h2>Activity</h2><span class="ct">live — since this dashboard started</span></div>
+    <ol>
+      <li><span class="t num">13:50:41</span><span class="pill warn">quota</span><span>window hit — reopens 14:32</span></li>
+      <li><span class="t num">13:50:31</span><span class="pill acc">enqueued</span><span class="repo"><img class="rico" src="icons/repo-crq.png" alt=""><a href="#">crq#143</a> · co-only</span></li>
+      <li><span class="t num">13:50:12</span><span class="pill warn">claimed</span><span class="repo"><img class="bico" src="icons/bot-bugbot.png" alt="" style="width:15px;height:15px">Bugbot on #141</span></li>
+      <li><span class="t num">13:50:11</span><span class="pill ok">commanded</span><span class="repo"><img class="bico" src="icons/bot-codex.png" alt="" style="width:15px;height:15px">Codex on #141</span></li>
+      <li><span class="t num">13:50:05</span><span class="pill ok">acked</span><span class="repo"><img class="bico" src="icons/bot-coderabbit.png" alt="" style="width:15px;height:15px">CodeRabbit — slot released</span></li>
+      <li><span class="t num">13:49:58</span><span class="pill ok">fired</span><span class="repo"><img class="rico" src="icons/repo-crq.png" alt=""><a href="#">crq#141</a> (mbp)</span></li>
+      <li><span class="t num">13:47:19</span><span class="pill acc">enqueued</span><span class="repo"><img class="rico" src="icons/repo-iptvchecker.png" alt=""><a href="#">IPTVChecker#23</a></span></li>
+      <li><span class="t num">13:44:03</span><span class="pill acc">enqueued</span><span class="repo"><img class="rico" src="icons/repo-pengeoversikt.svg" alt=""><a href="#">pengeoversikt#87</a></span></li>
+      <li><span class="t num">13:41:37</span><span class="pill ok">dispatch</span><span class="repo"><img class="rico" src="icons/repo-carrier.png" alt=""><a href="pr-detail.html">Carrier#85</a> (mbp)</span></li>
+      <li><span class="t num">13:36:12</span><span class="pill bad">failed</span><span>dispatch on atlas — 4th consecutive</span></li>
+      <li><span class="t num">13:29:45</span><span class="pill ok">completed</span><span class="repo"><img class="rico" src="icons/repo-crq.png" alt=""><a href="#">crq#140</a> — converged</span></li>
+      <li><span class="t num">12:58:50</span><span class="pill bad">held</span><span class="repo"><span class="rfall">H</span><a href="#">ha-gradient-card#31</a></span></li>
+      <li><span class="t num">12:31:47</span><span class="pill warn">retry</span><span class="repo"><img class="rico" src="icons/repo-sportarr.png" alt=""><a href="#">Sportarr#9</a> — after 14:51</span></li>
+    </ol>
+  </div>
+</aside>
+</div><!-- /shell -->
+</div><!-- /lay-a -->
+
+
+<div class="lay lay-b">
+<div class="laybar"><b>B · Three lanes</b> — metered review, co-review and autofix as separate columns,
+  each with its own gate. <span class="dim">The quota block stays in one column instead of reading fleet-wide.</span>
+  <span class="end"><a href="overview-options.html#b">tradeoffs ↗</a></span></div>
+<div style="padding:16px 24px 50px">
+  <div class="attn" style="margin-bottom:14px">
+    <span class="pill bad">Needs attention</span>
+    <span>Fix sessions failing on <b>atlas</b> — 4 consecutive: <span class="mono">claude: command not found (PATH empty in unit)</span></span>
+    <a class="go" href="setup.html#tools">Open hosts →</a></div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">
+    <div class="lane">
+      <div class="h"><h3><img class="bico" src="icons/bot-coderabbit.png" alt="" style="width:18px;height:18px">
+        Metered review <span class="pill warn sm" style="margin-left:auto">blocked</span></h3>
+        <div class="sub">spends the shared quota · one at a time · $0 inside the plan</div></div>
+      <div class="b">
+        <div class="gate"><b>Quota reopens in <span class="num" data-remaining="2475">41:15</span></b><br>
+          0 remaining · nothing metered fires until 14:32:41</div>
+        <div class="item"><div class="t"><img class="rico" src="icons/repo-crq.png" alt="">
+          <a href="pr-detail.html">coderabbit-queue#141</a></div>
+          <div class="m"><span class="pill ok sm">Reviewing</span> CodeRabbit acked and released the slot;
+            waiting on its review · deadline <b class="num" data-remaining="812" data-sign="neg">−13:32</b></div></div>
+        <div class="item"><div class="t"><img class="rico" src="icons/repo-pengeoversikt.svg" alt="">
+          <a href="pr-detail.html">pengeoversikt#87</a></div>
+          <div class="m">waits for the window at 14:32, then its turn · est. <b>$1.60</b></div></div>
+        <div class="item"><div class="t"><img class="rico" src="icons/repo-sportarr.png" alt="">
+          <a href="pr-detail.html">Sportarr#9</a></div>
+          <div class="m">cooling down after 2 attempts · retries 14:51 · est. <b>$3.05</b></div></div>
+        <div class="item"><div class="t dim"><span class="rfall">H</span> ha-gradient-card#31
+          <span class="pill bad sm">held</span></div>
+          <div class="m">“migrating to HA 2026.7 first — findings would churn”</div></div>
+      </div></div>
+
+    <div class="lane">
+      <div class="h"><h3><img class="bico" src="icons/bot-codex.png" alt="" style="width:18px;height:18px">
+        Co-review <span class="pill ok sm" style="margin-left:auto">running</span></h3>
+        <div class="sub">free · unaffected by the CodeRabbit quota</div></div>
+      <div class="b">
+        <div class="item"><div class="t"><img class="rico" src="icons/repo-crq.png" alt="">
+          <a href="pr-detail.html">coderabbit-queue#143</a></div>
+          <div class="m"><span class="pill ok sm">Next up</span> ready now — fires on the daemon’s next pass ·
+            Macroscope est. <b>$0.50</b> (10 KB floor)</div></div>
+        <div class="item"><div class="t"><img class="rico" src="icons/repo-iptvchecker.png" alt="">
+          <a href="pr-detail.html">IPTVChecker#23</a></div>
+          <div class="m">ready, queued behind #143 · est. <b>$0.50</b></div></div>
+        <div class="item"><div class="t"><img class="rico" src="icons/repo-crq.png" alt="">
+          <a href="pr-detail.html">coderabbit-queue#141</a></div>
+          <div class="m"><span class="marks">
+            <span class="bm y"><img src="icons/bot-codex.png" alt=""><i>✓</i></span>
+            <span class="bm p"><img src="icons/bot-bugbot.png" alt=""><i>⏳</i></span></span>
+            Codex reviewed 13:50 · Bugbot claimed 13:50, not yet recorded</div></div>
+        <div class="item"><div class="m dim">Macroscope is off on every repo in this lane —
+          <a href="bot-guide.html">set it up</a> to add a third opinion.</div></div>
+      </div></div>
+
+    <div class="lane">
+      <div class="h"><h3>🔧 Autofix <span class="pill bad sm" style="margin-left:auto">1 host down</span></h3>
+        <div class="sub">agents fixing findings on your machines</div></div>
+      <div class="b">
+        <div class="item"><div class="t"><img class="rico" src="icons/repo-carrier.png" alt="">
+          <a href="pr-detail.html">Carrier#85</a></div>
+          <div class="m"><span class="pill ok sm">Running <span class="num" data-elapsed="589">9:49</span></span>
+            mbp · attempt 1 of 3 · 6 findings · <a href="#">log</a></div></div>
+        <div class="item"><div class="t">Hosts</div>
+          <div class="m" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:5px">
+            <span class="pill ok sm">mbp · healthy</span>
+            <span class="pill bad sm">atlas · 4 failures</span>
+            <span class="pill mut sm">wsl · no recent signal</span></div></div>
+        <div class="item"><div class="m"><b>atlas:</b> <span class="mono">claude: command not found</span> —
+          the agent is installed for your shell but not on the service PATH.
+          <a href="setup.html#tools">Fix →</a></div></div>
+        <div class="item"><div class="m dim">Spend this month <b>$14.20</b> of a $50 cap ·
+          Macroscope balance $35.80</div></div>
+      </div></div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="hd"><h2>Recently finished</h2><span class="ct num">3</span></div>
+    <table>
+      <tbody>
+        <tr><td class="prcell"><div class="t"><img class="rico" src="icons/repo-crq.png" alt="">
+          <a href="pr-detail-converged.html">coderabbit-queue#140</a></div></td>
+          <td><span class="pill ok">Completed</span> <span class="dim">converged · 0 open findings</span></td>
+          <td class="num">13:29:45</td></tr>
+        <tr><td class="prcell"><div class="t"><img class="rico" src="icons/repo-bonusvarsler.png" alt="">
+          <a href="#">BonusVarsler#12</a></div></td>
+          <td><span class="pill mut">Superseded</span> <span class="dim">new head 8c02df114</span></td>
+          <td class="num">11:58:03</td></tr>
+        <tr><td class="prcell"><div class="t"><img class="rico" src="icons/repo-musikkfest.png" alt="">
+          <a href="#">musikkfest-planlegger#7</a></div></td>
+          <td><span class="pill mut">Closed</span> <span class="dim">PR closed before review</span></td>
+          <td class="num">10:42:17</td></tr>
+      </tbody></table>
+  </div>
+</div>
+</div><!-- /lay-b -->
+
+<div class="lay lay-c">
+<div class="laybar"><b>C · Only what needs you</b> — one sentence, then decisions; healthy work folded away.
+  <span class="dim">Most visits end in “nothing to do” — this says so in one line.</span>
+  <span class="end"><a href="overview-options.html#c">tradeoffs ↗</a></span></div>
+<div style="max-width:1020px;margin:0 auto;padding:18px 24px 60px">
+  <div class="hero" style="margin-bottom:12px">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <span class="pill bad">1 thing needs you</span>
+      <h2>Autofix is broken on <span class="mono">atlas</span></h2></div>
+    <p class="sub">Four attempts failed with <span class="mono">claude: command not found</span> — the agent
+      is installed for your shell but <span class="mono">crq-autofix.service</span> starts with an empty PATH.
+      Reviews are unaffected; only fixing is stuck.</p>
+    <div style="display:flex;gap:9px;margin-top:13px;flex-wrap:wrap">
+      <a class="btn" href="setup.html#tools" style="text-decoration:none">Show me the fix</a>
+      <button class="btn ghost">Use codex on atlas instead</button>
+      <button class="btn ghost">Turn autofix off there</button></div>
+  </div>
+
+  <div class="card" style="margin-bottom:12px"><div class="body" style="padding:12px 18px">
+    <div class="rowline" style="padding-top:0"><span class="pill warn sm">waiting</span>
+      <span>CodeRabbit’s quota reopens at <b>14:32</b>
+        <span class="num" data-remaining="2475" data-sign="neg">(−41:15)</span> — 2 PRs wait for it.
+        Nothing to do; co-review and autofix carry on.</span>
+      <a class="end" href="#">show queue</a></div>
+    <div class="rowline"><span class="pill ok sm">running</span>
+      <span>1 review in flight, 1 fix session, 2 co-only rounds ready — all healthy</span>
+      <a class="end" href="#">show all 7</a></div>
+    <div class="rowline"><span class="pill mut sm">held</span>
+      <span><span class="rfall">H</span> ha-gradient-card#31 — you held it 53m ago
+        <span class="dim">“migrating to HA 2026.7 first”</span></span>
+      <a class="end" href="#">unhold</a></div>
+    <div class="rowline"><span class="pill mut sm">spend</span>
+      <span>$14.20 of the $50 monthly cap · next round estimated at <b>$0.50</b></span>
+      <a class="end" href="fleet-settings.html">spend settings</a></div>
+  </div></div>
+
+  <div class="card" style="margin-bottom:0"><div class="body" style="padding:10px 18px">
+    <span class="note dim">Recently finished —
+      <img class="rico" src="icons/repo-crq.png" alt=""> <a href="pr-detail-converged.html">coderabbit-queue#140</a>
+      converged 13:29 · <img class="rico" src="icons/repo-bonusvarsler.png" alt=""> BonusVarsler#12 superseded ·
+      <img class="rico" src="icons/repo-musikkfest.png" alt=""> musikkfest-planlegger#7 closed</span>
+  </div></div>
+</div>
+</div><!-- /lay-c -->
+
+<div class="lay lay-d">
+<div class="laybar"><b>D · Feed-led</b> — the stream is the page, state is a strip on top.
+  <span class="dim">Best sense that the machine is working; weakest as a status board.</span>
+  <span class="end"><a href="overview-options.html#d">tradeoffs ↗</a></span></div>
+<div style="max-width:1020px;margin:0 auto;padding:18px 24px 60px">
+  <div class="card" style="margin-bottom:12px"><div class="hd" style="border-bottom:none;padding-bottom:12px;flex-wrap:wrap">
+    <span class="pill warn sm">quota −<span class="num" data-remaining="2475">41:15</span></span>
+    <span class="pill ok sm">1 reviewing</span><span class="pill acc sm">4 queued</span>
+    <span class="pill ok sm">1 fixing</span><span class="pill bad sm">atlas failing</span>
+    <span class="pill mut sm">$14.20 spent</span>
+    <span class="end" style="margin-left:auto"><span class="note">live · rev 4182 · since 09:02</span></span></div></div>
+
+  <div class="card" style="margin-bottom:0">
+    <div class="hd"><h2>Activity</h2><span class="ct">live — since this dashboard started</span>
+      <span class="end" style="margin-left:auto"><span class="note">filter: <b>all</b> ·
+        <a href="#">fires</a> · <a href="#">problems</a> · <a href="#">this repo</a></span></span></div>
+    <div class="body">
+      <div class="feedline"><span class="t num">13:50:41</span><span class="ic pill warn sm">quota</span>
+        <span><b>The account window closed</b> — CodeRabbit is out of reviews until 14:32.
+          <span class="x">Two queued PRs now wait for it; co-only work keeps going.</span></span></div>
+      <div class="feedline"><span class="t num">13:50:31</span><span class="ic pill acc sm">enqueued</span>
+        <span><img class="rico" src="icons/repo-crq.png" alt=""> <b>coderabbit-queue#143</b>
+          <span class="x">— co-reviewers only, so it can fire even while the quota is blocked. Est. $0.50.</span></span></div>
+      <div class="feedline"><span class="t num">13:50:12</span><span class="ic pill warn sm">claimed</span>
+        <span><img class="bico" src="icons/bot-bugbot.png" alt="" style="width:15px;height:15px;vertical-align:-3px">
+          <b>Bugbot</b> claimed #141 <span class="x">— posted, not yet recorded as a review.</span></span></div>
+      <div class="feedline"><span class="t num">13:50:11</span><span class="ic pill ok sm">commanded</span>
+        <span><img class="bico" src="icons/bot-codex.png" alt="" style="width:15px;height:15px;vertical-align:-3px">
+          <b>Codex</b> asked to review #141</span></div>
+      <div class="feedline"><span class="t num">13:50:05</span><span class="ic pill ok sm">acked</span>
+        <span><img class="bico" src="icons/bot-coderabbit.png" alt="" style="width:15px;height:15px;vertical-align:-3px">
+          <b>CodeRabbit acknowledged #141</b>
+          <span class="x">— the fire slot was released, so other PRs could move again.</span></span></div>
+      <div class="feedline"><span class="t num">13:49:58</span><span class="ic pill ok sm">fired</span>
+        <span><img class="rico" src="icons/repo-crq.png" alt=""> <b>coderabbit-queue#141</b> at
+          <span class="mono">9f3c2a1d7</span> from mbp <span class="x">— this spent the last review in the window.</span></span></div>
+      <div class="feedline"><span class="t num">13:47:19</span><span class="ic pill acc sm">enqueued</span>
+        <span><img class="rico" src="icons/repo-iptvchecker.png" alt=""> <b>IPTVChecker#23</b>
+          <span class="x">— co-only; queued behind #143.</span></span></div>
+      <div class="feedline"><span class="t num">13:44:03</span><span class="ic pill acc sm">enqueued</span>
+        <span><img class="rico" src="icons/repo-pengeoversikt.svg" alt=""> <b>pengeoversikt#87</b>
+          <span class="x">— needs the metered lane, so it waits for 14:32. Est. $1.60.</span></span></div>
+      <div class="feedline"><span class="t num">13:41:37</span><span class="ic pill ok sm">fixing</span>
+        <span><img class="rico" src="icons/repo-carrier.png" alt=""> <b>Carrier#85</b> — agent started on mbp,
+          6 findings <span class="x">· running <span class="num" data-elapsed="589">9:49</span> · <a href="#">log</a></span></span></div>
+      <div class="feedline"><span class="t num">13:36:12</span><span class="ic pill bad sm">failed</span>
+        <span><b>Autofix failed on atlas</b> — <span class="mono">claude: command not found</span>
+          <span class="x">· fourth in a row · <a href="setup.html#tools">fix the service PATH →</a></span></span></div>
+      <div class="feedline"><span class="t num">13:29:45</span><span class="ic pill ok sm">converged</span>
+        <span><img class="rico" src="icons/repo-crq.png" alt="">
+          <b><a href="pr-detail-converged.html">coderabbit-queue#140</a></b> finished clean
+          <span class="x">— nothing blocking, merge when ready.</span></span></div>
+      <div class="feedline"><span class="t num">12:58:50</span><span class="ic pill bad sm">held</span>
+        <span><span class="rfall">H</span> <b>ha-gradient-card#31</b> held by you
+          <span class="x">— “migrating to HA 2026.7 first”.</span></span></div>
+      <div class="feedline"><span class="t num">12:31:47</span><span class="ic pill warn sm">retry</span>
+        <span><img class="rico" src="icons/repo-sportarr.png" alt=""> <b>Sportarr#9</b> cooling down
+          <span class="x">— 2 attempts; retries no earlier than 14:51.</span></span></div>
+    </div>
+  </div>
+</div>
+</div><!-- /lay-d -->
+
+<label class="scrim" for="qs" aria-hidden="true"></label>
+<div class="slideover" role="dialog" aria-label="Quick settings">
+  <div class="so-hd">
+    <div class="r1">
+      <h2>Quick settings</h2>
+      <label class="so-close" for="qs" title="Close">×</label>
+    </div>
+    <div class="r2">
+      <select class="so-repo" aria-label="Repository">
+        <option selected>kristofferR/coderabbit-queue</option>
+        <option>kristofferR/pengeoversikt</option>
+        <option>kristofferR/IPTVChecker</option>
+        <option>kristofferR/Carrier</option>
+        <option>kristofferR/Sportarr</option>
+        <option>kristofferR/ha-gradient-card</option>
+      </select>
+      <a class="full" href="settings.html">Full settings ↗</a>
+    </div>
+    <div class="so-note">Opened from the ⚙ on a repo row — scoped to that repo. Basics only;
+      everything else lives on the full page.</div>
+  </div>
+  <div class="so-body">
+    <div class="prov"><span class="pill warn">Override</span> set 2026-07-19 by kristoffer
+      <a class="reset" href="#">Reset to fleet default</a></div>
+
+    <div class="bhead"><span>Reviewer</span><span>Runs</span><span>Required</span></div>
+    <div class="brow">
+      <div class="who"><img class="bico" src="icons/bot-coderabbit.png" alt="">
+        <span><span class="nm">CodeRabbit</span> <span class="dim">· primary</span>
+          <span class="st">always runs · seen 13:50</span></span></div>
+      <div class="tg"><span class="sw on lock"></span></div>
+      <div class="tg"><span class="sw on"></span></div>
+    </div>
+    <div class="brow">
+      <div class="who"><img class="bico" src="icons/bot-codex.png" alt="">
+        <span><span class="nm">Codex</span><span class="st">seen 13:50</span></span></div>
+      <div class="tg"><span class="sw on"></span></div>
+      <div class="tg"><span class="sw on"></span></div>
+    </div>
+    <div class="brow">
+      <div class="who"><img class="bico" src="icons/bot-bugbot.png" alt="">
+        <span><span class="nm">Cursor Bugbot</span><span class="st">seen 13:50</span></span></div>
+      <div class="tg"><span class="sw on"></span></div>
+      <div class="tg"><span class="sw"></span></div>
+    </div>
+    <div class="brow">
+      <div class="who"><img class="bico" src="icons/bot-macroscope.png" alt="">
+        <span><span class="nm">Macroscope</span>
+          <span class="st"><span class="w">Setup not verified</span> · <a href="bot-guide.html">set up →</a></span></span></div>
+      <div class="tg"><span class="sw on dirty"></span></div>
+      <div class="tg"><span class="sw"></span></div>
+    </div>
+
+    <div class="impact">
+      <b>Saving would:</b> enable Macroscope here and trigger it on <b>2 open PRs</b> at their current
+      heads (#141, #143). No metered reviews spent.
+    </div>
+
+    <div class="kvrow"><span>Automatic review</span>
+      <span class="v"><span class="pill ok">On</span> <span class="dim">managed</span></span></div>
+    <div class="kvrow"><span>Autofix <span class="dim">· may crq fix here</span></span>
+      <span class="seg"><span>Off</span><span>On</span><span class="on">Default (on)</span></span></div>
+    <div class="kvrow"><span>Fix agent</span><span class="v">claude · sonnet · effort high · <a href="settings.html">change ↗</a></span></div>
+
+    <div class="btnrow">
+      <button class="btn">Save changes</button>
+      <button class="btn ghost">Discard</button>
+      <span class="pending">1 change pending</span>
+    </div>
+  </div>
+</div>
+
+<details class="notes">
+  <summary>Mockup notes</summary>
+  <ul>
+    <li>Operations Desk. Frozen at Mon 2026-07-27 13:51:26 CEST; countdowns tick.</li>
+    <li><b>Layout A/B/C/D in the top bar switches the whole page</b> — same data and same styling, four structures: stacked tables, three lanes, needs-you-only, feed-led. Each links to its tradeoffs.</li>
+    <li>Bot logos are the real GitHub avatars of the accounts crq matches on; repo icons are the real
+      favicons from those repos (ha-gradient-card has none → letter-tile fallback).</li>
+    <li><b>The slide-over works:</b> the ⚙ on any repo row (layout A) opens quick settings for that repo; × or the scrim closes it.</li>
+    <li>Queue rows behind the front carry a reason but never a time (matches State.Queue()); quota shows
+      a remaining count only — the state stores no total.</li>
+  </ul>
+</details>
+
+<script>
+const t0=performance.now();
+function fmt(s){const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
+  return(h?h+":"+String(m).padStart(2,"0"):m)+":"+String(x).padStart(2,"0");}
+setInterval(()=>{const dt=Math.floor((performance.now()-t0)/1000);
+  document.querySelectorAll("[data-remaining]").forEach(el=>{
+    const left=+el.dataset.remaining-dt;
+    el.textContent=left>0?(el.dataset.sign==="neg"?"−":"")+fmt(left)
+      :(el.dataset.due||"due — waiting for next pump pass");});
+  document.querySelectorAll("[data-elapsed]").forEach(el=>{
+    el.textContent=fmt(+el.dataset.elapsed+dt);});
+},1000);
+</script>
+</body>
+</html>
