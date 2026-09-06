@@ -3280,20 +3280,20 @@ func TestParseAvailableInHandlesMarkdownAndColon(t *testing.T) {
 	if got == nil {
 		t.Fatal("expected a parsed reset for the verbatim rate-limit body, got nil")
 	}
-	if want := base.Add(40*time.Minute + 15*time.Second); !got.Equal(want) {
-		t.Fatalf("expected reset %v (base+40m15s), got %v", want, *got)
+	if want := base.Add(40*time.Minute + 30*time.Second); !got.Equal(want) {
+		t.Fatalf("expected reset %v (base+40m30s), got %v", want, *got)
 	}
 }
 
 func TestParseAvailableInPlainFormatStillWorks(t *testing.T) {
 	base := time.Date(2026, 7, 11, 18, 0, 0, 0, time.UTC)
 	got := dialect.ParseAvailableIn("You are rate limited. Reviews available in 3 minutes.", base)
-	if got == nil || !got.Equal(base.Add(3*time.Minute+15*time.Second)) {
-		t.Fatalf("expected base+3m15s for the plain format, got %v", got)
+	if got == nil || !got.Equal(base.Add(3*time.Minute+30*time.Second)) {
+		t.Fatalf("expected base+3m30s for the plain format, got %v", got)
 	}
 	got = dialect.ParseAvailableIn("available in 1 hour and 30 minutes", base)
-	if got == nil || !got.Equal(base.Add(90*time.Minute+15*time.Second)) {
-		t.Fatalf("expected base+90m15s for compound duration, got %v", got)
+	if got == nil || !got.Equal(base.Add(90*time.Minute+30*time.Second)) {
+		t.Fatalf("expected base+90m30s for compound duration, got %v", got)
 	}
 }
 

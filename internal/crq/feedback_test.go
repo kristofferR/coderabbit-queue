@@ -1494,8 +1494,8 @@ func TestRateLimitDetectionCoversFairUsageFormat(t *testing.T) {
 	}
 
 	base := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
-	if reset := dialect.ParseAvailableIn(newMsg, base); reset == nil || !reset.Equal(base.Add(48*time.Minute+15*time.Second)) {
-		t.Fatalf("expected reset base+48m15s from the new message, got %v", reset)
+	if reset := dialect.ParseAvailableIn(newMsg, base); reset == nil || !reset.Equal(base.Add(48*time.Minute+30*time.Second)) {
+		t.Fatalf("expected reset base+48m30s from the new message, got %v", reset)
 	}
 }
 
@@ -1505,7 +1505,7 @@ func TestParseAvailableIn(t *testing.T) {
 	if reset == nil {
 		t.Fatal("expected reset")
 	}
-	want := base.Add(time.Hour + 2*time.Minute + 18*time.Second)
+	want := base.Add(time.Hour + 2*time.Minute + 33*time.Second)
 	if !reset.Equal(want) {
 		t.Fatalf("reset mismatch: got %s want %s", reset, want)
 	}
@@ -1517,7 +1517,7 @@ func TestParseQuota(t *testing.T) {
 	if remaining == nil || *remaining != 0 {
 		t.Fatalf("remaining mismatch: %#v", remaining)
 	}
-	if reset == nil || !reset.Equal(base.Add(3*time.Minute+15*time.Second)) {
+	if reset == nil || !reset.Equal(base.Add(3*time.Minute+30*time.Second)) {
 		t.Fatalf("reset mismatch: %#v", reset)
 	}
 }

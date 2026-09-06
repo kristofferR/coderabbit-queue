@@ -203,7 +203,7 @@ func (d CodeRabbit) IsReviewFailure(body string) bool {
 }
 
 // ParseAvailableIn extracts CodeRabbit's "next review available in <duration>"
-// window from a rate-limit comment and returns base+duration+15s. The safety
+// window from a rate-limit comment and returns base+duration+30s. The safety
 // margin covers countdown rounding and timestamp skew before a queued retry.
 // It tolerates the markdown and punctuation around the value — the current
 // phrasing is "**Next review available in:** **40 minutes**", where a colon and
@@ -237,7 +237,7 @@ func ParseAvailableIn(text string, base time.Time) *time.Time {
 	if d <= 0 {
 		return nil
 	}
-	t := base.Add(d + 15*time.Second)
+	t := base.Add(d + 30*time.Second)
 	return &t
 }
 

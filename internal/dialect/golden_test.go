@@ -152,8 +152,8 @@ func TestGoldenClassification(t *testing.T) {
 				if reset != nil {
 					t.Errorf("ParseAvailableIn = %v, want none", reset)
 				}
-			} else if reset == nil || !reset.Equal(base.Add(tc.availableIn+15*time.Second)) {
-				t.Errorf("ParseAvailableIn = %v, want base+%v+15s", reset, tc.availableIn)
+			} else if reset == nil || !reset.Equal(base.Add(tc.availableIn+30*time.Second)) {
+				t.Errorf("ParseAvailableIn = %v, want base+%v+30s", reset, tc.availableIn)
 			}
 			if got := CodexReviewedCommitSHA(body); got != tc.reviewedSHA {
 				t.Errorf("CodexReviewedCommitSHA = %q, want %q", got, tc.reviewedSHA)

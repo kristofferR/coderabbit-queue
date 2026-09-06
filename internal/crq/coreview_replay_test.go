@@ -725,8 +725,8 @@ func TestSweepReviewingRecordsAccountBlockBeforeActivityFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.Equal(base.Add(40*time.Minute+15*time.Second)) {
-		t.Fatalf("account block = %v, want %s despite the later activity failure", st.Account.BlockedUntil, base.Add(40*time.Minute+15*time.Second))
+	if st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.Equal(base.Add(40*time.Minute+30*time.Second)) {
+		t.Fatalf("account block = %v, want %s despite the later activity failure", st.Account.BlockedUntil, base.Add(40*time.Minute+30*time.Second))
 	}
 	if r := st.Round(repo, pr); r == nil || r.Phase != PhaseReviewing {
 		t.Fatalf("sweepReviewing advanced the round despite the persistence failure: %+v", r)
@@ -755,8 +755,8 @@ func TestPumpRecordsAccountBlockBeforeActivityFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.Equal(base.Add(40*time.Minute+15*time.Second)) {
-		t.Fatalf("account block = %v, want %s despite the later activity failure", st.Account.BlockedUntil, base.Add(40*time.Minute+15*time.Second))
+	if st.Account.BlockedUntil == nil || !st.Account.BlockedUntil.Equal(base.Add(40*time.Minute+30*time.Second)) {
+		t.Fatalf("account block = %v, want %s despite the later activity failure", st.Account.BlockedUntil, base.Add(40*time.Minute+30*time.Second))
 	}
 	if r := st.Round(repo, pr); r == nil || r.Phase != PhaseQueued {
 		t.Fatalf("Pump advanced the round despite the persistence failure: %+v", r)
