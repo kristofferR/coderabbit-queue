@@ -324,7 +324,7 @@ func TestReplayRateLimitBounceFiresOncePerWindow(t *testing.T) {
 	// CodeRabbit answers with the Fair Usage rate limit, window 40 minutes.
 	const rlID = 9001
 	f.botComment(repo, pr, rlID, replayFairUsage(t, 40), base)
-	expectedRetry := base.Add(40 * time.Minute) // parsed from the comment's UpdatedAt (base)
+	expectedRetry := base.Add(40*time.Minute + 15*time.Second) // comment time plus countdown and safety margin
 
 	// Simulate the daemon for the full window: advance 60s each step, editing the
 	// SAME comment in place every 5 minutes (bumping its UpdatedAt), pumping and
@@ -350,8 +350,17 @@ func TestReplayRateLimitBounceFiresOncePerWindow(t *testing.T) {
 		}
 	}
 
-	// The window passes: exactly one retry fires.
-	f.clk.set(expectedRetry.Add(time.Second))
+	// The reported window has elapsed, but the safety margin still blocks firing.
+	for _, elapsed := range []time.Duration{40 * time.Minute, 40*time.Minute + 14*time.Second} {
+		f.clk.set(base.Add(elapsed))
+		f.pump()
+		if got := f.reviewsPosted(repo, pr); got != 1 {
+			t.Fatalf("at %s: retry fired before the safety margin elapsed, got %d commands", elapsed, got)
+		}
+	}
+
+	// The padded window passes: exactly one retry fires.
+	f.clk.set(expectedRetry)
 	if res := f.pump(); res.Action != "fired" || res.Head != head {
 		t.Fatalf("the retry must fire once the window passes, got %#v", res)
 	}
@@ -624,8 +633,8 @@ func TestReplay448DaySequenceFiresThreeTimes(t *testing.T) {
 	f.editComment(repo, pr, rlID, replayFairUsage(t, 40), f.clk.now())
 	f.pump()
 	if r := f.round(repo, pr); r == nil || r.Phase != PhaseAwaitingRetry ||
-		r.RetryAt == nil || !r.RetryAt.Equal(base.Add(57*time.Minute)) {
-		t.Fatalf("the parseable 40m window must park until base+57m, got %#v", r)
+		r.RetryAt == nil || !r.RetryAt.Equal(base.Add(57*time.Minute+15*time.Second)) {
+		t.Fatalf("the parseable 40m window must park until base+57m15s, got %#v", r)
 	}
 
 	// 5. The head moves mid-window (still inside the 40m block).
@@ -647,7 +656,7 @@ func TestReplay448DaySequenceFiresThreeTimes(t *testing.T) {
 	}
 
 	// 6. The block clears → the new head fires exactly once.
-	f.clk.set(base.Add(57*time.Minute + time.Second))
+	f.clk.set(base.Add(57*time.Minute + 15*time.Second))
 	if res := f.pump(); res.Action != "fired" || res.Head != head2 {
 		t.Fatalf("the new head should fire once the block clears, got %#v", res)
 	}
