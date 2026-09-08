@@ -1951,7 +1951,7 @@ func (s *Service) retireClosedRounds(ctx context.Context, repo string, open map[
 	return errors.Join(failures...)
 }
 
-// nextTerminalRound returns one completed or index-only pull request for a
+// nextTerminalRound returns one completed, archived-closed or index-only pull request for a
 // repository, rotating across passes. Terminal evidence grows with repository
 // age, so every housekeeping caller shares this bounded selection.
 func (s *Service) nextTerminalRound(st State, repo string, skip map[int]bool) (Round, bool) {
@@ -1962,6 +1962,14 @@ func (s *Service) nextTerminalRound(st State, repo string, skip map[int]bool) (R
 			continue
 		}
 		terminal[r.PR] = r
+	}
+	// A failed detail read can archive a waiting round before its merge is
+	// known, even when it has no evidence indexes to keep it selectable.
+	for _, r := range st.Archive {
+		if NormalizeRepo(r.Repo) == key && !skip[r.PR] && r.Phase == PhaseAbandoned &&
+			r.Note == "pr closed" && st.Round(r.Repo, r.PR) == nil {
+			terminal[r.PR] = r
+		}
 	}
 	// During a rolling upgrade, an older writer can rebuild these indexes from
 	// an archived merged round and later evict that round. Include index-only PRs

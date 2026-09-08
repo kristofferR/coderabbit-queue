@@ -448,6 +448,11 @@ func (s *Service) autoReviewPass(ctx context.Context, opts AutoOptions, owner, t
 // the autoreview-side housekeeping for deployments that do not run autofix.
 func (s *Service) retireMergedEvidence(ctx context.Context, st State, covered func(string) bool) error {
 	repos := map[string]bool{}
+	for _, round := range st.Archive {
+		if round.Phase == PhaseAbandoned && round.Note == "pr closed" && covered(round.Repo) {
+			repos[NormalizeRepo(round.Repo)] = true
+		}
+	}
 	for _, round := range st.Rounds {
 		if !round.Active() && covered(round.Repo) {
 			repos[NormalizeRepo(round.Repo)] = true

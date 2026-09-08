@@ -354,6 +354,52 @@ func TestRetireClosedRoundsArchivesUnreadableWaitingPR(t *testing.T) {
 	}
 }
 
+func TestArchivedUnreadableRoundRetiresAfterRecovery(t *testing.T) {
+	for _, daemon := range []string{"watch", "autoreview"} {
+		t.Run(daemon, func(t *testing.T) {
+			ctx := context.Background()
+			const repo = "owner/thing"
+			cfg := firingConfig()
+			gh := newFakeGitHub()
+			store := NewMemoryStore(cfg)
+			svc := NewService(cfg, gh, store, nil)
+			seedRound(t, store, cfg, repo, 1, "aaaaaaaaa", PhaseQueued, time.Now().UTC(), 0)
+			gh.pullErrs[fakeKey(repo, 1)] = errors.New("repository unavailable")
+			if err := svc.retireClosedRounds(ctx, repo, nil); err == nil {
+				t.Fatal("expected failed detail read")
+			}
+			st, _, err := store.Load(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := QueueKey(repo, 1)
+			if st.Round(repo, 1) != nil || len(st.CoActivity[key]) != 0 || len(st.CoAnswers[key]) != 0 {
+				t.Fatal("expected an archive-only cleanup candidate")
+			}
+			delete(gh.pullErrs, fakeKey(repo, 1))
+			gh.pulls[fakeKey(repo, 1)] = ghapi.Pull{State: "closed", Merged: true}
+			if daemon == "watch" {
+				err = svc.retireClosedRounds(ctx, repo, nil)
+			} else {
+				err = svc.retireMergedEvidence(ctx, st, func(candidate string) bool { return candidate == repo })
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			st, _, err = store.Load(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(st.Archive) != 1 || !st.Archive[0].Merged() {
+				t.Fatalf("archive did not record recovered merge: %+v", st.Archive)
+			}
+			if _, ok := svc.nextTerminalRound(st, repo, nil); ok {
+				t.Fatal("retired merge remained selectable")
+			}
+		})
+	}
+}
+
 func TestWatchRotatesPastUnreadableTerminalPR(t *testing.T) {
 	ctx := context.Background()
 	repo := "owner/thing"
